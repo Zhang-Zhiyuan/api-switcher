@@ -83,15 +83,32 @@ class ConfigValidator:
 
         # 存储目录检查
         try:
-            from config.paths import STORAGE_DIR, BACKUPS_DIR
-            if STORAGE_DIR.exists():
-                self._add_result(category, "存储目录", "ok", f"存在: {STORAGE_DIR}")
+            from config.paths import BACKUPS_DIR, STORAGE_DIR, get_storage_info
+            storage_info = get_storage_info()
+            source = storage_info.get("source", "unknown")
+            if STORAGE_DIR.exists() and storage_info.get("writable"):
+                self._add_result(category, "存储目录", "ok", f"存在且可写: {STORAGE_DIR} (来源: {source})")
+            elif STORAGE_DIR.exists():
+                self._add_result(
+                    category, "存储目录", "error",
+                    f"存在但不可写: {STORAGE_DIR}",
+                    storage_info.get("write_error") or "检查目录权限"
+                )
             else:
                 self._add_result(
                     category, "存储目录", "warning",
                     f"不存在: {STORAGE_DIR}",
                     "将自动创建"
                 )
+
+            if storage_info.get("data_dir_pointer_exists"):
+                self._add_result(category, "自定义数据目录", "ok", f"程序目录指针: {storage_info.get('data_dir_pointer')}")
+            if storage_info.get("user_data_dir_pointer_exists"):
+                self._add_result(category, "自定义数据目录", "ok", f"用户目录指针: {storage_info.get('user_data_dir_pointer')}")
+            if storage_info.get("portable_marker_exists"):
+                self._add_result(category, "便携模式", "ok", f"已启用: {storage_info.get('portable_marker')}")
+            for warning in storage_info.get("warnings", []):
+                self._add_result(category, "数据目录 fallback", "warning", warning)
 
             if BACKUPS_DIR.exists():
                 self._add_result(category, "备份目录", "ok", f"存在: {BACKUPS_DIR}")
@@ -109,6 +126,7 @@ class ConfigValidator:
             ('customtkinter', 'CustomTkinter'),
             ('keyring', 'Keyring'),
             ('paramiko', 'Paramiko'),
+            ('cryptography', 'Cryptography'),
         ]
 
         for module_name, display_name in required_packages:

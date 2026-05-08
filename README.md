@@ -84,6 +84,32 @@
    - 设置最大恢复次数为 3
    - 点击"保存"
 
+## 📁 数据存储位置
+
+软件自身数据统一保存在当前 Windows 用户的 Roaming 配置目录：
+
+```text
+%APPDATA%\API切换器\
+```
+
+这里包含 Profile 列表、备份、日志、使用统计、托管浏览器 Profile，以及 keyring 不可用时的 DPAPI 加密密钥备份。可以通过环境变量 `API_SWITCHER_DATA_DIR` 指定自定义数据目录。首次运行新版时，会把旧的项目内 `storage` 目录内容复制迁移到新位置，已存在的新数据不会被覆盖。
+
+数据目录选择优先级：
+
+1. 环境变量 `API_SWITCHER_DATA_DIR`
+2. 程序同目录的 `data_dir.txt`，或用户配置目录里的 `data_dir.txt`（可在“通用设置 > 数据存储”里选择目录生成）
+3. 程序同目录的 `portable.flag` 或环境变量 `API_SWITCHER_PORTABLE=1`，使用程序旁边的 `data` 目录
+4. Windows Roaming 目录 `%APPDATA%\API切换器`
+5. LocalAppData / 临时目录 fallback
+
+“通用设置 > 数据存储”可以打开当前数据目录、复制路径、选择自定义目录、启用便携模式或恢复默认；更改目录会复制当前数据，并在下次启动后生效。
+
+## 🔐 跨电脑迁移 Profile
+
+在“备份管理”中使用“导出迁移包”可以生成加密的 `.asxprofile` 文件。迁移包包含 Claude/Codex/SSH/浏览器 Profile 元数据，以及 API Key、OAuth Token、SSH 密码、SSH 密钥口令等由软件管理的登录信息。导入到另一台电脑时，输入同一个迁移密码，软件会把密钥重新写入新电脑的本机凭据存储。
+
+迁移包会尽力包含软件托管浏览器 Profile 的 cookies、Local State、本地存储、IndexedDB、Session Storage 等数据，并跳过缓存、锁文件和崩溃日志。Chrome/Edge 可能会把 cookies 绑定到系统密钥或浏览器安装环境，所以网页登录态跨电脑恢复属于尽力而为；外部浏览器 Profile 目录不会自动打包，避免误导出日常浏览器的完整数据目录。
+
 ## 📖 详细文档
 
 - **待办记录**: [PENDING_WORK.md](PENDING_WORK.md)

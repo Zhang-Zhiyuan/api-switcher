@@ -1,8 +1,11 @@
 import customtkinter as ctk
-from core import backup_manager
+from tkinter import filedialog
+
+from core import backup_manager, portable_migration
 from ui.widgets.toast import show_toast
 from ui.widgets.empty_state import EmptyState
 from ui.dialogs.confirm_dialog import ConfirmDialog
+from ui.dialogs.password_dialog import PasswordDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
 
@@ -29,11 +32,25 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         ctk.CTkLabel(
             title_area,
-            text="创建、清理或回滚本机配置备份",
+            text="创建本机备份，或导出可跨电脑迁移的加密 Profile 包",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
 
+        ctk.CTkButton(
+            header,
+            text="导入迁移包",
+            width=108,
+            command=self._import_portable,
+            **button_style("accent"),
+        ).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            header,
+            text="导出迁移包",
+            width=108,
+            command=self._export_portable,
+            **button_style("success"),
+        ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(
             header,
             text="清理旧备份",
@@ -147,3 +164,77 @@ class BackupTab(ctk.CTkScrollableFrame):
         ConfirmDialog(self.winfo_toplevel(), title="清理备份",
                       message="将保留最近 20 个备份，其余删除。继续？",
                       on_confirm=do_prune)
+
+    def _export_portable(self):
+        output_path = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            title="导出 Profile 迁移包",
+            defaultextension=".asxprofile",
+            filetypes=[
+                ("API切换器迁移包", "*.asxprofile"),
+                ("JSON 文件", "*.json"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not output_path:
+            return
+
+        def do_export(password: str):
+            try:
+                result = portable_migration.export_portable_profiles(output_path, password)
+                message = f"迁移包已导出: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                if result.browser_profile_count:
+                    message += f"，浏览器数据 {result.browser_profile_count} 个/{result.browser_file_count} 个文件"
+                if result.missing_secret_refs:
+                    message += f"，{len(result.missing_secret_refs)} 个密钥缺失"
+                if result.skipped_browser_files:
+                    message += f"，跳过 {len(result.skipped_browser_files)} 个浏览器文件"
+                show_toast(self.winfo_toplevel(), message)
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"导出失败: {e}", is_error=True)
+
+        PasswordDialog(
+            self.winfo_toplevel(),
+            title="设置迁移密码",
+            message="迁移包会包含 API Key、OAuth Token、SSH 密码，以及托管浏览器 Profile 的 cookies/本地存储等数据。请设置一个强密码，导入到另一台电脑时需要再次输入。",
+            confirm_password=True,
+            on_confirm=do_export,
+        )
+
+    def _import_portable(self):
+        input_path = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(),
+            title="导入 Profile 迁移包",
+            filetypes=[
+                ("API切换器迁移包", "*.asxprofile"),
+                ("JSON 文件", "*.json"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not input_path:
+            return
+
+        def do_import(password: str):
+            try:
+                result = portable_migration.import_portable_profiles(input_path, password)
+                message = f"迁移包已导入: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                if result.browser_profile_count:
+                    message += f"，浏览器数据 {result.browser_profile_count} 个/{result.browser_file_count} 个文件"
+                if result.skipped_browser_files:
+                    message += f"，跳过 {len(result.skipped_browser_files)} 个浏览器文件"
+                show_toast(self.winfo_toplevel(), message)
+                top = self.winfo_toplevel()
+                if hasattr(top, "refresh_all"):
+                    top.refresh_all()
+                else:
+                    self.refresh()
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"导入失败: {e}", is_error=True)
+
+        PasswordDialog(
+            self.winfo_toplevel(),
+            title="输入迁移密码",
+            message="导入会合并迁移包中的 Profile；同名 Profile 会被替换，密钥会写入本机凭据存储，托管浏览器 Profile 数据会还原到本机数据目录。",
+            confirm_password=False,
+            on_confirm=do_import,
+        )

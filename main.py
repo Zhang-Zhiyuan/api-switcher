@@ -5,11 +5,10 @@ import logging
 # Ensure the app directory is in the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config.paths import STORAGE_DIR, BACKUPS_DIR
+from config.paths import STORAGE_DIR, STORAGE_DIR_SOURCE, STORAGE_DIR_WARNINGS, ensure_storage_dirs
 
 # Ensure storage dirs exist
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+migrated_storage_items = ensure_storage_dirs()
 
 # Create logs directory
 LOGS_DIR = STORAGE_DIR / "logs"
@@ -34,6 +33,11 @@ log_manager.initialize()
 
 logger = logging.getLogger(__name__)
 logger.info("Application starting...")
+logger.info("Data directory: %s (%s)", STORAGE_DIR, STORAGE_DIR_SOURCE)
+for warning in STORAGE_DIR_WARNINGS:
+    logger.warning(warning)
+if migrated_storage_items:
+    logger.info("Migrated legacy storage items: %s", ", ".join(migrated_storage_items))
 
 
 def main():

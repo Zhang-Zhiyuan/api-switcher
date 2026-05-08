@@ -1,7 +1,10 @@
 import customtkinter as ctk
+from tkinter import filedialog
+
+from config import paths
 from core import parser, toml_parser, auth_parser, vscode_parser, switcher
 from ui.widgets.toast import show_toast
-from ui.theme import COLORS, button_style, card_frame_kwargs, font
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
 
 class CommonTab(ctk.CTkScrollableFrame):
@@ -65,6 +68,76 @@ class CommonTab(ctk.CTkScrollableFrame):
             font=font(12),
         ).pack(anchor="w", padx=14, pady=(0, 12))
 
+        # --- Data Directory ---
+        storage_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        storage_frame.pack(fill="x", padx=14, pady=(0, 12))
+
+        storage_head = ctk.CTkFrame(storage_frame, fg_color="transparent")
+        storage_head.pack(fill="x", padx=14, pady=(12, 8))
+        ctk.CTkLabel(
+            storage_head,
+            text="数据存储",
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            storage_head,
+            text="刷新",
+            width=72,
+            command=self._refresh_storage_info,
+            **button_style("secondary", compact=True),
+        ).pack(side="right")
+
+        self._storage_info_label = ctk.CTkLabel(
+            storage_frame,
+            text="",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._storage_info_label.pack(fill="x", padx=14, pady=(0, 8))
+        bind_wraplength(storage_frame, self._storage_info_label, padding=32)
+
+        storage_buttons = ctk.CTkFrame(storage_frame, fg_color="transparent")
+        storage_buttons.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkButton(
+            storage_buttons,
+            text="打开数据目录",
+            width=108,
+            command=self._open_data_dir,
+            **button_style("primary", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            storage_buttons,
+            text="复制路径",
+            width=78,
+            command=self._copy_data_dir,
+            **button_style("secondary", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            storage_buttons,
+            text="选择目录",
+            width=86,
+            command=self._choose_data_dir,
+            **button_style("accent", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            storage_buttons,
+            text="便携模式",
+            width=86,
+            command=self._enable_portable_mode,
+            **button_style("success", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            storage_buttons,
+            text="恢复默认",
+            width=86,
+            command=self._restore_default_storage,
+            **button_style("warning", compact=True),
+        ).pack(side="left")
+
         # --- Current Config Overview ---
         overview_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         overview_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -102,12 +175,14 @@ class CommonTab(ctk.CTkScrollableFrame):
         self._overview_text.pack(fill="x", padx=14, pady=(0, 14))
 
         self._refresh_overview()
+        self._refresh_storage_info()
 
     def refresh(self):
         """Refresh current permission state and overview text."""
         settings = parser.read_claude_settings()
         enabled = settings.get("permissions", {}).get("defaultMode") == "bypassPermissions"
         self._bypass_var.set(enabled)
+        self._refresh_storage_info()
         self._refresh_overview()
 
     def _toggle_bypass(self):
@@ -118,6 +193,92 @@ class CommonTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"Bypass Permissions {state}")
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"操作失败: {e}", is_error=True)
+
+    def _refresh_storage_info(self):
+        info = paths.get_storage_info()
+        source_labels = {
+            paths.ENV_DATA_DIR: "环境变量",
+            paths.DATA_DIR_POINTER_FILE: "自定义目录文件",
+            "portable": "便携模式",
+            "%APPDATA%": "Windows Roaming",
+            "home-roaming": "Windows Roaming",
+            "%LOCALAPPDATA%": "Windows Local",
+            "home-local": "Windows Local",
+            "temp-fallback": "临时目录 fallback",
+            "cwd-fallback": "当前目录 fallback",
+        }
+        source = source_labels.get(info["source"], str(info["source"]))
+        writable = "可写" if info["writable"] else f"不可写: {info['write_error']}"
+        pointer_state = "已设置" if (info["data_dir_pointer_exists"] or info["user_data_dir_pointer_exists"]) else "未设置"
+        portable_state = "已启用" if info["portable_marker_exists"] or info["portable"] else "未启用"
+        warnings = info.get("warnings") or []
+        warning_text = "\n警告: " + " | ".join(warnings[:3]) if warnings else ""
+        self._storage_info_label.configure(
+            text=(
+                f"当前目录: {info['storage_dir']}\n"
+                f"来源: {source}  |  状态: {writable}\n"
+                f"程序目录: {info['app_dir']}\n"
+                f"自定义目录文件: {pointer_state}  |  便携模式: {portable_state}"
+                f"{warning_text}\n"
+                "更改目录或便携模式会复制当前数据，并在下次启动后生效。"
+            )
+        )
+
+    def _open_data_dir(self):
+        try:
+            paths.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+            import os
+            os.startfile(paths.STORAGE_DIR)
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"打开失败: {e}", is_error=True)
+
+    def _copy_data_dir(self):
+        try:
+            top = self.winfo_toplevel()
+            top.clipboard_clear()
+            top.clipboard_append(str(paths.STORAGE_DIR))
+            show_toast(top, "已复制数据目录路径")
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"复制失败: {e}", is_error=True)
+
+    def _choose_data_dir(self):
+        selected = filedialog.askdirectory(
+            parent=self.winfo_toplevel(),
+            title="选择 API切换器数据目录",
+        )
+        if not selected:
+            return
+        try:
+            copied = paths.write_data_dir_pointer(selected, copy_current=True)
+            self._refresh_storage_info()
+            show_toast(
+                self.winfo_toplevel(),
+                f"已设置自定义目录并复制 {len(copied)} 个项目，重启后生效",
+            )
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"设置失败: {e}", is_error=True)
+
+    def _enable_portable_mode(self):
+        try:
+            copied = paths.enable_portable_storage(copy_current=True)
+            self._refresh_storage_info()
+            show_toast(
+                self.winfo_toplevel(),
+                f"已启用便携模式并复制 {len(copied)} 个项目，重启后生效",
+            )
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"启用失败: {e}", is_error=True)
+
+    def _restore_default_storage(self):
+        try:
+            changed = paths.disable_portable_storage()
+            self._refresh_storage_info()
+            if changed:
+                show_toast(self.winfo_toplevel(), "已恢复默认数据目录，重启后生效")
+            else:
+                show_toast(self.winfo_toplevel(), "当前已经使用默认数据目录")
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"恢复失败: {e}", is_error=True)
 
     def _refresh_overview(self):
         self._overview_text.configure(state="normal")
