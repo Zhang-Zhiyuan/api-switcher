@@ -66,7 +66,6 @@ def switch_codex_profile(name: str) -> None:
 
     # Update auth.json
     auth = auth_parser.read_codex_auth()
-    target.auth_mode = "api_key"
     auth = auth_parser.apply_codex_apikey(auth, target)
     auth_parser.write_codex_auth(auth)
 

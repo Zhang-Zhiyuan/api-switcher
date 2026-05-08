@@ -62,7 +62,6 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
 
     # Update auth.json
     auth = auth_parser.read_codex_auth()
-    codex_profile.auth_mode = "api_key"
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth)
 
@@ -167,7 +166,6 @@ def pull_codex_from_server(ssh_name: str) -> str:
         return "服务器上未找到 Codex 配置"
 
     name = f"Remote-{ssh_name}"
-    auth_mode = "api_key"
     provider_id = config.get("model_provider", "openai") if config else "openai"
     if provider_id == "openai":
         return "远程 Codex 配置是官方 OpenAI，已跳过；当前只导入第三方 API Profile"
@@ -177,7 +175,6 @@ def pull_codex_from_server(ssh_name: str) -> str:
     from models.profile import CodexProfile
     profile_kwargs = {
         "name": name,
-        "auth_mode": auth_mode,
         "model": config.get("model", "gpt-5.5") if config else "gpt-5.5",
         "model_provider": provider_id,
         "model_reasoning_effort": config.get("model_reasoning_effort", "high") if config else "high",

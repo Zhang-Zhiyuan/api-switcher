@@ -447,7 +447,7 @@ class ConfigValidator:
                 profiles = profile_manager.list_switchable_codex_profiles()
                 profile = next((p for p in profiles if p.name == active_codex), None)
 
-                if profile and profile.auth_mode == "api_key":
+                if profile:
                     # 获取 API Key
                     api_key = security.get_secret(profile.api_key_ref) if profile.api_key_ref else ""
 

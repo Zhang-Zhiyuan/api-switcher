@@ -184,7 +184,6 @@ class CodexTab(ctk.CTkScrollableFrame):
 
             new_profile = CodexProfile(
                 name=data["name"],
-                auth_mode="api_key",
                 api_key_ref=api_key_ref,
                 model=data["model"],
                 model_provider=data["model_provider"],
@@ -214,7 +213,6 @@ class CodexTab(ctk.CTkScrollableFrame):
 
             profile = CodexProfile(
                 name=data["name"],
-                auth_mode="api_key",
                 api_key_ref=api_key_ref,
                 model=data["model"],
                 model_provider=data["model_provider"],

@@ -641,7 +641,6 @@ def _codex_provider_table(config: dict, provider_id: str) -> dict:
 def _codex_profile_kwargs_from_current(name: str, config: dict, auth: dict) -> dict:
     profile_kwargs = {
         "name": name,
-        "auth_mode": "api_key",
         "model": config.get("model", "gpt-5.5"),
         "model_provider": config.get("model_provider", "openai"),
         "model_reasoning_effort": config.get("model_reasoning_effort", "high"),
@@ -722,7 +721,7 @@ def _codex_auth_matches(profile: CodexProfile, auth: dict) -> bool:
     auth_mode = _codex_auth_mode(auth)
     if not is_third_party_codex_profile(profile):
         return False
-    if profile.auth_mode != "api_key" or auth_mode != "api_key":
+    if auth_mode != "api_key":
         return False
 
     current_key = auth.get("OPENAI_API_KEY") or ""

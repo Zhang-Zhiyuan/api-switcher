@@ -620,7 +620,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             else:
                 data["model_provider"] = "custom"
                 data["custom_requires_openai_auth"] = False
-            data["auth_mode"] = "api_key"
             del data["codex_provider"]
 
             if not data.get("custom_base_url"):

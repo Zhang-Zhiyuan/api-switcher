@@ -9,27 +9,23 @@ from __future__ import annotations
 import base64
 import json
 import os
-import shutil
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from config import paths
 from core import profile_manager, security
 
 
 BUNDLE_FORMAT = "api-switcher-portable-profiles"
 BUNDLE_VERSION = 1
 KDF_ITERATIONS = 390_000
-MAX_BROWSER_FILE_BYTES = 256 * 1024 * 1024
-MAX_BROWSER_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_BUNDLE_FILE_BYTES = 3 * 1024 * 1024 * 1024
 
 
@@ -39,10 +35,6 @@ class PortableExportResult:
     profile_count: int
     secret_count: int
     missing_secret_refs: list[str]
-    browser_profile_count: int = 0
-    browser_file_count: int = 0
-    browser_bytes: int = 0
-    skipped_browser_files: list[str] | None = None
 
 
 @dataclass
@@ -50,36 +42,6 @@ class PortableImportResult:
     profile_count: int
     secret_count: int
     skipped_secret_refs: list[str]
-    browser_profile_count: int = 0
-    browser_file_count: int = 0
-    skipped_browser_files: list[str] | None = None
-
-
-BROWSER_SKIP_DIRS = {
-    "cache",
-    "code cache",
-    "gpucache",
-    "shadercache",
-    "grshadercache",
-    "crashpad",
-    "browsermetrics",
-    "optimization hints",
-    "safe browsing",
-    "segmentation platform",
-}
-BROWSER_SKIP_FILES = {
-    "singletonlock",
-    "singletoncookie",
-    "singletonsocket",
-    "lockfile",
-}
-BROWSER_SKIP_SUFFIXES = {
-    ".log",
-    ".tmp",
-    ".lock",
-    ".backup",
-    ".crdownload",
-}
 
 
 def _b64encode(data: bytes) -> str:
@@ -228,10 +190,8 @@ def _sanitize_portable_store(store: dict[str, Any]) -> dict[str, Any]:
         if profile.get("model_provider", "openai") == "openai":
             continue
         cleaned = dict(profile)
-        cleaned["auth_mode"] = "api_key"
-        cleaned["oauth_tokens_ref"] = None
-        cleaned["auth_data_ref"] = None
-        cleaned["last_refresh"] = None
+        for legacy_key in ("auth_mode", "openai_auth_key_ref", "oauth_tokens_ref", "auth_data_ref", "last_refresh"):
+            cleaned.pop(legacy_key, None)
         codex_profiles.append(cleaned)
 
     stripped["claude_profiles"] = claude_profiles
@@ -255,292 +215,6 @@ def _store_version(store: dict[str, Any]) -> int:
         return int(store.get("version", 1))
     except (TypeError, ValueError):
         return 1
-
-
-def _safe_profile_dir_name(name: str, browser_type: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name).strip("_") or "profile"
-    browser = browser_type if browser_type in {"chrome", "edge"} else "browser"
-    return f"{browser}_{safe}"
-
-
-def _managed_browser_profiles_dir() -> Path:
-    return paths.STORAGE_DIR / "browser_profiles"
-
-
-def _is_path_inside(path: Path, root: Path) -> bool:
-    try:
-        resolved = path.resolve()
-        resolved_root = root.resolve()
-    except OSError:
-        return False
-    return resolved == resolved_root or resolved_root in resolved.parents
-
-
-def _should_skip_browser_path(path: Path, relative_parts: Iterable[str]) -> bool:
-    if path.is_symlink():
-        return True
-
-    lowered_parts = [part.lower() for part in relative_parts]
-    if any(part in BROWSER_SKIP_DIRS for part in lowered_parts[:-1]):
-        return True
-
-    name = path.name.lower()
-    if name in BROWSER_SKIP_FILES:
-        return True
-    if any(name.endswith(suffix) for suffix in BROWSER_SKIP_SUFFIXES):
-        return True
-    return False
-
-
-def _browser_profile_export_path(profile: dict[str, Any]) -> Path | None:
-    if profile.get("profile_mode") != "managed":
-        return None
-    user_data_dir = profile.get("user_data_dir")
-    if not isinstance(user_data_dir, str) or not user_data_dir.strip():
-        return None
-
-    try:
-        source = Path(user_data_dir).expanduser().resolve()
-    except OSError:
-        return None
-
-    if not source.exists() or not source.is_dir():
-        return None
-    if not _is_path_inside(source, _managed_browser_profiles_dir()) and not profile.get("created_by_app"):
-        return None
-    return source
-
-
-def _collect_browser_profile_data(store: dict[str, Any]) -> dict[str, Any]:
-    browser_profiles = store.get("browser_profiles", [])
-    if not isinstance(browser_profiles, list):
-        return {"profiles": {}, "skipped": []}
-
-    exported_profiles: dict[str, Any] = {}
-    skipped: list[str] = []
-    for profile in browser_profiles:
-        if not isinstance(profile, dict) or not isinstance(profile.get("name"), str):
-            continue
-        source = _browser_profile_export_path(profile)
-        if source is None:
-            continue
-
-        files: list[dict[str, Any]] = []
-        total_bytes = 0
-        for file_path in source.rglob("*"):
-            try:
-                relative = file_path.relative_to(source)
-                relative_parts = relative.parts
-                if _should_skip_browser_path(file_path, relative_parts):
-                    skipped.append(f"{profile['name']}:{relative.as_posix()}")
-                    continue
-                if not file_path.is_file():
-                    continue
-                stat = file_path.stat()
-                if stat.st_size > MAX_BROWSER_FILE_BYTES:
-                    skipped.append(f"{profile['name']}:{relative.as_posix()} (文件过大)")
-                    continue
-                if total_bytes + stat.st_size > MAX_BROWSER_TOTAL_BYTES:
-                    skipped.append(f"{profile['name']}:{relative.as_posix()} (浏览器数据总量超过上限)")
-                    continue
-                data = file_path.read_bytes()
-                total_bytes += len(data)
-                files.append({
-                    "path": relative.as_posix(),
-                    "data": _b64encode(data),
-                    "mtime": stat.st_mtime,
-                    "size": len(data),
-                })
-            except (OSError, ValueError) as e:
-                try:
-                    relative_text = file_path.relative_to(source).as_posix()
-                except ValueError:
-                    relative_text = str(file_path)
-                skipped.append(f"{profile['name']}:{relative_text} ({e})")
-
-        exported_profiles[profile["name"]] = {
-            "browser_type": profile.get("browser_type"),
-            "source_dir": str(source),
-            "file_count": len(files),
-            "total_bytes": total_bytes,
-            "files": files,
-        }
-
-    return {"profiles": exported_profiles, "skipped": skipped}
-
-
-def _normalize_imported_browser_profiles(imported_store: dict[str, Any], browser_data: dict[str, Any]) -> None:
-    data_profiles = browser_data.get("profiles") if isinstance(browser_data, dict) else {}
-    if not isinstance(data_profiles, dict):
-        data_profiles = {}
-
-    profiles = imported_store.get("browser_profiles", [])
-    if not isinstance(profiles, list):
-        return
-
-    managed_root = _managed_browser_profiles_dir()
-    for profile in profiles:
-        if not isinstance(profile, dict):
-            continue
-        name = profile.get("name")
-        if name not in data_profiles:
-            continue
-
-        target = managed_root / _safe_profile_dir_name(str(name), str(profile.get("browser_type") or "browser"))
-        profile["profile_mode"] = "managed"
-        profile["created_by_app"] = True
-        profile["allow_full_reset"] = True
-        profile["user_data_dir"] = str(target)
-
-        explicit_exe = profile.get("browser_executable")
-        if isinstance(explicit_exe, str) and explicit_exe:
-            try:
-                if not Path(explicit_exe).exists():
-                    profile["browser_executable"] = None
-            except OSError:
-                profile["browser_executable"] = None
-
-
-def _remove_path(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    elif path.exists() or path.is_symlink():
-        path.unlink()
-
-
-def _restore_interrupted_browser_import(target_dir: Path, backup_dir: Path) -> None:
-    if target_dir.exists():
-        if backup_dir.exists():
-            _remove_path(backup_dir)
-        return
-    if backup_dir.exists():
-        shutil.move(str(backup_dir), str(target_dir))
-
-
-def _commit_browser_profile_dir(staging_dir: Path, target_dir: Path, backup_dir: Path) -> None:
-    target_moved_to_backup = False
-    staging_moved_to_target = False
-    try:
-        if backup_dir.exists():
-            _remove_path(backup_dir)
-        if target_dir.exists():
-            shutil.move(str(target_dir), str(backup_dir))
-            target_moved_to_backup = True
-        shutil.move(str(staging_dir), str(target_dir))
-        staging_moved_to_target = True
-    except Exception:
-        if not staging_moved_to_target and staging_dir.exists():
-            _remove_path(staging_dir)
-        if staging_moved_to_target and target_dir.exists():
-            _remove_path(target_dir)
-        if target_moved_to_backup and backup_dir.exists():
-            shutil.move(str(backup_dir), str(target_dir))
-        raise
-    else:
-        if backup_dir.exists():
-            _remove_path(backup_dir)
-
-
-def _restore_browser_profile_data(browser_data: dict[str, Any]) -> tuple[int, int, list[str]]:
-    data_profiles = browser_data.get("profiles") if isinstance(browser_data, dict) else {}
-    if not isinstance(data_profiles, dict):
-        return 0, 0, []
-
-    restored_profiles = 0
-    restored_files = 0
-    skipped: list[str] = []
-    managed_root = _managed_browser_profiles_dir()
-    managed_root.mkdir(parents=True, exist_ok=True)
-
-    for profile_name, entry in data_profiles.items():
-        if not isinstance(entry, dict):
-            skipped.append(str(profile_name))
-            continue
-
-        target_dir = managed_root / _safe_profile_dir_name(str(profile_name), str(entry.get("browser_type") or "browser"))
-        staging_dir = target_dir.with_name(target_dir.name + ".importing")
-        backup_dir = target_dir.with_name(target_dir.name + ".pre-import")
-        try:
-            _restore_interrupted_browser_import(target_dir, backup_dir)
-            if staging_dir.exists():
-                _remove_path(staging_dir)
-            staging_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            skipped.append(f"{profile_name}:无法准备目录 ({e})")
-            continue
-
-        files = entry.get("files", [])
-        if not isinstance(files, list):
-            skipped.append(f"{profile_name}:files 字段无效")
-            _remove_path(staging_dir)
-            continue
-
-        profile_restored_files = 0
-        profile_total_bytes = 0
-        profile_errors: list[str] = []
-        for file_info in files:
-            if not isinstance(file_info, dict):
-                profile_errors.append(f"{profile_name}:无效文件记录")
-                continue
-            relative_text = file_info.get("path")
-            data_text = file_info.get("data")
-            if not isinstance(relative_text, str) or not isinstance(data_text, str):
-                profile_errors.append(f"{profile_name}:无效文件字段")
-                continue
-            relative = Path(relative_text)
-            if relative.is_absolute() or ".." in relative.parts:
-                profile_errors.append(f"{profile_name}:{relative_text}")
-                continue
-
-            target_file = staging_dir / relative
-            if not _is_path_inside(target_file, staging_dir):
-                profile_errors.append(f"{profile_name}:{relative_text}")
-                continue
-
-            declared_size = file_info.get("size")
-            if isinstance(declared_size, int) and declared_size > MAX_BROWSER_FILE_BYTES:
-                profile_errors.append(f"{profile_name}:{relative_text} (文件过大)")
-                continue
-
-            try:
-                data = _b64decode(data_text)
-                if len(data) > MAX_BROWSER_FILE_BYTES:
-                    profile_errors.append(f"{profile_name}:{relative_text} (文件过大)")
-                    continue
-                if profile_total_bytes + len(data) > MAX_BROWSER_TOTAL_BYTES:
-                    profile_errors.append(f"{profile_name}:{relative_text} (浏览器数据总量超过上限)")
-                    continue
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-                target_file.write_bytes(data)
-                mtime = file_info.get("mtime")
-                if isinstance(mtime, (int, float)):
-                    os.utime(target_file, (mtime, mtime))
-                profile_total_bytes += len(data)
-                profile_restored_files += 1
-            except Exception as e:
-                profile_errors.append(f"{profile_name}:{relative_text} ({e})")
-
-        if profile_errors:
-            skipped.extend(profile_errors)
-            skipped.append(f"{profile_name}:存在无效或未写入文件，已保留原目录")
-            _remove_path(staging_dir)
-            continue
-
-        if profile_restored_files == 0 and target_dir.exists():
-            skipped.append(f"{profile_name}:没有可恢复文件，已保留原目录")
-            _remove_path(staging_dir)
-            continue
-
-        try:
-            _commit_browser_profile_dir(staging_dir, target_dir, backup_dir)
-        except Exception as e:
-            skipped.append(f"{profile_name}:无法替换目录 ({e})")
-            continue
-
-        restored_profiles += 1
-        restored_files += profile_restored_files
-
-    return restored_profiles, restored_files, skipped
 
 
 def _merge_profile_lists(existing: list[Any], imported: list[Any]) -> list[dict[str, Any]]:
@@ -576,14 +250,11 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
         else:
             secrets[ref] = value
 
-    browser_data = {"profiles": {}, "skipped": []}
-
     payload = {
         "payload_version": 1,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "store": store,
         "secrets": secrets,
-        "browser_data": browser_data,
         "missing_secret_refs": missing,
         "notes": [
             "Includes app-managed Claude/Codex/SSH profile metadata and secrets.",
@@ -609,18 +280,6 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
         profile_count=_count_profiles(store),
         secret_count=len(secrets),
         missing_secret_refs=missing,
-        browser_profile_count=len(browser_data.get("profiles", {})),
-        browser_file_count=sum(
-            int(entry.get("file_count", 0))
-            for entry in browser_data.get("profiles", {}).values()
-            if isinstance(entry, dict)
-        ),
-        browser_bytes=sum(
-            int(entry.get("total_bytes", 0))
-            for entry in browser_data.get("profiles", {}).values()
-            if isinstance(entry, dict)
-        ),
-        skipped_browser_files=browser_data.get("skipped", []),
     )
 
 
@@ -688,8 +347,6 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
             continue
         valid_secrets.append((ref, value))
 
-    browser_profile_count, browser_file_count, skipped_browser_files = 0, 0, []
-
     profile_manager._normalize_store(new_store)
     profile_manager._save_store(new_store)
 
@@ -706,7 +363,4 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
         profile_count=_count_profiles(imported_store),
         secret_count=restored,
         skipped_secret_refs=skipped,
-        browser_profile_count=browser_profile_count,
-        browser_file_count=browser_file_count,
-        skipped_browser_files=skipped_browser_files,
     )

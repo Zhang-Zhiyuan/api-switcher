@@ -29,12 +29,7 @@ class ClaudeProfile:
 @dataclass
 class CodexProfile:
     name: str
-    auth_mode: str  # kept for old data; new profiles use "api_key"
     api_key_ref: Optional[str] = None
-    openai_auth_key_ref: Optional[str] = None
-    oauth_tokens_ref: Optional[str] = None  # legacy, no longer used for switching
-    auth_data_ref: Optional[str] = None  # legacy, no longer used for switching
-    last_refresh: Optional[str] = None
     model: str = "gpt-5.5"
     model_provider: str = "openai"
     model_reasoning_effort: str = "high"

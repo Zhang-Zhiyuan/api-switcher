@@ -30,14 +30,6 @@ class ProviderConfig:
         return self.codex_base_url if self.codex_base_url is not None else self.default_base_url
 
 
-OPENAI_CODEX_MODELS = [
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-codex",
-    "gpt-5.3-codex",
-    "o3",
-]
-
 CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh"]
 
