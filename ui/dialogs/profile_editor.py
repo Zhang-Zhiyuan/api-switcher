@@ -467,7 +467,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
     def _test_connection(self):
         """Test API connection with current settings."""
         from core.api_tester import APITester
-        from ui.dialogs.api_test_result_dialog import APITestResultDialog
         import threading
 
         data = self._collect_data()
@@ -519,15 +518,26 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 result = APITester.test_openai_api(api_key, base_url, model)
 
             # Show result dialog in main thread
-            self.after(0, lambda: self._show_test_result(result, data.get("name", "")))
+            self._safe_after(lambda: self._show_test_result(result, data.get("name", "")))
 
         thread = threading.Thread(target=run_test, daemon=True)
         thread.start()
 
     def _show_test_result(self, result, profile_name: str):
         """Show test result dialog."""
+        from ui.dialogs.api_test_result_dialog import APITestResultDialog
+
+        if not self.winfo_exists():
+            return
         self._show_status("")
         APITestResultDialog(self, result, profile_name)
+
+    def _safe_after(self, callback) -> None:
+        """Schedule UI work from a background thread if the dialog still exists."""
+        try:
+            self.after(0, callback)
+        except Exception:
+            pass
 
     def _refresh_models(self):
         """Refresh model list from provider API, falling back to bundled presets."""
@@ -567,11 +577,13 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         def run_refresh():
             result = fetcher()
-            self.after(0, lambda: self._handle_model_refresh_result(result, fallback_models))
+            self._safe_after(lambda: self._handle_model_refresh_result(result, fallback_models))
 
         threading.Thread(target=run_refresh, daemon=True).start()
 
     def _apply_model_list(self, models: list[str], message: str, is_error: bool = False) -> None:
+        if not self.winfo_exists():
+            return
         if not models:
             self._show_error("没有可用模型")
             return
@@ -583,6 +595,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._show_error(message) if is_error else self._show_status(message, "success")
 
     def _handle_model_refresh_result(self, result, fallback_models: list[str]):
+        if not self.winfo_exists():
+            return
         if result.success and result.models:
             self._apply_model_list(result.models, result.message, is_error=False)
             return

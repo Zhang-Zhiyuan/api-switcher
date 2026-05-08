@@ -16,6 +16,11 @@ class AutoContinueSettings:
     error_recovery_enabled: bool = False  # 是否启用错误自动恢复
     max_error_recoveries: int = 3  # 单个会话最大恢复次数
 
+    # Git版本管理设置
+    git_auto_snapshot: bool = True  # 是否自动创建git快照（默认开启）
+    git_snapshot_on_start: bool = True  # 对话开始时创建快照
+    git_snapshot_on_recovery: bool = True  # 错误恢复前创建快照
+
     # Incomplete patterns (regex)
     incomplete_patterns: list[str] = field(default_factory=lambda: [
         r"(?i)(still|remaining|todo|wip|work in progress|not (yet )?complete)",

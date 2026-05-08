@@ -254,39 +254,7 @@ class APITester:
         )
 
     @staticmethod
-    def test_claude_api(api_key: str, base_url: str = "https://api.anthropic.com",
-                        model: str = "claude-sonnet-4", timeout: int = 10) -> TestResult:
-        """Test an Anthropic-compatible API by checking /v1/models, then fallback to /v1/messages."""
-        if not api_key or not api_key.strip():
-            return TestResult(success=False, message="API Key 为空")
-
-        model = (model or "").strip()
-        model_list = APITester.fetch_claude_models(api_key, base_url, timeout=timeout)
-        if model_list.success:
-            if model and model not in model_list.models:
-                return TestResult(
-                    success=False,
-                    message="连接成功，但模型不在服务端列表中",
-                    response_time=model_list.response_time,
-                    status_code=model_list.status_code,
-                    error_details="可用模型: " + ", ".join(model_list.models[:20]),
-                )
-            return TestResult(
-                success=True,
-                message="连接成功，模型可用" if model else "连接成功",
-                response_time=model_list.response_time,
-                status_code=model_list.status_code,
-            )
-
-        if model_list.status_code not in (404, 405):
-            return TestResult(
-                success=False,
-                message=model_list.message,
-                response_time=model_list.response_time,
-                status_code=model_list.status_code,
-                error_details=model_list.error_details,
-            )
-
+    def _probe_claude_message(api_key: str, base_url: str, model: str, timeout: int) -> TestResult:
         url = APITester._anthropic_url(base_url, "messages")
         payload = {
             "model": model,
@@ -308,39 +276,7 @@ class APITester:
         return result
 
     @staticmethod
-    def test_openai_api(api_key: str, base_url: str = "https://api.openai.com/v1",
-                        model: str = "gpt-5.5", timeout: int = 10) -> TestResult:
-        """Test an OpenAI-compatible API by checking /models, then fallback to /chat/completions."""
-        if not api_key or not api_key.strip():
-            return TestResult(success=False, message="API Key 为空")
-
-        model = (model or "").strip()
-        model_list = APITester.fetch_openai_models(api_key, base_url, timeout=timeout)
-        if model_list.success:
-            if model and model not in model_list.models:
-                return TestResult(
-                    success=False,
-                    message="连接成功，但模型不在服务端列表中",
-                    response_time=model_list.response_time,
-                    status_code=model_list.status_code,
-                    error_details="可用模型: " + ", ".join(model_list.models[:20]),
-                )
-            return TestResult(
-                success=True,
-                message="连接成功，模型可用" if model else "连接成功",
-                response_time=model_list.response_time,
-                status_code=model_list.status_code,
-            )
-
-        if model_list.status_code not in (404, 405):
-            return TestResult(
-                success=False,
-                message=model_list.message,
-                response_time=model_list.response_time,
-                status_code=model_list.status_code,
-                error_details=model_list.error_details,
-            )
-
+    def _probe_openai_chat(api_key: str, base_url: str, model: str, timeout: int) -> TestResult:
         url = APITester._openai_url(base_url, "chat/completions")
         payload = {
             "model": model,
@@ -359,6 +295,82 @@ class APITester:
         )
         result.message = "连接成功，模型可用" if ok else result.message
         return result
+
+    @staticmethod
+    def test_claude_api(api_key: str, base_url: str = "https://api.anthropic.com",
+                        model: str = "claude-sonnet-4", timeout: int = 10) -> TestResult:
+        """Test an Anthropic-compatible API by checking /v1/models, then fallback to /v1/messages."""
+        if not api_key or not api_key.strip():
+            return TestResult(success=False, message="API Key 为空")
+
+        model = (model or "").strip()
+        model_list = APITester.fetch_claude_models(api_key, base_url, timeout=timeout)
+        if model_list.success:
+            if model and model not in model_list.models:
+                probe = APITester._probe_claude_message(api_key, base_url, model, timeout)
+                if probe.success:
+                    probe.message = "连接成功，模型别名可用"
+                    return probe
+                if probe.error_details:
+                    probe.error_details = f"{probe.error_details}\n可用模型: {', '.join(model_list.models[:20])}"
+                else:
+                    probe.error_details = "可用模型: " + ", ".join(model_list.models[:20])
+                return probe
+            return TestResult(
+                success=True,
+                message="连接成功，模型可用" if model else "连接成功",
+                response_time=model_list.response_time,
+                status_code=model_list.status_code,
+            )
+
+        if model_list.status_code not in (404, 405):
+            return TestResult(
+                success=False,
+                message=model_list.message,
+                response_time=model_list.response_time,
+                status_code=model_list.status_code,
+                error_details=model_list.error_details,
+            )
+
+        return APITester._probe_claude_message(api_key, base_url, model, timeout)
+
+    @staticmethod
+    def test_openai_api(api_key: str, base_url: str = "https://api.openai.com/v1",
+                        model: str = "gpt-5.5", timeout: int = 10) -> TestResult:
+        """Test an OpenAI-compatible API by checking /models, then fallback to /chat/completions."""
+        if not api_key or not api_key.strip():
+            return TestResult(success=False, message="API Key 为空")
+
+        model = (model or "").strip()
+        model_list = APITester.fetch_openai_models(api_key, base_url, timeout=timeout)
+        if model_list.success:
+            if model and model not in model_list.models:
+                probe = APITester._probe_openai_chat(api_key, base_url, model, timeout)
+                if probe.success:
+                    probe.message = "连接成功，模型别名可用"
+                    return probe
+                if probe.error_details:
+                    probe.error_details = f"{probe.error_details}\n可用模型: {', '.join(model_list.models[:20])}"
+                else:
+                    probe.error_details = "可用模型: " + ", ".join(model_list.models[:20])
+                return probe
+            return TestResult(
+                success=True,
+                message="连接成功，模型可用" if model else "连接成功",
+                response_time=model_list.response_time,
+                status_code=model_list.status_code,
+            )
+
+        if model_list.status_code not in (404, 405):
+            return TestResult(
+                success=False,
+                message=model_list.message,
+                response_time=model_list.response_time,
+                status_code=model_list.status_code,
+                error_details=model_list.error_details,
+            )
+
+        return APITester._probe_openai_chat(api_key, base_url, model, timeout)
 
     @staticmethod
     def test_url_reachable(url: str, timeout: int = 5) -> TestResult:

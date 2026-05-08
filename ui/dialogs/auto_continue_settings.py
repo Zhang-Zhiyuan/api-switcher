@@ -9,8 +9,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
     def __init__(self, master, provider_name: str, settings: AutoContinueSettings, on_save=None):
         super().__init__(master)
         self.title(f"{provider_name} 自动续跑设置")
-        self.geometry("660x620")
-        self.minsize(560, 500)
+        self.geometry("660x780")
+        self.minsize(560, 600)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.transient(master)
@@ -89,6 +89,58 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
 
         self._add_field(scroll, "最大恢复次数", "max_error_recoveries", str(self.settings.max_error_recoveries))
 
+        # Git版本管理section
+        ctk.CTkLabel(scroll, text="Git 版本管理", text_color=COLORS["text"], font=font(14, "bold")).pack(
+            anchor="w", pady=(15, 5))
+
+        self._git_auto_snapshot_var = ctk.BooleanVar(value=self.settings.git_auto_snapshot)
+        git_auto_switch = ctk.CTkSwitch(
+            scroll,
+            text="启用自动 Git 快照 (推荐)",
+            variable=self._git_auto_snapshot_var,
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        git_auto_switch.pack(anchor="w", pady=5)
+
+        self._git_snapshot_on_start_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_start)
+        git_start_switch = ctk.CTkSwitch(
+            scroll,
+            text="对话开始时创建快照",
+            variable=self._git_snapshot_on_start_var,
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        git_start_switch.pack(anchor="w", pady=5, padx=(20, 0))
+
+        self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_recovery)
+        git_recovery_switch = ctk.CTkSwitch(
+            scroll,
+            text="错误恢复前创建快照",
+            variable=self._git_snapshot_on_recovery_var,
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        git_recovery_switch.pack(anchor="w", pady=5, padx=(20, 0))
+
+        # Git help text
+        git_help_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        git_help_frame.pack(fill="x", pady=(2, 10))
+
+        git_help_text = ctk.CTkLabel(
+            git_help_frame,
+            text="自动为项目创建 Git 快照，方便回滚到任意版本。\n"
+                 "如果项目不是 Git 仓库，会自动初始化。",
+            font=font(11),
+            text_color=COLORS["muted"],
+            justify="left",
+            anchor="w"
+        )
+        git_help_text.pack(anchor="w")
+
         # Help text
         help_frame = ctk.CTkFrame(scroll, fg_color="transparent")
         help_frame.pack(fill="x", pady=(2, 10))
@@ -148,6 +200,11 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             conservative = self._conservative_var.get()
             error_recovery = self._error_recovery_var.get()
 
+            # Git settings
+            git_auto_snapshot = self._git_auto_snapshot_var.get()
+            git_snapshot_on_start = self._git_snapshot_on_start_var.get()
+            git_snapshot_on_recovery = self._git_snapshot_on_recovery_var.get()
+
             incomplete = [line.strip() for line in self._incomplete_text.get("1.0", "end").split("\n") if line.strip()]
             blocker = [line.strip() for line in self._blocker_text.get("1.0", "end").split("\n") if line.strip()]
 
@@ -159,6 +216,9 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 conservative_mode=conservative,
                 error_recovery_enabled=error_recovery,
                 max_error_recoveries=max_recoveries,
+                git_auto_snapshot=git_auto_snapshot,
+                git_snapshot_on_start=git_snapshot_on_start,
+                git_snapshot_on_recovery=git_snapshot_on_recovery,
                 incomplete_patterns=incomplete,
                 blocker_patterns=blocker,
             )

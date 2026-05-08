@@ -152,8 +152,15 @@ class ClaudeProvider(AutoContinueProvider):
         tmp_dir = self.get_config_dir() / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        # 加载设置以检查是否启用git
+        settings = self.load_settings()
+        enable_git = (
+            bool(settings.git_auto_snapshot and settings.git_snapshot_on_start)
+            if settings else True
+        )
+
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
-        script_content = generate_hook_script(settings_path)
+        script_content = generate_hook_script(settings_path, enable_git)
 
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(script_content)
@@ -243,8 +250,15 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         script_path = self.get_error_recovery_script_path()
         script_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # 加载设置以检查是否启用git
+        settings = self.load_settings()
+        enable_git = (
+            bool(settings.git_auto_snapshot and settings.git_snapshot_on_recovery)
+            if settings else True
+        )
+
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
-        script_content = generate_error_recovery_script(settings_path)
+        script_content = generate_error_recovery_script(settings_path, enable_git)
 
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(script_content)
