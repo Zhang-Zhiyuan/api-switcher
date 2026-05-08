@@ -1,0 +1,110 @@
+import json
+import logging
+from pathlib import Path
+
+from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG
+
+logger = logging.getLogger(__name__)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_claude_settings() -> dict:
+    if not CLAUDE_SETTINGS.exists():
+        return {}
+    try:
+        return json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"Failed to read {CLAUDE_SETTINGS}: {e}")
+        return {}
+
+
+def write_claude_settings(data: dict) -> None:
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    _atomic_write(CLAUDE_SETTINGS, content)
+
+
+def read_claude_config() -> dict:
+    if not CLAUDE_CONFIG.exists():
+        return {}
+    try:
+        return json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"Failed to read {CLAUDE_CONFIG}: {e}")
+        return {}
+
+
+def write_claude_config(data: dict) -> None:
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    _atomic_write(CLAUDE_CONFIG, content)
+
+
+def apply_claude_profile(settings: dict, profile) -> dict:
+    """Apply a ClaudeProfile to settings dict. Only modifies API-related fields."""
+    settings = dict(settings)
+
+    # Ensure env dict exists
+    if not isinstance(settings.get("env"), dict):
+        settings["env"] = {}
+
+    from core.providers import ProviderRegistry
+
+    provider = ProviderRegistry.get_provider(profile.provider)
+
+    # Get actual token value from security module
+    from core import security
+    token = security.get_secret(profile.auth_token_ref)
+    if token:
+        settings["env"]["ANTHROPIC_AUTH_TOKEN"] = token
+        settings["env"]["ANTHROPIC_API_KEY"] = token
+    else:
+        settings["env"].pop("ANTHROPIC_AUTH_TOKEN", None)
+        settings["env"].pop("ANTHROPIC_API_KEY", None)
+
+    if profile.base_url:
+        settings["env"]["ANTHROPIC_BASE_URL"] = profile.base_url
+    else:
+        settings["env"].pop("ANTHROPIC_BASE_URL", None)
+
+    for key in [
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ]:
+        settings["env"].pop(key, None)
+    if provider and provider.claude_env:
+        settings["env"].update(provider.claude_env)
+
+    settings["model"] = profile.model
+
+    # 根据提供商决定是否设置 effortLevel
+    # 不支持推理力度的提供商会跳过该字段，避免向 API 发送无效参数。
+    if ProviderRegistry.supports_reasoning_effort(profile.provider):
+        settings["effortLevel"] = profile.effort_level
+    elif "effortLevel" in settings:
+        # 如果提供商不支持推理力度，移除该字段
+        del settings["effortLevel"]
+
+    settings["skipDangerousModePermissionPrompt"] = profile.skip_dangerous_prompt
+
+    # Permissions
+    if not isinstance(settings.get("permissions"), dict):
+        settings["permissions"] = {}
+    settings["permissions"]["defaultMode"] = profile.permissions_mode
+
+    if profile.permissions_allow:
+        settings["permissions"]["allow"] = profile.permissions_allow
+    else:
+        settings["permissions"].pop("allow", None)
+
+    if profile.additional_directories:
+        settings["additionalDirectories"] = profile.additional_directories
+    else:
+        settings.pop("additionalDirectories", None)
+
+    return settings

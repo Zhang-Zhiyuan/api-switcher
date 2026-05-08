@@ -1,0 +1,66 @@
+import customtkinter as ctk
+
+from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, input_style
+
+
+class DangerConfirmDialog(ctk.CTkToplevel):
+    """Require typing the exact profile name before a dangerous operation."""
+
+    def __init__(self, master, title: str, message: str, confirm_text: str, on_confirm=None):
+        super().__init__(master)
+        self.title(title)
+        self.geometry("560x280")
+        self.minsize(460, 250)
+        self.resizable(True, False)
+        self.configure(fg_color=COLORS["app_bg"])
+        self.grab_set()
+
+        self._confirm_text = confirm_text
+        self._on_confirm = on_confirm
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=18, pady=(16, 8))
+        ctk.CTkLabel(header, text=title, text_color=COLORS["danger"], font=font(18, "bold")).pack(anchor="w")
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+
+        message_label = ctk.CTkLabel(
+            body,
+            text=message,
+            text_color=COLORS["text"],
+            font=font(12),
+            justify="left",
+            anchor="w",
+        )
+        message_label.pack(fill="x", pady=(0, 12))
+        bind_wraplength(body, message_label, padding=4, min_width=320, max_width=680)
+
+        ctk.CTkLabel(
+            body,
+            text=f'请输入名称确认: {confirm_text}',
+            text_color=COLORS["muted"],
+            font=font(12, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        self._entry = ctk.CTkEntry(body, **input_style())
+        self._entry.pack(fill="x")
+
+        self._error = ctk.CTkLabel(body, text="", text_color=COLORS["danger"], font=font(11))
+        self._error.pack(fill="x", pady=(6, 0))
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=18, pady=(0, 16))
+        ctk.CTkButton(btn_frame, text="取消", width=84, command=self.destroy, **button_style("secondary")).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_frame, text="确认清理", width=98, command=self._submit, **button_style("danger")).pack(side="right")
+
+        center_window(self, master)
+
+    def _submit(self):
+        if self._entry.get().strip() != self._confirm_text:
+            self._error.configure(text="输入的名称不匹配，已取消操作")
+            return
+        if self._on_confirm:
+            self._on_confirm()
+        self.destroy()
