@@ -5,7 +5,7 @@
 ## ✨ 主要功能
 
 ### 1. API 管理
-- 支持多个 API 提供商（Anthropic Claude、OpenAI、DeepSeek V4、Kimi、GLM、自定义 OpenAI-compatible）
+- 支持多个第三方 API 提供商（DeepSeek V4、Kimi、GLM、自定义 OpenAI-compatible / Anthropic-compatible）
 - 快速切换不同的 API 配置
 - 安全的密钥管理
 - 配置导入/导出
@@ -106,9 +106,9 @@
 
 ## 🔐 跨电脑迁移 Profile
 
-在“备份管理”中使用“导出迁移包”可以生成加密的 `.asxprofile` 文件。迁移包包含 Claude/Codex/SSH/浏览器 Profile 元数据，以及 API Key、OAuth Token、SSH 密码、SSH 密钥口令等由软件管理的登录信息。导入到另一台电脑时，输入同一个迁移密码，软件会把密钥重新写入新电脑的本机凭据存储。
+在“备份管理”中使用“导出迁移包”可以生成加密的 `.asxprofile` 文件。迁移包只包含 Claude/Codex/SSH 的第三方 API Profile 元数据，以及 API Key、SSH 密码、SSH 密钥口令等由软件管理的密钥。导入到另一台电脑时，输入同一个迁移密码，软件会把密钥重新写入新电脑的本机凭据存储。
 
-迁移包会尽力包含软件托管浏览器 Profile 的 cookies、Local State、本地存储、IndexedDB、Session Storage 等数据，并跳过缓存、锁文件和崩溃日志。Chrome/Edge 可能会把 cookies 绑定到系统密钥或浏览器安装环境，所以网页登录态跨电脑恢复属于尽力而为；外部浏览器 Profile 目录不会自动打包，避免误导出日常浏览器的完整数据目录。
+浏览器 Profile 只作为本机隔离、启动和清理工具使用，不再通过迁移包或浏览器 Tab 做跨机器导入/导出；官方账号登录态、OAuth Token、cookies、Local State、本地存储、IndexedDB、Session Storage 等浏览器数据不会被打包。
 
 ## 📖 详细文档
 
@@ -130,8 +130,6 @@
 
 ## 🎯 支持的 API 提供商
 
-- **Anthropic Claude** (Claude Code)
-- **OpenAI** (Codex CLI)
 - **DeepSeek V4** (Codex OpenAI-compatible / Claude Code Anthropic-compatible)
 - **Kimi** (Moonshot OpenAI-compatible)
 - **智谱 AI / Z.ai** (GLM Coding Plan)

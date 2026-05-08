@@ -1,5 +1,4 @@
 import customtkinter as ctk
-from tkinter import filedialog
 
 from core import profile_manager
 from core.browser_data_manager import browser_data_manager
@@ -9,7 +8,7 @@ from ui.dialogs.browser_profile_editor import BrowserProfileEditorDialog
 from ui.dialogs.bulk_operation_result_dialog import BulkOperationResultDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.dialogs.danger_confirm_dialog import DangerConfirmDialog
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, center_window, combo_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 
@@ -53,9 +52,6 @@ class BrowserTab(ctk.CTkScrollableFrame):
         action_bar = ctk.CTkFrame(self, fg_color="transparent")
         action_bar.pack(fill="x", padx=14, pady=(0, 8))
         ctk.CTkButton(action_bar, text="+ 新建 Profile", width=126, command=self._create_profile, **button_style("primary")).pack(side="left")
-        ctk.CTkButton(action_bar, text="导出选中", width=112, command=self._export_selected_profiles, **button_style("accent")).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(action_bar, text="导出全部", width=112, command=self._export_profiles, **button_style("accent")).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(action_bar, text="导入配置", width=112, command=self._import_profiles, **button_style("secondary")).pack(side="left", padx=(8, 0))
         ctk.CTkButton(action_bar, text="刷新全部诊断", width=122, command=self.refresh, **button_style("secondary")).pack(side="left", padx=(8, 0))
 
         quick_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -393,117 +389,3 @@ class BrowserTab(ctk.CTkScrollableFrame):
             subprocess.Popen(["explorer", profile.user_data_dir])
         except Exception as e:
             self._toast(f"打开目录失败: {e}", is_error=True)
-
-    def _export_profiles(self):
-        try:
-            path = filedialog.asksaveasfilename(
-                title="导出浏览器 Profile 配置",
-                defaultextension=".json",
-                filetypes=[("JSON Files", "*.json")],
-            )
-            if not path:
-                return
-            browser_profile_manager.export_profiles_metadata(path)
-            self._toast("已导出全部配置")
-        except Exception as e:
-            self._toast(f"导出失败: {e}", is_error=True)
-
-    def _export_selected_profiles(self):
-        try:
-            if not self._selected_names:
-                self._toast("请先选择至少一个 Profile", is_error=True)
-                return
-            path = filedialog.asksaveasfilename(
-                title="导出选中的浏览器 Profile 配置",
-                defaultextension=".json",
-                filetypes=[("JSON Files", "*.json")],
-            )
-            if not path:
-                return
-            browser_profile_manager.export_profiles_metadata(path, names=sorted(self._selected_names))
-            self._toast(f"已导出 {len(self._selected_names)} 个 Profile")
-        except Exception as e:
-            self._toast(f"导出失败: {e}", is_error=True)
-
-    def _import_profiles(self):
-        try:
-            path = filedialog.askopenfilename(
-                title="导入浏览器 Profile 配置",
-                filetypes=[("JSON Files", "*.json")],
-            )
-            if not path:
-                return
-
-            self._show_import_policy_dialog(path)
-        except Exception as e:
-            self._toast(f"导入失败: {e}", is_error=True)
-
-    def _show_import_policy_dialog(self, path: str):
-        dialog = ctk.CTkToplevel(self.winfo_toplevel())
-        dialog.title("选择导入策略")
-        dialog.geometry("420x280")
-        dialog.configure(fg_color=COLORS["app_bg"])
-        dialog.transient(self.winfo_toplevel())
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        content = ctk.CTkFrame(dialog, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=20, pady=20)
-
-        ctk.CTkLabel(
-            content,
-            text="遇到同名 Profile 时如何处理？",
-            text_color=COLORS["text"],
-            font=font(14, "bold"),
-        ).pack(pady=(0, 16))
-
-        policy_var = ctk.StringVar(value="rename")
-
-        options = [
-            ("rename", "重命名导入", "为冲突的 Profile 自动添加后缀（推荐）"),
-            ("skip", "跳过", "保留现有 Profile，不导入冲突项"),
-            ("overwrite", "覆盖", "用导入的配置覆盖现有 Profile"),
-        ]
-
-        for value, label, desc in options:
-            frame = ctk.CTkFrame(content, fg_color="transparent")
-            frame.pack(fill="x", pady=4)
-            ctk.CTkRadioButton(
-                frame,
-                text=label,
-                variable=policy_var,
-                value=value,
-                text_color=COLORS["text"],
-                font=font(13),
-            ).pack(anchor="w")
-            ctk.CTkLabel(
-                frame,
-                text=desc,
-                text_color=COLORS["muted"],
-                font=font(11),
-            ).pack(anchor="w", padx=(28, 0))
-
-        btn_frame = ctk.CTkFrame(content, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(16, 0))
-
-        def do_import():
-            policy = policy_var.get()
-            dialog.destroy()
-            try:
-                result = browser_profile_manager.import_profiles_metadata(path, conflict_policy=policy)
-                self._toast(f"导入 {result['imported']} 个，重命名 {result['renamed']} 个，跳过 {result['skipped']} 个")
-                if result["failures"]:
-                    BulkOperationResultDialog(
-                        self.winfo_toplevel(),
-                        title="导入结果",
-                        success_count=result["imported"],
-                        failure_items=result["failures"],
-                        success_label=f"重命名 {result['renamed']} 个 | 覆盖 {result['overwritten']} 个 | 跳过 {result['skipped']} 个",
-                    )
-                self.refresh()
-            except Exception as e:
-                self._toast(f"导入失败: {e}", is_error=True)
-
-        ctk.CTkButton(btn_frame, text="取消", width=100, command=dialog.destroy, **button_style("secondary")).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(btn_frame, text="确定导入", width=100, command=do_import, **button_style("primary")).pack(side="right")
-        center_window(dialog, self.winfo_toplevel())

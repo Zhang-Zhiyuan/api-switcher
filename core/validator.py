@@ -160,7 +160,7 @@ class ConfigValidator:
 
             # 检查 Profile
             try:
-                profiles = profile_manager.list_claude_profiles()
+                profiles = profile_manager.list_switchable_claude_profiles()
                 if profiles:
                     self._add_result(category, "Profile 数量", "ok", f"{len(profiles)} 个")
                     current = profile_manager.get_current_claude_name()
@@ -220,7 +220,7 @@ class ConfigValidator:
 
             # 检查 Profile
             try:
-                profiles = profile_manager.list_codex_profiles()
+                profiles = profile_manager.list_switchable_codex_profiles()
                 if profiles:
                     self._add_result(category, "Profile 数量", "ok", f"{len(profiles)} 个")
                     current = profile_manager.get_current_codex_name()
@@ -395,7 +395,7 @@ class ConfigValidator:
         try:
             active_claude = profile_manager.get_current_claude_name()
             if active_claude:
-                profiles = profile_manager.list_claude_profiles()
+                profiles = profile_manager.list_switchable_claude_profiles()
                 profile = next((p for p in profiles if p.name == active_claude), None)
 
                 if profile:
@@ -444,7 +444,7 @@ class ConfigValidator:
         try:
             active_codex = profile_manager.get_current_codex_name()
             if active_codex:
-                profiles = profile_manager.list_codex_profiles()
+                profiles = profile_manager.list_switchable_codex_profiles()
                 profile = next((p for p in profiles if p.name == active_codex), None)
 
                 if profile and profile.auth_mode == "api_key":
@@ -480,11 +480,6 @@ class ConfigValidator:
                             "未找到 API Key",
                             "在 Profile 中配置 API Key"
                         )
-                elif profile and profile.auth_mode == "chatgpt":
-                    self._add_result(
-                        category, f"Codex ({active_codex})", "ok",
-                        "OAuth 模式（跳过测试）"
-                    )
             else:
                 self._add_result(category, "Codex", "ok", "未激活配置")
 

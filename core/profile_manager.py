@@ -314,6 +314,14 @@ def list_claude_profiles() -> list[ClaudeProfile]:
     return _load_profile_list(store.get("claude_profiles", []), ClaudeProfile, "Claude")
 
 
+def is_third_party_claude_profile(profile: ClaudeProfile) -> bool:
+    return getattr(profile, "provider", "anthropic") != "anthropic"
+
+
+def list_switchable_claude_profiles() -> list[ClaudeProfile]:
+    return [p for p in list_claude_profiles() if is_third_party_claude_profile(p)]
+
+
 def get_active_claude_name() -> str | None:
     return _load_store().get("active_claude_profile")
 
@@ -408,7 +416,10 @@ def _claude_profile_config_matches(profile: ClaudeProfile, settings: dict) -> bo
     env = _claude_env(settings)
     permissions = _claude_permissions(settings)
 
-    if detect_claude_provider(settings) != profile.provider:
+    detected_provider = detect_claude_provider(settings)
+    if detected_provider == "anthropic" or not is_third_party_claude_profile(profile):
+        return False
+    if detected_provider != profile.provider:
         return False
     if (env.get("ANTHROPIC_BASE_URL") or "") != (profile.base_url or ""):
         return False
@@ -459,7 +470,7 @@ def get_current_claude_name() -> str | None:
     if not settings and not config:
         return None
 
-    for profile in list_claude_profiles():
+    for profile in list_switchable_claude_profiles():
         if _claude_profile_matches(profile, settings, config):
             return profile.name
     return None
@@ -473,7 +484,7 @@ def get_claude_runtime_summary() -> dict:
     config = read_claude_config()
     current_name = None
     if settings or config:
-        for profile in list_claude_profiles():
+        for profile in list_switchable_claude_profiles():
             if _claude_profile_matches(profile, settings, config):
                 current_name = profile.name
                 break
@@ -487,34 +498,6 @@ def get_claude_runtime_summary() -> dict:
         "has_settings": bool(settings),
         "has_config": bool(config),
     }
-
-
-def refresh_claude_profile_auth_from_current(name: str) -> bool:
-    """Persist the current Claude auth state back into an existing profile."""
-    from core.parser import read_claude_settings, read_claude_config
-
-    settings = read_claude_settings()
-    config = read_claude_config()
-    if not settings and not config:
-        return False
-
-    profiles = list_claude_profiles()
-    target = next((p for p in profiles if p.name == name), None)
-    if not target:
-        return False
-
-    token_value = _claude_auth_token_from_current(settings, config)
-    if token_value:
-        target.auth_token_ref = target.auth_token_ref or f"claude:{name}:auth_token"
-        security.set_secret(target.auth_token_ref, token_value)
-
-    primary_key = _claude_primary_api_key(config)
-    if primary_key:
-        target.primary_api_key_ref = target.primary_api_key_ref or f"claude:{name}:primary_api_key"
-        security.set_secret(target.primary_api_key_ref, primary_key)
-
-    save_claude_profile(target)
-    return True
 
 
 def _pick_claude_import_name(settings: dict, config: dict) -> str:
@@ -580,6 +563,14 @@ def list_codex_profiles() -> list[CodexProfile]:
     return _load_profile_list(store.get("codex_profiles", []), CodexProfile, "Codex")
 
 
+def is_third_party_codex_profile(profile: CodexProfile) -> bool:
+    return getattr(profile, "model_provider", "openai") != "openai"
+
+
+def list_switchable_codex_profiles() -> list[CodexProfile]:
+    return [p for p in list_codex_profiles() if is_third_party_codex_profile(p)]
+
+
 def get_active_codex_name() -> str | None:
     return _load_store().get("active_codex_profile")
 
@@ -621,35 +612,13 @@ def _codex_auth_identity_from_auth(auth: dict) -> str:
         return f"key-{_short_fingerprint(api_key)}" if api_key else "api-key"
 
     tokens = auth.get("tokens", {})
-    if not isinstance(tokens, dict):
-        tokens = {}
-    identity = (
-        tokens.get("account_id")
-        or tokens.get("sub")
-        or tokens.get("refresh_token")
-        or tokens.get("id_token")
-        or tokens.get("access_token")
-    )
-    return f"acct-{_short_fingerprint(identity)}" if identity else "chatgpt"
+    return "official-login" if isinstance(tokens, dict) and tokens else "no-api-key"
 
 
 def describe_codex_profile_identity(profile: CodexProfile) -> str:
     """Return a non-secret auth identity label for display."""
-    if profile.auth_mode == "api_key":
-        api_key = security.get_secret(profile.api_key_ref)
-        return f"key-{_short_fingerprint(api_key)}" if api_key else "api-key"
-
-    tokens = security.get_secret_json(profile.oauth_tokens_ref)
-    if not isinstance(tokens, dict):
-        tokens = {}
-    identity = (
-        tokens.get("account_id")
-        or tokens.get("sub")
-        or tokens.get("refresh_token")
-        or tokens.get("id_token")
-        or tokens.get("access_token")
-    )
-    return f"acct-{_short_fingerprint(identity)}" if identity else "chatgpt"
+    api_key = security.get_secret(profile.api_key_ref)
+    return f"key-{_short_fingerprint(api_key)}" if api_key else "api-key"
 
 
 def _build_codex_import_name(config: dict, auth: dict) -> str:
@@ -670,10 +639,9 @@ def _codex_provider_table(config: dict, provider_id: str) -> dict:
 
 
 def _codex_profile_kwargs_from_current(name: str, config: dict, auth: dict) -> dict:
-    auth_mode = _codex_auth_mode(auth)
     profile_kwargs = {
         "name": name,
-        "auth_mode": auth_mode,
+        "auth_mode": "api_key",
         "model": config.get("model", "gpt-5.5"),
         "model_provider": config.get("model_provider", "openai"),
         "model_reasoning_effort": config.get("model_reasoning_effort", "high"),
@@ -695,26 +663,11 @@ def _codex_profile_kwargs_from_current(name: str, config: dict, auth: dict) -> d
 
 
 def _store_codex_auth_secrets(name: str, profile_kwargs: dict, auth: dict) -> None:
-    if auth:
-        ref = f"codex:{name}:auth_data"
-        security.set_secret_json(ref, auth)
-        profile_kwargs["auth_data_ref"] = ref
-
-    auth_mode = _codex_auth_mode(auth)
-    if auth_mode == "api_key":
-        api_key = auth.get("OPENAI_API_KEY")
-        if api_key:
-            ref = f"codex:{name}:api_key"
-            security.set_secret(ref, api_key)
-            profile_kwargs["api_key_ref"] = ref
-        return
-
-    tokens = auth.get("tokens", {})
-    if isinstance(tokens, dict) and tokens:
-        ref = f"codex:{name}:oauth_tokens"
-        security.set_secret_json(ref, tokens)
-        profile_kwargs["oauth_tokens_ref"] = ref
-    profile_kwargs["last_refresh"] = auth.get("last_refresh")
+    api_key = auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None
+    if api_key:
+        ref = f"codex:{name}:api_key"
+        security.set_secret(ref, api_key)
+        profile_kwargs["api_key_ref"] = ref
 
 
 def _codex_expected_base_url(profile: CodexProfile) -> str:
@@ -734,6 +687,10 @@ def _same_optional(left: object, right: object) -> bool:
 
 
 def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
+    if not is_third_party_codex_profile(profile):
+        return False
+    if config.get("model_provider", "openai") == "openai":
+        return False
     if profile.model != config.get("model", "gpt-5.5"):
         return False
     if profile.model_provider != config.get("model_provider", "openai"):
@@ -746,9 +703,6 @@ def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
         return False
     if profile.disable_response_storage != config.get("disable_response_storage", True):
         return False
-
-    if profile.model_provider == "openai":
-        return True
 
     custom = _codex_provider_table(config, profile.model_provider)
     current_base_url = custom.get("base_url")
@@ -766,29 +720,14 @@ def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
 
 def _codex_auth_matches(profile: CodexProfile, auth: dict) -> bool:
     auth_mode = _codex_auth_mode(auth)
-    if profile.auth_mode != auth_mode:
+    if not is_third_party_codex_profile(profile):
+        return False
+    if profile.auth_mode != "api_key" or auth_mode != "api_key":
         return False
 
-    if auth_mode == "api_key":
-        current_key = auth.get("OPENAI_API_KEY") or ""
-        stored_key = security.get_secret(profile.api_key_ref) or ""
-        return bool(current_key or stored_key) and current_key == stored_key
-
-    current_tokens = auth.get("tokens", {})
-    if not isinstance(current_tokens, dict):
-        current_tokens = {}
-    stored_tokens = security.get_secret_json(profile.oauth_tokens_ref)
-    if not isinstance(stored_tokens, dict):
-        stored_tokens = {}
-
-    current_account = current_tokens.get("account_id")
-    stored_account = stored_tokens.get("account_id")
-    if current_account or stored_account:
-        return current_account == stored_account
-
-    if current_tokens or stored_tokens:
-        return current_tokens == stored_tokens
-    return True
+    current_key = auth.get("OPENAI_API_KEY") or ""
+    stored_key = security.get_secret(profile.api_key_ref) or ""
+    return bool(current_key and stored_key) and current_key == stored_key
 
 
 def codex_profile_matches_current(profile: CodexProfile) -> bool:
@@ -812,7 +751,7 @@ def get_current_codex_name() -> str | None:
     if not config and not auth:
         return None
 
-    for profile in list_codex_profiles():
+    for profile in list_switchable_codex_profiles():
         if _codex_profile_matches(profile, config, auth):
             return profile.name
     return None
@@ -827,7 +766,7 @@ def get_codex_runtime_summary() -> dict:
     auth = read_codex_auth()
     current_name = None
     if config or auth:
-        for profile in list_codex_profiles():
+        for profile in list_switchable_codex_profiles():
             if _codex_profile_matches(profile, config, auth):
                 current_name = profile.name
                 break
@@ -842,41 +781,6 @@ def get_codex_runtime_summary() -> dict:
         "has_config": bool(config),
         "has_auth": bool(auth),
     }
-
-
-def refresh_codex_profile_auth_from_current(name: str) -> bool:
-    """Persist the current auth.json login state back into an existing profile."""
-    from core.auth_parser import read_codex_auth
-
-    auth = read_codex_auth()
-    if not auth:
-        return False
-
-    profiles = list_codex_profiles()
-    target = next((p for p in profiles if p.name == name), None)
-    if not target:
-        return False
-
-    auth_mode = _codex_auth_mode(auth)
-    target.auth_mode = auth_mode
-    target.auth_data_ref = target.auth_data_ref or f"codex:{name}:auth_data"
-    security.set_secret_json(target.auth_data_ref, auth)
-
-    if auth_mode == "api_key":
-        api_key = auth.get("OPENAI_API_KEY")
-        if api_key:
-            target.api_key_ref = target.api_key_ref or f"codex:{name}:api_key"
-            security.set_secret(target.api_key_ref, api_key)
-        target.last_refresh = None
-    else:
-        tokens = auth.get("tokens", {})
-        if isinstance(tokens, dict) and tokens:
-            target.oauth_tokens_ref = target.oauth_tokens_ref or f"codex:{name}:oauth_tokens"
-            security.set_secret_json(target.oauth_tokens_ref, tokens)
-        target.last_refresh = auth.get("last_refresh")
-
-    save_codex_profile(target)
-    return True
 
 
 def _pick_codex_import_name(config: dict, auth: dict) -> str:
@@ -944,6 +848,8 @@ def import_current_claude() -> ClaudeProfile | None:
     config = read_claude_config()
     if not settings and not config:
         return None
+    if detect_claude_provider(settings) == "anthropic":
+        return None
 
     name = _pick_claude_import_name(settings, config)
     return ClaudeProfile(**_claude_profile_kwargs_from_current(name, settings, config))
@@ -957,6 +863,10 @@ def import_current_codex() -> CodexProfile | None:
     config = read_codex_config()
     auth = read_codex_auth()
     if not config and not auth:
+        return None
+    if config.get("model_provider", "openai") == "openai":
+        return None
+    if _codex_auth_mode(auth) != "api_key" or not auth.get("OPENAI_API_KEY"):
         return None
 
     name = _pick_codex_import_name(config, auth)

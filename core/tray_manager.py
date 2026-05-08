@@ -60,13 +60,15 @@ class TrayManager:
 
     def get_active_profiles_text(self) -> str:
         """Get text showing currently active profiles."""
+        claude_names = {p.name for p in profile_manager.list_switchable_claude_profiles()}
+        codex_names = {p.name for p in profile_manager.list_switchable_codex_profiles()}
         active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
         active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
 
         parts = []
-        if active_claude:
+        if active_claude in claude_names:
             parts.append(f"Claude: {active_claude}")
-        if active_codex:
+        if active_codex in codex_names:
             parts.append(f"Codex: {active_codex}")
 
         return " | ".join(parts) if parts else "无激活配置"
@@ -92,7 +94,7 @@ class TrayManager:
         menu_items.append(Item.SEPARATOR)
 
         # Claude profiles submenu
-        claude_profiles = profile_manager.list_claude_profiles()
+        claude_profiles = profile_manager.list_switchable_claude_profiles()
         if claude_profiles:
             claude_items = []
             for profile in claude_profiles[:10]:  # Limit to 10 profiles
@@ -108,7 +110,7 @@ class TrayManager:
             menu_items.append(Item('Claude Code', pystray.Menu(*claude_items)))
 
         # Codex profiles submenu
-        codex_profiles = profile_manager.list_codex_profiles()
+        codex_profiles = profile_manager.list_switchable_codex_profiles()
         if codex_profiles:
             codex_items = []
             for profile in codex_profiles[:10]:  # Limit to 10 profiles

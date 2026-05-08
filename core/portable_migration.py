@@ -210,6 +210,46 @@ def _count_profiles(store: dict[str, Any]) -> int:
     return total
 
 
+def _sanitize_portable_store(store: dict[str, Any]) -> dict[str, Any]:
+    stripped = dict(store)
+
+    claude_profiles = []
+    for profile in store.get("claude_profiles", []):
+        if not isinstance(profile, dict):
+            continue
+        if profile.get("provider", "anthropic") == "anthropic":
+            continue
+        claude_profiles.append(dict(profile))
+
+    codex_profiles = []
+    for profile in store.get("codex_profiles", []):
+        if not isinstance(profile, dict):
+            continue
+        if profile.get("model_provider", "openai") == "openai":
+            continue
+        cleaned = dict(profile)
+        cleaned["auth_mode"] = "api_key"
+        cleaned["oauth_tokens_ref"] = None
+        cleaned["auth_data_ref"] = None
+        cleaned["last_refresh"] = None
+        codex_profiles.append(cleaned)
+
+    stripped["claude_profiles"] = claude_profiles
+    stripped["codex_profiles"] = codex_profiles
+    stripped["browser_profiles"] = []
+
+    active_claude = stripped.get("active_claude_profile")
+    if active_claude not in {profile.get("name") for profile in claude_profiles}:
+        stripped["active_claude_profile"] = None
+
+    active_codex = stripped.get("active_codex_profile")
+    if active_codex not in {profile.get("name") for profile in codex_profiles}:
+        stripped["active_codex_profile"] = None
+
+    stripped["active_browser_profile"] = None
+    return stripped
+
+
 def _store_version(store: dict[str, Any]) -> int:
     try:
         return int(store.get("version", 1))
@@ -524,7 +564,7 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
     if len(password) < 8:
         raise ValueError("迁移密码至少需要 8 个字符")
 
-    store = profile_manager._load_store()
+    store = _sanitize_portable_store(profile_manager._load_store())
     secret_refs = sorted(_collect_secret_refs_from_store(store))
     secrets: dict[str, str] = {}
     missing: list[str] = []
@@ -536,7 +576,7 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
         else:
             secrets[ref] = value
 
-    browser_data = _collect_browser_profile_data(store)
+    browser_data = {"profiles": {}, "skipped": []}
 
     payload = {
         "payload_version": 1,
@@ -546,8 +586,8 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
         "browser_data": browser_data,
         "missing_secret_refs": missing,
         "notes": [
-            "Includes app-managed profile metadata, secrets, and managed browser profile data.",
-            "Browser cookie/session migration is best-effort and may fail if the browser encrypts data to a machine-specific key.",
+            "Includes app-managed Claude/Codex/SSH profile metadata and secrets.",
+            "Browser profiles and browser login/session data are intentionally local-only and are not exported.",
         ],
     }
     bundle = _encrypt_payload(payload, password)
@@ -611,10 +651,7 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
     if not isinstance(imported_store, dict):
         raise ValueError("迁移包中没有有效 Profile 数据")
 
-    browser_data = payload.get("browser_data", {})
-    if not isinstance(browser_data, dict):
-        browser_data = {}
-    _normalize_imported_browser_profiles(imported_store, browser_data)
+    imported_store = _sanitize_portable_store(imported_store)
 
     existing_store = profile_manager._load_store()
     new_store = dict(existing_store)
@@ -651,7 +688,7 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
             continue
         valid_secrets.append((ref, value))
 
-    browser_profile_count, browser_file_count, skipped_browser_files = _restore_browser_profile_data(browser_data)
+    browser_profile_count, browser_file_count, skipped_browser_files = 0, 0, []
 
     profile_manager._normalize_store(new_store)
     profile_manager._save_store(new_store)

@@ -7,10 +7,14 @@ logger = logging.getLogger(__name__)
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
     """Sync Claude profile to remote server. Returns status message."""
-    profiles = profile_manager.list_claude_profiles()
+    profiles = profile_manager.list_switchable_claude_profiles()
     claude_profile = next((p for p in profiles if p.name == claude_name), None)
     if not claude_profile:
         raise ValueError(f"Claude profile '{claude_name}' not found")
+    if not profile_manager.is_third_party_claude_profile(claude_profile):
+        raise ValueError("只能同步第三方 Claude API Profile")
+    if not (security.get_secret(claude_profile.auth_token_ref) or security.get_secret(getattr(claude_profile, "primary_api_key_ref", None))):
+        raise ValueError("Claude API Profile 需要 Auth Token")
 
     ssh_profiles = profile_manager.list_ssh_profiles()
     ssh_profile = next((p for p in ssh_profiles if p.name == ssh_name), None)
@@ -35,10 +39,14 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
 def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
     """Sync Codex profile to remote server. Returns status message."""
-    profiles = profile_manager.list_codex_profiles()
+    profiles = profile_manager.list_switchable_codex_profiles()
     codex_profile = next((p for p in profiles if p.name == codex_name), None)
     if not codex_profile:
         raise ValueError(f"Codex profile '{codex_name}' not found")
+    if not profile_manager.is_third_party_codex_profile(codex_profile):
+        raise ValueError("只能同步第三方 Codex API Profile")
+    if not security.get_secret(codex_profile.api_key_ref):
+        raise ValueError("Codex API Profile 需要 API Key")
 
     ssh_profiles = profile_manager.list_ssh_profiles()
     ssh_profile = next((p for p in ssh_profiles if p.name == ssh_name), None)
@@ -54,10 +62,8 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
 
     # Update auth.json
     auth = auth_parser.read_codex_auth()
-    if codex_profile.auth_mode == "api_key":
-        auth = auth_parser.apply_codex_apikey(auth, codex_profile)
-    else:
-        auth = auth_parser.apply_codex_oauth(auth, codex_profile)
+    codex_profile.auth_mode = "api_key"
+    auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth)
 
     logger.info(f"Synced Codex profile '{codex_name}' to {ssh_profile.host}")
@@ -69,14 +75,18 @@ def sync_all_to_server(ssh_name: str) -> str:
     results = []
 
     # Sync Claude
+    switchable_claude = {p.name for p in profile_manager.list_switchable_claude_profiles()}
     active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
     if active_claude:
-        results.append(sync_claude_to_server(ssh_name, active_claude))
+        if active_claude in switchable_claude:
+            results.append(sync_claude_to_server(ssh_name, active_claude))
 
     # Sync Codex
+    switchable_codex = {p.name for p in profile_manager.list_switchable_codex_profiles()}
     active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
     if active_codex:
-        results.append(sync_codex_to_server(ssh_name, active_codex))
+        if active_codex in switchable_codex:
+            results.append(sync_codex_to_server(ssh_name, active_codex))
 
     return " | ".join(results) if results else "没有活动的 Profile 可同步"
 
@@ -103,6 +113,9 @@ def pull_claude_from_server(ssh_name: str) -> str:
         env = {}
     token_value = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey", "")
     primary_key = config.get("primaryApiKey", "")
+    provider = profile_manager.detect_claude_provider(settings)
+    if provider == "anthropic":
+        return "远程 Claude 配置是官方 Anthropic，已跳过；当前只导入第三方 API Profile"
 
     from models.profile import ClaudeProfile
     token_ref = f"claude:{name}:auth_token"
@@ -131,7 +144,7 @@ def pull_claude_from_server(ssh_name: str) -> str:
         skip_dangerous_prompt=settings.get("skipDangerousModePermissionPrompt", False),
         permissions_allow=permissions.get("allow", []),
         additional_directories=additional_directories,
-        provider=profile_manager.detect_claude_provider(settings),
+        provider=provider,
     )
     profile_manager.save_claude_profile(profile)
 
@@ -154,14 +167,19 @@ def pull_codex_from_server(ssh_name: str) -> str:
         return "服务器上未找到 Codex 配置"
 
     name = f"Remote-{ssh_name}"
-    auth_mode = auth.get("auth_mode", "chatgpt") if auth else "chatgpt"
+    auth_mode = "api_key"
+    provider_id = config.get("model_provider", "openai") if config else "openai"
+    if provider_id == "openai":
+        return "远程 Codex 配置是官方 OpenAI，已跳过；当前只导入第三方 API Profile"
+    if not auth or auth.get("OPENAI_API_KEY") is None:
+        return "远程 Codex 配置没有 API Key，已跳过；当前只导入第三方 API Profile"
 
     from models.profile import CodexProfile
     profile_kwargs = {
         "name": name,
         "auth_mode": auth_mode,
         "model": config.get("model", "gpt-5.5") if config else "gpt-5.5",
-        "model_provider": config.get("model_provider", "openai") if config else "openai",
+        "model_provider": provider_id,
         "model_reasoning_effort": config.get("model_reasoning_effort", "high") if config else "high",
         "approval_policy": config.get("approval_policy", "never") if config else "never",
         "sandbox_mode": config.get("sandbox_mode", "danger-full-access") if config else "danger-full-access",
@@ -182,16 +200,9 @@ def pull_codex_from_server(ssh_name: str) -> str:
             profile_kwargs["custom_wire_api"] = custom.get("wire_api")
             profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
 
-    if auth:
-        if auth_mode == "api_key" and auth.get("OPENAI_API_KEY"):
-            ref = f"codex:{name}:api_key"
-            security.set_secret(ref, auth["OPENAI_API_KEY"])
-            profile_kwargs["api_key_ref"] = ref
-        elif isinstance(auth.get("tokens"), dict) and auth.get("tokens"):
-            ref = f"codex:{name}:oauth_tokens"
-            security.set_secret_json(ref, auth["tokens"])
-            profile_kwargs["oauth_tokens_ref"] = ref
-            profile_kwargs["last_refresh"] = auth.get("last_refresh")
+    ref = f"codex:{name}:api_key"
+    security.set_secret(ref, auth["OPENAI_API_KEY"])
+    profile_kwargs["api_key_ref"] = ref
 
     profile = CodexProfile(**profile_kwargs)
     profile_manager.save_codex_profile(profile)

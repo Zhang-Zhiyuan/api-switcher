@@ -110,7 +110,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         for w in self._cards_frame.winfo_children():
             w.destroy()
 
-        profiles = profile_manager.list_claude_profiles()
+        profiles = profile_manager.list_switchable_claude_profiles()
         runtime = profile_manager.get_claude_runtime_summary()
         active = runtime.get("profile_name")
         stored_active = runtime.get("stored_active")
@@ -174,7 +174,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"切换失败: {e}", is_error=True)
 
     def _edit_profile(self, name):
-        profiles = profile_manager.list_claude_profiles()
+        profiles = profile_manager.list_switchable_claude_profiles()
         profile = next((p for p in profiles if p.name == name), None)
 
         def on_save(data, old_profile):
@@ -196,7 +196,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 skip_dangerous_prompt=data["skip_dangerous_prompt"],
                 permissions_allow=old_profile.permissions_allow if old_profile else [],
                 additional_directories=old_profile.additional_directories if old_profile else [],
-                provider=data.get("provider", "anthropic"),
+                provider=data.get("provider", "custom"),
                 custom_provider_name=data.get("custom_provider_name") or None,
             )
             profile_manager.save_claude_profile(new_profile)
@@ -225,7 +225,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 effort_level=data["effort_level"],
                 permissions_mode=data["permissions_mode"],
                 skip_dangerous_prompt=data["skip_dangerous_prompt"],
-                provider=data.get("provider", "anthropic"),
+                provider=data.get("provider", "custom"),
                 custom_provider_name=data.get("custom_provider_name") or None,
             )
             profile_manager.save_claude_profile(profile)

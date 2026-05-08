@@ -169,13 +169,13 @@ class App(ctk.CTk):
         """Load profiles for quick switch menus."""
         try:
             # Load Claude profiles
-            claude_profiles = profile_manager.list_claude_profiles()
+            claude_profiles = profile_manager.list_switchable_claude_profiles()
             claude_names = [p.name for p in claude_profiles]
             if claude_names:
                 self.claude_switch.configure(values=claude_names)
                 # Set current active profile
                 current = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
-                if current:
+                if current in claude_names:
                     self.claude_switch.set(current)
                 else:
                     self.claude_switch.set(claude_names[0] if claude_names else "Claude")
@@ -184,13 +184,13 @@ class App(ctk.CTk):
                 self.claude_switch.set("无配置")
 
             # Load Codex profiles
-            codex_profiles = profile_manager.list_codex_profiles()
+            codex_profiles = profile_manager.list_switchable_codex_profiles()
             codex_names = [p.name for p in codex_profiles]
             if codex_names:
                 self.codex_switch.configure(values=codex_names)
                 # Set current active profile
                 current = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
-                if current:
+                if current in codex_names:
                     self.codex_switch.set(current)
                 else:
                     self.codex_switch.set(codex_names[0] if codex_names else "Codex")

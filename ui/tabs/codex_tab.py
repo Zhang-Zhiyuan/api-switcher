@@ -1,5 +1,4 @@
 import customtkinter as ctk
-import json
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -101,30 +100,13 @@ class CodexTab(ctk.CTkScrollableFrame):
         if tray and tray.is_running():
             tray.update_menu()
 
-    def _save_oauth_input(self, profile_name: str, value: str) -> str:
-        """Store OAuth tokens entered as JSON, with a raw-token fallback."""
-        oauth_ref = f"codex:{profile_name}:oauth_tokens"
-        value = value.strip()
-        if not value:
-            return oauth_ref
-
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, dict):
-                security.set_secret_json(oauth_ref, parsed)
-            else:
-                security.set_secret_json(oauth_ref, {"token": str(parsed)})
-        except json.JSONDecodeError:
-            security.set_secret_json(oauth_ref, {"token": value})
-        return oauth_ref
-
     def refresh(self):
         if not self._cards_frame:
             return
         for w in self._cards_frame.winfo_children():
             w.destroy()
 
-        profiles = profile_manager.list_codex_profiles()
+        profiles = profile_manager.list_switchable_codex_profiles()
         runtime = profile_manager.get_codex_runtime_summary()
         active = runtime.get("profile_name")
         stored_active = runtime.get("stored_active")
@@ -164,29 +146,12 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         for p in profiles:
             is_active = p.name == active
-            auth_desc = "OAuth" if p.auth_mode == "chatgpt" else "API Key"
             auth_identity = profile_manager.describe_codex_profile_identity(p)
-            auth_desc = f"{auth_desc} ({auth_identity})"
+            auth_desc = f"API Key ({auth_identity})"
             info = [
                 f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}",
                 f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
             ]
-
-            # Token expiry for OAuth profiles
-            if p.auth_mode == "chatgpt" and p.oauth_tokens_ref:
-                tokens = security.get_secret_json(p.oauth_tokens_ref)
-                if tokens and tokens.get("id_token"):
-                    from core.auth_parser import get_token_expiry
-                    from datetime import datetime, timezone
-                    exp = get_token_expiry(tokens["id_token"])
-                    if exp:
-                        now = datetime.now(timezone.utc)
-                        if exp < now:
-                            info.append(f"Token 状态: 已过期 ({exp.strftime('%Y-%m-%d %H:%M')})")
-                        else:
-                            delta = exp - now
-                            hours = int(delta.total_seconds() / 3600)
-                            info.append(f"Token 过期: {exp.strftime('%Y-%m-%d %H:%M')} (剩余 {hours}h)")
 
             card = ProfileCard(
                 self._cards_frame, p.name, info, is_active=is_active,
@@ -207,27 +172,20 @@ class CodexTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"切换失败: {e}", is_error=True)
 
     def _edit_profile(self, name):
-        profiles = profile_manager.list_codex_profiles()
+        profiles = profile_manager.list_switchable_codex_profiles()
         profile = next((p for p in profiles if p.name == name), None)
 
         def on_save(data, old_profile):
-            oauth_ref = old_profile.oauth_tokens_ref if old_profile else None
             api_key_ref = old_profile.api_key_ref if old_profile else None
-            auth_data_ref = old_profile.auth_data_ref if old_profile else None
 
             if data.get("api_key"):
                 api_key_ref = f"codex:{data['name']}:api_key"
                 security.set_secret(api_key_ref, data["api_key"])
 
-            if data.get("oauth_token"):
-                oauth_ref = self._save_oauth_input(data["name"], data["oauth_token"])
-
             new_profile = CodexProfile(
                 name=data["name"],
-                auth_mode=data["auth_mode"],
+                auth_mode="api_key",
                 api_key_ref=api_key_ref,
-                oauth_tokens_ref=oauth_ref,
-                auth_data_ref=auth_data_ref,
                 model=data["model"],
                 model_provider=data["model_provider"],
                 model_reasoning_effort=data.get("model_reasoning_effort", "high"),
@@ -249,20 +207,15 @@ class CodexTab(ctk.CTkScrollableFrame):
     def _create_profile(self):
         def on_save(data, _):
             api_key_ref = None
-            oauth_ref = None
 
             if data.get("api_key"):
                 api_key_ref = f"codex:{data['name']}:api_key"
                 security.set_secret(api_key_ref, data["api_key"])
 
-            if data.get("oauth_token"):
-                oauth_ref = self._save_oauth_input(data["name"], data["oauth_token"])
-
             profile = CodexProfile(
                 name=data["name"],
-                auth_mode=data["auth_mode"],
+                auth_mode="api_key",
                 api_key_ref=api_key_ref,
-                oauth_tokens_ref=oauth_ref,
                 model=data["model"],
                 model_provider=data["model_provider"],
                 model_reasoning_effort=data.get("model_reasoning_effort", "high"),

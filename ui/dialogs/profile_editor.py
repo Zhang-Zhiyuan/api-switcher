@@ -1,7 +1,7 @@
 import customtkinter as ctk
 from ui.widgets.masked_entry import MaskedEntry
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
-from core.providers import CODEX_REASONING_EFFORTS, OPENAI_CODEX_MODELS, ProviderRegistry
+from core.providers import CODEX_REASONING_EFFORTS, ProviderRegistry
 
 
 class ProfileEditorDialog(ctk.CTkToplevel):
@@ -157,16 +157,26 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _build_claude_fields(self, parent):
         p = self._profile
+        third_party_providers = [
+            provider
+            for provider in ProviderRegistry.get_claude_providers()
+            if provider.name != "anthropic"
+        ]
+        default_provider = third_party_providers[0] if third_party_providers else ProviderRegistry.get_provider("custom")
+        provider_options = [provider.display_name for provider in third_party_providers]
 
         # Provider 选择
         self._add_field(parent, "提供商", "provider",
-                        ProviderRegistry.get_claude_provider_display_names(), "combo")
+                        provider_options, "combo")
         if p and hasattr(p, 'provider'):
             provider_config = ProviderRegistry.get_provider(p.provider)
-            if provider_config:
+            if provider_config and provider_config.name != "anthropic":
                 self._fields["provider"][0].set(provider_config.display_name)
+            elif default_provider:
+                self._fields["provider"][0].set(default_provider.display_name)
         else:
-            self._fields["provider"][0].set("Anthropic Claude")
+            if default_provider:
+                self._fields["provider"][0].set(default_provider.display_name)
 
         # 绑定 Provider 变化事件
         self._fields["provider"][0].configure(command=self._on_claude_provider_change)
@@ -174,22 +184,22 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         self._add_field(parent, "名称", "name", p.name if p else "")
         self._add_field(parent, "API 端点", "base_url",
-                        p.base_url if p else ProviderRegistry.get_claude_base_url("anthropic"))
+                        p.base_url if p else (default_provider.base_url_for_claude() if default_provider else ""))
         self._add_field(parent, "Auth Token", "auth_token", "", "masked")
 
         # 模型选择 - 使用可编辑的 combobox
         model_widget = self._add_field(parent, "模型", "model",
-                        ProviderRegistry.get_models("anthropic"), "combo")
+                        default_provider.supported_models if default_provider else [], "combo")
         model_widget.configure(state="normal")  # 允许手动输入
         if p:
             model_widget.set(p.model)
         else:
-            model_widget.set(ProviderRegistry.get_default_model("anthropic"))
+            model_widget.set(default_provider.default_model if default_provider else "")
         self._attach_refresh_button("model")
 
         # 推理力度
         self._add_field(parent, "推理力度", "effort_level",
-                        ProviderRegistry.get_reasoning_efforts("anthropic"), "combo")
+                        default_provider.reasoning_efforts if default_provider else [], "combo")
         if p:
             self._fields["effort_level"][0].set(p.effort_level)
         else:
@@ -212,22 +222,23 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         # 初始化时更新字段
         self._on_claude_provider_change(self._fields["provider"][0].get())
         if p:
-            self._fields["base_url"][0].delete(0, "end")
-            self._fields["base_url"][0].insert(0, p.base_url)
-            self._fields["model"][0].set(p.model)
-            self._fields["effort_level"][0].set(p.effort_level)
+            if getattr(p, "provider", "anthropic") != "anthropic":
+                self._fields["base_url"][0].delete(0, "end")
+                self._fields["base_url"][0].insert(0, p.base_url)
+                self._fields["model"][0].set(p.model)
+                self._fields["effort_level"][0].set(p.effort_level)
 
     def _build_codex_fields(self, parent):
         p = self._profile
+        codex_providers = ProviderRegistry.get_codex_providers()
+        default_provider = codex_providers[0] if codex_providers else ProviderRegistry.get_provider("custom")
 
         # Provider 选择（扩展）
-        provider_options = ["OpenAI"] + ProviderRegistry.get_codex_provider_display_names()
+        provider_options = [provider.display_name for provider in codex_providers]
         self._add_field(parent, "Provider", "codex_provider", provider_options, "combo")
 
         # 设置默认值
-        if p and p.model_provider == "openai":
-            self._fields["codex_provider"][0].set("OpenAI")
-        elif p:
+        if p and p.model_provider != "openai":
             provider_config = ProviderRegistry.get_provider(p.model_provider)
             if provider_config:
                 self._fields["codex_provider"][0].set(provider_config.display_name)
@@ -236,29 +247,23 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             else:
                 self._fields["codex_provider"][0].set("Custom")
         else:
-            self._fields["codex_provider"][0].set("OpenAI")
+            if default_provider:
+                self._fields["codex_provider"][0].set(default_provider.display_name)
 
         # 绑定 Provider 变化事件
         self._fields["codex_provider"][0].configure(command=self._on_codex_provider_change)
         self._add_provider_note(parent)
 
         self._add_field(parent, "名称", "name", p.name if p else "")
-        self._add_field(parent, "认证模式", "auth_mode", ["chatgpt", "api_key"], "combo")
-        if p:
-            self._fields["auth_mode"][0].set(p.auth_mode)
-        else:
-            self._fields["auth_mode"][0].set("chatgpt")
-
         self._add_field(parent, "API Key", "api_key", "", "masked")
-        self._add_field(parent, "OAuth Token", "oauth_token", "", "masked")
 
         # 模型选择 - 使用可编辑的 combobox
-        model_widget = self._add_field(parent, "模型", "model", OPENAI_CODEX_MODELS, "combo")
+        model_widget = self._add_field(parent, "模型", "model", default_provider.supported_models if default_provider else [], "combo")
         model_widget.configure(state="normal")  # 允许手动输入
         if p:
             model_widget.set(p.model)
         else:
-            model_widget.set(OPENAI_CODEX_MODELS[0])
+            model_widget.set(default_provider.default_model if default_provider else "")
         self._attach_refresh_button("model")
 
         # 推理力度 - 改为下拉框
@@ -289,14 +294,15 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         # 初始化时更新字段
         self._on_codex_provider_change(self._fields["codex_provider"][0].get())
         if p:
-            self._fields["model"][0].set(p.model)
-            self._fields["model_reasoning_effort"][0].set(p.model_reasoning_effort)
-            self._fields["custom_base_url"][0].delete(0, "end")
-            self._fields["custom_base_url"][0].insert(0, p.custom_base_url or "")
-            self._fields["custom_name"][0].delete(0, "end")
-            self._fields["custom_name"][0].insert(0, p.custom_name or "")
-            self._fields["custom_wire_api"][0].delete(0, "end")
-            self._fields["custom_wire_api"][0].insert(0, p.custom_wire_api or "responses")
+            if getattr(p, "model_provider", "openai") != "openai":
+                self._fields["model"][0].set(p.model)
+                self._fields["model_reasoning_effort"][0].set(p.model_reasoning_effort)
+                self._fields["custom_base_url"][0].delete(0, "end")
+                self._fields["custom_base_url"][0].insert(0, p.custom_base_url or "")
+                self._fields["custom_name"][0].delete(0, "end")
+                self._fields["custom_name"][0].insert(0, p.custom_name or "")
+                self._fields["custom_wire_api"][0].delete(0, "end")
+                self._fields["custom_wire_api"][0].insert(0, p.custom_wire_api or "responses")
 
     def _get_value(self, key):
         widget, ftype = self._fields[key]
@@ -315,7 +321,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _provider_note(self, provider, is_codex: bool) -> str:
         if provider is None:
-            return "OpenAI 官方配置支持模型选择和推理力度；OAuth 模式无法在这里直接测试连接。"
+            return "仅支持第三方 API Profile；官方账号登录态不会保存或切换。"
 
         parts = []
         if provider.notes:
@@ -357,8 +363,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _current_codex_provider(self):
         display_name = self._fields["codex_provider"][0].get()
-        if display_name == "OpenAI":
-            return None
         return ProviderRegistry.get_provider_by_display_name(display_name)
 
     def _current_claude_provider(self):
@@ -410,59 +414,39 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _on_codex_provider_change(self, provider_display_name):
         """当 Codex Provider 改变时更新相关字段"""
-        if provider_display_name == "OpenAI":
+        provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
+        if not provider:
             self._update_provider_note(None, is_codex=True)
-            # OpenAI 提供商
-            if "custom_base_url" in self._fields:
-                self._fields["custom_base_url"][0].delete(0, "end")
-            if "custom_name" in self._fields:
-                self._fields["custom_name"][0].delete(0, "end")
-            if "custom_wire_api" in self._fields:
-                self._fields["custom_wire_api"][0].delete(0, "end")
-                self._fields["custom_wire_api"][0].insert(0, "responses")
-            if "model" in self._fields:
-                self._fields["model"][0].configure(values=OPENAI_CODEX_MODELS)
-                self._fields["model"][0].set(OPENAI_CODEX_MODELS[0])
-            # OpenAI 支持推理力度
-            if "model_reasoning_effort" in self._fields:
-                effort_widget, _ = self._fields["model_reasoning_effort"]
-                effort_row = effort_widget.master
+            return
+
+        self._update_provider_note(provider, is_codex=True)
+        if "custom_base_url" in self._fields:
+            self._fields["custom_base_url"][0].delete(0, "end")
+            self._fields["custom_base_url"][0].insert(0, provider.base_url_for_codex())
+        if "custom_name" in self._fields:
+            self._fields["custom_name"][0].delete(0, "end")
+            self._fields["custom_name"][0].insert(0, provider.display_name)
+        if "custom_wire_api" in self._fields:
+            self._fields["custom_wire_api"][0].delete(0, "end")
+            self._fields["custom_wire_api"][0].insert(0, provider.wire_api)
+        if "model" in self._fields:
+            if provider.supported_models:
+                self._fields["model"][0].configure(values=provider.supported_models)
+                self._fields["model"][0].set(provider.default_model)
+            else:
+                self._fields["model"][0].configure(values=[""])
+                self._fields["model"][0].set("")
+        # 更新推理力度可见性
+        if "model_reasoning_effort" in self._fields:
+            effort_widget, _ = self._fields["model_reasoning_effort"]
+            effort_row = effort_widget.master
+            if provider.reasoning_efforts:
                 effort_row.pack(fill="x", pady=5)
-                effort_widget.configure(values=CODEX_REASONING_EFFORTS)
-                if effort_widget.get() not in CODEX_REASONING_EFFORTS:
-                    effort_widget.set("high")
-        else:
-            # 预设提供商
-            provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
-            if provider:
-                self._update_provider_note(provider, is_codex=True)
-                if "custom_base_url" in self._fields:
-                    self._fields["custom_base_url"][0].delete(0, "end")
-                    self._fields["custom_base_url"][0].insert(0, provider.base_url_for_codex())
-                if "custom_name" in self._fields:
-                    self._fields["custom_name"][0].delete(0, "end")
-                    self._fields["custom_name"][0].insert(0, provider.display_name)
-                if "custom_wire_api" in self._fields:
-                    self._fields["custom_wire_api"][0].delete(0, "end")
-                    self._fields["custom_wire_api"][0].insert(0, provider.wire_api)
-                if "model" in self._fields:
-                    if provider.supported_models:
-                        self._fields["model"][0].configure(values=provider.supported_models)
-                        self._fields["model"][0].set(provider.default_model)
-                    else:
-                        self._fields["model"][0].configure(values=[""])
-                        self._fields["model"][0].set("")
-                # 更新推理力度可见性
-                if "model_reasoning_effort" in self._fields:
-                    effort_widget, _ = self._fields["model_reasoning_effort"]
-                    effort_row = effort_widget.master
-                    if provider.reasoning_efforts:
-                        effort_row.pack(fill="x", pady=5)
-                        effort_widget.configure(values=provider.reasoning_efforts)
-                        if effort_widget.get() not in provider.reasoning_efforts:
-                            effort_widget.set(provider.reasoning_efforts[0])
-                    else:
-                        effort_row.pack_forget()
+                effort_widget.configure(values=provider.reasoning_efforts)
+                if effort_widget.get() not in provider.reasoning_efforts:
+                    effort_widget.set(provider.reasoning_efforts[0])
+            else:
+                effort_row.pack_forget()
 
     def _test_connection(self):
         """Test API connection with current settings."""
@@ -486,14 +470,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 return
 
         else:  # codex
-            auth_mode = data.get("auth_mode", "chatgpt")
-            if auth_mode == "api_key":
-                api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
-                if not api_key:
-                    self._show_error("请先输入 API Key，或保存过带密钥的 Profile")
-                    return
-            else:
-                self._show_error("OAuth 模式暂不支持测试连接")
+            api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
+            if not api_key:
+                self._show_error("请先输入 API Key，或保存过带密钥的 Profile")
                 return
 
             provider = self._current_codex_provider()
@@ -501,8 +480,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 base_url = data.get("custom_base_url") or provider.base_url_for_codex()
                 model = data.get("model") or provider.default_model
             else:
-                base_url = data.get("custom_base_url") or "https://api.openai.com/v1"
-                model = data.get("model") or OPENAI_CODEX_MODELS[0]
+                base_url = data.get("custom_base_url")
+                model = data.get("model")
             if not base_url:
                 self._show_error("请先填写 API 端点")
                 return
@@ -554,12 +533,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             fetcher = lambda: APITester.fetch_claude_models(api_key, base_url)
         else:
             provider = self._current_codex_provider()
-            if data.get("auth_mode") != "api_key":
-                self._show_error("OAuth 模式无法刷新远程模型列表")
-                return
             api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
-            base_url = data.get("custom_base_url") or (provider.base_url_for_codex() if provider else "https://api.openai.com/v1")
-            fallback_models = provider.supported_models if provider else OPENAI_CODEX_MODELS
+            base_url = data.get("custom_base_url") or (provider.base_url_for_codex() if provider else "")
+            fallback_models = provider.supported_models if provider else []
             fetcher = lambda: APITester.fetch_openai_models(api_key, base_url)
 
         if not base_url and not fallback_models:
@@ -617,6 +593,12 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         if not data.get("model"):
             self._show_error("请输入模型名称")
             return
+        if self._profile_type == "claude" and not self._get_secret_value("auth_token", getattr(self._profile, "auth_token_ref", None)):
+            self._show_error("请先输入 Auth Token")
+            return
+        if self._profile_type == "codex" and not self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None)):
+            self._show_error("请先输入 API Key")
+            return
 
         # 处理 Claude Profile 的 provider 字段
         if self._profile_type == "claude" and "provider" in data:
@@ -628,23 +610,20 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         # 处理 Codex Profile 的 provider 字段
         if self._profile_type == "codex" and "codex_provider" in data:
             provider_display_name = data["codex_provider"]
-            if provider_display_name == "OpenAI":
-                data["model_provider"] = "openai"
-                data["custom_requires_openai_auth"] = False
+            provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
+            if provider:
+                data["model_provider"] = provider.name
+                data["custom_base_url"] = data.get("custom_base_url") or provider.base_url_for_codex()
+                data["custom_name"] = data.get("custom_name") or provider.display_name
+                data["custom_wire_api"] = data.get("custom_wire_api") or provider.wire_api
+                data["custom_requires_openai_auth"] = provider.requires_openai_auth
             else:
-                provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
-                if provider:
-                    data["model_provider"] = provider.name
-                    data["custom_base_url"] = data.get("custom_base_url") or provider.base_url_for_codex()
-                    data["custom_name"] = data.get("custom_name") or provider.display_name
-                    data["custom_wire_api"] = data.get("custom_wire_api") or provider.wire_api
-                    data["custom_requires_openai_auth"] = provider.requires_openai_auth
-                else:
-                    data["model_provider"] = "custom"
-                    data["custom_requires_openai_auth"] = False
+                data["model_provider"] = "custom"
+                data["custom_requires_openai_auth"] = False
+            data["auth_mode"] = "api_key"
             del data["codex_provider"]
 
-            if data["model_provider"] != "openai" and not data.get("custom_base_url"):
+            if not data.get("custom_base_url"):
                 self._show_error("第三方或自定义 Provider 需要 API 端点")
                 return
 

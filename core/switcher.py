@@ -1,6 +1,6 @@
 import logging
 
-from core import backup_manager, parser, toml_parser, auth_parser, vscode_parser, profile_manager
+from core import backup_manager, parser, toml_parser, auth_parser, vscode_parser, profile_manager, security
 from core.usage_recorder import usage_recorder
 
 logger = logging.getLogger(__name__)
@@ -8,14 +8,15 @@ logger = logging.getLogger(__name__)
 
 def switch_claude_profile(name: str) -> None:
     """Switch to a named Claude profile. Auto-backup before switching."""
-    profiles = profile_manager.list_claude_profiles()
+    profiles = profile_manager.list_switchable_claude_profiles()
     target = next((p for p in profiles if p.name == name), None)
     if not target:
         raise ValueError(f"Claude profile '{name}' not found")
 
-    current_name = profile_manager.get_current_claude_name()
-    if current_name and current_name != name:
-        profile_manager.refresh_claude_profile_auth_from_current(current_name)
+    if not profile_manager.is_third_party_claude_profile(target):
+        raise ValueError("只能切换第三方 Claude API Profile")
+    if not (security.get_secret(target.auth_token_ref) or security.get_secret(getattr(target, "primary_api_key_ref", None))):
+        raise ValueError("Claude API Profile 需要 Auth Token")
 
     backup_manager.create_backup(f"切换 Claude 到: {name}")
 
@@ -46,14 +47,15 @@ def switch_claude_profile(name: str) -> None:
 
 def switch_codex_profile(name: str) -> None:
     """Switch to a named Codex profile. Auto-backup before switching."""
-    profiles = profile_manager.list_codex_profiles()
+    profiles = profile_manager.list_switchable_codex_profiles()
     target = next((p for p in profiles if p.name == name), None)
     if not target:
         raise ValueError(f"Codex profile '{name}' not found")
 
-    current_name = profile_manager.get_current_codex_name()
-    if current_name and current_name != name:
-        profile_manager.refresh_codex_profile_auth_from_current(current_name)
+    if not profile_manager.is_third_party_codex_profile(target):
+        raise ValueError("只能切换第三方 Codex API Profile")
+    if not security.get_secret(target.api_key_ref):
+        raise ValueError("Codex API Profile 需要 API Key")
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 
@@ -64,10 +66,8 @@ def switch_codex_profile(name: str) -> None:
 
     # Update auth.json
     auth = auth_parser.read_codex_auth()
-    if target.auth_mode == "api_key":
-        auth = auth_parser.apply_codex_apikey(auth, target)
-    else:
-        auth = auth_parser.apply_codex_oauth(auth, target)
+    target.auth_mode = "api_key"
+    auth = auth_parser.apply_codex_apikey(auth, target)
     auth_parser.write_codex_auth(auth)
 
     profile_manager.set_active_codex(name)
