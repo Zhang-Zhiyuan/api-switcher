@@ -8,6 +8,7 @@ class ClaudeProfile:
     name: str
     auth_token_ref: str
     base_url: str
+    primary_api_key_ref: Optional[str] = None
     model: str = "claude-sonnet-4"
     effort_level: str = "high"
     permissions_mode: str = "bypassPermissions"
@@ -32,6 +33,7 @@ class CodexProfile:
     api_key_ref: Optional[str] = None
     openai_auth_key_ref: Optional[str] = None
     oauth_tokens_ref: Optional[str] = None
+    auth_data_ref: Optional[str] = None
     last_refresh: Optional[str] = None
     model: str = "gpt-5.5"
     model_provider: str = "openai"

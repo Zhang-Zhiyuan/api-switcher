@@ -44,6 +44,15 @@ def write_claude_config(data: dict) -> None:
     _atomic_write(CLAUDE_CONFIG, content)
 
 
+def _get_claude_profile_token(profile) -> str | None:
+    from core import security
+
+    token = security.get_secret(profile.auth_token_ref)
+    if token:
+        return token
+    return security.get_secret(getattr(profile, "primary_api_key_ref", None))
+
+
 def apply_claude_profile(settings: dict, profile) -> dict:
     """Apply a ClaudeProfile to settings dict. Only modifies API-related fields."""
     settings = dict(settings)
@@ -57,8 +66,7 @@ def apply_claude_profile(settings: dict, profile) -> dict:
     provider = ProviderRegistry.get_provider(profile.provider)
 
     # Get actual token value from security module
-    from core import security
-    token = security.get_secret(profile.auth_token_ref)
+    token = _get_claude_profile_token(profile)
     if token:
         settings["env"]["ANTHROPIC_AUTH_TOKEN"] = token
         settings["env"]["ANTHROPIC_API_KEY"] = token
@@ -108,3 +116,20 @@ def apply_claude_profile(settings: dict, profile) -> dict:
         settings.pop("additionalDirectories", None)
 
     return settings
+
+
+def apply_claude_config(config: dict, profile) -> dict:
+    """Apply Claude auth state to config.json while preserving unrelated fields."""
+    from core import security
+
+    config = dict(config)
+    primary_key = security.get_secret(getattr(profile, "primary_api_key_ref", None))
+    if not primary_key:
+        primary_key = security.get_secret(profile.auth_token_ref)
+
+    if primary_key:
+        config["primaryApiKey"] = primary_key
+    else:
+        config.pop("primaryApiKey", None)
+
+    return config

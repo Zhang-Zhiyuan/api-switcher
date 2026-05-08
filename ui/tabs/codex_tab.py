@@ -18,6 +18,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._cards_frame = None
+        self._runtime_label = None
         self._build_ui()
 
     def _build_ui(self):
@@ -38,6 +39,14 @@ class CodexTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
+
+        self._runtime_label = ctk.CTkLabel(
+            title_area,
+            text="",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._runtime_label.pack(anchor="w", pady=(4, 0))
 
         ctk.CTkButton(
             header,
@@ -84,6 +93,14 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         self.refresh()
 
+    def _refresh_shell_state(self):
+        top = self.winfo_toplevel()
+        if hasattr(top, "_load_quick_switch_profiles"):
+            top._load_quick_switch_profiles()
+        tray = getattr(top, "tray_manager", None)
+        if tray and tray.is_running():
+            tray.update_menu()
+
     def _save_oauth_input(self, profile_name: str, value: str) -> str:
         """Store OAuth tokens entered as JSON, with a raw-token fallback."""
         oauth_ref = f"codex:{profile_name}:oauth_tokens"
@@ -108,7 +125,32 @@ class CodexTab(ctk.CTkScrollableFrame):
             w.destroy()
 
         profiles = profile_manager.list_codex_profiles()
-        active = profile_manager.get_active_codex_name()
+        runtime = profile_manager.get_codex_runtime_summary()
+        active = runtime.get("profile_name")
+        stored_active = runtime.get("stored_active")
+
+        if self._runtime_label:
+            if active:
+                text = (
+                    f"Codex on disk: {active} | "
+                    f"{runtime.get('provider')} / {runtime.get('model')} | "
+                    f"{runtime.get('auth_mode')}:{runtime.get('auth_identity')}"
+                )
+                color = COLORS["success"]
+            elif runtime.get("has_config") or runtime.get("has_auth"):
+                text = (
+                    "Codex on disk: unmatched saved profile | "
+                    f"{runtime.get('provider')} / {runtime.get('model')} | "
+                    f"{runtime.get('auth_mode')}:{runtime.get('auth_identity')}"
+                )
+                color = COLORS["warning"]
+            else:
+                text = "Codex on disk: no config/auth found"
+                color = COLORS["muted"]
+
+            if stored_active and stored_active != active:
+                text = f"{text} | last app switch: {stored_active}"
+            self._runtime_label.configure(text=text, text_color=color)
 
         if not profiles:
             EmptyState(
@@ -123,6 +165,8 @@ class CodexTab(ctk.CTkScrollableFrame):
         for p in profiles:
             is_active = p.name == active
             auth_desc = "OAuth" if p.auth_mode == "chatgpt" else "API Key"
+            auth_identity = profile_manager.describe_codex_profile_identity(p)
+            auth_desc = f"{auth_desc} ({auth_identity})"
             info = [
                 f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}",
                 f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
@@ -158,6 +202,7 @@ class CodexTab(ctk.CTkScrollableFrame):
             switcher.switch_codex_profile(name)
             show_toast(self.winfo_toplevel(), f"已切换到: {name}")
             self.refresh()
+            self._refresh_shell_state()
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"切换失败: {e}", is_error=True)
 
@@ -168,6 +213,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         def on_save(data, old_profile):
             oauth_ref = old_profile.oauth_tokens_ref if old_profile else None
             api_key_ref = old_profile.api_key_ref if old_profile else None
+            auth_data_ref = old_profile.auth_data_ref if old_profile else None
 
             if data.get("api_key"):
                 api_key_ref = f"codex:{data['name']}:api_key"
@@ -181,6 +227,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 auth_mode=data["auth_mode"],
                 api_key_ref=api_key_ref,
                 oauth_tokens_ref=oauth_ref,
+                auth_data_ref=auth_data_ref,
                 model=data["model"],
                 model_provider=data["model_provider"],
                 model_reasoning_effort=data.get("model_reasoning_effort", "high"),
@@ -194,6 +241,7 @@ class CodexTab(ctk.CTkScrollableFrame):
             profile_manager.save_codex_profile(new_profile)
             show_toast(self.winfo_toplevel(), f"已保存: {data['name']}")
             self.refresh()
+            self._refresh_shell_state()
 
         ProfileEditorDialog(self.winfo_toplevel(), title="编辑 Codex Profile",
                             profile=profile, profile_type="codex", on_save=on_save)
@@ -228,6 +276,7 @@ class CodexTab(ctk.CTkScrollableFrame):
             profile_manager.save_codex_profile(profile)
             show_toast(self.winfo_toplevel(), f"已创建: {data['name']}")
             self.refresh()
+            self._refresh_shell_state()
 
         ProfileEditorDialog(self.winfo_toplevel(), title="新建 Codex Profile",
                             profile_type="codex", on_save=on_save)
@@ -237,6 +286,7 @@ class CodexTab(ctk.CTkScrollableFrame):
             profile_manager.delete_codex_profile(name)
             show_toast(self.winfo_toplevel(), f"已删除: {name}")
             self.refresh()
+            self._refresh_shell_state()
 
         ConfirmDialog(self.winfo_toplevel(), title="删除 Profile",
                       message=f"确定要删除 \"{name}\" 吗？\n关联的密钥也会被清除。",
@@ -248,5 +298,6 @@ class CodexTab(ctk.CTkScrollableFrame):
             profile_manager.save_codex_profile(profile)
             show_toast(self.winfo_toplevel(), "已导入当前 Codex 配置")
             self.refresh()
+            self._refresh_shell_state()
         else:
             show_toast(self.winfo_toplevel(), "未找到当前 Codex 配置", is_error=True)

@@ -174,7 +174,7 @@ class App(ctk.CTk):
             if claude_names:
                 self.claude_switch.configure(values=claude_names)
                 # Set current active profile
-                current = profile_manager.get_active_claude_name()
+                current = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
                 if current:
                     self.claude_switch.set(current)
                 else:
@@ -189,7 +189,7 @@ class App(ctk.CTk):
             if codex_names:
                 self.codex_switch.configure(values=codex_names)
                 # Set current active profile
-                current = profile_manager.get_active_codex_name()
+                current = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
                 if current:
                     self.codex_switch.set(current)
                 else:
@@ -208,11 +208,9 @@ class App(ctk.CTk):
 
         try:
             from core import switcher
-            from core.usage_recorder import usage_recorder
             from ui.widgets.toast import show_toast
 
             switcher.switch_claude_profile(profile_name)
-            usage_recorder.start_session(profile_name, "claude")
 
             show_toast(self, f"已切换到: {profile_name}")
             self._status.configure(text=f"已切换到 Claude: {profile_name}")
@@ -220,6 +218,8 @@ class App(ctk.CTk):
             # Refresh tabs
             self._claude_tab.refresh()
             self._usage_stats_tab.refresh()
+            if self.tray_manager.is_running():
+                self.tray_manager.update_menu()
 
             logger.info(f"Quick switched to Claude profile: {profile_name}")
 
@@ -235,11 +235,9 @@ class App(ctk.CTk):
 
         try:
             from core import switcher
-            from core.usage_recorder import usage_recorder
             from ui.widgets.toast import show_toast
 
             switcher.switch_codex_profile(profile_name)
-            usage_recorder.start_session(profile_name, "codex")
 
             show_toast(self, f"已切换到: {profile_name}")
             self._status.configure(text=f"已切换到 Codex: {profile_name}")
@@ -247,6 +245,8 @@ class App(ctk.CTk):
             # Refresh tabs
             self._codex_tab.refresh()
             self._usage_stats_tab.refresh()
+            if self.tray_manager.is_running():
+                self.tray_manager.update_menu()
 
             logger.info(f"Quick switched to Codex profile: {profile_name}")
 

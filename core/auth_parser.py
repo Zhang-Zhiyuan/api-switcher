@@ -30,14 +30,27 @@ def write_codex_auth(data: dict) -> None:
     _atomic_write(CODEX_AUTH, content)
 
 
+def _load_profile_auth_base(profile) -> dict | None:
+    """Load a full auth.json snapshot saved with a profile, if present."""
+    from core import security
+
+    ref = getattr(profile, "auth_data_ref", None)
+    data = security.get_secret_json(ref)
+    return data if isinstance(data, dict) else None
+
+
 def apply_codex_oauth(auth: dict, profile) -> dict:
     """Apply OAuth tokens from a CodexProfile to auth.json."""
     from core import security
 
-    auth = dict(auth)
+    saved_auth = _load_profile_auth_base(profile)
+    auth = dict(saved_auth if saved_auth is not None else auth)
     auth["auth_mode"] = "chatgpt"
 
     tokens_data = security.get_secret_json(profile.oauth_tokens_ref)
+    if not tokens_data and saved_auth and isinstance(saved_auth.get("tokens"), dict):
+        tokens_data = saved_auth["tokens"]
+
     if tokens_data:
         auth["tokens"] = tokens_data
     elif profile.oauth_tokens_ref:
@@ -61,10 +74,14 @@ def apply_codex_apikey(auth: dict, profile) -> dict:
     """Apply API key from a CodexProfile to auth.json."""
     from core import security
 
-    auth = dict(auth)
+    saved_auth = _load_profile_auth_base(profile)
+    auth = dict(saved_auth if saved_auth is not None else auth)
     auth["auth_mode"] = "api_key"
 
     api_key = security.get_secret(profile.api_key_ref)
+    if not api_key and saved_auth and saved_auth.get("OPENAI_API_KEY"):
+        api_key = saved_auth.get("OPENAI_API_KEY")
+
     if api_key:
         auth["OPENAI_API_KEY"] = api_key
     elif profile.api_key_ref:

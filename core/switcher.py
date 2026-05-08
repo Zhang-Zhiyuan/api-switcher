@@ -13,11 +13,20 @@ def switch_claude_profile(name: str) -> None:
     if not target:
         raise ValueError(f"Claude profile '{name}' not found")
 
+    current_name = profile_manager.get_current_claude_name()
+    if current_name and current_name != name:
+        profile_manager.refresh_claude_profile_auth_from_current(current_name)
+
     backup_manager.create_backup(f"切换 Claude 到: {name}")
 
     settings = parser.read_claude_settings()
     settings = parser.apply_claude_profile(settings, target)
     parser.write_claude_settings(settings)
+
+    current_config = parser.read_claude_config()
+    config = parser.apply_claude_config(current_config, target)
+    if config or current_config:
+        parser.write_claude_config(config)
 
     # Sync VS Code settings
     vscode = vscode_parser.read_vscode_settings()
@@ -41,6 +50,10 @@ def switch_codex_profile(name: str) -> None:
     target = next((p for p in profiles if p.name == name), None)
     if not target:
         raise ValueError(f"Codex profile '{name}' not found")
+
+    current_name = profile_manager.get_current_codex_name()
+    if current_name and current_name != name:
+        profile_manager.refresh_codex_profile_auth_from_current(current_name)
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 

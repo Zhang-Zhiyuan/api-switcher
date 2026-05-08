@@ -22,9 +22,12 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
     # Get current local settings and apply profile
     settings = parser.read_claude_settings()
     settings = parser.apply_claude_profile(settings, claude_profile)
+    config = parser.read_claude_config()
+    config = parser.apply_claude_config(config, claude_profile)
 
     # Write to remote
     remote_config.write_remote_claude_settings(client, settings)
+    remote_config.write_remote_claude_config(client, config)
 
     logger.info(f"Synced Claude profile '{claude_name}' to {ssh_profile.host}")
     return f"已同步 Claude 配置到 {ssh_profile.host}"
@@ -66,12 +69,12 @@ def sync_all_to_server(ssh_name: str) -> str:
     results = []
 
     # Sync Claude
-    active_claude = profile_manager.get_active_claude_name()
+    active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
     if active_claude:
         results.append(sync_claude_to_server(ssh_name, active_claude))
 
     # Sync Codex
-    active_codex = profile_manager.get_active_codex_name()
+    active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
     if active_codex:
         results.append(sync_codex_to_server(ssh_name, active_codex))
 
@@ -87,33 +90,47 @@ def pull_claude_from_server(ssh_name: str) -> str:
 
     client = ssh_manager.connect(ssh_profile)
     settings = remote_config.read_remote_claude_settings(client)
-    if not settings:
+    config = remote_config.read_remote_claude_config(client) or {}
+    if not settings and not config:
         return "服务器上未找到 Claude 配置"
+    if not settings:
+        settings = {}
 
     # Create profile from remote settings
     name = f"Remote-{ssh_name}"
     env = settings.get("env", {})
     if not isinstance(env, dict):
         env = {}
-    token_value = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY", "")
+    token_value = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey", "")
+    primary_key = config.get("primaryApiKey", "")
 
     from models.profile import ClaudeProfile
     token_ref = f"claude:{name}:auth_token"
+    primary_ref = f"claude:{name}:primary_api_key"
     if token_value:
         security.set_secret(token_ref, token_value)
+    if primary_key:
+        security.set_secret(primary_ref, primary_key)
 
     permissions = settings.get("permissions", {})
     if not isinstance(permissions, dict):
         permissions = {}
+    additional_directories = settings.get("additionalDirectories", [])
+    if not isinstance(additional_directories, list):
+        additional_directories = permissions.get("additionalDirectories", [])
+    if not isinstance(additional_directories, list):
+        additional_directories = []
     profile = ClaudeProfile(
         name=name,
         auth_token_ref=token_ref,
+        primary_api_key_ref=primary_ref if primary_key else None,
         base_url=env.get("ANTHROPIC_BASE_URL", ""),
         model=settings.get("model", ""),
         effort_level=settings.get("effortLevel", "high"),
         permissions_mode=permissions.get("defaultMode", "default"),
         skip_dangerous_prompt=settings.get("skipDangerousModePermissionPrompt", False),
         permissions_allow=permissions.get("allow", []),
+        additional_directories=additional_directories,
         provider=profile_manager.detect_claude_provider(settings),
     )
     profile_manager.save_claude_profile(profile)

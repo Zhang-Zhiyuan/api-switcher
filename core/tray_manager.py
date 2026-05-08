@@ -60,8 +60,8 @@ class TrayManager:
 
     def get_active_profiles_text(self) -> str:
         """Get text showing currently active profiles."""
-        active_claude = profile_manager.get_active_claude_name()
-        active_codex = profile_manager.get_active_codex_name()
+        active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
+        active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
 
         parts = []
         if active_claude:
@@ -77,8 +77,8 @@ class TrayManager:
             return tuple()
 
         # Get active profiles
-        active_claude = profile_manager.get_active_claude_name()
-        active_codex = profile_manager.get_active_codex_name()
+        active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
+        active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
 
         menu_items = []
 

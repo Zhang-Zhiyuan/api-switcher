@@ -78,6 +78,14 @@ def write_remote_claude_settings(client: paramiko.SSHClient, data: dict):
     write_remote_json(client, REMOTE_PATHS["claude_settings"], data)
 
 
+def read_remote_claude_config(client: paramiko.SSHClient) -> dict | None:
+    return read_remote_json(client, REMOTE_PATHS["claude_config"])
+
+
+def write_remote_claude_config(client: paramiko.SSHClient, data: dict):
+    write_remote_json(client, REMOTE_PATHS["claude_config"], data)
+
+
 def read_remote_codex_config(client: paramiko.SSHClient) -> dict | None:
     return read_remote_toml(client, REMOTE_PATHS["codex_config"])
 

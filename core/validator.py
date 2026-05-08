@@ -163,9 +163,16 @@ class ConfigValidator:
                 profiles = profile_manager.list_claude_profiles()
                 if profiles:
                     self._add_result(category, "Profile 数量", "ok", f"{len(profiles)} 个")
-                    active = profile_manager.get_active_claude_name()
-                    if active:
-                        self._add_result(category, "当前 Profile", "ok", active)
+                    current = profile_manager.get_current_claude_name()
+                    stored_active = profile_manager.get_active_claude_name()
+                    if current:
+                        self._add_result(category, "当前 Profile", "ok", current)
+                    elif stored_active:
+                        self._add_result(
+                            category, "当前 Profile", "warning",
+                            f"磁盘配置未匹配，最近切换: {stored_active}",
+                            "重新切换或导入当前配置"
+                        )
                     else:
                         self._add_result(
                             category, "当前 Profile", "warning",
@@ -216,9 +223,16 @@ class ConfigValidator:
                 profiles = profile_manager.list_codex_profiles()
                 if profiles:
                     self._add_result(category, "Profile 数量", "ok", f"{len(profiles)} 个")
-                    active = profile_manager.get_active_codex_name()
-                    if active:
-                        self._add_result(category, "当前 Profile", "ok", active)
+                    current = profile_manager.get_current_codex_name()
+                    stored_active = profile_manager.get_active_codex_name()
+                    if current:
+                        self._add_result(category, "当前 Profile", "ok", current)
+                    elif stored_active:
+                        self._add_result(
+                            category, "当前 Profile", "warning",
+                            f"磁盘配置未匹配，最近切换: {stored_active}",
+                            "重新切换或导入当前配置"
+                        )
                     else:
                         self._add_result(
                             category, "当前 Profile", "warning",
@@ -379,7 +393,7 @@ class ConfigValidator:
         category = "API 连接测试"
 
         try:
-            active_claude = profile_manager.get_active_claude_name()
+            active_claude = profile_manager.get_current_claude_name()
             if active_claude:
                 profiles = profile_manager.list_claude_profiles()
                 profile = next((p for p in profiles if p.name == active_claude), None)
@@ -387,6 +401,8 @@ class ConfigValidator:
                 if profile:
                     # 获取 API Key
                     api_key = security.get_secret(profile.auth_token_ref) if profile.auth_token_ref else ""
+                    if not api_key:
+                        api_key = security.get_secret(getattr(profile, "primary_api_key_ref", None)) or ""
 
                     if api_key:
                         self._add_result(category, f"Claude ({active_claude})", "ok", "正在测试...")
@@ -426,7 +442,7 @@ class ConfigValidator:
 
         # 测试 Codex API
         try:
-            active_codex = profile_manager.get_active_codex_name()
+            active_codex = profile_manager.get_current_codex_name()
             if active_codex:
                 profiles = profile_manager.list_codex_profiles()
                 profile = next((p for p in profiles if p.name == active_codex), None)
