@@ -59,7 +59,7 @@ class TrayManager:
         return image
 
     def get_active_profiles_text(self) -> str:
-        """Get text showing currently active profiles."""
+        """Get text showing currently active API configurations."""
         claude_names = {p.name for p in profile_manager.list_switchable_claude_profiles()}
         codex_names = {p.name for p in profile_manager.list_switchable_codex_profiles()}
         active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
@@ -67,11 +67,11 @@ class TrayManager:
 
         parts = []
         if active_claude in claude_names:
-            parts.append(f"Claude: {active_claude}")
+            parts.append(f"Claude API: {active_claude}")
         if active_codex in codex_names:
-            parts.append(f"Codex: {active_codex}")
+            parts.append(f"Codex API: {active_codex}")
 
-        return " | ".join(parts) if parts else "无激活配置"
+        return " | ".join(parts) if parts else "无激活 API 配置"
 
     def create_menu(self) -> tuple:
         """Create the tray menu."""
@@ -88,12 +88,12 @@ class TrayManager:
         menu_items.append(Item('显示主窗口', self.on_show_window, default=True))
         menu_items.append(Item.SEPARATOR)
 
-        # Current active profiles section
+        # Current active API config section
         status_text = self.get_active_profiles_text()
-        menu_items.append(Item(f'当前: {status_text}', None, enabled=False))
+        menu_items.append(Item(f'当前 API: {status_text}', None, enabled=False))
         menu_items.append(Item.SEPARATOR)
 
-        # Claude profiles submenu
+        # Claude API configs submenu
         claude_profiles = profile_manager.list_switchable_claude_profiles()
         if claude_profiles:
             claude_items = []
@@ -107,9 +107,9 @@ class TrayManager:
                         checked=lambda item, name=profile.name: name == active_claude
                     )
                 )
-            menu_items.append(Item('Claude Code', pystray.Menu(*claude_items)))
+            menu_items.append(Item('Claude API 配置', pystray.Menu(*claude_items)))
 
-        # Codex profiles submenu
+        # Codex API configs submenu
         codex_profiles = profile_manager.list_switchable_codex_profiles()
         if codex_profiles:
             codex_items = []
@@ -123,7 +123,7 @@ class TrayManager:
                         checked=lambda item, name=profile.name: name == active_codex
                     )
                 )
-            menu_items.append(Item('Codex CLI', pystray.Menu(*codex_items)))
+            menu_items.append(Item('Codex API 配置', pystray.Menu(*codex_items)))
 
         menu_items.append(Item.SEPARATOR)
 

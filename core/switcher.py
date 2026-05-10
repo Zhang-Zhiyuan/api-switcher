@@ -7,16 +7,16 @@ logger = logging.getLogger(__name__)
 
 
 def switch_claude_profile(name: str) -> None:
-    """Switch to a named Claude profile. Auto-backup before switching."""
+    """Switch to a named Claude API configuration. Auto-backup before switching."""
     profiles = profile_manager.list_switchable_claude_profiles()
     target = next((p for p in profiles if p.name == name), None)
     if not target:
-        raise ValueError(f"Claude profile '{name}' not found")
+        raise ValueError(f"未找到 Claude API 配置: {name}")
 
     if not profile_manager.is_third_party_claude_profile(target):
-        raise ValueError("只能切换第三方 Claude API Profile")
+        raise ValueError("只能切换第三方 Claude API 配置")
     if not (security.get_secret(target.auth_token_ref) or security.get_secret(getattr(target, "primary_api_key_ref", None))):
-        raise ValueError("Claude API Profile 需要 Auth Token")
+        raise ValueError("Claude API 配置需要 Auth Token")
 
     backup_manager.create_backup(f"切换 Claude 到: {name}")
 
@@ -47,16 +47,16 @@ def switch_claude_profile(name: str) -> None:
 
 
 def switch_codex_profile(name: str) -> None:
-    """Switch to a named Codex profile. Auto-backup before switching."""
+    """Switch to a named Codex API configuration. Auto-backup before switching."""
     profiles = profile_manager.list_switchable_codex_profiles()
     target = next((p for p in profiles if p.name == name), None)
     if not target:
-        raise ValueError(f"Codex profile '{name}' not found")
+        raise ValueError(f"未找到 Codex API 配置: {name}")
 
     if not profile_manager.is_third_party_codex_profile(target):
-        raise ValueError("只能切换第三方 Codex API Profile")
+        raise ValueError("只能切换第三方 Codex API 配置")
     if not security.get_secret(target.api_key_ref):
-        raise ValueError("Codex API Profile 需要 API Key")
+        raise ValueError("Codex API 配置需要 API Key")
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 

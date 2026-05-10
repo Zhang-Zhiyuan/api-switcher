@@ -55,7 +55,7 @@ class App(ctk.CTk):
 
         subtitle_label = ctk.CTkLabel(
             title_area,
-            text="集中管理 Claude Code、Codex CLI 的第三方 API Profile，以及本机浏览器 Profile",
+            text="第三方 API 配置、官方账号快照、本机浏览器 Profile 分区管理",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -79,7 +79,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             switch_frame,
-            text="快速切换",
+            text="快速切换 API",
             text_color=COLORS["muted"],
             font=font(11),
         ).pack(side="left", padx=(0, 8))
@@ -92,7 +92,7 @@ class App(ctk.CTk):
             **combo_style(),
         )
         self.claude_switch.pack(side="left", padx=(0, 6))
-        self.claude_switch.set("Claude Profile")
+        self.claude_switch.set("Claude API")
 
         # Codex quick switch
         self.codex_switch = ctk.CTkComboBox(
@@ -102,7 +102,7 @@ class App(ctk.CTk):
             **combo_style(),
         )
         self.codex_switch.pack(side="left")
-        self.codex_switch.set("Codex Profile")
+        self.codex_switch.set("Codex API")
 
         # 按钮区域
         button_group = ctk.CTkFrame(action_panel, fg_color="transparent")
@@ -194,10 +194,10 @@ class App(ctk.CTk):
                 if current in claude_names:
                     self.claude_switch.set(current)
                 else:
-                    self.claude_switch.set(claude_names[0] if claude_names else "Claude Profile")
+                    self.claude_switch.set(claude_names[0] if claude_names else "Claude API")
             else:
-                self.claude_switch.configure(values=["暂无 Claude Profile"], state="disabled")
-                self.claude_switch.set("暂无 Claude Profile")
+                self.claude_switch.configure(values=["暂无 Claude API 配置"], state="disabled")
+                self.claude_switch.set("暂无 Claude API 配置")
 
             # Load Codex profiles
             codex_profiles = profile_manager.list_switchable_codex_profiles()
@@ -209,17 +209,17 @@ class App(ctk.CTk):
                 if current in codex_names:
                     self.codex_switch.set(current)
                 else:
-                    self.codex_switch.set(codex_names[0] if codex_names else "Codex Profile")
+                    self.codex_switch.set(codex_names[0] if codex_names else "Codex API")
             else:
-                self.codex_switch.configure(values=["暂无 Codex Profile"], state="disabled")
-                self.codex_switch.set("暂无 Codex Profile")
+                self.codex_switch.configure(values=["暂无 Codex API 配置"], state="disabled")
+                self.codex_switch.set("暂无 Codex API 配置")
 
         except Exception as e:
             logger.error(f"Failed to load quick switch profiles: {e}", exc_info=True)
 
     def _quick_switch_claude(self, profile_name: str):
         """Quick switch Claude profile."""
-        if profile_name in {"Claude", "Claude Profile", "暂无 Claude Profile", "无配置"}:
+        if profile_name in {"Claude", "Claude Profile", "Claude API", "暂无 Claude Profile", "暂无 Claude API 配置", "无配置"}:
             return
 
         try:
@@ -228,8 +228,8 @@ class App(ctk.CTk):
 
             switcher.switch_claude_profile(profile_name)
 
-            show_toast(self, f"已切换到: {profile_name}")
-            self._status.configure(text=f"已切换到 Claude: {profile_name}")
+            show_toast(self, f"已切换 Claude API 配置: {profile_name}")
+            self._status.configure(text=f"已切换 Claude API 配置: {profile_name}")
 
             # Refresh tabs
             self._claude_tab.refresh()
@@ -246,7 +246,7 @@ class App(ctk.CTk):
 
     def _quick_switch_codex(self, profile_name: str):
         """Quick switch Codex profile."""
-        if profile_name in {"Codex", "Codex Profile", "暂无 Codex Profile", "无配置"}:
+        if profile_name in {"Codex", "Codex Profile", "Codex API", "暂无 Codex Profile", "暂无 Codex API 配置", "无配置"}:
             return
 
         try:
@@ -255,8 +255,8 @@ class App(ctk.CTk):
 
             switcher.switch_codex_profile(profile_name)
 
-            show_toast(self, f"已切换到: {profile_name}")
-            self._status.configure(text=f"已切换到 Codex: {profile_name}")
+            show_toast(self, f"已切换 Codex API 配置: {profile_name}")
+            self._status.configure(text=f"已切换 Codex API 配置: {profile_name}")
 
             # Refresh tabs
             self._codex_tab.refresh()
@@ -303,7 +303,7 @@ class App(ctk.CTk):
         self._usage_stats_tab.refresh()
         self._backup_tab.refresh()
         self._log_viewer_tab.refresh()
-        self._status.configure(text="已刷新全部配置")
+        self._status.configure(text="已刷新全部 API 配置和账号状态")
 
         # Update tray menu to reflect changes
         if self.tray_manager.is_running():

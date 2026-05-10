@@ -5,9 +5,9 @@ from core.providers import CODEX_REASONING_EFFORTS, ProviderRegistry
 
 
 class ProfileEditorDialog(ctk.CTkToplevel):
-    """Dialog for creating or editing a Claude or Codex profile."""
+    """Dialog for creating or editing a Claude or Codex API configuration."""
 
-    def __init__(self, master, title="Edit Profile", profile=None, profile_type="claude",
+    def __init__(self, master, title="编辑 API 配置", profile=None, profile_type="claude",
                  on_save=None):
         super().__init__(master)
         self.title(title)
@@ -166,7 +166,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         provider_options = [provider.display_name for provider in third_party_providers]
 
         # Provider 选择
-        self._add_field(parent, "提供商", "provider",
+        self._add_field(parent, "API 提供商", "provider",
                         provider_options, "combo")
         if p and hasattr(p, 'provider'):
             provider_config = ProviderRegistry.get_provider(p.provider)
@@ -182,7 +182,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._fields["provider"][0].configure(command=self._on_claude_provider_change)
         self._add_provider_note(parent)
 
-        self._add_field(parent, "名称", "name", p.name if p else "")
+        self._add_field(parent, "API 配置名称", "name", p.name if p else "")
         self._add_field(parent, "API 端点", "base_url",
                         p.base_url if p else (default_provider.base_url_for_claude() if default_provider else ""))
         self._add_field(parent, "Auth Token", "auth_token", "", "masked")
@@ -254,7 +254,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._fields["codex_provider"][0].configure(command=self._on_codex_provider_change)
         self._add_provider_note(parent)
 
-        self._add_field(parent, "名称", "name", p.name if p else "")
+        self._add_field(parent, "API 配置名称", "name", p.name if p else "")
         self._add_field(parent, "API Key", "api_key", "", "masked")
 
         # 模型选择 - 使用可编辑的 combobox
@@ -321,7 +321,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _provider_note(self, provider, is_codex: bool) -> str:
         if provider is None:
-            return "仅支持第三方 API Profile；官方账号登录态不会保存或切换。"
+            return "仅支持第三方 API 配置；官方账号登录态在“官方账号”区单独导入和切换。"
 
         parts = []
         if provider.notes:
@@ -463,7 +463,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             model = data.get("model") or (provider.default_model if provider else "claude-sonnet-4")
 
             if not api_key:
-                self._show_error("请先输入 Auth Token，或保存过带密钥的 Profile")
+                self._show_error("请先输入 Auth Token，或保存过带密钥的 API 配置")
                 return
             if not base_url:
                 self._show_error("请先填写 API 端点")
@@ -472,7 +472,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         else:  # codex
             api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
             if not api_key:
-                self._show_error("请先输入 API Key，或保存过带密钥的 Profile")
+                self._show_error("请先输入 API Key，或保存过带密钥的 API 配置")
                 return
 
             provider = self._current_codex_provider()
@@ -588,7 +588,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         data = self._collect_data()
 
         if not data.get("name"):
-            self._show_error("请输入 Profile 名称")
+            self._show_error("请输入 API 配置名称")
             return
         if not data.get("model"):
             self._show_error("请输入模型名称")
@@ -600,14 +600,14 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._show_error("请先输入 API Key")
             return
 
-        # 处理 Claude Profile 的 provider 字段
+        # 处理 Claude API 配置的 provider 字段
         if self._profile_type == "claude" and "provider" in data:
             provider_display_name = data["provider"]
             provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
             if provider:
                 data["provider"] = provider.name
 
-        # 处理 Codex Profile 的 provider 字段
+        # 处理 Codex API 配置的 provider 字段
         if self._profile_type == "codex" and "codex_provider" in data:
             provider_display_name = data["codex_provider"]
             provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)

@@ -7,7 +7,7 @@ class ProfileCard(ctk.CTkFrame):
     """A card widget displaying a profile summary with action buttons."""
 
     def __init__(self, master, name: str, info_lines: list[str], is_active: bool = False,
-                 active_label: str = "当前运行", on_switch=None, on_test=None,
+                 active_label: str = "当前运行", switch_label: str = "切换", on_switch=None, on_test=None,
                  on_edit=None, on_clone=None, on_delete=None, **kwargs):
         border_color = kwargs.pop("border_color", COLORS["success"] if is_active else COLORS["border_soft"])
         frame_kwargs = card_frame_kwargs(border_color)
@@ -68,8 +68,8 @@ class ProfileCard(ctk.CTkFrame):
         if not is_active and on_switch:
             ctk.CTkButton(
                 btn_frame,
-                text="切换",
-                width=62,
+                text=switch_label,
+                width=76 if len(switch_label) > 2 else 62,
                 command=lambda: on_switch(name),
                 **button_style("primary", compact=True),
             ).pack(side="left", padx=(0, 6))
