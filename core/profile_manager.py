@@ -640,6 +640,38 @@ def get_claude_account_credentials(profile: ClaudeAccountProfile) -> dict | None
     return security.get_secret_json(profile.credentials_ref)
 
 
+def _validate_account_snapshot(data: object, label: str) -> tuple[bool, str]:
+    if data is None:
+        return False, f"{label}快照不可读取，可能已被删除或密钥存储损坏"
+    if not isinstance(data, dict):
+        return False, f"{label}快照格式异常"
+    if not data:
+        return False, f"{label}快照为空"
+    return True, "可用"
+
+
+def validate_claude_account_snapshot(profile: ClaudeAccountProfile) -> tuple[bool, str]:
+    credentials = get_claude_account_credentials(profile)
+    return _validate_claude_account_credentials(credentials)
+
+
+def _validate_claude_account_credentials(credentials: object) -> tuple[bool, str]:
+    ok, reason = _validate_account_snapshot(credentials, "Claude 账号")
+    if not ok:
+        return ok, reason
+    if not any(value.strip() for value in _iter_nested_strings(credentials)):
+        return False, "Claude 账号快照里没有可用凭据内容"
+    return True, reason
+
+
+def load_claude_account_credentials(profile: ClaudeAccountProfile) -> dict:
+    credentials = get_claude_account_credentials(profile)
+    ok, reason = _validate_claude_account_credentials(credentials)
+    if not ok:
+        raise ValueError(reason)
+    return credentials
+
+
 def _claude_account_identity_from_credentials(credentials: dict) -> str:
     return _identity_from_json(credentials, "claude-login")
 
@@ -674,7 +706,8 @@ def import_current_claude_account() -> ClaudeAccountProfile | None:
     from core.parser import read_claude_credentials
 
     credentials = read_claude_credentials()
-    if not credentials:
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok:
         return None
 
     identity = _claude_account_identity_from_credentials(credentials)
@@ -717,7 +750,8 @@ def get_current_claude_account_name() -> str | None:
     settings = read_claude_settings()
     config = read_claude_config()
     credentials = read_claude_credentials()
-    if not credentials or _claude_api_override_active(settings, config):
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok or _claude_api_override_active(settings, config):
         return None
 
     identity = _claude_account_identity_from_credentials(credentials)
@@ -734,9 +768,10 @@ def get_claude_account_runtime_summary() -> dict:
     config = read_claude_config()
     credentials = read_claude_credentials()
     override_active = _claude_api_override_active(settings, config)
-    identity = _claude_account_identity_from_credentials(credentials) if credentials else "no-login"
+    credentials_ok, credentials_status = _validate_claude_account_credentials(credentials)
+    identity = _claude_account_identity_from_credentials(credentials) if credentials_ok else "no-login"
     profile_name = None
-    if credentials and not override_active:
+    if credentials_ok and not override_active:
         for profile in list_claude_account_profiles():
             if profile.identity == identity:
                 profile_name = profile.name
@@ -746,7 +781,8 @@ def get_claude_account_runtime_summary() -> dict:
         "profile_name": profile_name,
         "stored_active": get_active_claude_account_name(),
         "identity": identity,
-        "has_credentials": bool(credentials),
+        "has_credentials": credentials_ok,
+        "credentials_status": credentials_status,
         "credentials_path": str(CLAUDE_CREDENTIALS),
         "api_override_active": override_active,
     }
@@ -1182,10 +1218,43 @@ def get_codex_account_auth(profile: CodexAccountProfile) -> dict | None:
 
 
 def _codex_official_auth_available(auth: dict) -> bool:
-    if _codex_auth_mode(auth) != "chatgpt":
+    if not isinstance(auth, dict):
         return False
     tokens = auth.get("tokens")
     return isinstance(tokens, dict) and any(bool(value) for value in tokens.values())
+
+
+def _normalize_codex_official_auth(auth: dict) -> dict:
+    if not isinstance(auth, dict):
+        raise ValueError("Codex 账号快照格式异常")
+    if not _codex_official_auth_available(auth):
+        raise ValueError("Codex 账号快照里没有可用 ChatGPT 登录 token")
+
+    normalized = dict(auth)
+    normalized["auth_mode"] = "chatgpt"
+    normalized.pop("OPENAI_API_KEY", None)
+    return normalized
+
+
+def _validate_codex_account_auth(auth: object) -> tuple[bool, str]:
+    ok, reason = _validate_account_snapshot(auth, "Codex 账号")
+    if not ok:
+        return ok, reason
+    if not _codex_official_auth_available(auth):
+        return False, "Codex 账号快照里没有可用 ChatGPT 登录 token"
+    return True, "可用"
+
+
+def validate_codex_account_snapshot(profile: CodexAccountProfile) -> tuple[bool, str]:
+    return _validate_codex_account_auth(get_codex_account_auth(profile))
+
+
+def load_codex_account_auth(profile: CodexAccountProfile) -> dict:
+    auth = get_codex_account_auth(profile)
+    ok, reason = _validate_codex_account_auth(auth)
+    if not ok:
+        raise ValueError(reason)
+    return _normalize_codex_official_auth(auth)
 
 
 def _codex_account_identity_from_auth(auth: dict) -> str:
@@ -1193,7 +1262,9 @@ def _codex_account_identity_from_auth(auth: dict) -> str:
 
 
 def _codex_account_override_active(config: dict, auth: dict) -> bool:
-    if _codex_auth_mode(auth) != "chatgpt":
+    if not _codex_official_auth_available(auth):
+        return True
+    if str(auth.get("auth_mode") or "").strip() == "api_key":
         return True
     return config.get("model_provider", "openai") != "openai"
 
@@ -1213,6 +1284,7 @@ def import_current_codex_account() -> CodexAccountProfile | None:
     auth = read_codex_auth()
     if not _codex_official_auth_available(auth):
         return None
+    auth = _normalize_codex_official_auth(auth)
 
     identity = _codex_account_identity_from_auth(auth)
     name = _pick_codex_account_import_name(identity)

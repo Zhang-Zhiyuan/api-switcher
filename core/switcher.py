@@ -86,9 +86,7 @@ def switch_claude_account(name: str) -> None:
     if not target:
         raise ValueError(f"Claude account '{name}' not found")
 
-    credentials = profile_manager.get_claude_account_credentials(target)
-    if not credentials:
-        raise ValueError("该 Claude 账号快照没有可用凭据")
+    credentials = profile_manager.load_claude_account_credentials(target)
 
     backup_manager.create_backup(f"切换 Claude 官方账号到 {name}")
 
@@ -115,9 +113,7 @@ def switch_codex_account(name: str) -> None:
     if not target:
         raise ValueError(f"Codex account '{name}' not found")
 
-    auth = profile_manager.get_codex_account_auth(target)
-    if not auth:
-        raise ValueError("该 Codex 账号快照没有可用 auth.json")
+    auth = profile_manager.load_codex_account_auth(target)
 
     backup_manager.create_backup(f"切换 Codex 官方账号到 {name}")
 

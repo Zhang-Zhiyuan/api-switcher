@@ -77,6 +77,17 @@ def clear_claude_api_overrides(settings: dict) -> dict:
             settings["env"] = env
         else:
             settings.pop("env", None)
+
+    # Third-party Claude profiles can leave non-Claude model names behind.
+    # When returning to an official login, keep valid Claude model choices but
+    # fall back to the current app default if the model clearly belongs elsewhere.
+    model = str(settings.get("model") or "").strip()
+    if model and not model.startswith("claude-"):
+        settings["model"] = "claude-sonnet-4"
+
+    effort = str(settings.get("effortLevel") or "").strip()
+    if effort and effort not in {"low", "medium", "high", "xhigh"}:
+        settings["effortLevel"] = "high"
     return settings
 
 

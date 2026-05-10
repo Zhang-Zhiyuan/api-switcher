@@ -230,17 +230,18 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         for account in account_profiles:
             is_active = account.name == active_account
+            snapshot_ok, snapshot_status = profile_manager.validate_codex_account_snapshot(account)
             info = [
                 f"身份: {account.identity}",
-                f"凭据: 本机加密保存  |  创建时间: {account.created_at or '-'}",
+                f"状态: {snapshot_status}  |  凭据: 本机加密保存  |  保存时间: {account.created_at or '-'}",
             ]
 
             card = ProfileCard(
                 self._account_cards_frame, account.name, info, is_active=is_active,
                 active_label="当前账号",
-                on_switch=self._switch_account,
+                on_switch=self._switch_account if snapshot_ok else None,
                 on_delete=self._delete_account,
-                border_color=COLORS["accent"] if is_active else COLORS["border_soft"],
+                border_color=COLORS["accent"] if is_active else (COLORS["danger"] if not snapshot_ok else COLORS["border_soft"]),
             )
             card.pack(fill="x", pady=5)
 
@@ -405,8 +406,12 @@ class CodexTab(ctk.CTkScrollableFrame):
         profile = profile_manager.import_current_codex_account()
         if profile:
             profile_manager.save_codex_account_profile(profile)
-            profile_manager.set_active_codex_account(profile.name)
-            show_toast(self.winfo_toplevel(), f"已导入当前 Codex 官方账号: {profile.name}")
+            if profile_manager.get_current_codex_account_name() == profile.name:
+                profile_manager.set_active_codex_account(profile.name)
+                message = f"已导入当前 Codex 官方账号: {profile.name}"
+            else:
+                message = f"已导入 Codex 官方账号: {profile.name}；点击切换后启用"
+            show_toast(self.winfo_toplevel(), message)
             self.refresh()
             self._refresh_shell_state()
         else:
