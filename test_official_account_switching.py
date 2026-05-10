@@ -142,7 +142,7 @@ def test_import_current_accounts_use_human_identity_names(isolated_accounts):
     )
     claude_account = profile_manager.import_current_claude_account()
     assert claude_account is not None
-    assert claude_account.identity == "张三 Claude"
+    assert claude_account.identity == "zhang@example.test"
     assert claude_account.name == "Claude-账号-张三-Claude"
 
     auth_parser.write_codex_auth({
@@ -151,5 +151,67 @@ def test_import_current_accounts_use_human_identity_names(isolated_accounts):
     })
     codex_account = profile_manager.import_current_codex_account()
     assert codex_account is not None
-    assert codex_account.identity == "zzy"
+    assert codex_account.identity == "zzy@example.test"
     assert codex_account.name == "Codex-账号-zzy"
+
+
+def test_account_matching_accepts_legacy_display_identity(isolated_accounts):
+    from models.profile import ClaudeAccountProfile
+
+    parser.CLAUDE_CREDENTIALS.parent.mkdir(parents=True)
+    credentials = {"token": _jwt({"name": "Same Display", "email": "same@example.test"})}
+    parser.CLAUDE_CREDENTIALS.write_text(json.dumps(credentials), encoding="utf-8")
+    security.set_secret_json("legacy:claude", credentials)
+    profile_manager.save_claude_account_profile(
+        ClaudeAccountProfile(name="Legacy Display", credentials_ref="legacy:claude", identity="Same Display")
+    )
+
+    assert profile_manager.import_current_claude_account().name == "Legacy Display"
+    assert profile_manager.get_current_claude_account_name() == "Legacy Display"
+
+
+def test_account_matching_rejects_same_display_with_different_stable_identity(isolated_accounts):
+    from models.profile import ClaudeAccountProfile
+
+    parser.CLAUDE_CREDENTIALS.parent.mkdir(parents=True)
+    current_credentials = {"token": _jwt({"name": "Same Display", "email": "current@example.test"})}
+    legacy_credentials = {"token": _jwt({"name": "Same Display", "email": "legacy@example.test"})}
+    parser.CLAUDE_CREDENTIALS.write_text(json.dumps(current_credentials), encoding="utf-8")
+    security.set_secret_json("legacy:claude", legacy_credentials)
+    profile_manager.save_claude_account_profile(
+        ClaudeAccountProfile(name="Legacy Display", credentials_ref="legacy:claude", identity="Same Display")
+    )
+
+    imported = profile_manager.import_current_claude_account()
+    assert imported is not None
+    assert imported.name == "Claude-账号-Same-Display"
+    profile_manager.save_claude_account_profile(imported)
+    assert profile_manager.get_current_claude_account_name() == imported.name
+
+
+def test_import_names_handle_generic_labels_and_unsafe_values(isolated_accounts):
+    parser.write_claude_settings({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "relay-token",
+            "ANTHROPIC_BASE_URL": "api.relay.example.com/anthropic",
+        },
+        "model": "bad/model name with spaces",
+    })
+    claude_profile = profile_manager.import_current_claude()
+    assert claude_profile is not None
+    assert claude_profile.name == "Claude-api.relay.example.com-bad-model-name-with-spaces"
+
+    toml_parser.write_codex_config({
+        "model": "model/with spaces",
+        "model_provider": "custom",
+        "model_providers": {
+            "custom": {
+                "name": "OpenAI Compatible",
+                "base_url": "https://api.codex-relay.example.com/v1",
+            }
+        },
+    })
+    auth_parser.write_codex_auth({"auth_mode": "api_key", "OPENAI_API_KEY": "relay-key"})
+    codex_profile = profile_manager.import_current_codex()
+    assert codex_profile is not None
+    assert codex_profile.name == "Codex-api.codex-relay.example.com-model-with-spaces"

@@ -682,6 +682,29 @@ def _claude_account_identity_from_credentials(credentials: dict) -> str:
     return _identity_from_json(credentials, "claude-login")
 
 
+def _claude_account_preferred_name(credentials: dict) -> str:
+    return _account_preferred_name_from_json(credentials, "claude-login")
+
+
+def _claude_account_identity_candidates(credentials: dict) -> set[str]:
+    return _account_identity_candidates_from_json(credentials, "claude-login")
+
+
+def _claude_account_matches_credentials(profile: ClaudeAccountProfile, credentials: dict) -> bool:
+    identity = _claude_account_identity_from_credentials(credentials)
+    if profile.identity == identity:
+        return True
+
+    saved = get_claude_account_credentials(profile)
+    if isinstance(saved, dict) and saved:
+        return _account_snapshots_match(saved, credentials, "claude-login")
+
+    stable_candidates = _account_stable_identity_candidates_from_json(credentials, "claude-login")
+    if stable_candidates:
+        return profile.identity in stable_candidates
+    return profile.identity in _claude_account_identity_candidates(credentials)
+
+
 def _claude_api_override_active(settings: dict, config: dict) -> bool:
     env = _claude_env(settings)
     override_keys = {
@@ -699,12 +722,14 @@ def _claude_api_override_active(settings: dict, config: dict) -> bool:
     return detect_claude_provider(settings) != "anthropic"
 
 
-def _pick_claude_account_import_name(identity: str) -> str:
+def _pick_claude_account_import_name(identity: str, preferred_name: str | None = None, credentials: dict | None = None) -> str:
     profiles = list_claude_account_profiles()
     for profile in profiles:
         if profile.identity == identity:
             return profile.name
-    return _account_import_name("Claude-账号", identity, {profile.name for profile in profiles})
+        if credentials and _claude_account_matches_credentials(profile, credentials):
+            return profile.name
+    return _account_import_name("Claude-账号", preferred_name or identity, {profile.name for profile in profiles})
 
 
 def import_current_claude_account() -> ClaudeAccountProfile | None:
@@ -717,7 +742,8 @@ def import_current_claude_account() -> ClaudeAccountProfile | None:
         return None
 
     identity = _claude_account_identity_from_credentials(credentials)
-    name = _pick_claude_account_import_name(identity)
+    preferred_name = _claude_account_preferred_name(credentials)
+    name = _pick_claude_account_import_name(identity, preferred_name, credentials)
     ref = f"claude-account:{name}:credentials"
     security.set_secret_json(ref, credentials)
     return ClaudeAccountProfile(
@@ -762,7 +788,7 @@ def get_current_claude_account_name() -> str | None:
 
     identity = _claude_account_identity_from_credentials(credentials)
     for profile in list_claude_account_profiles():
-        if profile.identity == identity:
+        if _claude_account_matches_credentials(profile, credentials):
             return profile.name
     return None
 
@@ -779,7 +805,7 @@ def get_claude_account_runtime_summary() -> dict:
     profile_name = None
     if credentials_ok and not override_active:
         for profile in list_claude_account_profiles():
-            if profile.identity == identity:
+            if _claude_account_matches_credentials(profile, credentials):
                 profile_name = profile.name
                 break
 
@@ -843,6 +869,34 @@ def _safe_name_part(value: object, fallback: str) -> str:
     return (text or fallback)[:40]
 
 
+def _looks_like_url(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return "://" in text or text.startswith(("www.", "api."))
+
+
+def _looks_like_endpoint(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if _looks_like_url(text):
+        return True
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    host = text.split("/", 1)[0].split(":", 1)[0].strip("[]")
+    return host == "localhost" or ("." in host and re.fullmatch(r"[a-z0-9.-]+", host) is not None)
+
+
+def _usable_label(value: object, max_length: int = 160) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or len(text) > max_length:
+        return ""
+    if len(text.split(".")) >= 3 and not any(ch.isspace() for ch in text) and _decode_jwt_payload(text):
+        return ""
+    return text
+
+
 def _host_label(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -857,6 +911,26 @@ def _host_label(value: object) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _station_label_candidate(value: object) -> str:
+    text = _usable_label(value, max_length=80)
+    if not text:
+        return ""
+    if _looks_like_endpoint(text):
+        return _host_label(text)
+    generic = re.sub(r"[\s_-]+", "-", text.strip().lower())
+    if generic in {
+        "custom",
+        "api",
+        "openai",
+        "openai-compatible",
+        "custom-provider",
+        "default",
+        "provider",
+    }:
+        return ""
+    return text
 
 
 def _provider_display_name(provider_id: object, fallback: str = "custom") -> str:
@@ -876,7 +950,7 @@ def _claude_station_label(settings: dict) -> str:
     env = _claude_env(settings)
     provider_id = detect_claude_provider(settings)
     if provider_id == "custom":
-        return _host_label(env.get("ANTHROPIC_BASE_URL")) or "Custom"
+        return _station_label_candidate(env.get("ANTHROPIC_BASE_URL")) or "Custom"
     return _provider_display_name(provider_id, provider_id)
 
 
@@ -884,10 +958,15 @@ def _codex_station_label(config: dict) -> str:
     provider_id = str(config.get("model_provider") or "openai")
     custom = _codex_provider_table(config, provider_id)
     for value in [custom.get("name"), custom.get("display_name")]:
-        if value:
-            return str(value)
+        label = _station_label_candidate(value)
+        if label:
+            return label
     if provider_id == "custom" or custom:
-        return _host_label(custom.get("base_url")) or _provider_display_name(provider_id, provider_id)
+        return (
+            _station_label_candidate(custom.get("base_url"))
+            or _station_label_candidate(provider_id)
+            or _provider_display_name(provider_id, provider_id)
+        )
     return _provider_display_name(provider_id, provider_id)
 
 
@@ -941,10 +1020,7 @@ def _iter_nested_strings(value: object, limit: int = 200):
             stack.extend(item)
 
 
-def _identity_from_json(data: dict, fallback_prefix: str = "official-login") -> str:
-    if not isinstance(data, dict) or not data:
-        return f"{fallback_prefix}-empty"
-
+def _account_identity_parts(data: dict, fallback_prefix: str = "official-login") -> dict:
     human_keys = [
         "name",
         "display_name",
@@ -964,40 +1040,98 @@ def _identity_from_json(data: dict, fallback_prefix: str = "official-login") -> 
         "sub",
     ]
     human_values: list[str] = []
-    id_values: list[str] = []
+    email_values: list[str] = []
+    stable_values: list[str] = []
+
+    def add_human(value: object) -> None:
+        label = _usable_label(value)
+        if label and not _looks_like_url(label) and "@" not in label:
+            human_values.append(label)
+
+    def add_id(value: object) -> None:
+        label = _usable_label(value)
+        if not label:
+            return
+        if "@" in label and len(label) <= 160:
+            email_values.append(label.lower())
+        else:
+            stable_values.append(label)
 
     for key in human_keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            human_values.append(value.strip())
+        add_human(data.get(key))
     for key in id_keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            id_values.append(value.strip())
+        add_id(data.get(key))
 
     for value in _iter_nested_strings(data):
         if "@" in value and len(value) <= 160:
-            id_values.append(value.strip())
+            add_id(value)
         jwt_payload = _decode_jwt_payload(value)
         for key in human_keys:
-            jwt_value = jwt_payload.get(key)
-            if isinstance(jwt_value, str) and jwt_value.strip():
-                human_values.append(jwt_value.strip())
+            add_human(jwt_payload.get(key))
         for key in id_keys:
-            jwt_value = jwt_payload.get(key)
-            if isinstance(jwt_value, str) and jwt_value.strip():
-                id_values.append(jwt_value.strip())
+            add_id(jwt_payload.get(key))
 
-    for value in human_values:
-        if value:
-            return value
-    for value in id_values:
-        if "@" in value:
-            return value
-    for value in id_values:
-        if value:
-            return f"id-{_short_fingerprint(value)}"
-    return f"{fallback_prefix}-{_json_fingerprint(data)}"
+    display = next((value for value in human_values if value), "")
+    email = next((value for value in email_values if value), "")
+    stable = email or next((value for value in stable_values if value), "")
+    if stable and stable != email:
+        stable = f"id-{_short_fingerprint(stable)}"
+    if not stable:
+        stable = display or f"{fallback_prefix}-{_json_fingerprint(data)}"
+
+    stable_candidates = set(email_values)
+    stable_candidates.update(f"id-{_short_fingerprint(value)}" for value in stable_values if value)
+
+    candidates = {stable}
+    candidates.update(value for value in human_values if value)
+    candidates.update(value for value in email_values if value)
+    candidates.update(stable_candidates)
+
+    return {
+        "display": display,
+        "email": email,
+        "identity": stable,
+        "preferred_name": display or email or stable,
+        "stable_candidates": {value for value in stable_candidates if value},
+        "candidates": {value for value in candidates if value},
+    }
+
+
+def _identity_from_json(data: dict, fallback_prefix: str = "official-login") -> str:
+    if not isinstance(data, dict) or not data:
+        return f"{fallback_prefix}-empty"
+    return str(_account_identity_parts(data, fallback_prefix)["identity"])
+
+
+def _account_preferred_name_from_json(data: dict, fallback_prefix: str = "official-login") -> str:
+    if not isinstance(data, dict) or not data:
+        return f"{fallback_prefix}-empty"
+    return str(_account_identity_parts(data, fallback_prefix)["preferred_name"])
+
+
+def _account_identity_candidates_from_json(data: dict, fallback_prefix: str = "official-login") -> set[str]:
+    if not isinstance(data, dict) or not data:
+        return {f"{fallback_prefix}-empty"}
+    return set(_account_identity_parts(data, fallback_prefix)["candidates"])
+
+
+def _account_stable_identity_candidates_from_json(data: dict, fallback_prefix: str = "official-login") -> set[str]:
+    if not isinstance(data, dict) or not data:
+        return set()
+    return set(_account_identity_parts(data, fallback_prefix)["stable_candidates"])
+
+
+def _account_snapshots_match(saved: dict, current: dict, fallback_prefix: str = "official-login") -> bool:
+    if not isinstance(saved, dict) or not saved or not isinstance(current, dict) or not current:
+        return False
+
+    saved_parts = _account_identity_parts(saved, fallback_prefix)
+    current_parts = _account_identity_parts(current, fallback_prefix)
+    saved_stable = set(saved_parts["stable_candidates"])
+    current_stable = set(current_parts["stable_candidates"])
+    if saved_stable and current_stable:
+        return bool(saved_stable & current_stable)
+    return bool(set(saved_parts["candidates"]) & set(current_parts["candidates"]))
 
 
 def _account_import_name(prefix: str, identity: str, existing: set[str]) -> str:
@@ -1337,6 +1471,29 @@ def _codex_account_identity_from_auth(auth: dict) -> str:
     return _identity_from_json(auth, "codex-login")
 
 
+def _codex_account_preferred_name(auth: dict) -> str:
+    return _account_preferred_name_from_json(auth, "codex-login")
+
+
+def _codex_account_identity_candidates(auth: dict) -> set[str]:
+    return _account_identity_candidates_from_json(auth, "codex-login")
+
+
+def _codex_account_matches_auth(profile: CodexAccountProfile, auth: dict) -> bool:
+    identity = _codex_account_identity_from_auth(auth)
+    if profile.identity == identity:
+        return True
+
+    saved = get_codex_account_auth(profile)
+    if isinstance(saved, dict) and saved:
+        return _account_snapshots_match(saved, auth, "codex-login")
+
+    stable_candidates = _account_stable_identity_candidates_from_json(auth, "codex-login")
+    if stable_candidates:
+        return profile.identity in stable_candidates
+    return profile.identity in _codex_account_identity_candidates(auth)
+
+
 def _codex_account_override_active(config: dict, auth: dict) -> bool:
     if not _codex_official_auth_available(auth):
         return True
@@ -1345,12 +1502,14 @@ def _codex_account_override_active(config: dict, auth: dict) -> bool:
     return config.get("model_provider", "openai") != "openai"
 
 
-def _pick_codex_account_import_name(identity: str) -> str:
+def _pick_codex_account_import_name(identity: str, preferred_name: str | None = None, auth: dict | None = None) -> str:
     profiles = list_codex_account_profiles()
     for profile in profiles:
         if profile.identity == identity:
             return profile.name
-    return _account_import_name("Codex-账号", identity, {profile.name for profile in profiles})
+        if auth and _codex_account_matches_auth(profile, auth):
+            return profile.name
+    return _account_import_name("Codex-账号", preferred_name or identity, {profile.name for profile in profiles})
 
 
 def import_current_codex_account() -> CodexAccountProfile | None:
@@ -1363,7 +1522,8 @@ def import_current_codex_account() -> CodexAccountProfile | None:
     auth = _normalize_codex_official_auth(auth)
 
     identity = _codex_account_identity_from_auth(auth)
-    name = _pick_codex_account_import_name(identity)
+    preferred_name = _codex_account_preferred_name(auth)
+    name = _pick_codex_account_import_name(identity, preferred_name, auth)
     ref = f"codex-account:{name}:auth_json"
     security.set_secret_json(ref, auth)
     return CodexAccountProfile(
@@ -1407,7 +1567,7 @@ def get_current_codex_account_name() -> str | None:
 
     identity = _codex_account_identity_from_auth(auth)
     for profile in list_codex_account_profiles():
-        if profile.identity == identity:
+        if _codex_account_matches_auth(profile, auth):
             return profile.name
     return None
 
@@ -1424,7 +1584,7 @@ def get_codex_account_runtime_summary() -> dict:
     profile_name = None
     if has_official_auth and not override_active:
         for profile in list_codex_account_profiles():
-            if profile.identity == identity:
+            if _codex_account_matches_auth(profile, auth):
                 profile_name = profile.name
                 break
 
