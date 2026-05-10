@@ -1,0 +1,234 @@
+from io import BytesIO
+
+import pytest
+
+from core import auth_parser, profile_manager, remote_config, security, sync_manager, toml_parser
+from core.ssh_manager import SSHManager, ssh_manager
+from core.ssh_profile_builder import build_ssh_profile_from_data
+from models.profile import CodexProfile, SSHProfile
+
+
+@pytest.fixture()
+def isolated_ssh(tmp_path, monkeypatch):
+    secret_store: dict[str, str] = {}
+
+    monkeypatch.setattr(security, "set_secret", lambda key, value: secret_store.__setitem__(key, value or ""))
+    monkeypatch.setattr(security, "get_secret", lambda key: secret_store.get(key) if key else None)
+    monkeypatch.setattr(security, "delete_secret", lambda key: secret_store.pop(key, None) if key else None)
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
+
+    return secret_store
+
+
+def test_ssh_builder_preserves_password_when_editing_metadata(isolated_ssh):
+    security.set_secret("ssh:prod:password", "secret-password")
+    existing = SSHProfile(
+        name="prod",
+        host="old.example.com",
+        port=22,
+        username="root",
+        auth_type="password",
+        password_ref="ssh:prod:password",
+    )
+
+    profile = build_ssh_profile_from_data(
+        {
+            "name": "prod",
+            "host": "new.example.com",
+            "port": "2200",
+            "username": "admin",
+            "auth_type": "password",
+            "password": "",
+            "private_key_path": "",
+            "key_passphrase": "",
+        },
+        existing,
+    )
+
+    assert profile.password_ref == "ssh:prod:password"
+    assert profile.host == "new.example.com"
+    assert profile.port == 2200
+    assert security.get_secret(profile.password_ref) == "secret-password"
+
+
+def test_ssh_rename_copies_secret_and_removes_old_ref(isolated_ssh, monkeypatch):
+    disconnected = []
+    monkeypatch.setattr(ssh_manager, "disconnect", lambda name: disconnected.append(name))
+
+    security.set_secret("ssh:prod:password", "secret-password")
+    old = SSHProfile(
+        name="prod",
+        host="old.example.com",
+        auth_type="password",
+        password_ref="ssh:prod:password",
+    )
+    profile_manager.save_ssh_profile(old)
+    profile_manager.set_active_ssh("prod")
+
+    renamed = build_ssh_profile_from_data(
+        {
+            "name": "prod-renamed",
+            "host": "new.example.com",
+            "port": "22",
+            "username": "root",
+            "auth_type": "password",
+            "password": "",
+            "private_key_path": "",
+            "key_passphrase": "",
+        },
+        old,
+    )
+    profile_manager.save_ssh_profile(renamed, previous_name=old.name)
+
+    profiles = profile_manager.list_ssh_profiles()
+    assert [profile.name for profile in profiles] == ["prod-renamed"]
+    assert profile_manager.get_active_ssh_name() == "prod-renamed"
+    assert renamed.password_ref == "ssh:prod-renamed:password"
+    assert security.get_secret("ssh:prod-renamed:password") == "secret-password"
+    assert security.get_secret("ssh:prod:password") is None
+    assert {"prod", "prod-renamed"}.issubset(set(disconnected))
+
+
+def test_ssh_switching_from_password_to_key_prunes_password_secret(isolated_ssh):
+    security.set_secret("ssh:prod:password", "secret-password")
+    old = SSHProfile(
+        name="prod",
+        host="server.example.com",
+        auth_type="password",
+        password_ref="ssh:prod:password",
+    )
+    profile_manager.save_ssh_profile(old)
+
+    key_profile = build_ssh_profile_from_data(
+        {
+            "name": "prod",
+            "host": "server.example.com",
+            "port": "22",
+            "username": "root",
+            "auth_type": "key",
+            "password": "",
+            "private_key_path": "/home/root/.ssh/id_ed25519",
+            "key_passphrase": "",
+        },
+        old,
+    )
+    profile_manager.save_ssh_profile(key_profile, previous_name=old.name)
+
+    [saved] = profile_manager.list_ssh_profiles()
+    assert saved.auth_type == "key"
+    assert saved.password_ref is None
+    assert saved.private_key_path == "/home/root/.ssh/id_ed25519"
+    assert security.get_secret("ssh:prod:password") is None
+
+
+def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatch):
+    security.set_secret("codex:relay:api_key", "sk-relay")
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="relay",
+            api_key_ref="codex:relay:api_key",
+            model="relay-model",
+            model_provider="custom",
+            custom_base_url="https://relay.example.com/v1",
+        )
+    )
+
+    connected = {}
+    written = {}
+    fake_client = object()
+
+    def fake_connect(profile):
+        connected["profile"] = profile
+        return fake_client
+
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", fake_connect)
+    monkeypatch.setattr(toml_parser, "read_codex_config", lambda: {})
+    monkeypatch.setattr(auth_parser, "read_codex_auth", lambda: {"auth_mode": "chatgpt", "tokens": {"id": "old"}})
+    monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data: written.setdefault("config", (client, data)))
+    monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data: written.setdefault("auth", (client, data)))
+
+    message = sync_manager.sync_codex_to_server("remote", "relay")
+
+    assert connected["profile"].name == "remote"
+    assert written["config"][0] is fake_client
+    assert written["auth"][1]["auth_mode"] == "api_key"
+    assert written["auth"][1]["OPENAI_API_KEY"] == "sk-relay"
+    assert "ssh.example.com" in message
+
+
+class _FakeChannel:
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+
+class _FakeReader(BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+
+class _FakeWriter:
+    def __init__(self, sftp, path):
+        self.sftp = sftp
+        self.path = path
+        self.buffer = bytearray()
+
+    def write(self, data):
+        assert isinstance(data, bytes)
+        self.buffer.extend(data)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.sftp.files[self.path] = bytes(self.buffer)
+
+
+class _FakeSFTP:
+    def __init__(self):
+        self.files = {"/remote.json": b'{"ok": true}'}
+        self.open_modes = []
+
+    def get_channel(self):
+        return _FakeChannel()
+
+    def open(self, path, mode):
+        self.open_modes.append(mode)
+        if "r" in mode:
+            if path not in self.files:
+                raise FileNotFoundError(path)
+            return _FakeReader(self.files[path])
+        return _FakeWriter(self, path)
+
+    def rename(self, source, target):
+        self.files[target] = self.files.pop(source)
+
+    def remove(self, path):
+        self.files.pop(path, None)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeClient:
+    def __init__(self, sftp):
+        self.sftp = sftp
+
+    def open_sftp(self):
+        return self.sftp
+
+
+def test_ssh_remote_file_io_uses_binary_sftp_modes():
+    manager = SSHManager()
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+
+    assert manager.read_remote_file(client, "/remote.json") == '{"ok": true}'
+    manager.write_remote_file(client, "/written.json", '{"saved": true}')
+
+    assert "rb" in sftp.open_modes
+    assert "wb" in sftp.open_modes
+    assert sftp.files["/written.json"] == b'{"saved": true}'

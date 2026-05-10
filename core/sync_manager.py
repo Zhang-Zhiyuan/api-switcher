@@ -1,5 +1,6 @@
 import logging
-from core import ssh_manager, remote_config, parser, toml_parser, auth_parser, profile_manager, security
+from core import remote_config, parser, toml_parser, auth_parser, profile_manager, security
+from core.ssh_manager import ssh_manager
 from models.profile import SSHProfile
 
 logger = logging.getLogger(__name__)

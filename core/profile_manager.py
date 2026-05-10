@@ -1686,25 +1686,76 @@ def set_active_ssh(name: str) -> None:
     _save_store(store)
 
 
-def save_ssh_profile(profile: SSHProfile) -> None:
+def _disconnect_ssh_profiles(names: set[str]) -> None:
+    if not names:
+        return
+    try:
+        from core.ssh_manager import ssh_manager
+
+        for name in names:
+            if name:
+                ssh_manager.disconnect(name)
+    except Exception as e:
+        logger.debug(f"Failed to disconnect SSH profiles after profile update: {e}")
+
+
+def _profile_secret_refs(profile: object) -> set[str]:
+    if hasattr(profile, "to_dict"):
+        data = profile.to_dict()
+    elif isinstance(profile, dict):
+        data = profile
+    else:
+        data = {}
+    return {
+        value
+        for key, value in data.items()
+        if key.endswith("_ref") and isinstance(value, str) and value
+    }
+
+
+def save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> None:
     store = _load_store()
     profiles = store.get("ssh_profiles", [])
-    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+    replaced_names = {profile.name}
+    if previous_name:
+        replaced_names.add(previous_name)
+
+    replaced_refs: set[str] = set()
+    for existing in profiles:
+        if isinstance(existing, dict) and existing.get("name") in replaced_names:
+            replaced_refs.update(_profile_secret_refs(existing))
+
+    new_refs = _profile_secret_refs(profile)
+    profiles = [
+        p for p in profiles
+        if isinstance(p, dict) and p.get("name") not in replaced_names
+    ]
     profiles.append(profile.to_dict())
     store["ssh_profiles"] = profiles
+    if previous_name and store.get("active_ssh_profile") == previous_name:
+        store["active_ssh_profile"] = profile.name
     _save_store(store)
+
+    _disconnect_ssh_profiles(replaced_names | {profile.name})
+
+    for ref in replaced_refs - new_refs:
+        security.delete_secret(ref)
+
+    if previous_name and previous_name != profile.name:
+        for suffix in ["password", "key_passphrase"]:
+            ref = f"ssh:{previous_name}:{suffix}"
+            if ref not in new_refs:
+                security.delete_secret(ref)
 
 
 def delete_ssh_profile(name: str) -> None:
     store = _load_store()
+    _disconnect_ssh_profiles({name})
+
     profile_refs = set()
     for profile in store.get("ssh_profiles", []):
         if isinstance(profile, dict) and profile.get("name") == name:
-            profile_refs.update(
-                value
-                for key, value in profile.items()
-                if key.endswith("_ref") and isinstance(value, str) and value
-            )
+            profile_refs.update(_profile_secret_refs(profile))
             break
 
     for ref in profile_refs:

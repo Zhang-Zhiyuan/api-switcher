@@ -185,6 +185,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
             profile = self._build_profile(data)
 
             from core.ssh_manager import ssh_manager
+            ssh_manager.disconnect(profile.name)
             success, message = ssh_manager.test_connection(profile)
 
             if success:
@@ -207,29 +208,9 @@ class SSHEditorDialog(ctk.CTkToplevel):
         }
 
     def _build_profile(self, data: dict) -> SSHProfile:
-        from core import security
+        from core.ssh_profile_builder import build_ssh_profile_from_data
 
-        password_ref = None
-        key_passphrase_ref = None
-
-        if data["auth_type"] == "password" and data["password"]:
-            password_ref = f"ssh:{data['name']}:password"
-            security.set_secret(password_ref, data["password"])
-
-        if data["key_passphrase"]:
-            key_passphrase_ref = f"ssh:{data['name']}:key_passphrase"
-            security.set_secret(key_passphrase_ref, data["key_passphrase"])
-
-        return SSHProfile(
-            name=data["name"],
-            host=data["host"],
-            port=int(data["port"]),
-            username=data["username"],
-            auth_type=data["auth_type"],
-            password_ref=password_ref,
-            private_key_path=data["private_key_path"] or None,
-            private_key_passphrase_ref=key_passphrase_ref,
-        )
+        return build_ssh_profile_from_data(data, self._profile)
 
     def _save(self):
         try:

@@ -169,8 +169,9 @@ class SSHManager:
             sftp = client.open_sftp()
             sftp.get_channel().settimeout(timeout)
 
-            with sftp.open(path, "r") as f:
-                content = f.read().decode("utf-8")
+            with sftp.open(path, "rb") as f:
+                raw = f.read()
+                content = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
                 logger.debug(f"Read {len(content)} bytes from {path}")
                 return content
 
@@ -211,7 +212,7 @@ class SSHManager:
                 self._ensure_remote_dir(sftp, remote_dir)
 
             # Write to temporary file
-            with sftp.open(temp_path, "w") as f:
+            with sftp.open(temp_path, "wb") as f:
                 f.write(content.encode("utf-8"))
 
             # Atomic rename
