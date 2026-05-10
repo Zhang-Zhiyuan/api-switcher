@@ -222,54 +222,74 @@ class App(ctk.CTk):
         if profile_name in {"Claude", "Claude Profile", "Claude API", "暂无 Claude Profile", "暂无 Claude API 配置", "无配置"}:
             return
 
-        try:
-            from core import switcher
-            from ui.widgets.toast import show_toast
+        def perform_switch():
+            try:
+                from core import switcher
+                from ui.widgets.toast import show_toast
 
-            switcher.switch_claude_profile(profile_name)
+                switcher.switch_claude_profile(profile_name)
 
-            show_toast(self, f"已切换 Claude API 配置: {profile_name}")
-            self._status.configure(text=f"已切换 Claude API 配置: {profile_name}")
+                show_toast(self, f"已切换 Claude API 配置: {profile_name}")
+                self._status.configure(text=f"已切换 Claude API 配置: {profile_name}")
 
-            # Refresh tabs
-            self._claude_tab.refresh()
-            self._usage_stats_tab.refresh()
-            if self.tray_manager.is_running():
-                self.tray_manager.update_menu()
+                self._claude_tab.refresh()
+                self._usage_stats_tab.refresh()
+                self._load_quick_switch_profiles()
+                if self.tray_manager.is_running():
+                    self.tray_manager.update_menu()
 
-            logger.info(f"Quick switched to Claude profile: {profile_name}")
+                logger.info(f"Quick switched to Claude profile: {profile_name}")
 
-        except Exception as e:
-            logger.error(f"Failed to quick switch Claude: {e}", exc_info=True)
-            from ui.widgets.toast import show_toast
-            show_toast(self, f"切换失败: {e}", is_error=True)
+            except Exception as e:
+                logger.error(f"Failed to quick switch Claude: {e}", exc_info=True)
+                from ui.widgets.toast import show_toast
+                show_toast(self, f"切换失败: {e}", is_error=True)
+                self._load_quick_switch_profiles()
+
+        self._show_switch_preview("claude_api", profile_name, perform_switch, self._load_quick_switch_profiles)
 
     def _quick_switch_codex(self, profile_name: str):
         """Quick switch Codex profile."""
         if profile_name in {"Codex", "Codex Profile", "Codex API", "暂无 Codex Profile", "暂无 Codex API 配置", "无配置"}:
             return
 
+        def perform_switch():
+            try:
+                from core import switcher
+                from ui.widgets.toast import show_toast
+
+                switcher.switch_codex_profile(profile_name)
+
+                show_toast(self, f"已切换 Codex API 配置: {profile_name}")
+                self._status.configure(text=f"已切换 Codex API 配置: {profile_name}")
+
+                self._codex_tab.refresh()
+                self._usage_stats_tab.refresh()
+                self._load_quick_switch_profiles()
+                if self.tray_manager.is_running():
+                    self.tray_manager.update_menu()
+
+                logger.info(f"Quick switched to Codex profile: {profile_name}")
+
+            except Exception as e:
+                logger.error(f"Failed to quick switch Codex: {e}", exc_info=True)
+                from ui.widgets.toast import show_toast
+                show_toast(self, f"切换失败: {e}", is_error=True)
+                self._load_quick_switch_profiles()
+
+        self._show_switch_preview("codex_api", profile_name, perform_switch, self._load_quick_switch_profiles)
+
+    def _show_switch_preview(self, kind: str, profile_name: str, on_confirm, on_cancel=None):
         try:
-            from core import switcher
-            from ui.widgets.toast import show_toast
+            from ui.dialogs.switch_preview_dialog import show_switch_preview
 
-            switcher.switch_codex_profile(profile_name)
-
-            show_toast(self, f"已切换 Codex API 配置: {profile_name}")
-            self._status.configure(text=f"已切换 Codex API 配置: {profile_name}")
-
-            # Refresh tabs
-            self._codex_tab.refresh()
-            self._usage_stats_tab.refresh()
-            if self.tray_manager.is_running():
-                self.tray_manager.update_menu()
-
-            logger.info(f"Quick switched to Codex profile: {profile_name}")
-
+            show_switch_preview(self, kind, profile_name, on_confirm=on_confirm, on_cancel=on_cancel)
         except Exception as e:
-            logger.error(f"Failed to quick switch Codex: {e}", exc_info=True)
+            logger.error(f"Failed to show switch preview: {e}", exc_info=True)
             from ui.widgets.toast import show_toast
-            show_toast(self, f"切换失败: {e}", is_error=True)
+            show_toast(self, f"切换预览失败: {e}", is_error=True)
+            if on_cancel:
+                on_cancel()
 
     def _on_closing(self):
         """Handle window close event - minimize to tray instead of exit."""

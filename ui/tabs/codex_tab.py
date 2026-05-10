@@ -170,6 +170,16 @@ class CodexTab(ctk.CTkScrollableFrame):
         if tray and tray.is_running():
             tray.update_menu()
 
+    def _show_switch_preview(self, kind: str, name: str, on_confirm):
+        top = self.winfo_toplevel()
+        if hasattr(top, "_show_switch_preview"):
+            top._show_switch_preview(kind, name, on_confirm, self._refresh_shell_state)
+            return
+
+        from ui.dialogs.switch_preview_dialog import show_switch_preview
+
+        show_switch_preview(top, kind, name, on_confirm=on_confirm, on_cancel=self._refresh_shell_state)
+
     def refresh(self):
         if not self._cards_frame or not self._account_cards_frame:
             return
@@ -289,22 +299,28 @@ class CodexTab(ctk.CTkScrollableFrame):
             card.pack(fill="x", pady=5)
 
     def _switch_profile(self, name):
-        try:
-            switcher.switch_codex_profile(name)
-            show_toast(self.winfo_toplevel(), f"已切换 Codex API 配置: {name}")
-            self.refresh()
-            self._refresh_shell_state()
-        except Exception as e:
-            show_toast(self.winfo_toplevel(), f"切换失败: {e}", is_error=True)
+        def perform_switch():
+            try:
+                switcher.switch_codex_profile(name)
+                show_toast(self.winfo_toplevel(), f"已切换 Codex API 配置: {name}")
+                self.refresh()
+                self._refresh_shell_state()
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"切换失败: {e}", is_error=True)
+
+        self._show_switch_preview("codex_api", name, perform_switch)
 
     def _switch_account(self, name):
-        try:
-            switcher.switch_codex_account(name)
-            show_toast(self.winfo_toplevel(), f"已切换 Codex 官方账号: {name}；新开的终端会话生效")
-            self.refresh()
-            self._refresh_shell_state()
-        except Exception as e:
-            show_toast(self.winfo_toplevel(), f"账号切换失败: {e}", is_error=True)
+        def perform_switch():
+            try:
+                switcher.switch_codex_account(name)
+                show_toast(self.winfo_toplevel(), f"已切换 Codex 官方账号: {name}；新开的终端会话生效")
+                self.refresh()
+                self._refresh_shell_state()
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"账号切换失败: {e}", is_error=True)
+
+        self._show_switch_preview("codex_account", name, perform_switch)
 
     def _test_profile(self, name):
         profiles = profile_manager.list_switchable_codex_profiles()

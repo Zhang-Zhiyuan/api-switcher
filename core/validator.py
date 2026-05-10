@@ -41,6 +41,9 @@ class ConfigValidator:
         # Codex CLI 配置检查
         self._validate_codex()
 
+        # 已保存 Profile 的静态检查，不发起网络请求
+        self._validate_static_profile_health()
+
         # API 连接测试
         self._validate_api_connections()
 
@@ -250,6 +253,23 @@ class ConfigValidator:
 
         except Exception as e:
             self._add_result(category, "配置检查", "error", f"检查失败: {e}")
+
+    def _validate_static_profile_health(self):
+        """Validate saved API/account switch targets without making network calls."""
+        try:
+            from core.switch_preview import collect_static_health_checks
+
+            for check in collect_static_health_checks():
+                self._add_result(
+                    check.category,
+                    check.item,
+                    check.status,
+                    check.message,
+                    check.suggestion or None,
+                )
+        except Exception as e:
+            logger.error(f"Static profile health validation error: {e}", exc_info=True)
+            self._add_result("Profile 静态检查", "检查失败", "error", str(e))
 
     def _validate_browser(self):
         """验证浏览器配置"""
