@@ -1,30 +1,29 @@
-# 收尾验收与剩余外部验证
+# 最终验收记录
 
-更新时间: 2026-05-08
+更新时间: 2026-05-11
 
 ## 已完成
 
-- 已按官方文档更新 DeepSeek V4、Kimi、GLM 的 provider 预设、默认模型、端点、Codex wire API 与 Claude Code 环境变量映射。
-- Codex 第三方 provider 会写入独立的 `[model_providers.<id>]`，避免 DeepSeek、Kimi、GLM 互相覆盖。
-- 不支持推理力度的 provider 会自动移除 `model_reasoning_effort` / `effortLevel`，避免发送无效参数。
-- Profile 存储已迁移到 version 4，并增加旧配置容错、坏数据跳过、原子写入和备份。
-- 配置切换会清理旧 Profile 残留的密钥、权限白名单、额外目录和坏掉的 `model_providers` 结构，避免误用上一个配置。
-- Python 3.10 环境已补充 `tomli` TOML 读取 fallback，本地和远程 Codex 配置读取都可用。
-- 远程拉取 Claude 配置时会识别 DeepSeek/GLM provider，不再默认回落为 Anthropic。
-- DPAPI fallback 密钥文件名已做 Windows 安全转义，Profile 名包含特殊字符时不会生成非法路径。
-- Profile 编辑器已添加“测试连接”按钮，可校验端点、密钥和模型名。
-- Profile 编辑器已添加“刷新模型”按钮，会优先从 provider 模型接口拉取，失败时回落到内置模型列表。
-- Profile 编辑器已添加 provider 专属提示，会说明推理力度处理、wire API，以及 Kimi `.ai` / `.cn` 端点差异。
-- UI 已完成一轮响应式与鲁棒性优化，Profile 编辑、导入、确认、健康检查、自动续跑设置等弹窗已做 smoke test。
-- 已删除多余 Markdown 文档，仅保留本文件作为剩余事项记录。
-- README 与项目说明已同步到当前 provider 支持范围和真实验收状态。
-- 已完成源码编译、provider 回归、迁移回归、导入测试、错误恢复测试、图标生成和 exe 打包。
+- 第三方 API Profile 与官方账号快照已分离，Claude Code / Codex CLI 均支持 API 与账号两类切换。
+- 切换前预览、静态配置健康检查、API 连接测试、模型刷新和 provider 专属提示已接入。
+- SSH 服务器支持把本机第三方 API 或官方账号快照推送到远程环境，并支持远程第三方 API 配置拉取。
+- SSH 远程路径已支持 `~`、`$HOME`、自定义 Claude/Codex 目录和常见 Linux HOME 解析 fallback。
+- 浏览器 Profile 支持本机隔离启动、站点数据清理、整目录重置、托管 Profile 跨机器加密迁移。
+- 浏览器启动已固定独立 `user-data-dir`、`Default` 分区、窗口尺寸和语言代码；清理时会尽量按实际 `--user-data-dir` 精确判断占用。
+- Profile 迁移包使用密码加密，包含第三方 API/SSH 元数据、密钥和托管浏览器登录数据；同名导入会替换，非同名会合并。
+- 数据目录已迁移到稳定用户配置目录，并支持自定义目录、便携模式、旧数据兼容迁移、原子写入和备份。
+- 自动续跑、错误恢复、错误统计、Git 快照和回滚功能已完成基础集成。
+- 已完成源码编译、导入检查、错误恢复验证脚本、迁移逻辑 smoke test、PyInstaller 打包。
+
+## 已知边界
+
+- 浏览器 Profile 可以隔离 Cookies、本地存储、IndexedDB、缓存等站点数据，但不能保证跨机器被网页识别为完全相同设备；网页仍可能基于 IP、系统、显卡、字体、Canvas、WebGL、时区等生成指纹。
+- Chromium Cookies 在 Windows 上可能受系统账号加密机制影响；迁移后如登录态失效，需要在新机器重新登录一次。
+- SSH 同步依赖远程服务器权限、shell 行为和 Claude/Codex 安装路径；已做多路径兼容，但仍建议用真实服务器做一次端到端验证。
+- 错误恢复 Hook 需要在 GUI 的“通用设置”中启用后才会安装；未启用时验证脚本会报告 Hook 未安装。
 
 ## 仍需真实环境验证
 
-- 使用真实 API Key 做端到端连接测试:
-  - DeepSeek: Codex OpenAI-compatible chat endpoint 与 Claude Code Anthropic-compatible endpoint
-  - Kimi: Codex OpenAI-compatible chat endpoint；如果使用中国平台密钥，base_url 需要改为 `https://api.moonshot.cn/v1`
-  - GLM: Coding Plan endpoint 与 Claude Code 环境变量映射
-- 使用真实 SSH 服务器验证远程同步和远程拉取，重点确认 Codex 的 `[model_providers.<id>]` 写入。
-- 如需启用错误自动恢复，需要在 GUI 中启用并安装 hook；当前本机验证显示 Claude/Codex 的 hook 尚未安装。
+- 使用真实 API Key 做端到端连接测试：DeepSeek、Kimi、GLM、自定义 OpenAI-compatible / Anthropic-compatible。
+- 使用真实 SSH 服务器验证推送第三方 API、推送官方账号、远程拉取第三方 API 配置。
+- 使用真实 Chrome / Edge 托管 Profile 验证导出、导入、启动和站点登录态恢复。

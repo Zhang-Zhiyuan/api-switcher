@@ -366,7 +366,13 @@ class ConfigValidator:
 
                 for profile in test_profiles:
                     try:
-                        success, message = ssh_manager.test_connection(profile)
+                        client = ssh_manager.connect(profile, timeout=4, max_retries=1)
+                        stdout, _stderr = ssh_manager.execute_command(
+                            client,
+                            "printf 'Connection OK' 2>/dev/null || echo Connection OK",
+                            timeout=4,
+                        )
+                        success = "Connection OK" in stdout
                         if success:
                             connected_count += 1
                         else:
@@ -425,8 +431,6 @@ class ConfigValidator:
                         api_key = security.get_secret(getattr(profile, "primary_api_key_ref", None)) or ""
 
                     if api_key:
-                        self._add_result(category, f"Claude ({active_claude})", "ok", "正在测试...")
-
                         # 测试连接
                         result = APITester.test_claude_api(
                             api_key,
@@ -472,8 +476,6 @@ class ConfigValidator:
                     api_key = security.get_secret(profile.api_key_ref) if profile.api_key_ref else ""
 
                     if api_key:
-                        self._add_result(category, f"Codex ({active_codex})", "ok", "正在测试...")
-
                         # 测试连接
                         result = APITester.test_openai_api(
                             api_key,
