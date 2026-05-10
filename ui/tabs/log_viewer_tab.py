@@ -8,7 +8,7 @@ from tkinter import filedialog
 from datetime import datetime
 
 from core.log_handler import log_manager
-from ui.theme import COLORS, button_style, font
+from ui.theme import COLORS, button_style, combo_style, font, textbox_style
 from ui.widgets.toast import show_toast
 
 
@@ -85,7 +85,8 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             filter_bar,
             values=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
             width=120,
-            command=self._on_level_change
+            command=self._on_level_change,
+            **combo_style(),
         )
         self._level_combo.set("DEBUG")
         self._level_combo.pack(side="left", padx=(0, 12))
@@ -117,11 +118,8 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._log_text = ctk.CTkTextbox(
             log_frame,
             wrap="word",
-            font=("Consolas", 11),
-            fg_color=COLORS["surface"],
-            text_color=COLORS["text"],
-            border_width=0,
-            activate_scrollbars=True
+            activate_scrollbars=True,
+            **textbox_style(monospace=True),
         )
         self._log_text.pack(fill="both", expand=True, padx=2, pady=2)
 

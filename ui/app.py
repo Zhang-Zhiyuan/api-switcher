@@ -41,10 +41,9 @@ class App(ctk.CTk):
         # Top bar
         topbar = ctk.CTkFrame(shell, fg_color="transparent")
         topbar.pack(fill="x", pady=(0, 14))
-        topbar.grid_columnconfigure(0, weight=1)
 
         title_area = ctk.CTkFrame(topbar, fg_color="transparent")
-        title_area.grid(row=0, column=0, sticky="ew")
+        title_area.pack(fill="x")
 
         ctk.CTkLabel(
             title_area,
@@ -71,7 +70,7 @@ class App(ctk.CTk):
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        action_panel.grid(row=0, column=1, sticky="e", padx=(18, 0))
+        action_panel.pack(fill="x", pady=(10, 0))
 
         # Quick switch menu
         switch_frame = ctk.CTkFrame(action_panel, fg_color="transparent")
@@ -106,7 +105,7 @@ class App(ctk.CTk):
 
         # 按钮区域
         button_group = ctk.CTkFrame(action_panel, fg_color="transparent")
-        button_group.pack(side="left", padx=(0, 12), pady=9)
+        button_group.pack(side="right", padx=(0, 12), pady=9)
         ctk.CTkButton(
             button_group,
             text="健康检查",

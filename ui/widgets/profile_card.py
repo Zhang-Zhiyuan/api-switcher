@@ -47,7 +47,7 @@ class ProfileCard(ctk.CTkFrame):
             justify="left",
         )
         name_label.pack(side="left", fill="x", expand=True, padx=(7, 0))
-        bind_wraplength(title_area, name_label, padding=300, min_width=140, max_width=520)
+        bind_wraplength(title_area, name_label, padding=120, min_width=160, max_width=760)
 
         if is_active:
             active_tag = ctk.CTkLabel(
@@ -62,57 +62,40 @@ class ProfileCard(ctk.CTkFrame):
             )
             active_tag.pack(side="left", padx=(8, 0))
 
-        btn_frame = ctk.CTkFrame(header, fg_color="transparent")
-        btn_frame.pack(side="right")
+        actions = []
 
         if not is_active and on_switch:
-            ctk.CTkButton(
-                btn_frame,
-                text=switch_label,
-                width=76 if len(switch_label) > 2 else 62,
-                command=lambda: on_switch(name),
-                **button_style("primary", compact=True),
-            ).pack(side="left", padx=(0, 6))
+            actions.append((switch_label, 76 if len(switch_label) > 2 else 62, "primary", lambda: on_switch(name)))
 
         if on_test:
-            ctk.CTkButton(
-                btn_frame,
-                text="测试",
-                width=58,
-                command=lambda: on_test(name),
-                **button_style("accent", compact=True),
-            ).pack(side="left", padx=(0, 6))
+            actions.append(("测试", 58, "accent", lambda: on_test(name)))
 
         if on_edit:
-            ctk.CTkButton(
-                btn_frame,
-                text="编辑",
-                width=58,
-                command=lambda: on_edit(name),
-                **button_style("secondary", compact=True),
-            ).pack(side="left", padx=(0, 6))
+            actions.append(("编辑", 58, "secondary", lambda: on_edit(name)))
 
         if on_clone:
-            ctk.CTkButton(
-                btn_frame,
-                text="复制",
-                width=58,
-                command=lambda: on_clone(name),
-                **button_style("secondary", compact=True),
-            ).pack(side="left", padx=(0, 6))
+            actions.append(("复制", 58, "secondary", lambda: on_clone(name)))
 
         if on_delete:
-            ctk.CTkButton(
-                btn_frame,
-                text="删除",
-                width=58,
-                command=lambda: on_delete(name),
-                **button_style("danger", compact=True),
-            ).pack(side="left")
+            actions.append(("删除", 58, "danger", lambda: on_delete(name)))
+
+        if actions:
+            actions_row = ctk.CTkFrame(self, fg_color="transparent")
+            actions_row.pack(fill="x", padx=14, pady=(0, 8))
+            btn_frame = ctk.CTkFrame(actions_row, fg_color="transparent")
+            btn_frame.pack(anchor="e")
+            for index, (text, width, kind, command) in enumerate(actions):
+                ctk.CTkButton(
+                    btn_frame,
+                    text=text,
+                    width=width,
+                    command=command,
+                    **button_style(kind, compact=True),
+                ).pack(side="left", padx=(0, 6 if index < len(actions) - 1 else 0))
 
         # Info lines
         info_frame = ctk.CTkFrame(self, fg_color="transparent")
-        info_frame.pack(fill="x", padx=14, pady=(2, 12))
+        info_frame.pack(fill="x", padx=14, pady=(2 if not actions else 0, 12))
         for line in info_lines:
             lbl = ctk.CTkLabel(
                 info_frame,

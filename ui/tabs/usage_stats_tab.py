@@ -126,7 +126,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             top_section,
-            text="🏆 最常用配置 (Top 10)",
+            text="最常用配置 (Top 10)",
             text_color=COLORS["text"],
             font=font(14, "bold"),
         ).pack(anchor="w", padx=15, pady=(15, 10))
@@ -146,7 +146,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             recent_section,
-            text="🕒 最近使用配置",
+            text="最近使用配置",
             text_color=COLORS["text"],
             font=font(14, "bold"),
         ).pack(anchor="w", padx=15, pady=(15, 10))
@@ -169,7 +169,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             trend_header,
-            text="📈 使用趋势",
+            text="使用趋势",
             text_color=COLORS["text"],
             font=font(14, "bold"),
         ).pack(side="left")
@@ -503,7 +503,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
             ctk.CTkLabel(
                 legend_frame,
-                text="📊 切换次数",
+                text="切换次数",
                 text_color=COLORS["muted"],
                 font=font(10),
             ).pack(side="left", padx=10)
@@ -512,7 +512,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             if max_tokens > 0:
                 ctk.CTkLabel(
                     legend_frame,
-                    text=f"💬 Token总量: {format_token_count(sum(d['total_tokens'] for d in trend_data))}",
+                    text=f"Token 总量: {format_token_count(sum(d['total_tokens'] for d in trend_data))}",
                     text_color=COLORS["muted"],
                     font=font(10),
                 ).pack(side="left", padx=10)
