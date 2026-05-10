@@ -103,3 +103,53 @@ def test_invalid_account_snapshot_is_reported(isolated_accounts):
     assert "不可读取" in reason
     with pytest.raises(ValueError, match="不可读取"):
         switcher.switch_codex_account("broken")
+
+
+def test_import_current_api_configs_use_station_names(isolated_accounts):
+    parser.write_claude_settings({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "relay-token",
+            "ANTHROPIC_BASE_URL": "https://relay.example.com/anthropic",
+        },
+        "model": "claude-sonnet-4",
+    })
+    claude_profile = profile_manager.import_current_claude()
+    assert claude_profile is not None
+    assert claude_profile.name == "Claude-relay.example.com-claude-sonnet-4"
+    assert claude_profile.provider == "custom"
+
+    toml_parser.write_codex_config({
+        "model": "gpt-5.5",
+        "model_provider": "my-relay",
+        "model_providers": {
+            "my-relay": {
+                "name": "KiloCode 中转",
+                "base_url": "https://relay.example.com/v1",
+            }
+        },
+    })
+    auth_parser.write_codex_auth({"auth_mode": "api_key", "OPENAI_API_KEY": "relay-key"})
+    codex_profile = profile_manager.import_current_codex()
+    assert codex_profile is not None
+    assert codex_profile.name == "Codex-KiloCode-中转-gpt-5.5"
+
+
+def test_import_current_accounts_use_human_identity_names(isolated_accounts):
+    parser.CLAUDE_CREDENTIALS.parent.mkdir(parents=True)
+    parser.CLAUDE_CREDENTIALS.write_text(
+        json.dumps({"token": _jwt({"name": "张三 Claude", "email": "zhang@example.test"})}),
+        encoding="utf-8",
+    )
+    claude_account = profile_manager.import_current_claude_account()
+    assert claude_account is not None
+    assert claude_account.identity == "张三 Claude"
+    assert claude_account.name == "Claude-账号-张三-Claude"
+
+    auth_parser.write_codex_auth({
+        "auth_mode": "chatgpt",
+        "tokens": {"id_token": _jwt({"preferred_username": "zzy", "email": "zzy@example.test"})},
+    })
+    codex_account = profile_manager.import_current_codex_account()
+    assert codex_account is not None
+    assert codex_account.identity == "zzy"
+    assert codex_account.name == "Codex-账号-zzy"

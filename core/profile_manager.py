@@ -6,6 +6,7 @@ import shutil
 import base64
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
 from models.profile import (
@@ -328,6 +329,9 @@ def detect_claude_provider(settings: dict) -> str:
         if provider.claude_env and all(env.get(key) == value for key, value in provider.claude_env.items()):
             return provider.name
 
+    if base_url and base_url not in {"https://api.anthropic.com", "https://api.anthropic.com/v1"}:
+        return "custom"
+
     return "anthropic"
 
 
@@ -428,10 +432,12 @@ def _claude_profile_kwargs_from_current(name: str, settings: dict, config: dict)
 
 
 def _build_claude_import_name(settings: dict, config: dict) -> str:
-    provider = _safe_name_part(detect_claude_provider(settings), "anthropic")
+    provider = _safe_name_part(_claude_station_label(settings), "Claude-API")
     model = _safe_name_part(settings.get("model"), "model")
+    if model and model != "model":
+        return f"Claude-{provider}-{model}"
     identity = _safe_name_part(_claude_auth_identity_from_current(settings, config), "auth")
-    return f"Claude-{provider}-{model}-{identity}"
+    return f"Claude-{provider}-{identity}"
 
 
 def _claude_profile_config_matches(profile: ClaudeProfile, settings: dict) -> bool:
@@ -698,7 +704,7 @@ def _pick_claude_account_import_name(identity: str) -> str:
     for profile in profiles:
         if profile.identity == identity:
             return profile.name
-    return _account_import_name("Claude-account", identity, {profile.name for profile in profiles})
+    return _account_import_name("Claude-账号", identity, {profile.name for profile in profiles})
 
 
 def import_current_claude_account() -> ClaudeAccountProfile | None:
@@ -832,9 +838,57 @@ def _short_fingerprint(value: object) -> str:
 def _safe_name_part(value: object, fallback: str) -> str:
     text = str(value or "").strip() or fallback
     text = re.sub(r"\s+", "-", text)
-    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text)
+    text = re.sub(r"[^\w.-]+", "-", text, flags=re.UNICODE)
     text = text.strip("-_.")
     return (text or fallback)[:40]
+
+
+def _host_label(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"https://{text}"
+    try:
+        host = urlparse(text).hostname or ""
+    except Exception:
+        host = ""
+    host = host.lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _provider_display_name(provider_id: object, fallback: str = "custom") -> str:
+    provider_name = str(provider_id or "").strip() or fallback
+    try:
+        from core.providers import ProviderRegistry
+
+        provider = ProviderRegistry.get_provider(provider_name)
+        if provider and provider.display_name:
+            return provider.display_name
+    except Exception:
+        pass
+    return provider_name
+
+
+def _claude_station_label(settings: dict) -> str:
+    env = _claude_env(settings)
+    provider_id = detect_claude_provider(settings)
+    if provider_id == "custom":
+        return _host_label(env.get("ANTHROPIC_BASE_URL")) or "Custom"
+    return _provider_display_name(provider_id, provider_id)
+
+
+def _codex_station_label(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    for value in [custom.get("name"), custom.get("display_name")]:
+        if value:
+            return str(value)
+    if provider_id == "custom" or custom:
+        return _host_label(custom.get("base_url")) or _provider_display_name(provider_id, provider_id)
+    return _provider_display_name(provider_id, provider_id)
 
 
 def _unique_profile_name(existing: set[str], preferred: str) -> str:
@@ -891,36 +945,56 @@ def _identity_from_json(data: dict, fallback_prefix: str = "official-login") -> 
     if not isinstance(data, dict) or not data:
         return f"{fallback_prefix}-empty"
 
-    direct_keys = [
+    human_keys = [
+        "name",
+        "display_name",
+        "displayName",
+        "full_name",
+        "nickname",
+        "preferred_username",
+        "username",
+    ]
+    id_keys = [
         "email",
         "user_email",
         "account_email",
-        "preferred_username",
-        "username",
         "userId",
         "user_id",
         "account_id",
         "sub",
     ]
-    candidate_values: list[str] = []
-    for key in direct_keys:
+    human_values: list[str] = []
+    id_values: list[str] = []
+
+    for key in human_keys:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
-            candidate_values.append(value.strip())
+            human_values.append(value.strip())
+    for key in id_keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            id_values.append(value.strip())
 
     for value in _iter_nested_strings(data):
         if "@" in value and len(value) <= 160:
-            candidate_values.append(value.strip())
+            id_values.append(value.strip())
         jwt_payload = _decode_jwt_payload(value)
-        for key in direct_keys:
+        for key in human_keys:
             jwt_value = jwt_payload.get(key)
             if isinstance(jwt_value, str) and jwt_value.strip():
-                candidate_values.append(jwt_value.strip())
+                human_values.append(jwt_value.strip())
+        for key in id_keys:
+            jwt_value = jwt_payload.get(key)
+            if isinstance(jwt_value, str) and jwt_value.strip():
+                id_values.append(jwt_value.strip())
 
-    for value in candidate_values:
+    for value in human_values:
+        if value:
+            return value
+    for value in id_values:
         if "@" in value:
             return value
-    for value in candidate_values:
+    for value in id_values:
         if value:
             return f"id-{_short_fingerprint(value)}"
     return f"{fallback_prefix}-{_json_fingerprint(data)}"
@@ -948,10 +1022,12 @@ def describe_codex_profile_identity(profile: CodexProfile) -> str:
 
 
 def _build_codex_import_name(config: dict, auth: dict) -> str:
-    provider = _safe_name_part(config.get("model_provider"), "openai")
+    provider = _safe_name_part(_codex_station_label(config), "Codex-API")
     model = _safe_name_part(config.get("model"), "model")
+    if model and model != "model":
+        return f"Codex-{provider}-{model}"
     identity = _safe_name_part(_codex_auth_identity_from_auth(auth), "auth")
-    return f"Codex-{provider}-{model}-{identity}"
+    return f"Codex-{provider}-{identity}"
 
 
 def _codex_model_providers(config: dict) -> dict:
@@ -1274,7 +1350,7 @@ def _pick_codex_account_import_name(identity: str) -> str:
     for profile in profiles:
         if profile.identity == identity:
             return profile.name
-    return _account_import_name("Codex-account", identity, {profile.name for profile in profiles})
+    return _account_import_name("Codex-账号", identity, {profile.name for profile in profiles})
 
 
 def import_current_codex_account() -> CodexAccountProfile | None:
