@@ -1,6 +1,6 @@
 """Dialog for displaying API test results."""
 import customtkinter as ctk
-from ui.theme import COLORS, button_style, font
+from ui.theme import COLORS, button_style, center_window, font
 
 
 class APITestResultDialog(ctk.CTkToplevel):
@@ -18,13 +18,8 @@ class APITestResultDialog(ctk.CTkToplevel):
         self.transient(parent)
         self.grab_set()
 
-        # Center on parent
-        self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 500) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 400) // 2
-        self.geometry(f"+{x}+{y}")
-
         self._build_ui(test_result, profile_name)
+        center_window(self, parent)
 
     def _build_ui(self, result, profile_name: str):
         """Build the dialog UI."""

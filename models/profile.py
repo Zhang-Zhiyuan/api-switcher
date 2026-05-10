@@ -50,6 +50,38 @@ class CodexProfile:
 
 
 @dataclass
+class ClaudeAccountProfile:
+    name: str
+    credentials_ref: str
+    identity: str = "official-login"
+    created_at: str = ""
+    notes: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ClaudeAccountProfile":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class CodexAccountProfile:
+    name: str
+    auth_json_ref: str
+    identity: str = "official-login"
+    created_at: str = ""
+    notes: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CodexAccountProfile":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class BackupEntry:
     timestamp: str
     directory: Path

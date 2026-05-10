@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 import customtkinter as ctk
-from ui.theme import COLORS, button_style, font
+from ui.theme import COLORS, button_style, combo_style, font
 from core.usage_stats import usage_stats, format_token_count
 from ui.widgets.toast import show_toast
 
@@ -62,10 +62,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             values=["全部时间", "今日", "本周", "本月", "最近7天", "最近30天"],
             width=110,
             command=lambda _: self.refresh(),
-            fg_color=COLORS["surface"],
-            button_color=COLORS["primary"],
-            button_hover_color=COLORS["primary_hover"],
-            border_color=COLORS["border_soft"],
+            **combo_style(),
         )
         self.date_filter.pack(side="left", padx=5)
         self.date_filter.set("全部时间")
@@ -78,10 +75,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             values=["全部", "Claude", "Codex"],
             width=100,
             command=lambda _: self.refresh(),
-            fg_color=COLORS["surface"],
-            button_color=COLORS["primary"],
-            button_hover_color=COLORS["primary_hover"],
-            border_color=COLORS["border_soft"],
+            **combo_style(),
         )
         self.type_filter.pack(side="left", padx=5)
         self.type_filter.set("全部")

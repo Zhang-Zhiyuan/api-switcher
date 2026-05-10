@@ -38,6 +38,7 @@ def switch_claude_profile(name: str) -> None:
     vscode_parser.write_vscode_settings(vscode)
 
     profile_manager.set_active_claude(name)
+    profile_manager.set_active_claude_account(None)
 
     # Record usage statistics
     usage_recorder.start_session(name, "claude")
@@ -70,11 +71,66 @@ def switch_codex_profile(name: str) -> None:
     auth_parser.write_codex_auth(auth)
 
     profile_manager.set_active_codex(name)
+    profile_manager.set_active_codex_account(None)
 
     # Record usage statistics
     usage_recorder.start_session(name, "codex")
 
     logger.info(f"Switched Codex profile to: {name}")
+
+
+def switch_claude_account(name: str) -> None:
+    """Switch Claude Code back to a saved official login snapshot."""
+    profiles = profile_manager.list_claude_account_profiles()
+    target = next((p for p in profiles if p.name == name), None)
+    if not target:
+        raise ValueError(f"Claude account '{name}' not found")
+
+    credentials = profile_manager.get_claude_account_credentials(target)
+    if not credentials:
+        raise ValueError("该 Claude 账号快照没有可用凭据")
+
+    backup_manager.create_backup(f"切换 Claude 官方账号到 {name}")
+
+    parser.write_claude_credentials(credentials)
+
+    settings = parser.read_claude_settings()
+    parser.write_claude_settings(parser.clear_claude_api_overrides(settings))
+
+    current_config = parser.read_claude_config()
+    config = parser.clear_claude_config_auth(current_config)
+    if config or current_config:
+        parser.write_claude_config(config)
+
+    profile_manager.set_active_claude_account(name)
+    profile_manager.set_active_claude(None)
+
+    logger.info(f"Switched Claude official account to: {name}")
+
+
+def switch_codex_account(name: str) -> None:
+    """Switch Codex CLI back to a saved ChatGPT login snapshot."""
+    profiles = profile_manager.list_codex_account_profiles()
+    target = next((p for p in profiles if p.name == name), None)
+    if not target:
+        raise ValueError(f"Codex account '{name}' not found")
+
+    auth = profile_manager.get_codex_account_auth(target)
+    if not auth:
+        raise ValueError("该 Codex 账号快照没有可用 auth.json")
+
+    backup_manager.create_backup(f"切换 Codex 官方账号到 {name}")
+
+    auth_parser.write_codex_auth(auth)
+
+    config = toml_parser.read_codex_config()
+    config = toml_parser.apply_codex_official_account(config)
+    toml_parser.write_codex_config(config)
+
+    profile_manager.set_active_codex_account(name)
+    profile_manager.set_active_codex(None)
+
+    logger.info(f"Switched Codex official account to: {name}")
 
 
 def toggle_bypass_permissions(enabled: bool) -> None:

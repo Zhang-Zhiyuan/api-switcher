@@ -8,7 +8,7 @@ from ui.tabs.ssh_tab import SSHTab
 from ui.tabs.browser_tab import BrowserTab
 from ui.tabs.log_viewer_tab import LogViewerTab
 from ui.tabs.usage_stats_tab import UsageStatsTab
-from ui.theme import COLORS, button_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
 from core.tray_manager import TrayManager
 from core import profile_manager
 
@@ -22,8 +22,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("API 配置切换器")
-        self.geometry("1040x720")
-        self.minsize(860, 560)
+        self.geometry("1120x760")
+        self.minsize(980, 620)
         self.configure(fg_color=COLORS["app_bg"])
 
         # Initialize tray manager
@@ -36,82 +36,92 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         shell = ctk.CTkFrame(self, fg_color="transparent")
-        shell.pack(fill="both", expand=True, padx=18, pady=(16, 12))
+        shell.pack(fill="both", expand=True, padx=20, pady=(18, 14))
 
         # Top bar
         topbar = ctk.CTkFrame(shell, fg_color="transparent")
-        topbar.pack(fill="x", pady=(0, 12))
+        topbar.pack(fill="x", pady=(0, 14))
+        topbar.grid_columnconfigure(0, weight=1)
 
         title_area = ctk.CTkFrame(topbar, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        title_area.grid(row=0, column=0, sticky="ew")
 
         ctk.CTkLabel(
             title_area,
             text="API 配置切换器",
             text_color=COLORS["text"],
-            font=font(24, "bold"),
+            font=font(22, "bold"),
         ).pack(anchor="w")
 
-        ctk.CTkLabel(
+        subtitle_label = ctk.CTkLabel(
             title_area,
-            text="集中管理 Claude Code、Codex CLI、SSH 同步与备份",
+            text="集中管理 Claude Code、Codex CLI 的第三方 API Profile，以及本机浏览器 Profile",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(anchor="w", pady=(2, 0))
+            anchor="w",
+            justify="left",
+        )
+        subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(title_area, subtitle_label, padding=12, min_width=260, max_width=620)
+
+        action_panel = ctk.CTkFrame(
+            topbar,
+            fg_color=COLORS["surface"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border_soft"],
+        )
+        action_panel.grid(row=0, column=1, sticky="e", padx=(18, 0))
 
         # Quick switch menu
-        switch_frame = ctk.CTkFrame(topbar, fg_color="transparent")
-        switch_frame.pack(side="right", padx=(0, 10))
+        switch_frame = ctk.CTkFrame(action_panel, fg_color="transparent")
+        switch_frame.pack(side="left", padx=(12, 8), pady=9)
 
         ctk.CTkLabel(
             switch_frame,
-            text="快速切换:",
+            text="快速切换",
             text_color=COLORS["muted"],
             font=font(11),
-        ).pack(side="left", padx=(0, 5))
+        ).pack(side="left", padx=(0, 8))
 
         # Claude quick switch
         self.claude_switch = ctk.CTkComboBox(
             switch_frame,
-            width=150,
+            width=148,
             command=self._quick_switch_claude,
-            fg_color=COLORS["surface"],
-            button_color=COLORS["primary"],
-            button_hover_color=COLORS["primary_hover"],
-            border_color=COLORS["border_soft"],
+            **combo_style(),
         )
-        self.claude_switch.pack(side="left", padx=2)
-        self.claude_switch.set("Claude")
+        self.claude_switch.pack(side="left", padx=(0, 6))
+        self.claude_switch.set("Claude Profile")
 
         # Codex quick switch
         self.codex_switch = ctk.CTkComboBox(
             switch_frame,
-            width=150,
+            width=148,
             command=self._quick_switch_codex,
-            fg_color=COLORS["surface"],
-            button_color=COLORS["primary"],
-            button_hover_color=COLORS["primary_hover"],
-            border_color=COLORS["border_soft"],
+            **combo_style(),
         )
-        self.codex_switch.pack(side="left", padx=2)
-        self.codex_switch.set("Codex")
+        self.codex_switch.pack(side="left")
+        self.codex_switch.set("Codex Profile")
 
         # 按钮区域
+        button_group = ctk.CTkFrame(action_panel, fg_color="transparent")
+        button_group.pack(side="left", padx=(0, 12), pady=9)
         ctk.CTkButton(
-            topbar,
+            button_group,
             text="健康检查",
             width=96,
             command=self._show_health_check,
             **button_style("accent"),
-        ).pack(side="right", padx=(10, 0))
+        ).pack(side="left", padx=(8, 0))
 
         ctk.CTkButton(
-            topbar,
+            button_group,
             text="刷新全部",
             width=96,
             command=self.refresh_all,
             **button_style("secondary"),
-        ).pack(side="right", padx=(10, 0))
+        ).pack(side="left", padx=(8, 0))
 
         # Tab view
         self._tabview = ctk.CTkTabview(
@@ -145,7 +155,13 @@ class App(ctk.CTk):
             tab.pack(fill="both", expand=True)
 
         # Status bar
-        footer = ctk.CTkFrame(shell, fg_color="transparent")
+        footer = ctk.CTkFrame(
+            shell,
+            fg_color=COLORS["surface"],
+            corner_radius=6,
+            border_width=1,
+            border_color=COLORS["border_soft"],
+        )
         footer.pack(fill="x", pady=(8, 0))
         self._status = ctk.CTkLabel(
             footer,
@@ -153,7 +169,7 @@ class App(ctk.CTk):
             text_color=COLORS["muted"],
             font=font(11),
         )
-        self._status.pack(anchor="w")
+        self._status.pack(anchor="w", padx=10, pady=6)
 
         # Start tray icon when optional dependency is available.
         if self.tray_manager.is_available():
@@ -172,38 +188,38 @@ class App(ctk.CTk):
             claude_profiles = profile_manager.list_switchable_claude_profiles()
             claude_names = [p.name for p in claude_profiles]
             if claude_names:
-                self.claude_switch.configure(values=claude_names)
+                self.claude_switch.configure(values=claude_names, state="normal")
                 # Set current active profile
                 current = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
                 if current in claude_names:
                     self.claude_switch.set(current)
                 else:
-                    self.claude_switch.set(claude_names[0] if claude_names else "Claude")
+                    self.claude_switch.set(claude_names[0] if claude_names else "Claude Profile")
             else:
-                self.claude_switch.configure(values=["无配置"])
-                self.claude_switch.set("无配置")
+                self.claude_switch.configure(values=["暂无 Claude Profile"], state="disabled")
+                self.claude_switch.set("暂无 Claude Profile")
 
             # Load Codex profiles
             codex_profiles = profile_manager.list_switchable_codex_profiles()
             codex_names = [p.name for p in codex_profiles]
             if codex_names:
-                self.codex_switch.configure(values=codex_names)
+                self.codex_switch.configure(values=codex_names, state="normal")
                 # Set current active profile
                 current = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
                 if current in codex_names:
                     self.codex_switch.set(current)
                 else:
-                    self.codex_switch.set(codex_names[0] if codex_names else "Codex")
+                    self.codex_switch.set(codex_names[0] if codex_names else "Codex Profile")
             else:
-                self.codex_switch.configure(values=["无配置"])
-                self.codex_switch.set("无配置")
+                self.codex_switch.configure(values=["暂无 Codex Profile"], state="disabled")
+                self.codex_switch.set("暂无 Codex Profile")
 
         except Exception as e:
             logger.error(f"Failed to load quick switch profiles: {e}", exc_info=True)
 
     def _quick_switch_claude(self, profile_name: str):
         """Quick switch Claude profile."""
-        if profile_name == "Claude" or profile_name == "无配置":
+        if profile_name in {"Claude", "Claude Profile", "暂无 Claude Profile", "无配置"}:
             return
 
         try:
@@ -230,7 +246,7 @@ class App(ctk.CTk):
 
     def _quick_switch_codex(self, profile_name: str):
         """Quick switch Codex profile."""
-        if profile_name == "Codex" or profile_name == "无配置":
+        if profile_name in {"Codex", "Codex Profile", "暂无 Codex Profile", "无配置"}:
             return
 
         try:

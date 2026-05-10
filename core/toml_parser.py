@@ -92,3 +92,13 @@ def apply_codex_profile(config: dict, profile) -> dict:
                 custom["wire_api"] = wire_api
 
     return config
+
+
+def apply_codex_official_account(config: dict) -> dict:
+    """Make Codex use file-backed ChatGPT credentials instead of third-party API auth."""
+    config = dict(config)
+    config["model_provider"] = "openai"
+    config["cli_auth_credentials_store"] = "file"
+    if not config.get("model"):
+        config["model"] = "gpt-5.5"
+    return config

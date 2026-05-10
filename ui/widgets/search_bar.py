@@ -3,7 +3,7 @@
 """
 import customtkinter as ctk
 from typing import Callable, Optional
-from ui.theme import COLORS, font
+from ui.theme import COLORS, font, input_style
 
 
 class SearchBar(ctk.CTkFrame):
@@ -33,11 +33,7 @@ class SearchBar(ctk.CTkFrame):
         self.search_entry = ctk.CTkEntry(
             self,
             placeholder_text=placeholder,
-            height=32,
-            font=font(12),
-            fg_color=COLORS["surface"],
-            border_color=COLORS["border_soft"],
-            placeholder_text_color=COLORS["muted"]
+            **input_style(),
         )
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 

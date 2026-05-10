@@ -3,10 +3,19 @@ import json
 import logging
 import re
 import shutil
+import base64
+from datetime import datetime
 from pathlib import Path
 
-from config.paths import PROFILES_FILE
-from models.profile import ClaudeProfile, CodexProfile, SSHProfile, BrowserProfile
+from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
+from models.profile import (
+    ClaudeProfile,
+    CodexProfile,
+    ClaudeAccountProfile,
+    CodexAccountProfile,
+    SSHProfile,
+    BrowserProfile,
+)
 from core import security
 
 logger = logging.getLogger(__name__)
@@ -14,12 +23,16 @@ logger = logging.getLogger(__name__)
 PROFILE_LIST_KEYS = (
     "claude_profiles",
     "codex_profiles",
+    "claude_account_profiles",
+    "codex_account_profiles",
     "ssh_profiles",
     "browser_profiles",
 )
 ACTIVE_PROFILE_KEYS = (
     "active_claude_profile",
     "active_codex_profile",
+    "active_claude_account",
+    "active_codex_account",
     "active_ssh_profile",
     "active_browser_profile",
 )
@@ -28,13 +41,17 @@ ACTIVE_PROFILE_KEYS = (
 def _get_default_store() -> dict:
     """Return default empty store structure."""
     return {
-        "version": 4,  # 更新版本号以支持新的 provider 字段
+        "version": 5,  # provider fields plus local-only official account snapshots
         "claude_profiles": [],
         "codex_profiles": [],
+        "claude_account_profiles": [],
+        "codex_account_profiles": [],
         "ssh_profiles": [],
         "browser_profiles": [],
         "active_claude_profile": None,
         "active_codex_profile": None,
+        "active_claude_account": None,
+        "active_codex_account": None,
         "active_ssh_profile": None,
         "active_browser_profile": None,
     }
@@ -55,6 +72,9 @@ def _normalize_store(store: dict) -> bool:
         logger.warning("Invalid profile store version, resetting to current version")
         store["version"] = defaults["version"]
         changed = True
+    elif store["version"] < defaults["version"]:
+        store["version"] = defaults["version"]
+        changed = True
 
     for key in PROFILE_LIST_KEYS:
         if not isinstance(store.get(key), list):
@@ -71,6 +91,8 @@ def _normalize_store(store: dict) -> bool:
     active_links = {
         "active_claude_profile": "claude_profiles",
         "active_codex_profile": "codex_profiles",
+        "active_claude_account": "claude_account_profiles",
+        "active_codex_account": "codex_account_profiles",
         "active_ssh_profile": "ssh_profiles",
         "active_browser_profile": "browser_profiles",
     }
@@ -326,7 +348,7 @@ def get_active_claude_name() -> str | None:
     return _load_store().get("active_claude_profile")
 
 
-def set_active_claude(name: str) -> None:
+def set_active_claude(name: str | None) -> None:
     store = _load_store()
     store["active_claude_profile"] = name
     _save_store(store)
@@ -508,14 +530,7 @@ def _pick_claude_import_name(settings: dict, config: dict) -> str:
         if profile.name.lower() not in generic_names and _claude_profile_matches(profile, settings, config):
             return profile.name
 
-    existing = {profile.name for profile in profiles}
-    if base_name not in existing:
-        return base_name
-
-    index = 2
-    while f"{base_name}-{index}" in existing:
-        index += 1
-    return f"{base_name}-{index}"
+    return _unique_profile_name({profile.name for profile in profiles}, base_name)
 
 
 def save_claude_profile(profile: ClaudeProfile) -> None:
@@ -526,6 +541,45 @@ def save_claude_profile(profile: ClaudeProfile) -> None:
     profiles.append(profile.to_dict())
     store["claude_profiles"] = profiles
     _save_store(store)
+
+
+def clone_claude_profile(name: str) -> ClaudeProfile:
+    profiles = list_claude_profiles()
+    source = next((p for p in profiles if p.name == name), None)
+    if not source:
+        raise ValueError(f"Claude profile '{name}' not found")
+
+    new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
+    token_ref = f"claude:{new_name}:auth_token"
+    primary_ref = f"claude:{new_name}:primary_api_key"
+
+    token_value = (
+        security.get_secret(source.auth_token_ref)
+        or security.get_secret(getattr(source, "primary_api_key_ref", None))
+        or ""
+    )
+    primary_value = security.get_secret(getattr(source, "primary_api_key_ref", None)) or ""
+    if token_value:
+        security.set_secret(token_ref, token_value)
+    if primary_value:
+        security.set_secret(primary_ref, primary_value)
+
+    cloned = ClaudeProfile(
+        name=new_name,
+        auth_token_ref=token_ref,
+        primary_api_key_ref=primary_ref if primary_value else None,
+        base_url=source.base_url,
+        model=source.model,
+        effort_level=source.effort_level,
+        permissions_mode=source.permissions_mode,
+        skip_dangerous_prompt=source.skip_dangerous_prompt,
+        permissions_allow=list(source.permissions_allow or []),
+        additional_directories=list(source.additional_directories or []),
+        provider=source.provider,
+        custom_provider_name=source.custom_provider_name,
+    )
+    save_claude_profile(cloned)
+    return cloned
 
 
 def delete_claude_profile(name: str) -> None:
@@ -556,6 +610,148 @@ def delete_claude_profile(name: str) -> None:
     _save_store(store)
 
 
+# --- Claude Official Account CRUD ---
+
+def list_claude_account_profiles() -> list[ClaudeAccountProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("claude_account_profiles", []), ClaudeAccountProfile, "Claude account")
+
+
+def get_active_claude_account_name() -> str | None:
+    return _load_store().get("active_claude_account")
+
+
+def set_active_claude_account(name: str | None) -> None:
+    store = _load_store()
+    store["active_claude_account"] = name
+    _save_store(store)
+
+
+def save_claude_account_profile(profile: ClaudeAccountProfile) -> None:
+    store = _load_store()
+    profiles = store.get("claude_account_profiles", [])
+    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+    profiles.append(profile.to_dict())
+    store["claude_account_profiles"] = profiles
+    _save_store(store)
+
+
+def get_claude_account_credentials(profile: ClaudeAccountProfile) -> dict | None:
+    return security.get_secret_json(profile.credentials_ref)
+
+
+def _claude_account_identity_from_credentials(credentials: dict) -> str:
+    return _identity_from_json(credentials, "claude-login")
+
+
+def _claude_api_override_active(settings: dict, config: dict) -> bool:
+    env = _claude_env(settings)
+    override_keys = {
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    }
+    if any(env.get(key) for key in override_keys):
+        return True
+    if config.get("primaryApiKey"):
+        return True
+    return detect_claude_provider(settings) != "anthropic"
+
+
+def _pick_claude_account_import_name(identity: str) -> str:
+    profiles = list_claude_account_profiles()
+    for profile in profiles:
+        if profile.identity == identity:
+            return profile.name
+    return _account_import_name("Claude-account", identity, {profile.name for profile in profiles})
+
+
+def import_current_claude_account() -> ClaudeAccountProfile | None:
+    """Create a local-only account snapshot from Claude Code credentials."""
+    from core.parser import read_claude_credentials
+
+    credentials = read_claude_credentials()
+    if not credentials:
+        return None
+
+    identity = _claude_account_identity_from_credentials(credentials)
+    name = _pick_claude_account_import_name(identity)
+    ref = f"claude-account:{name}:credentials"
+    security.set_secret_json(ref, credentials)
+    return ClaudeAccountProfile(
+        name=name,
+        credentials_ref=ref,
+        identity=identity,
+        created_at=_now_iso(),
+    )
+
+
+def delete_claude_account_profile(name: str) -> None:
+    store = _load_store()
+    profile_refs = set()
+    for profile in store.get("claude_account_profiles", []):
+        if isinstance(profile, dict) and profile.get("name") == name:
+            ref = profile.get("credentials_ref")
+            if isinstance(ref, str) and ref:
+                profile_refs.add(ref)
+            break
+    for ref in profile_refs:
+        security.delete_secret(ref)
+    security.delete_secret(f"claude-account:{name}:credentials")
+
+    store["claude_account_profiles"] = [
+        p for p in store.get("claude_account_profiles", [])
+        if isinstance(p, dict) and p.get("name") != name
+    ]
+    if store.get("active_claude_account") == name:
+        store["active_claude_account"] = None
+    _save_store(store)
+
+
+def get_current_claude_account_name() -> str | None:
+    from core.parser import read_claude_settings, read_claude_config, read_claude_credentials
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    credentials = read_claude_credentials()
+    if not credentials or _claude_api_override_active(settings, config):
+        return None
+
+    identity = _claude_account_identity_from_credentials(credentials)
+    for profile in list_claude_account_profiles():
+        if profile.identity == identity:
+            return profile.name
+    return None
+
+
+def get_claude_account_runtime_summary() -> dict:
+    from core.parser import read_claude_settings, read_claude_config, read_claude_credentials
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    credentials = read_claude_credentials()
+    override_active = _claude_api_override_active(settings, config)
+    identity = _claude_account_identity_from_credentials(credentials) if credentials else "no-login"
+    profile_name = None
+    if credentials and not override_active:
+        for profile in list_claude_account_profiles():
+            if profile.identity == identity:
+                profile_name = profile.name
+                break
+
+    return {
+        "profile_name": profile_name,
+        "stored_active": get_active_claude_account_name(),
+        "identity": identity,
+        "has_credentials": bool(credentials),
+        "credentials_path": str(CLAUDE_CREDENTIALS),
+        "api_override_active": override_active,
+    }
+
+
 # --- Codex Profile CRUD ---
 
 def list_codex_profiles() -> list[CodexProfile]:
@@ -575,7 +771,7 @@ def get_active_codex_name() -> str | None:
     return _load_store().get("active_codex_profile")
 
 
-def set_active_codex(name: str) -> None:
+def set_active_codex(name: str | None) -> None:
     store = _load_store()
     store["active_codex_profile"] = name
     _save_store(store)
@@ -603,6 +799,100 @@ def _safe_name_part(value: object, fallback: str) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "-", text)
     text = text.strip("-_.")
     return (text or fallback)[:40]
+
+
+def _unique_profile_name(existing: set[str], preferred: str) -> str:
+    base = str(preferred or "").strip() or "Profile"
+    if base not in existing:
+        return base
+
+    index = 2
+    while f"{base}-{index}" in existing:
+        index += 1
+    return f"{base}-{index}"
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _json_fingerprint(data: object) -> str:
+    try:
+        text = json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(data)
+    return _short_fingerprint(text)
+
+
+def _decode_jwt_payload(value: str) -> dict:
+    parts = str(value or "").split(".")
+    if len(parts) < 2:
+        return {}
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        data = json.loads(decoded.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _iter_nested_strings(value: object, limit: int = 200):
+    seen = 0
+    stack = [value]
+    while stack and seen < limit:
+        item = stack.pop()
+        if isinstance(item, str):
+            seen += 1
+            yield item
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
+def _identity_from_json(data: dict, fallback_prefix: str = "official-login") -> str:
+    if not isinstance(data, dict) or not data:
+        return f"{fallback_prefix}-empty"
+
+    direct_keys = [
+        "email",
+        "user_email",
+        "account_email",
+        "preferred_username",
+        "username",
+        "userId",
+        "user_id",
+        "account_id",
+        "sub",
+    ]
+    candidate_values: list[str] = []
+    for key in direct_keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            candidate_values.append(value.strip())
+
+    for value in _iter_nested_strings(data):
+        if "@" in value and len(value) <= 160:
+            candidate_values.append(value.strip())
+        jwt_payload = _decode_jwt_payload(value)
+        for key in direct_keys:
+            jwt_value = jwt_payload.get(key)
+            if isinstance(jwt_value, str) and jwt_value.strip():
+                candidate_values.append(jwt_value.strip())
+
+    for value in candidate_values:
+        if "@" in value:
+            return value
+    for value in candidate_values:
+        if value:
+            return f"id-{_short_fingerprint(value)}"
+    return f"{fallback_prefix}-{_json_fingerprint(data)}"
+
+
+def _account_import_name(prefix: str, identity: str, existing: set[str]) -> str:
+    safe_identity = _safe_name_part(identity, "official-login")
+    return _unique_profile_name(existing, f"{prefix}-{safe_identity}")
 
 
 def _codex_auth_identity_from_auth(auth: dict) -> str:
@@ -790,14 +1080,7 @@ def _pick_codex_import_name(config: dict, auth: dict) -> str:
         if profile.name.lower() not in generic_names and _codex_profile_matches(profile, config, auth):
             return profile.name
 
-    existing = {profile.name for profile in profiles}
-    if base_name not in existing:
-        return base_name
-
-    index = 2
-    while f"{base_name}-{index}" in existing:
-        index += 1
-    return f"{base_name}-{index}"
+    return _unique_profile_name({profile.name for profile in profiles}, base_name)
 
 
 def save_codex_profile(profile: CodexProfile) -> None:
@@ -807,6 +1090,37 @@ def save_codex_profile(profile: CodexProfile) -> None:
     profiles.append(profile.to_dict())
     store["codex_profiles"] = profiles
     _save_store(store)
+
+
+def clone_codex_profile(name: str) -> CodexProfile:
+    profiles = list_codex_profiles()
+    source = next((p for p in profiles if p.name == name), None)
+    if not source:
+        raise ValueError(f"Codex profile '{name}' not found")
+
+    new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
+    api_key_ref = None
+    api_key = security.get_secret(source.api_key_ref) or ""
+    if api_key:
+        api_key_ref = f"codex:{new_name}:api_key"
+        security.set_secret(api_key_ref, api_key)
+
+    cloned = CodexProfile(
+        name=new_name,
+        api_key_ref=api_key_ref,
+        model=source.model,
+        model_provider=source.model_provider,
+        model_reasoning_effort=source.model_reasoning_effort,
+        approval_policy=source.approval_policy,
+        sandbox_mode=source.sandbox_mode,
+        custom_base_url=source.custom_base_url,
+        custom_name=source.custom_name,
+        custom_wire_api=source.custom_wire_api,
+        custom_requires_openai_auth=source.custom_requires_openai_auth,
+        disable_response_storage=source.disable_response_storage,
+    )
+    save_codex_profile(cloned)
+    return cloned
 
 
 def delete_codex_profile(name: str) -> None:
@@ -835,6 +1149,146 @@ def delete_codex_profile(name: str) -> None:
     if store.get("active_codex_profile") == name:
         store["active_codex_profile"] = None
     _save_store(store)
+
+
+# --- Codex Official Account CRUD ---
+
+def list_codex_account_profiles() -> list[CodexAccountProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("codex_account_profiles", []), CodexAccountProfile, "Codex account")
+
+
+def get_active_codex_account_name() -> str | None:
+    return _load_store().get("active_codex_account")
+
+
+def set_active_codex_account(name: str | None) -> None:
+    store = _load_store()
+    store["active_codex_account"] = name
+    _save_store(store)
+
+
+def save_codex_account_profile(profile: CodexAccountProfile) -> None:
+    store = _load_store()
+    profiles = store.get("codex_account_profiles", [])
+    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+    profiles.append(profile.to_dict())
+    store["codex_account_profiles"] = profiles
+    _save_store(store)
+
+
+def get_codex_account_auth(profile: CodexAccountProfile) -> dict | None:
+    return security.get_secret_json(profile.auth_json_ref)
+
+
+def _codex_official_auth_available(auth: dict) -> bool:
+    if _codex_auth_mode(auth) != "chatgpt":
+        return False
+    tokens = auth.get("tokens")
+    return isinstance(tokens, dict) and any(bool(value) for value in tokens.values())
+
+
+def _codex_account_identity_from_auth(auth: dict) -> str:
+    return _identity_from_json(auth, "codex-login")
+
+
+def _codex_account_override_active(config: dict, auth: dict) -> bool:
+    if _codex_auth_mode(auth) != "chatgpt":
+        return True
+    return config.get("model_provider", "openai") != "openai"
+
+
+def _pick_codex_account_import_name(identity: str) -> str:
+    profiles = list_codex_account_profiles()
+    for profile in profiles:
+        if profile.identity == identity:
+            return profile.name
+    return _account_import_name("Codex-account", identity, {profile.name for profile in profiles})
+
+
+def import_current_codex_account() -> CodexAccountProfile | None:
+    """Create a local-only account snapshot from Codex auth.json."""
+    from core.auth_parser import read_codex_auth
+
+    auth = read_codex_auth()
+    if not _codex_official_auth_available(auth):
+        return None
+
+    identity = _codex_account_identity_from_auth(auth)
+    name = _pick_codex_account_import_name(identity)
+    ref = f"codex-account:{name}:auth_json"
+    security.set_secret_json(ref, auth)
+    return CodexAccountProfile(
+        name=name,
+        auth_json_ref=ref,
+        identity=identity,
+        created_at=_now_iso(),
+    )
+
+
+def delete_codex_account_profile(name: str) -> None:
+    store = _load_store()
+    profile_refs = set()
+    for profile in store.get("codex_account_profiles", []):
+        if isinstance(profile, dict) and profile.get("name") == name:
+            ref = profile.get("auth_json_ref")
+            if isinstance(ref, str) and ref:
+                profile_refs.add(ref)
+            break
+    for ref in profile_refs:
+        security.delete_secret(ref)
+    security.delete_secret(f"codex-account:{name}:auth_json")
+
+    store["codex_account_profiles"] = [
+        p for p in store.get("codex_account_profiles", [])
+        if isinstance(p, dict) and p.get("name") != name
+    ]
+    if store.get("active_codex_account") == name:
+        store["active_codex_account"] = None
+    _save_store(store)
+
+
+def get_current_codex_account_name() -> str | None:
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    auth = read_codex_auth()
+    if not _codex_official_auth_available(auth) or _codex_account_override_active(config, auth):
+        return None
+
+    identity = _codex_account_identity_from_auth(auth)
+    for profile in list_codex_account_profiles():
+        if profile.identity == identity:
+            return profile.name
+    return None
+
+
+def get_codex_account_runtime_summary() -> dict:
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    auth = read_codex_auth()
+    has_official_auth = _codex_official_auth_available(auth)
+    override_active = _codex_account_override_active(config, auth)
+    identity = _codex_account_identity_from_auth(auth) if has_official_auth else "no-login"
+    profile_name = None
+    if has_official_auth and not override_active:
+        for profile in list_codex_account_profiles():
+            if profile.identity == identity:
+                profile_name = profile.name
+                break
+
+    return {
+        "profile_name": profile_name,
+        "stored_active": get_active_codex_account_name(),
+        "identity": identity,
+        "has_auth": bool(auth),
+        "has_official_auth": has_official_auth,
+        "api_override_active": override_active,
+        "credentials_store": config.get("cli_auth_credentials_store", "file") if config else "file",
+    }
 
 
 # --- Import from current config ---

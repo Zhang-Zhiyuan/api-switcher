@@ -3,7 +3,15 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG, CODEX_CONFIG, CODEX_AUTH, VSCODE_SETTINGS, BACKUPS_DIR
+from config.paths import (
+    CLAUDE_SETTINGS,
+    CLAUDE_CONFIG,
+    CLAUDE_CREDENTIALS,
+    CODEX_CONFIG,
+    CODEX_AUTH,
+    VSCODE_SETTINGS,
+    BACKUPS_DIR,
+)
 from models.profile import BackupEntry
 
 logger = logging.getLogger(__name__)
@@ -11,6 +19,7 @@ logger = logging.getLogger(__name__)
 BACKUP_FILES = {
     "claude_settings.json": CLAUDE_SETTINGS,
     "claude_config.json": CLAUDE_CONFIG,
+    "claude_credentials.json": CLAUDE_CREDENTIALS,
     "codex_config.toml": CODEX_CONFIG,
     "codex_auth.json": CODEX_AUTH,
     "vscode_settings.json": VSCODE_SETTINGS,

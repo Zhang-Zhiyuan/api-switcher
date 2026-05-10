@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+from ui.theme import COLORS, button_style, card_frame_kwargs, center_window, combo_style, font, textbox_style
+
 
 class ErrorStatsDialog(ctk.CTkToplevel):
     """错误统计对话框"""
@@ -17,12 +19,8 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         self.title(f"{provider} 错误统计")
         self.geometry("900x700")
         self.resizable(True, True)
-
-        # 居中显示
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() // 2) - (900 // 2)
-        y = (self.winfo_screenheight() // 2) - (700 // 2)
-        self.geometry(f"900x700+{x}+{y}")
+        self.minsize(760, 560)
+        self.configure(fg_color=COLORS["app_bg"])
 
         # 模态对话框
         self.transient(parent)
@@ -30,41 +28,44 @@ class ErrorStatsDialog(ctk.CTkToplevel):
 
         self.stats = None
         self._create_widgets()
+        center_window(self, parent)
         self._load_stats()
 
     def _create_widgets(self):
         """创建界面组件"""
         # 顶部信息栏
-        info_frame = ctk.CTkFrame(self)
+        info_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         info_frame.pack(fill="x", padx=20, pady=(20, 10))
 
         self.status_label = ctk.CTkLabel(
             info_frame,
             text=f"{self.provider} 错误恢复统计",
-            font=("Microsoft YaHei UI", 16, "bold")
+            text_color=COLORS["text"],
+            font=font(16, "bold"),
         )
         self.status_label.pack(pady=10)
 
         # 时间范围选择
-        range_frame = ctk.CTkFrame(info_frame)
+        range_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
         range_frame.pack(pady=5)
 
-        ctk.CTkLabel(range_frame, text="时间范围:", font=("Microsoft YaHei UI", 12)).pack(side="left", padx=5)
+        ctk.CTkLabel(range_frame, text="时间范围", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=5)
 
         self.days_var = ctk.StringVar(value="7")
         days_options = ["1", "7", "30", "90"]
-        days_menu = ctk.CTkOptionMenu(
+        days_menu = ctk.CTkComboBox(
             range_frame,
             variable=self.days_var,
             values=days_options,
             command=lambda _: self._load_stats(),
-            width=100
+            width=100,
+            **combo_style(),
         )
         days_menu.pack(side="left", padx=5)
-        ctk.CTkLabel(range_frame, text="天", font=("Microsoft YaHei UI", 12)).pack(side="left")
+        ctk.CTkLabel(range_frame, text="天", text_color=COLORS["muted"], font=font(12)).pack(side="left")
 
         # 统计卡片区域
-        cards_frame = ctk.CTkFrame(self)
+        cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         cards_frame.pack(fill="x", padx=20, pady=10)
 
         # 总错误数
@@ -84,19 +85,19 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         self.avg_card.pack(side="left", padx=5, expand=True, fill="both")
 
         # 详细统计区域
-        detail_frame = ctk.CTkFrame(self)
+        detail_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         detail_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
         # 使用 Textbox 显示详细信息
         self.detail_text = ctk.CTkTextbox(
             detail_frame,
-            font=("Consolas", 11),
-            wrap="word"
+            wrap="word",
+            **textbox_style(monospace=True),
         )
         self.detail_text.pack(fill="both", expand=True, padx=5, pady=5)
 
         # 按钮栏
-        button_frame = ctk.CTkFrame(self)
+        button_frame = ctk.CTkFrame(self, fg_color="transparent")
         button_frame.pack(fill="x", padx=20, pady=(10, 20))
 
         ctk.CTkButton(
@@ -104,7 +105,7 @@ class ErrorStatsDialog(ctk.CTkToplevel):
             text="刷新",
             command=self._load_stats,
             width=100,
-            height=35
+            **button_style("secondary"),
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
@@ -112,7 +113,7 @@ class ErrorStatsDialog(ctk.CTkToplevel):
             text="导出报告",
             command=self._export_report,
             width=100,
-            height=35
+            **button_style("accent"),
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
@@ -120,9 +121,7 @@ class ErrorStatsDialog(ctk.CTkToplevel):
             text="清空日志",
             command=self._clear_logs,
             width=100,
-            height=35,
-            fg_color="#e74c3c",
-            hover_color="#c0392b"
+            **button_style("danger"),
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
@@ -130,7 +129,7 @@ class ErrorStatsDialog(ctk.CTkToplevel):
             text="关闭",
             command=self.destroy,
             width=100,
-            height=35
+            **button_style("primary"),
         ).pack(side="right", padx=5)
 
     def _create_stat_card(self, parent, title: str, value: str, color: str):
@@ -140,14 +139,14 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             card,
             text=title,
-            font=("Microsoft YaHei UI", 11),
+            font=font(11),
             text_color="white"
         ).pack(pady=(10, 5))
 
         value_label = ctk.CTkLabel(
             card,
             text=value,
-            font=("Microsoft YaHei UI", 20, "bold"),
+            font=font(20, "bold"),
             text_color="white"
         )
         value_label.pack(pady=(0, 10))
@@ -270,19 +269,19 @@ class ErrorStatsDialog(ctk.CTkToplevel):
 
         # 配置标签样式
         if tag == "header":
-            self.detail_text.tag_config(tag, font=("Microsoft YaHei UI", 13, "bold"), foreground="#2c3e50")
+            self.detail_text.tag_config(tag, font=("Microsoft YaHei UI", 13, "bold"), foreground=COLORS["primary"])
         elif tag == "separator":
-            self.detail_text.tag_config(tag, foreground="#bdc3c7")
+            self.detail_text.tag_config(tag, foreground=COLORS["border"])
         elif tag == "label":
-            self.detail_text.tag_config(tag, font=("Consolas", 11, "bold"), foreground="#34495e")
+            self.detail_text.tag_config(tag, font=("Consolas", 11, "bold"), foreground=COLORS["text"])
         elif tag == "count":
-            self.detail_text.tag_config(tag, foreground="#e74c3c", font=("Consolas", 11, "bold"))
+            self.detail_text.tag_config(tag, foreground=COLORS["danger"], font=("Consolas", 11, "bold"))
         elif tag == "percentage":
-            self.detail_text.tag_config(tag, foreground="#95a5a6")
+            self.detail_text.tag_config(tag, foreground=COLORS["muted"])
         elif tag == "highlight":
-            self.detail_text.tag_config(tag, foreground="#e74c3c", font=("Consolas", 12, "bold"))
+            self.detail_text.tag_config(tag, foreground=COLORS["danger"], font=("Consolas", 12, "bold"))
         elif tag == "muted":
-            self.detail_text.tag_config(tag, foreground="#95a5a6", font=("Consolas", 11, "italic"))
+            self.detail_text.tag_config(tag, foreground=COLORS["muted"], font=("Consolas", 11, "italic"))
 
     def _display_error(self, error_message: str):
         """显示错误信息"""

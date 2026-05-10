@@ -196,6 +196,8 @@ def _sanitize_portable_store(store: dict[str, Any]) -> dict[str, Any]:
 
     stripped["claude_profiles"] = claude_profiles
     stripped["codex_profiles"] = codex_profiles
+    stripped["claude_account_profiles"] = []
+    stripped["codex_account_profiles"] = []
     stripped["browser_profiles"] = []
 
     active_claude = stripped.get("active_claude_profile")
@@ -207,6 +209,8 @@ def _sanitize_portable_store(store: dict[str, Any]) -> dict[str, Any]:
         stripped["active_codex_profile"] = None
 
     stripped["active_browser_profile"] = None
+    stripped["active_claude_account"] = None
+    stripped["active_codex_account"] = None
     return stripped
 
 

@@ -7,7 +7,7 @@ from ui.dialogs.profile_editor import ProfileEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from models.profile import CodexProfile
 from core import profile_manager, switcher, security
-from ui.theme import COLORS, button_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, font
 
 
 class CodexTab(ctk.CTkScrollableFrame):
@@ -17,6 +17,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._cards_frame = None
+        self._account_cards_frame = None
         self._runtime_label = None
         self._build_ui()
 
@@ -28,35 +29,42 @@ class CodexTab(ctk.CTkScrollableFrame):
         title_area.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             title_area,
-            text="Codex CLI Profile",
+            text="Codex CLI",
             text_color=COLORS["text"],
             font=font(18, "bold"),
         ).pack(anchor="w")
-        ctk.CTkLabel(
+        subtitle_label = ctk.CTkLabel(
             title_area,
-            text="管理认证方式、模型供应商、审批策略与沙盒模式",
+            text="第三方 API Profile 与本机 ChatGPT 登录账号分开管理",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(anchor="w", pady=(2, 0))
+            anchor="w",
+            justify="left",
+        )
+        subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(title_area, subtitle_label, padding=24, min_width=240, max_width=720)
 
         self._runtime_label = ctk.CTkLabel(
             title_area,
             text="",
             text_color=COLORS["muted"],
             font=font(12),
+            anchor="w",
+            justify="left",
         )
-        self._runtime_label.pack(anchor="w", pady=(4, 0))
+        self._runtime_label.pack(anchor="w", fill="x", pady=(4, 0))
+        bind_wraplength(title_area, self._runtime_label, padding=24, min_width=240, max_width=760)
 
         ctk.CTkButton(
             header,
-            text="+ 新建 Profile",
+            text="+ 新建 API Profile",
             width=126,
             command=self._create_profile,
             **button_style("primary"),
         ).pack(side="right")
         ctk.CTkButton(
             header,
-            text="导入当前配置",
+            text="导入当前 API",
             width=126,
             command=self._import_current,
             **button_style("secondary"),
@@ -64,6 +72,37 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 10))
+
+        account_header = ctk.CTkFrame(self, fg_color="transparent")
+        account_header.pack(fill="x", padx=14, pady=(8, 8))
+        account_title = ctk.CTkFrame(account_header, fg_color="transparent")
+        account_title.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            account_title,
+            text="官方账号",
+            text_color=COLORS["text"],
+            font=font(16, "bold"),
+        ).pack(anchor="w")
+        account_subtitle = ctk.CTkLabel(
+            account_title,
+            text="保存本机 Codex ChatGPT 登录 auth.json 快照；切换后新开的终端会话生效",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        account_subtitle.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(account_title, account_subtitle, padding=24, min_width=240, max_width=720)
+        ctk.CTkButton(
+            account_header,
+            text="导入当前账号",
+            width=126,
+            command=self._import_current_account,
+            **button_style("secondary"),
+        ).pack(side="right")
+
+        self._account_cards_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._account_cards_frame.pack(fill="x", padx=14, pady=(0, 10))
 
         # Separator
         separator = ctk.CTkFrame(self, height=1, fg_color=COLORS["border_soft"])
@@ -101,64 +140,107 @@ class CodexTab(ctk.CTkScrollableFrame):
             tray.update_menu()
 
     def refresh(self):
-        if not self._cards_frame:
+        if not self._cards_frame or not self._account_cards_frame:
             return
         for w in self._cards_frame.winfo_children():
             w.destroy()
+        for w in self._account_cards_frame.winfo_children():
+            w.destroy()
 
         profiles = profile_manager.list_switchable_codex_profiles()
+        account_profiles = profile_manager.list_codex_account_profiles()
         runtime = profile_manager.get_codex_runtime_summary()
+        account_runtime = profile_manager.get_codex_account_runtime_summary()
         active = runtime.get("profile_name")
         stored_active = runtime.get("stored_active")
+        active_account = account_runtime.get("profile_name")
+        stored_account = account_runtime.get("stored_active")
 
         if self._runtime_label:
             if active:
                 text = (
-                    f"Codex on disk: {active} | "
+                    f"API 当前写入: {active} | "
                     f"{runtime.get('provider')} / {runtime.get('model')} | "
                     f"{runtime.get('auth_mode')}:{runtime.get('auth_identity')}"
                 )
                 color = COLORS["success"]
             elif runtime.get("has_config") or runtime.get("has_auth"):
                 text = (
-                    "Codex on disk: unmatched saved profile | "
+                    "API 当前写入: 未匹配到已保存 Profile | "
                     f"{runtime.get('provider')} / {runtime.get('model')} | "
                     f"{runtime.get('auth_mode')}:{runtime.get('auth_identity')}"
                 )
                 color = COLORS["warning"]
             else:
-                text = "Codex on disk: no config/auth found"
+                text = "API 当前写入: 未发现 config/auth"
                 color = COLORS["muted"]
 
             if stored_active and stored_active != active:
-                text = f"{text} | last app switch: {stored_active}"
+                text = f"{text} | API 记录: {stored_active}"
+            if active_account:
+                text = f"{text} | 官方账号: {active_account}"
+            elif account_runtime.get("has_official_auth"):
+                if account_runtime.get("api_override_active"):
+                    text = f"{text} | 官方账号: 已保存登录，但当前被 API 覆盖"
+                else:
+                    text = f"{text} | 官方账号: 未匹配 ({account_runtime.get('identity')})"
+            elif stored_account:
+                text = f"{text} | 官方账号记录: {stored_account}"
             self._runtime_label.configure(text=text, text_color=color)
 
         if not profiles:
             EmptyState(
                 self._cards_frame,
-                "暂无 Codex Profile",
-                "新建一个配置，或从当前 Codex CLI 设置中导入。",
-                "新建 Profile",
+                "暂无 Codex API Profile",
+                "新建第三方 API 配置，或从当前 Codex CLI API 设置中导入。",
+                "新建 API Profile",
                 self._create_profile,
             ).pack(fill="x", pady=(12, 4))
+        else:
+            for p in profiles:
+                is_active = p.name == active
+                auth_identity = profile_manager.describe_codex_profile_identity(p)
+                auth_desc = f"API Key ({auth_identity})"
+                info = [
+                    f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}",
+                    f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
+                ]
+
+                card = ProfileCard(
+                    self._cards_frame, p.name, info, is_active=is_active,
+                    active_label="当前 API",
+                    on_switch=self._switch_profile,
+                    on_test=self._test_profile,
+                    on_edit=self._edit_profile,
+                    on_clone=self._clone_profile,
+                    on_delete=self._delete_profile,
+                    border_color=COLORS["primary"] if is_active else COLORS["border_soft"],
+                )
+                card.pack(fill="x", pady=5)
+
+        if not account_profiles:
+            EmptyState(
+                self._account_cards_frame,
+                "暂无 Codex 官方账号",
+                "先用 Codex CLI 登录 ChatGPT，再导入当前账号快照。",
+                "导入当前账号",
+                self._import_current_account,
+            ).pack(fill="x", pady=(4, 4))
             return
 
-        for p in profiles:
-            is_active = p.name == active
-            auth_identity = profile_manager.describe_codex_profile_identity(p)
-            auth_desc = f"API Key ({auth_identity})"
+        for account in account_profiles:
+            is_active = account.name == active_account
             info = [
-                f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}",
-                f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
+                f"身份: {account.identity}",
+                f"凭据: 本机加密保存  |  创建时间: {account.created_at or '-'}",
             ]
 
             card = ProfileCard(
-                self._cards_frame, p.name, info, is_active=is_active,
-                on_switch=self._switch_profile,
-                on_edit=self._edit_profile,
-                on_delete=self._delete_profile,
-                border_color=COLORS["primary"] if is_active else COLORS["border_soft"],
+                self._account_cards_frame, account.name, info, is_active=is_active,
+                active_label="当前账号",
+                on_switch=self._switch_account,
+                on_delete=self._delete_account,
+                border_color=COLORS["accent"] if is_active else COLORS["border_soft"],
             )
             card.pack(fill="x", pady=5)
 
@@ -170,6 +252,50 @@ class CodexTab(ctk.CTkScrollableFrame):
             self._refresh_shell_state()
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"切换失败: {e}", is_error=True)
+
+    def _switch_account(self, name):
+        try:
+            switcher.switch_codex_account(name)
+            show_toast(self.winfo_toplevel(), f"已切换 Codex 官方账号: {name}；新开的终端会话生效")
+            self.refresh()
+            self._refresh_shell_state()
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"账号切换失败: {e}", is_error=True)
+
+    def _test_profile(self, name):
+        profiles = profile_manager.list_switchable_codex_profiles()
+        profile = next((p for p in profiles if p.name == name), None)
+        if not profile:
+            show_toast(self.winfo_toplevel(), f"未找到 Profile: {name}", is_error=True)
+            return
+
+        api_key = security.get_secret(profile.api_key_ref) or ""
+        if not api_key:
+            show_toast(self.winfo_toplevel(), "该 Profile 没有可用 API Key", is_error=True)
+            return
+
+        show_toast(self.winfo_toplevel(), f"正在测试: {name}")
+
+        def run_test():
+            from core.api_tester import APITester
+            from core.providers import ProviderRegistry
+            from ui.dialogs.api_test_result_dialog import APITestResultDialog
+
+            provider = ProviderRegistry.get_provider(profile.model_provider)
+            base_url = profile.custom_base_url or (provider.base_url_for_codex() if provider else "")
+            result = APITester.test_openai_api(api_key, base_url, profile.model)
+
+            def show_result():
+                if self.winfo_exists():
+                    APITestResultDialog(self.winfo_toplevel(), result, name)
+
+            try:
+                self.after(0, show_result)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=run_test, daemon=True).start()
 
     def _edit_profile(self, name):
         profiles = profile_manager.list_switchable_codex_profiles()
@@ -232,6 +358,15 @@ class CodexTab(ctk.CTkScrollableFrame):
         ProfileEditorDialog(self.winfo_toplevel(), title="新建 Codex Profile",
                             profile_type="codex", on_save=on_save)
 
+    def _clone_profile(self, name):
+        try:
+            cloned = profile_manager.clone_codex_profile(name)
+            show_toast(self.winfo_toplevel(), f"已复制为: {cloned.name}")
+            self.refresh()
+            self._refresh_shell_state()
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"复制失败: {e}", is_error=True)
+
     def _delete_profile(self, name):
         def do_delete():
             profile_manager.delete_codex_profile(name)
@@ -243,12 +378,40 @@ class CodexTab(ctk.CTkScrollableFrame):
                       message=f"确定要删除 \"{name}\" 吗？\n关联的密钥也会被清除。",
                       on_confirm=do_delete)
 
+    def _delete_account(self, name):
+        def do_delete():
+            profile_manager.delete_codex_account_profile(name)
+            show_toast(self.winfo_toplevel(), f"已删除 Codex 官方账号: {name}")
+            self.refresh()
+            self._refresh_shell_state()
+
+        ConfirmDialog(self.winfo_toplevel(), title="删除官方账号",
+                      message=f"确定要删除 \"{name}\" 吗？\n只会清除本应用保存的本机账号快照。",
+                      on_confirm=do_delete)
+
     def _import_current(self):
         profile = profile_manager.import_current_codex()
         if profile:
             profile_manager.save_codex_profile(profile)
-            show_toast(self.winfo_toplevel(), "已导入当前 Codex 配置")
+            profile_manager.set_active_codex(profile.name)
+            profile_manager.set_active_codex_account(None)
+            show_toast(self.winfo_toplevel(), f"已导入当前 Codex 配置: {profile.name}")
             self.refresh()
             self._refresh_shell_state()
         else:
             show_toast(self.winfo_toplevel(), "未找到当前 Codex 配置", is_error=True)
+
+    def _import_current_account(self):
+        profile = profile_manager.import_current_codex_account()
+        if profile:
+            profile_manager.save_codex_account_profile(profile)
+            profile_manager.set_active_codex_account(profile.name)
+            show_toast(self.winfo_toplevel(), f"已导入当前 Codex 官方账号: {profile.name}")
+            self.refresh()
+            self._refresh_shell_state()
+        else:
+            show_toast(
+                self.winfo_toplevel(),
+                "未找到 Codex ChatGPT 登录状态，请先运行 codex login",
+                is_error=True,
+            )

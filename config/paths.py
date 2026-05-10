@@ -318,10 +318,13 @@ def get_storage_info() -> dict:
     }
 
 # Target config files
-CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
-CLAUDE_CONFIG = Path.home() / ".claude" / "config.json"
-CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
-CODEX_AUTH = Path.home() / ".codex" / "auth.json"
+CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
+CLAUDE_CONFIG = CLAUDE_HOME / "config.json"
+CLAUDE_CREDENTIALS = CLAUDE_HOME / ".credentials.json"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+CODEX_CONFIG = CODEX_HOME / "config.toml"
+CODEX_AUTH = CODEX_HOME / "auth.json"
 VSCODE_SETTINGS = Path.home() / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
 
 # Local storage

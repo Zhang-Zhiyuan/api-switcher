@@ -49,18 +49,24 @@ class BrowserTab(ctk.CTkScrollableFrame):
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
 
-        action_bar = ctk.CTkFrame(self, fg_color="transparent")
-        action_bar.pack(fill="x", padx=14, pady=(0, 8))
+        action_bar = ctk.CTkFrame(header, fg_color="transparent")
+        action_bar.pack(side="right", padx=(12, 0))
         ctk.CTkButton(action_bar, text="+ 新建 Profile", width=126, command=self._create_profile, **button_style("primary")).pack(side="left")
         ctk.CTkButton(action_bar, text="刷新全部诊断", width=122, command=self.refresh, **button_style("secondary")).pack(side="left", padx=(8, 0))
 
-        quick_bar = ctk.CTkFrame(self, fg_color="transparent")
+        quick_bar = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["surface"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border_soft"],
+        )
         quick_bar.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(quick_bar, text="快速创建", text_color=COLORS["muted"], font=font(12)).pack(side="left")
-        ctk.CTkButton(quick_bar, text="Chrome-ChatGPT", width=132, command=lambda: self._quick_create("chrome", "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(quick_bar, text="Chrome-Claude", width=126, command=lambda: self._quick_create("chrome", "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(quick_bar, text="Edge-ChatGPT", width=120, command=lambda: self._quick_create("edge", "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(quick_bar, text="Edge-Claude", width=114, command=lambda: self._quick_create("edge", "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(quick_bar, text="快速创建", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        ctk.CTkButton(quick_bar, text="Chrome-ChatGPT", width=132, command=lambda: self._quick_create("chrome", "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(8, 0), pady=9)
+        ctk.CTkButton(quick_bar, text="Chrome-Claude", width=126, command=lambda: self._quick_create("chrome", "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(8, 0), pady=9)
+        ctk.CTkButton(quick_bar, text="Edge-ChatGPT", width=120, command=lambda: self._quick_create("edge", "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(8, 0), pady=9)
+        ctk.CTkButton(quick_bar, text="Edge-Claude", width=114, command=lambda: self._quick_create("edge", "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(8, 12), pady=9)
 
         filter_bar = ctk.CTkFrame(self, fg_color="transparent")
         filter_bar.pack(fill="x", padx=14, pady=(0, 8))
@@ -78,13 +84,19 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._stats_label = ctk.CTkLabel(filter_bar, text="", text_color=COLORS["muted"], font=font(12))
         self._stats_label.pack(side="right")
 
-        bulk_bar = ctk.CTkFrame(self, fg_color="transparent")
+        bulk_bar = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["surface"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border_soft"],
+        )
         bulk_bar.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkButton(bulk_bar, text="全选当前", width=96, command=self._select_visible, **button_style("secondary", compact=True)).pack(side="left")
-        ctk.CTkButton(bulk_bar, text="清空选择", width=96, command=self._clear_selection, **button_style("secondary", compact=True)).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(bulk_bar, text="批量清理 GPT", width=108, command=lambda: self._bulk_clear_sites("chatgpt"), **button_style("warning", compact=True)).pack(side="left", padx=(12, 0))
-        ctk.CTkButton(bulk_bar, text="批量清理 Claude", width=122, command=lambda: self._bulk_clear_sites("claude"), **button_style("warning", compact=True)).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(bulk_bar, text="批量清理两者", width=122, command=lambda: self._bulk_clear_sites("both"), **button_style("warning", compact=True)).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(bulk_bar, text="全选当前", width=96, command=self._select_visible, **button_style("secondary", compact=True)).pack(side="left", padx=(12, 0), pady=9)
+        ctk.CTkButton(bulk_bar, text="清空选择", width=96, command=self._clear_selection, **button_style("secondary", compact=True)).pack(side="left", padx=(8, 0), pady=9)
+        ctk.CTkButton(bulk_bar, text="批量清理 GPT", width=108, command=lambda: self._bulk_clear_sites("chatgpt"), **button_style("warning", compact=True)).pack(side="left", padx=(12, 0), pady=9)
+        ctk.CTkButton(bulk_bar, text="批量清理 Claude", width=122, command=lambda: self._bulk_clear_sites("claude"), **button_style("warning", compact=True)).pack(side="left", padx=(8, 0), pady=9)
+        ctk.CTkButton(bulk_bar, text="批量清理两者", width=122, command=lambda: self._bulk_clear_sites("both"), **button_style("warning", compact=True)).pack(side="left", padx=(8, 12), pady=9)
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 12))

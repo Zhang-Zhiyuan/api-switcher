@@ -2,7 +2,7 @@ import json
 import logging
 from pathlib import Path
 
-from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG
+from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG, CLAUDE_CREDENTIALS
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,49 @@ def read_claude_config() -> dict:
 def write_claude_config(data: dict) -> None:
     content = json.dumps(data, indent=2, ensure_ascii=False)
     _atomic_write(CLAUDE_CONFIG, content)
+
+
+def read_claude_credentials() -> dict:
+    if not CLAUDE_CREDENTIALS.exists():
+        return {}
+    try:
+        return json.loads(CLAUDE_CREDENTIALS.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"Failed to read {CLAUDE_CREDENTIALS}: {e}")
+        return {}
+
+
+def write_claude_credentials(data: dict) -> None:
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    _atomic_write(CLAUDE_CREDENTIALS, content)
+
+
+def clear_claude_api_overrides(settings: dict) -> dict:
+    """Remove settings that make Claude Code prefer API keys over login credentials."""
+    settings = dict(settings)
+    env = settings.get("env")
+    if isinstance(env, dict):
+        for key in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ]:
+            env.pop(key, None)
+        if env:
+            settings["env"] = env
+        else:
+            settings.pop("env", None)
+    return settings
+
+
+def clear_claude_config_auth(config: dict) -> dict:
+    """Remove API-key auth fields from Claude config while preserving other settings."""
+    config = dict(config)
+    config.pop("primaryApiKey", None)
+    return config
 
 
 def _get_claude_profile_token(profile) -> str | None:
