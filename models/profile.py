@@ -110,6 +110,8 @@ class SSHProfile:
     password_ref: Optional[str] = None
     private_key_path: Optional[str] = None
     private_key_passphrase_ref: Optional[str] = None
+    remote_claude_dir: Optional[str] = None
+    remote_codex_dir: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -172,6 +172,13 @@ class SSHTab(ctk.CTkScrollableFrame):
                     f"地址: {p.host}:{p.port}  |  用户: {p.username}  |  认证: {p.auth_type}",
                     f"状态: {status}",
                 ]
+                remote_dirs = []
+                if getattr(p, "remote_claude_dir", None):
+                    remote_dirs.append(f"Claude: {p.remote_claude_dir}")
+                if getattr(p, "remote_codex_dir", None):
+                    remote_dirs.append(f"Codex: {p.remote_codex_dir}")
+                if remote_dirs:
+                    info.append("远端目录: " + "  |  ".join(remote_dirs))
 
                 card_frame = ctk.CTkFrame(
                     self._cards_frame,

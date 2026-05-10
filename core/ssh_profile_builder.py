@@ -51,6 +51,26 @@ def _parse_port(value: object) -> int:
     return port
 
 
+def _remote_dir(value: object) -> str | None:
+    text = _clean(value).replace("\\", "/").rstrip("/")
+    if not text:
+        return None
+    if "\x00" in text:
+        raise ValueError("远程配置目录不能包含非法字符")
+    valid = (
+        text.startswith("/")
+        or text == "~"
+        or text.startswith("~/")
+        or text == "$HOME"
+        or text.startswith("$HOME/")
+        or text == "${HOME}"
+        or text.startswith("${HOME}/")
+    )
+    if not valid:
+        raise ValueError("远程配置目录需要使用 ~、$HOME 或绝对路径")
+    return text
+
+
 def build_ssh_profile_from_data(data: dict, existing: SSHProfile | None = None) -> SSHProfile:
     """Validate editor data and return an SSHProfile while preserving secrets."""
     name = _clean(data.get("name"))
@@ -60,6 +80,8 @@ def build_ssh_profile_from_data(data: dict, existing: SSHProfile | None = None) 
     private_key_path = _clean(data.get("private_key_path"))
     password = str(data.get("password") or "")
     key_passphrase = str(data.get("key_passphrase") or "")
+    remote_claude_dir = _remote_dir(data.get("remote_claude_dir"))
+    remote_codex_dir = _remote_dir(data.get("remote_codex_dir"))
 
     if not name:
         raise ValueError("SSH 服务器名称不能为空")
@@ -108,4 +130,6 @@ def build_ssh_profile_from_data(data: dict, existing: SSHProfile | None = None) 
         password_ref=password_ref,
         private_key_path=private_key_path or None,
         private_key_passphrase_ref=key_passphrase_ref,
+        remote_claude_dir=remote_claude_dir,
+        remote_codex_dir=remote_codex_dir,
     )

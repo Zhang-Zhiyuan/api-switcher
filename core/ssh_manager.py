@@ -1,5 +1,8 @@
 import logging
+import errno
+import posixpath
 import time
+import uuid
 from pathlib import Path
 import paramiko
 from core import security
@@ -159,10 +162,24 @@ class SSHManager:
         except Exception:
             return False
 
+    @staticmethod
+    def _is_not_found_error(error: BaseException) -> bool:
+        return (
+            isinstance(error, FileNotFoundError)
+            or getattr(error, "errno", None) == errno.ENOENT
+            or "No such file" in str(error)
+        )
+
+    @staticmethod
+    def _normalize_remote_path(path: str) -> str:
+        text = str(path or "").strip().replace("\\", "/")
+        if not text:
+            raise ValueError("文件路径不能为空")
+        return posixpath.normpath(text)
+
     def read_remote_file(self, client: paramiko.SSHClient, path: str, timeout: int = 30) -> str | None:
         """Read a file from the remote server with timeout."""
-        if not path or not path.strip():
-            raise ValueError("文件路径不能为空")
+        path = self._normalize_remote_path(path)
 
         sftp = None
         try:
@@ -175,13 +192,16 @@ class SSHManager:
                 logger.debug(f"Read {len(content)} bytes from {path}")
                 return content
 
-        except FileNotFoundError:
-            logger.info(f"Remote file not found: {path}")
-            return None
         except IOError as e:
+            if self._is_not_found_error(e):
+                logger.info(f"Remote file not found: {path}")
+                return None
             logger.error(f"IO error reading {path}: {e}")
             raise RuntimeError(f"读取远程文件失败: {e}") from e
         except Exception as e:
+            if self._is_not_found_error(e):
+                logger.info(f"Remote file not found: {path}")
+                return None
             logger.error(f"Error reading remote file {path}: {e}")
             raise RuntimeError(f"读取远程文件失败: {e}") from e
         finally:
@@ -191,23 +211,28 @@ class SSHManager:
                 except Exception:
                     pass
 
-    def write_remote_file(self, client: paramiko.SSHClient, path: str, content: str, timeout: int = 30):
+    def write_remote_file(
+        self,
+        client: paramiko.SSHClient,
+        path: str,
+        content: str,
+        timeout: int = 30,
+        file_mode: int | None = None,
+    ):
         """Write a file to the remote server with atomic operation."""
-        if not path or not path.strip():
-            raise ValueError("文件路径不能为空")
+        path = self._normalize_remote_path(path)
         if content is None:
             raise ValueError("文件内容不能为 None")
 
         sftp = None
-        temp_path = path + ".tmp"
+        temp_path = f"{path}.tmp.{uuid.uuid4().hex}"
 
         try:
             sftp = client.open_sftp()
             sftp.get_channel().settimeout(timeout)
 
             # Ensure directory exists
-            import os
-            remote_dir = os.path.dirname(path)
+            remote_dir = posixpath.dirname(path)
             if remote_dir:
                 self._ensure_remote_dir(sftp, remote_dir)
 
@@ -225,6 +250,12 @@ class SSHManager:
                 except Exception:
                     pass
                 sftp.rename(temp_path, path)
+
+            if file_mode is not None:
+                try:
+                    sftp.chmod(path, file_mode)
+                except Exception as e:
+                    logger.warning(f"Failed to chmod remote file {path}: {e}")
 
             logger.info(f"Wrote {len(content)} bytes to {path}")
 
@@ -253,8 +284,8 @@ class SSHManager:
             logger.debug(f"Executing command: {cmd}")
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
 
-            stdout_data = stdout.read().decode("utf-8")
-            stderr_data = stderr.read().decode("utf-8")
+            stdout_data = stdout.read().decode("utf-8", errors="replace")
+            stderr_data = stderr.read().decode("utf-8", errors="replace")
 
             exit_status = stdout.channel.recv_exit_status()
             logger.debug(f"Command exit status: {exit_status}")
@@ -285,23 +316,27 @@ class SSHManager:
 
     def _ensure_remote_dir(self, sftp, path: str):
         """Ensure remote directory exists with error handling."""
-        if not path or path == "/":
+        path = self._normalize_remote_path(path)
+        if not path or path in {".", "/"}:
             return
 
-        import os
-        parts = [p for p in path.split("/") if p]
-        current = ""
+        parts = [p for p in path.split("/") if p and p != "."]
+        current = "/" if path.startswith("/") else ""
 
         for part in parts:
-            current = os.path.join(current, part)
-            if not current.startswith("/"):
-                current = "/" + current
+            current = posixpath.join(current, part) if current else part
 
             try:
                 sftp.stat(current)
-            except FileNotFoundError:
+            except OSError as e:
+                if not self._is_not_found_error(e):
+                    raise RuntimeError(f"无法访问远程目录 {current}: {e}") from e
                 try:
                     sftp.mkdir(current)
+                    try:
+                        sftp.chmod(current, 0o700)
+                    except Exception:
+                        pass
                     logger.debug(f"Created remote directory: {current}")
                 except Exception as e:
                     logger.error(f"Failed to create directory {current}: {e}")

@@ -124,6 +124,26 @@ def test_ssh_switching_from_password_to_key_prunes_password_secret(isolated_ssh)
     assert security.get_secret("ssh:prod:password") is None
 
 
+def test_ssh_builder_accepts_custom_remote_config_dirs(isolated_ssh):
+    profile = build_ssh_profile_from_data(
+        {
+            "name": "prod",
+            "host": "server.example.com",
+            "port": "22",
+            "username": "root",
+            "auth_type": "key",
+            "password": "",
+            "private_key_path": "/home/root/.ssh/id_ed25519",
+            "key_passphrase": "",
+            "remote_claude_dir": "$HOME/.config/claude",
+            "remote_codex_dir": "/srv/codex\\state/",
+        }
+    )
+
+    assert profile.remote_claude_dir == "$HOME/.config/claude"
+    assert profile.remote_codex_dir == "/srv/codex/state"
+
+
 def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatch):
     security.set_secret("codex:relay:api_key", "sk-relay")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
@@ -146,10 +166,10 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
         return fake_client
 
     monkeypatch.setattr(sync_manager.ssh_manager, "connect", fake_connect)
-    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client: {})
-    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client: {"auth_mode": "chatgpt", "tokens": {"id": "old"}})
-    monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data: written.setdefault("config", (client, data)))
-    monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data: written.setdefault("auth", (client, data)))
+    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {"auth_mode": "chatgpt", "tokens": {"id": "old"}})
+    monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data, profile=None: written.setdefault("config", (client, data, profile)))
+    monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data, profile=None: written.setdefault("auth", (client, data, profile)))
 
     message = sync_manager.sync_codex_to_server("remote", "relay")
 
@@ -157,6 +177,7 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
     assert written["config"][0] is fake_client
     assert written["auth"][1]["auth_mode"] == "api_key"
     assert written["auth"][1]["OPENAI_API_KEY"] == "sk-relay"
+    assert written["auth"][2].name == "remote"
     assert "ssh.example.com" in message
 
 
@@ -178,7 +199,7 @@ def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrid
     monkeypatch.setattr(
         remote_config,
         "read_remote_claude_settings",
-        lambda client: {
+        lambda client, profile=None: {
             "env": {
                 "ANTHROPIC_AUTH_TOKEN": "old-token",
                 "ANTHROPIC_API_KEY": "old-token",
@@ -187,26 +208,26 @@ def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrid
             "model": "deepseek-chat",
         },
     )
-    monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client: {"primaryApiKey": "old-token"})
+    monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {"primaryApiKey": "old-token"})
     monkeypatch.setattr(
         remote_config,
         "write_remote_claude_credentials",
-        lambda client, data: written.setdefault("credentials", (client, data)),
+        lambda client, data, profile=None: written.setdefault("credentials", (client, data, profile)),
     )
     monkeypatch.setattr(
         remote_config,
         "write_remote_claude_settings",
-        lambda client, data: written.setdefault("settings", (client, data)),
+        lambda client, data, profile=None: written.setdefault("settings", (client, data, profile)),
     )
     monkeypatch.setattr(
         remote_config,
         "write_remote_claude_config",
-        lambda client, data: written.setdefault("config", (client, data)),
+        lambda client, data, profile=None: written.setdefault("config", (client, data, profile)),
     )
 
     message = sync_manager.sync_claude_account_to_server("remote", "work")
 
-    assert written["credentials"] == (fake_client, credentials)
+    assert written["credentials"] == (fake_client, credentials, profile_manager.list_ssh_profiles()[0])
     assert "env" not in written["settings"][1]
     assert written["settings"][1]["model"] == "claude-sonnet-4"
     assert "primaryApiKey" not in written["config"][1]
@@ -228,16 +249,16 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
     fake_client = object()
     written = {}
     monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
-    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client: {"model_provider": "custom"})
+    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client, profile=None: {"model_provider": "custom"})
     monkeypatch.setattr(
         remote_config,
         "write_remote_codex_auth",
-        lambda client, data: written.setdefault("auth", (client, data)),
+        lambda client, data, profile=None: written.setdefault("auth", (client, data, profile)),
     )
     monkeypatch.setattr(
         remote_config,
         "write_remote_codex_config",
-        lambda client, data: written.setdefault("config", (client, data)),
+        lambda client, data, profile=None: written.setdefault("config", (client, data, profile)),
     )
 
     message = sync_manager.sync_codex_account_to_server("remote", "work")
@@ -245,6 +266,7 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
     assert written["auth"][0] is fake_client
     assert written["auth"][1]["auth_mode"] == "chatgpt"
     assert "OPENAI_API_KEY" not in written["auth"][1]
+    assert written["auth"][2].name == "remote"
     assert written["config"][1]["model_provider"] == "openai"
     assert written["config"][1]["cli_auth_credentials_store"] == "file"
     assert "ssh.example.com" in message
@@ -284,9 +306,17 @@ class _FakeSFTP:
     def __init__(self):
         self.files = {"/remote.json": b'{"ok": true}'}
         self.open_modes = []
+        self.dirs = {"/"}
+        self.mkdir_calls = []
+        self.chmod_calls = []
 
     def get_channel(self):
         return _FakeChannel()
+
+    def normalize(self, path):
+        if path == ".":
+            return "/home/fallback"
+        return path
 
     def open(self, path, mode):
         self.open_modes.append(mode)
@@ -302,16 +332,39 @@ class _FakeSFTP:
     def remove(self, path):
         self.files.pop(path, None)
 
+    def stat(self, path):
+        normalized = path.replace("\\", "/")
+        if normalized in self.dirs or normalized in self.files:
+            return object()
+        error = OSError("No such file")
+        error.errno = 2
+        raise error
+
+    def mkdir(self, path):
+        assert "\\" not in path
+        normalized = path.replace("\\", "/")
+        self.dirs.add(normalized)
+        self.mkdir_calls.append(normalized)
+
+    def chmod(self, path, mode):
+        assert "\\" not in path
+        self.chmod_calls.append((path, mode))
+
     def close(self):
         self.closed = True
 
 
 class _FakeClient:
-    def __init__(self, sftp):
+    def __init__(self, sftp, command_outputs=None):
         self.sftp = sftp
+        self.command_outputs = list(command_outputs or [])
 
     def open_sftp(self):
         return self.sftp
+
+    def exec_command(self, command, timeout=None):
+        output = self.command_outputs.pop(0) if self.command_outputs else "/home/test"
+        return None, _FakeReader(str(output).encode("utf-8")), _FakeReader(b"")
 
 
 def test_ssh_remote_file_io_uses_binary_sftp_modes():
@@ -325,3 +378,28 @@ def test_ssh_remote_file_io_uses_binary_sftp_modes():
     assert "rb" in sftp.open_modes
     assert "wb" in sftp.open_modes
     assert sftp.files["/written.json"] == b'{"saved": true}'
+    assert all("\\" not in path for path in sftp.mkdir_calls)
+
+
+def test_remote_config_expands_home_and_custom_profile_dirs():
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp, command_outputs=["/srv/users/alice"])
+    profile = SSHProfile(
+        name="remote",
+        host="ssh.example.com",
+        remote_codex_dir="$HOME/.config/codex",
+    )
+
+    remote_config.write_remote_codex_auth(client, {"tokens": {"id_token": "token"}}, profile)
+
+    assert "/srv/users/alice/.config/codex/auth.json" in sftp.files
+    assert ("/srv/users/alice/.config/codex/auth.json", 0o600) in sftp.chmod_calls
+
+
+def test_remote_config_uses_sftp_home_fallback_when_home_env_is_empty():
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp, command_outputs=["", "", ""])
+
+    remote_config.write_remote_claude_settings(client, {"model": "claude-sonnet-4"})
+
+    assert "/home/fallback/.claude/settings.json" in sftp.files

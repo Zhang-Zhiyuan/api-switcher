@@ -27,13 +27,13 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
     ssh_profile, client = _connect_ssh(ssh_name)
 
-    settings = remote_config.read_remote_claude_settings(client) or {}
+    settings = remote_config.read_remote_claude_settings(client, ssh_profile) or {}
     settings = parser.apply_claude_profile(settings, claude_profile)
-    config = remote_config.read_remote_claude_config(client) or {}
+    config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     config = parser.apply_claude_config(config, claude_profile)
 
-    remote_config.write_remote_claude_settings(client, settings)
-    remote_config.write_remote_claude_config(client, config)
+    remote_config.write_remote_claude_settings(client, settings, ssh_profile)
+    remote_config.write_remote_claude_config(client, config, ssh_profile)
 
     logger.info(f"Synced Claude API profile '{claude_name}' to {ssh_profile.host}")
     return f"已同步 Claude API '{claude_name}' 到 {ssh_profile.host}"
@@ -46,13 +46,13 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
 
     ssh_profile, client = _connect_ssh(ssh_name)
 
-    remote_config.write_remote_claude_credentials(client, credentials)
+    remote_config.write_remote_claude_credentials(client, credentials, ssh_profile)
 
-    settings = remote_config.read_remote_claude_settings(client) or {}
-    remote_config.write_remote_claude_settings(client, parser.clear_claude_api_overrides(settings))
+    settings = remote_config.read_remote_claude_settings(client, ssh_profile) or {}
+    remote_config.write_remote_claude_settings(client, parser.clear_claude_api_overrides(settings), ssh_profile)
 
-    config = remote_config.read_remote_claude_config(client) or {}
-    remote_config.write_remote_claude_config(client, parser.clear_claude_config_auth(config))
+    config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
+    remote_config.write_remote_claude_config(client, parser.clear_claude_config_auth(config), ssh_profile)
 
     logger.info(f"Synced Claude account '{account_name}' to {ssh_profile.host}")
     return f"已同步 Claude 账号 '{account_name}' 到 {ssh_profile.host}"
@@ -68,13 +68,13 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
 
     ssh_profile, client = _connect_ssh(ssh_name)
 
-    config = remote_config.read_remote_codex_config(client) or {}
+    config = remote_config.read_remote_codex_config(client, ssh_profile) or {}
     config = toml_parser.apply_codex_profile(config, codex_profile)
-    remote_config.write_remote_codex_config(client, config)
+    remote_config.write_remote_codex_config(client, config, ssh_profile)
 
-    auth = remote_config.read_remote_codex_auth(client) or {}
+    auth = remote_config.read_remote_codex_auth(client, ssh_profile) or {}
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
-    remote_config.write_remote_codex_auth(client, auth)
+    remote_config.write_remote_codex_auth(client, auth, ssh_profile)
 
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
     return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host}"
@@ -87,10 +87,10 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
 
     ssh_profile, client = _connect_ssh(ssh_name)
 
-    remote_config.write_remote_codex_auth(client, auth)
+    remote_config.write_remote_codex_auth(client, auth, ssh_profile)
 
-    config = remote_config.read_remote_codex_config(client) or {}
-    remote_config.write_remote_codex_config(client, toml_parser.apply_codex_official_account(config))
+    config = remote_config.read_remote_codex_config(client, ssh_profile) or {}
+    remote_config.write_remote_codex_config(client, toml_parser.apply_codex_official_account(config), ssh_profile)
 
     logger.info(f"Synced Codex account '{account_name}' to {ssh_profile.host}")
     return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}"
@@ -143,8 +143,8 @@ def pull_claude_from_server(ssh_name: str) -> str:
         raise ValueError(f"SSH server '{ssh_name}' not found")
 
     client = ssh_manager.connect(ssh_profile)
-    settings = remote_config.read_remote_claude_settings(client)
-    config = remote_config.read_remote_claude_config(client) or {}
+    settings = remote_config.read_remote_claude_settings(client, ssh_profile)
+    config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     if not settings and not config:
         return "服务器上未找到 Claude 配置"
     if not settings:
@@ -204,8 +204,8 @@ def pull_codex_from_server(ssh_name: str) -> str:
 
     client = ssh_manager.connect(ssh_profile)
 
-    config = remote_config.read_remote_codex_config(client)
-    auth = remote_config.read_remote_codex_auth(client)
+    config = remote_config.read_remote_codex_config(client, ssh_profile)
+    auth = remote_config.read_remote_codex_auth(client, ssh_profile)
 
     if not config and not auth:
         return "服务器上未找到 Codex 配置"

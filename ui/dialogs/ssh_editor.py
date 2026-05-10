@@ -11,7 +11,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
     def __init__(self, master, title="编辑 SSH 服务器", profile: SSHProfile = None, on_save=None):
         super().__init__(master)
         self.title(title)
-        self.geometry("620x620")
+        self.geometry("640x700")
         self.minsize(540, 500)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
@@ -86,6 +86,20 @@ class SSHEditorDialog(ctk.CTkToplevel):
 
         # Password
         self._add_field(scroll, "登录密码", "password", "", "masked")
+
+        # Remote config directories
+        self._add_field(
+            scroll,
+            "Claude目录",
+            "remote_claude_dir",
+            profile.remote_claude_dir if profile and profile.remote_claude_dir else "~/.claude",
+        )
+        self._add_field(
+            scroll,
+            "Codex目录",
+            "remote_codex_dir",
+            profile.remote_codex_dir if profile and profile.remote_codex_dir else "~/.codex",
+        )
 
         # Test button
         test_frame = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -205,6 +219,8 @@ class SSHEditorDialog(ctk.CTkToplevel):
             "private_key_path": self._key_entry.get(),
             "key_passphrase": self._get_value("key_passphrase"),
             "password": self._get_value("password"),
+            "remote_claude_dir": self._get_value("remote_claude_dir"),
+            "remote_codex_dir": self._get_value("remote_codex_dir"),
         }
 
     def _build_profile(self, data: dict) -> SSHProfile:
