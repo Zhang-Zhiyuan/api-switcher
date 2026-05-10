@@ -97,6 +97,9 @@ def main() -> None:
         _reset_store()
         for ref in [claude_ref, codex_ref, ssh_ref]:
             security.delete_secret(ref)
+        preexisting_browser_dir = machine_b / "browser_profiles" / "chrome_BrowserMoveMe"
+        preexisting_browser_dir.mkdir(parents=True)
+        (preexisting_browser_dir / "old.txt").write_text("old-browser-data", encoding="utf-8")
 
         imported = portable_migration.import_portable_profiles(bundle, "strong-password")
         assert imported.profile_count == 4, imported
@@ -116,6 +119,8 @@ def main() -> None:
         assert (imported_browser_dir / "Default" / "Network" / "Cookies").read_bytes() == b"cookie-db"
         assert (imported_browser_dir / "Default" / "Local Storage" / "leveldb" / "chatgpt.ldb").read_bytes() == b"local-storage"
         assert not (imported_browser_dir / "Default" / "Cache" / "cache.bin").exists()
+        assert not (imported_browser_dir / "old.txt").exists()
+        assert not (machine_b / "browser_profiles" / "chrome_BrowserMoveMe.import_backup").exists()
 
         bad_json_bundle = root / "bad-json.asxprofile"
         bad_json_bundle.write_text("{", encoding="utf-8")
@@ -132,6 +137,24 @@ def main() -> None:
             assert "迁移密码错误" in str(e)
         else:
             raise AssertionError("Wrong password should fail")
+
+        corrupt_payload = portable_migration._decrypt_bundle(raw, "strong-password")
+        for item in corrupt_payload.get("browser_data", {}).values():
+            for file_entry in item.get("files", []):
+                file_entry["data"] = "@@not-base64@@"
+        corrupt_browser_bundle = root / "corrupt-browser.asxprofile"
+        corrupt_browser_bundle.write_text(
+            json.dumps(portable_migration._encrypt_payload(corrupt_payload, "strong-password"), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        machine_c = root / "machine_c"
+        _set_data_dir(machine_c)
+        _reset_store()
+        imported_corrupt = portable_migration.import_portable_profiles(corrupt_browser_bundle, "strong-password")
+        assert imported_corrupt.browser_file_count == 0
+        assert imported_corrupt.skipped_browser_files
+        assert profile_manager.list_browser_profiles() == []
+        assert profile_manager.get_active_browser_name() is None
 
         for ref in [claude_ref, codex_ref, ssh_ref]:
             security.delete_secret(ref)
