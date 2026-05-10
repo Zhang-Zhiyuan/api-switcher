@@ -1,3 +1,4 @@
+import threading
 import customtkinter as ctk
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -19,6 +20,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._profile_combo = None
         self._remote_auto_provider_combo = None
         self._remote_auto_status_label = None
+        self._remote_auto_buttons = []
+        self._remote_auto_busy = False
         self._sync_kind_options = {
             "Claude API": "claude_api",
             "Claude 账号": "claude_account",
@@ -185,34 +188,39 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_provider_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
         self._remote_auto_provider_combo.set("Claude + Codex")
 
-        ctk.CTkButton(
+        check_button = ctk.CTkButton(
             auto_controls,
             text="检查",
             width=78,
             command=self._check_remote_auto_continue,
             **button_style("secondary"),
-        ).grid(row=0, column=2, sticky="e", padx=(0, 8))
-        ctk.CTkButton(
+        )
+        check_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
+        install_button = ctk.CTkButton(
             auto_controls,
             text="安装/修复",
             width=102,
             command=self._install_remote_auto_continue,
             **button_style("primary"),
-        ).grid(row=0, column=3, sticky="e", padx=(0, 8))
-        ctk.CTkButton(
+        )
+        install_button.grid(row=0, column=3, sticky="e", padx=(0, 8))
+        pause_button = ctk.CTkButton(
             auto_controls,
             text="暂停",
             width=78,
             command=self._pause_remote_auto_continue,
             **button_style("warning"),
-        ).grid(row=0, column=4, sticky="e", padx=(0, 8))
-        ctk.CTkButton(
+        )
+        pause_button.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        uninstall_button = ctk.CTkButton(
             auto_controls,
             text="卸载",
             width=78,
             command=self._uninstall_remote_auto_continue,
             **button_style("danger"),
-        ).grid(row=0, column=5, sticky="e")
+        )
+        uninstall_button.grid(row=0, column=5, sticky="e")
+        self._remote_auto_buttons = [check_button, install_button, pause_button, uninstall_button]
 
         self._remote_auto_status_label = ctk.CTkLabel(
             auto_controls,
@@ -499,83 +507,145 @@ class SSHTab(ctk.CTkScrollableFrame):
                 text_color=COLORS["danger"] if is_error else COLORS["muted"],
             )
 
+    def _set_remote_auto_busy(self, busy: bool, message: str | None = None):
+        self._remote_auto_busy = busy
+        state = "disabled" if busy else "normal"
+        for button in self._remote_auto_buttons:
+            try:
+                button.configure(state=state)
+            except Exception:
+                pass
+        if self._remote_auto_provider_combo:
+            try:
+                self._remote_auto_provider_combo.configure(state=state)
+            except Exception:
+                pass
+        if message:
+            self._set_remote_auto_status(message)
+
+    def _run_remote_auto_task(self, busy_message: str, worker, on_done):
+        if self._remote_auto_busy:
+            show_toast(self.winfo_toplevel(), "远端自动续跑操作正在进行中，请稍等", is_error=True)
+            return
+
+        self._set_remote_auto_busy(True, busy_message)
+
+        def run():
+            try:
+                payload = worker()
+            except Exception as e:
+                payload = {
+                    "results": [],
+                    "statuses": [],
+                    "failures": [str(e)],
+                }
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_remote_auto_busy(False)
+                on_done(payload)
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _summarize_remote_auto_status(self, statuses, failures: list[str] | None = None) -> str:
         parts = [status.summary() for status in statuses]
         if failures:
             parts.append("失败: " + "；".join(failures))
         return " | ".join(parts) if parts else "没有可显示的远端自动续跑状态"
 
+    def _collect_remote_auto_statuses(self, server_name: str, targets: list[str]) -> tuple[list, list[str]]:
+        statuses = []
+        failures = []
+        for provider in targets:
+            try:
+                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
+            except Exception as e:
+                failures.append(f"{provider}: {e}")
+        return statuses, failures
+
+    def _show_remote_auto_result(self, payload, default_message: str):
+        statuses = payload.get("statuses", [])
+        failures = payload.get("failures", [])
+        results = payload.get("results", [])
+        message = self._summarize_remote_auto_status(statuses, failures)
+        self._set_remote_auto_status(message, bool(failures))
+        toast_message = " | ".join(results)
+        if failures:
+            toast_message = (toast_message + " | " if toast_message else "") + "失败: " + "；".join(failures)
+        show_toast(self.winfo_toplevel(), toast_message or default_message, is_error=bool(failures))
+
     def _check_remote_auto_continue(self):
         server_name = self._selected_server_name()
         if not server_name:
             return
 
-        statuses = []
-        failures = []
-        for provider in self._selected_remote_auto_targets():
-            try:
-                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
-            except Exception as e:
-                failures.append(f"{provider}: {e}")
+        targets = self._selected_remote_auto_targets()
 
-        message = self._summarize_remote_auto_status(statuses, failures)
-        self._set_remote_auto_status(message, bool(failures))
-        show_toast(self.winfo_toplevel(), "远端自动续跑检查完成" if statuses else message, is_error=bool(failures))
+        def worker():
+            statuses, failures = self._collect_remote_auto_statuses(server_name, targets)
+            return {"statuses": statuses, "failures": failures, "results": []}
+
+        self._run_remote_auto_task(
+            f"正在检查 {server_name} 的远端自动续跑状态...",
+            worker,
+            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑检查完成"),
+        )
 
     def _install_remote_auto_continue(self):
         server_name = self._selected_server_name()
         if not server_name:
             return
 
-        results = []
-        failures = []
         targets = self._selected_remote_auto_targets()
-        for provider in targets:
-            try:
-                results.append(remote_auto_continue.install_remote_auto_continue(server_name, provider))
-            except Exception as e:
-                failures.append(f"{provider}: {e}")
 
-        statuses = []
-        for provider in targets:
-            try:
-                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
-            except Exception:
-                pass
+        def worker():
+            results = []
+            failures = []
+            for provider in targets:
+                try:
+                    results.append(remote_auto_continue.install_remote_auto_continue(server_name, provider))
+                except Exception as e:
+                    failures.append(f"{provider}: {e}")
+            statuses, status_failures = self._collect_remote_auto_statuses(server_name, targets)
+            failures.extend(status_failures)
+            return {"statuses": statuses, "failures": failures, "results": results}
 
-        if statuses or failures:
-            self._set_remote_auto_status(self._summarize_remote_auto_status(statuses, failures), bool(failures))
-        message = " | ".join(results)
-        if failures:
-            message = (message + " | " if message else "") + "失败: " + "；".join(failures)
-        show_toast(self.winfo_toplevel(), message or "远端自动续跑安装完成", is_error=bool(failures))
+        self._run_remote_auto_task(
+            f"正在安装/修复 {server_name} 的远端自动续跑...",
+            worker,
+            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑安装完成"),
+        )
 
     def _pause_remote_auto_continue(self):
         server_name = self._selected_server_name()
         if not server_name:
             return
 
-        results = []
-        failures = []
         targets = self._selected_remote_auto_targets()
-        for provider in targets:
-            try:
-                results.append(remote_auto_continue.pause_remote_auto_continue(server_name, provider))
-            except Exception as e:
-                failures.append(f"{provider}: {e}")
 
-        statuses = []
-        for provider in targets:
-            try:
-                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
-            except Exception:
-                pass
-        self._set_remote_auto_status(self._summarize_remote_auto_status(statuses, failures), bool(failures))
+        def worker():
+            results = []
+            failures = []
+            for provider in targets:
+                try:
+                    results.append(remote_auto_continue.pause_remote_auto_continue(server_name, provider))
+                except Exception as e:
+                    failures.append(f"{provider}: {e}")
+            statuses, status_failures = self._collect_remote_auto_statuses(server_name, targets)
+            failures.extend(status_failures)
+            return {"statuses": statuses, "failures": failures, "results": results}
 
-        message = " | ".join(results)
-        if failures:
-            message = (message + " | " if message else "") + "失败: " + "；".join(failures)
-        show_toast(self.winfo_toplevel(), message or "远端自动续跑已暂停", is_error=bool(failures))
+        self._run_remote_auto_task(
+            f"正在暂停 {server_name} 的远端自动续跑...",
+            worker,
+            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑已暂停"),
+        )
 
     def _uninstall_remote_auto_continue(self):
         server_name = self._selected_server_name()
@@ -586,26 +656,23 @@ class SSHTab(ctk.CTkScrollableFrame):
         target_label = "、".join("Claude" if p == "claude" else "Codex" for p in targets)
 
         def do_uninstall():
-            results = []
-            failures = []
-            for provider in targets:
-                try:
-                    results.append(remote_auto_continue.uninstall_remote_auto_continue(server_name, provider))
-                except Exception as e:
-                    failures.append(f"{provider}: {e}")
+            def worker():
+                results = []
+                failures = []
+                for provider in targets:
+                    try:
+                        results.append(remote_auto_continue.uninstall_remote_auto_continue(server_name, provider))
+                    except Exception as e:
+                        failures.append(f"{provider}: {e}")
+                statuses, status_failures = self._collect_remote_auto_statuses(server_name, targets)
+                failures.extend(status_failures)
+                return {"statuses": statuses, "failures": failures, "results": results}
 
-            statuses = []
-            for provider in targets:
-                try:
-                    statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
-                except Exception:
-                    pass
-            self._set_remote_auto_status(self._summarize_remote_auto_status(statuses, failures), bool(failures))
-
-            message = " | ".join(results)
-            if failures:
-                message = (message + " | " if message else "") + "失败: " + "；".join(failures)
-            show_toast(self.winfo_toplevel(), message or "远端自动续跑已卸载", is_error=bool(failures))
+            self._run_remote_auto_task(
+                f"正在卸载 {server_name} 的远端自动续跑...",
+                worker,
+                lambda payload: self._show_remote_auto_result(payload, "远端自动续跑已卸载"),
+            )
 
         ConfirmDialog(
             self.winfo_toplevel(),

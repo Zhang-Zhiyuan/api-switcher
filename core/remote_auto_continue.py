@@ -82,7 +82,8 @@ class RemoteAutoContinueStatus:
         state = "正常" if self.ready else "需处理"
         parts = [
             f"{self.label}: {state}",
-            f"状态 {'已启用' if self.enabled else '已暂停'}",
+            f"系统 {self.remote_os or 'unknown'}",
+            f"状态 {'已启用' if self.enabled else '未启用'}",
             f"脚本 {'存在' if self.hook_script_exists else '缺失'}",
             f"Hook {'已注册' if self.hook_registered else '未注册'}",
             f"设置 {'有效' if self.settings_valid else '缺失/无效'}",
@@ -190,6 +191,40 @@ def _write_text(client, path: str, content: str, mode: int | None = None) -> Non
     ssh_manager.write_remote_file(client, path, content, file_mode=mode)
 
 
+def _remote_file_mode(client, path: str) -> int | None:
+    sftp = None
+    try:
+        sftp = client.open_sftp()
+        return sftp.stat(path).st_mode & 0o777
+    except Exception:
+        return None
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _snapshot_remote_files(client, paths: list[str]) -> dict[str, tuple[str | None, int | None]]:
+    snapshots: dict[str, tuple[str | None, int | None]] = {}
+    for path in dict.fromkeys(p for p in paths if p):
+        content = _read_text(client, path)
+        snapshots[path] = (content, _remote_file_mode(client, path) if content is not None else None)
+    return snapshots
+
+
+def _restore_remote_files(client, snapshots: dict[str, tuple[str | None, int | None]]) -> None:
+    for path, (content, mode) in snapshots.items():
+        try:
+            if content is None:
+                _remove_remote_file(client, path)
+            else:
+                _write_text(client, path, content, mode=mode)
+        except Exception as e:
+            logger.warning(f"Failed to restore remote file {path}: {e}")
+
+
 def _read_json(client, path: str, default: Any = None, strict: bool = True) -> Any:
     raw = _read_text(client, path)
     if raw is None or not raw.strip():
@@ -282,7 +317,8 @@ def _generate_remote_hook_script(settings_path: str, state_dir: str) -> str:
             f"SETTINGS_PATH={shlex.quote(settings_path)}",
             f"STATE_DIR={shlex.quote(state_dir)}",
             'mkdir -p "$STATE_DIR" 2>/dev/null || true',
-            'HOOK_INPUT="$(cat 2>/dev/null || true)"',
+            'INPUT_PATH="$STATE_DIR/auto_continue_input_$$.json"',
+            'cat > "$INPUT_PATH" 2>/dev/null || true',
             'PYTHON_BIN=""',
             'if command -v python3 >/dev/null 2>&1 && python3 -c \'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)\' 2>/dev/null; then',
             '  PYTHON_BIN="$(command -v python3)"',
@@ -290,7 +326,7 @@ def _generate_remote_hook_script(settings_path: str, state_dir: str) -> str:
             '  PYTHON_BIN="$(command -v python)"',
             "fi",
             'if [ -n "$PYTHON_BIN" ]; then',
-            '  HOOK_INPUT="$HOOK_INPUT" "$PYTHON_BIN" - "$SETTINGS_PATH" "$STATE_DIR" <<\'PY\'',
+            '  "$PYTHON_BIN" - "$SETTINGS_PATH" "$STATE_DIR" "$INPUT_PATH" <<\'PY\'',
         ]
     )
     body = r'''
@@ -471,6 +507,7 @@ def run_git_snapshot():
 def main():
     settings_path = sys.argv[1]
     state_dir = sys.argv[2]
+    input_path = sys.argv[3] if len(sys.argv) > 3 else ""
     try:
         with open(settings_path, "r", encoding="utf-8") as handle:
             settings = json.load(handle)
@@ -483,7 +520,14 @@ def main():
     if not as_bool(settings.get("enabled"), False):
         return
 
-    raw_input = os.environ.get("HOOK_INPUT", "")
+    raw_input = ""
+    if input_path:
+        try:
+            with open(input_path, "r", encoding="utf-8", errors="replace") as handle:
+                raw_input = handle.read()
+        except Exception as exc:
+            log(f"Failed to read hook input file: {exc}", "ERROR")
+            return
     if not raw_input.strip():
         return
     try:
@@ -543,6 +587,14 @@ def main():
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             break
         except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 60:
+                    os.unlink(lock_path)
+                    continue
+            except FileNotFoundError:
+                continue
+            except Exception:
+                pass
             time.sleep(0.1)
     if lock_fd is None:
         log("Failed to acquire state lock", "WARN")
@@ -614,6 +666,7 @@ PY
 else
   echo "Python 3.6+ not found; auto-continue hook skipped" >&2
 fi
+rm -f "$INPUT_PATH" 2>/dev/null || true
 exit 0
 '''
     return header + body
@@ -817,17 +870,31 @@ def install_remote_auto_continue(
 
     paths = _paths(client, ssh_profile, provider)
     resolved_settings = _load_local_settings(provider, settings)
-    _write_json(client, paths.settings_path, resolved_settings.to_dict())
+    snapshot_paths = [
+        paths.settings_path,
+        paths.script_path,
+        paths.guidance_path,
+        paths.provider_config_path,
+    ]
+    if paths.codex_hooks_path:
+        snapshot_paths.append(paths.codex_hooks_path)
+    snapshots = _snapshot_remote_files(client, snapshot_paths)
 
-    script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
-    _write_text(client, paths.script_path, script, mode=0o700)
-    _install_guidance(client, paths.guidance_path)
+    try:
+        _write_json(client, paths.settings_path, resolved_settings.to_dict())
 
-    command = f"sh {shlex.quote(paths.script_path)}"
-    if provider == "claude":
-        _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents)
-    else:
-        _register_codex_hook(client, paths, command)
+        script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+        _write_text(client, paths.script_path, script, mode=0o700)
+        _install_guidance(client, paths.guidance_path)
+
+        command = f"sh {shlex.quote(paths.script_path)}"
+        if provider == "claude":
+            _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents)
+        else:
+            _register_codex_hook(client, paths, command)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
 
     logger.info(f"Installed remote auto-continue for {provider} on {ssh_profile.host}")
     return f"已在 {ssh_profile.host} 安装/修复 {_provider_label(provider)} 远端自动续跑"
@@ -901,7 +968,11 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
 
     status.hook_script_exists = _remote_file_exists(client, paths.script_path)
 
-    settings = _read_json(client, paths.settings_path, default=None, strict=False)
+    try:
+        settings = _read_json(client, paths.settings_path, default=None, strict=False)
+    except Exception as e:
+        settings = None
+        status.issues.append(f"设置读取失败: {e}")
     if isinstance(settings, dict):
         try:
             parsed = AutoContinueSettings.from_dict(settings)
@@ -912,22 +983,38 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
     else:
         status.issues.append("缺少自动续跑设置")
 
-    guidance = _read_text(client, paths.guidance_path)
+    try:
+        guidance = _read_text(client, paths.guidance_path)
+    except Exception as e:
+        guidance = None
+        status.issues.append(f"指导文件读取失败: {e}")
     status.guidance_installed = bool(guidance and "BEGIN AUTO CONTINUE GUIDANCE" in guidance)
 
     if provider == "claude":
-        provider_config = _read_json(client, paths.provider_config_path, default={}, strict=False)
+        try:
+            provider_config = _read_json(client, paths.provider_config_path, default={}, strict=False)
+        except Exception as e:
+            provider_config = None
+            status.issues.append(f"Claude settings.json 读取失败: {e}")
         if isinstance(provider_config, dict):
             status.hook_registered = any(_is_our_command(command) for command in _iter_claude_hook_commands(provider_config))
         else:
             status.issues.append("Claude settings.json 无法读取")
     else:
-        hooks = _read_json(client, paths.codex_hooks_path or "", default={}, strict=False)
+        try:
+            hooks = _read_json(client, paths.codex_hooks_path or "", default={}, strict=False)
+        except Exception as e:
+            hooks = None
+            status.issues.append(f"Codex hooks.json 读取失败: {e}")
         if isinstance(hooks, dict):
             status.hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Stop"))
         else:
             status.issues.append("Codex hooks.json 无法读取")
-        config = _read_toml(client, paths.provider_config_path, strict=False)
+        try:
+            config = _read_toml(client, paths.provider_config_path, strict=False)
+        except Exception as e:
+            config = {}
+            status.issues.append(f"Codex config.toml 读取失败: {e}")
         status.codex_hooks_enabled = bool(config.get("codex_hooks"))
 
     if not status.hook_script_exists:
