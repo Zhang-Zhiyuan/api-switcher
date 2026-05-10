@@ -3,7 +3,7 @@ from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from core import profile_manager, ssh_manager, sync_manager
+from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 
 
@@ -17,11 +17,18 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
+        self._remote_auto_provider_combo = None
+        self._remote_auto_status_label = None
         self._sync_kind_options = {
             "Claude API": "claude_api",
             "Claude 账号": "claude_account",
             "Codex API": "codex_api",
             "Codex 账号": "codex_account",
+        }
+        self._remote_auto_options = {
+            "Claude": "claude",
+            "Codex": "codex",
+            "Claude + Codex": "all",
         }
         self._build_ui()
 
@@ -139,6 +146,84 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._sync_selected,
             **button_style("primary"),
         ).grid(row=1, column=3, sticky="e", pady=(10, 0))
+
+        auto_header = ctk.CTkFrame(self, fg_color="transparent")
+        auto_header.pack(fill="x", padx=14, pady=(4, 5))
+        ctk.CTkLabel(
+            auto_header,
+            text="远端自动续跑",
+            text_color=COLORS["text"],
+            font=font(16, "bold"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            auto_header,
+            text="把本机 Claude/Codex 自动续跑设置安装到已连接的 SSH 服务器",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(side="left", padx=(10, 0))
+
+        auto_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        auto_frame.pack(fill="x", padx=14, pady=(0, 12))
+        auto_controls = ctk.CTkFrame(auto_frame, fg_color="transparent")
+        auto_controls.pack(fill="x", padx=14, pady=14)
+        auto_controls.grid_columnconfigure(1, weight=1)
+        auto_controls.grid_columnconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            auto_controls,
+            text="安装对象",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self._remote_auto_provider_combo = ctk.CTkComboBox(
+            auto_controls,
+            values=list(self._remote_auto_options.keys()),
+            width=160,
+            **combo_style(),
+        )
+        self._remote_auto_provider_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
+        self._remote_auto_provider_combo.set("Claude + Codex")
+
+        ctk.CTkButton(
+            auto_controls,
+            text="检查",
+            width=78,
+            command=self._check_remote_auto_continue,
+            **button_style("secondary"),
+        ).grid(row=0, column=2, sticky="e", padx=(0, 8))
+        ctk.CTkButton(
+            auto_controls,
+            text="安装/修复",
+            width=102,
+            command=self._install_remote_auto_continue,
+            **button_style("primary"),
+        ).grid(row=0, column=3, sticky="e", padx=(0, 8))
+        ctk.CTkButton(
+            auto_controls,
+            text="暂停",
+            width=78,
+            command=self._pause_remote_auto_continue,
+            **button_style("warning"),
+        ).grid(row=0, column=4, sticky="e", padx=(0, 8))
+        ctk.CTkButton(
+            auto_controls,
+            text="卸载",
+            width=78,
+            command=self._uninstall_remote_auto_continue,
+            **button_style("danger"),
+        ).grid(row=0, column=5, sticky="e")
+
+        self._remote_auto_status_label = ctk.CTkLabel(
+            auto_controls,
+            text="未检查。安装时会同步本机自动续跑设置，并要求远端具备 sh 和 Python 3.6+。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._remote_auto_status_label.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
 
@@ -391,6 +476,143 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         do_sync()
+
+    def _selected_remote_auto_targets(self) -> list[str]:
+        if not self._remote_auto_provider_combo:
+            return ["claude", "codex"]
+        selected = self._remote_auto_options.get(self._remote_auto_provider_combo.get(), "all")
+        if selected == "all":
+            return ["claude", "codex"]
+        return [selected]
+
+    def _selected_server_name(self) -> str | None:
+        server_name = self._server_combo.get()
+        if server_name == "(无)":
+            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+            return None
+        return server_name
+
+    def _set_remote_auto_status(self, message: str, is_error: bool = False):
+        if self._remote_auto_status_label:
+            self._remote_auto_status_label.configure(
+                text=message,
+                text_color=COLORS["danger"] if is_error else COLORS["muted"],
+            )
+
+    def _summarize_remote_auto_status(self, statuses, failures: list[str] | None = None) -> str:
+        parts = [status.summary() for status in statuses]
+        if failures:
+            parts.append("失败: " + "；".join(failures))
+        return " | ".join(parts) if parts else "没有可显示的远端自动续跑状态"
+
+    def _check_remote_auto_continue(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        statuses = []
+        failures = []
+        for provider in self._selected_remote_auto_targets():
+            try:
+                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
+            except Exception as e:
+                failures.append(f"{provider}: {e}")
+
+        message = self._summarize_remote_auto_status(statuses, failures)
+        self._set_remote_auto_status(message, bool(failures))
+        show_toast(self.winfo_toplevel(), "远端自动续跑检查完成" if statuses else message, is_error=bool(failures))
+
+    def _install_remote_auto_continue(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        results = []
+        failures = []
+        targets = self._selected_remote_auto_targets()
+        for provider in targets:
+            try:
+                results.append(remote_auto_continue.install_remote_auto_continue(server_name, provider))
+            except Exception as e:
+                failures.append(f"{provider}: {e}")
+
+        statuses = []
+        for provider in targets:
+            try:
+                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
+            except Exception:
+                pass
+
+        if statuses or failures:
+            self._set_remote_auto_status(self._summarize_remote_auto_status(statuses, failures), bool(failures))
+        message = " | ".join(results)
+        if failures:
+            message = (message + " | " if message else "") + "失败: " + "；".join(failures)
+        show_toast(self.winfo_toplevel(), message or "远端自动续跑安装完成", is_error=bool(failures))
+
+    def _pause_remote_auto_continue(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        results = []
+        failures = []
+        targets = self._selected_remote_auto_targets()
+        for provider in targets:
+            try:
+                results.append(remote_auto_continue.pause_remote_auto_continue(server_name, provider))
+            except Exception as e:
+                failures.append(f"{provider}: {e}")
+
+        statuses = []
+        for provider in targets:
+            try:
+                statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
+            except Exception:
+                pass
+        self._set_remote_auto_status(self._summarize_remote_auto_status(statuses, failures), bool(failures))
+
+        message = " | ".join(results)
+        if failures:
+            message = (message + " | " if message else "") + "失败: " + "；".join(failures)
+        show_toast(self.winfo_toplevel(), message or "远端自动续跑已暂停", is_error=bool(failures))
+
+    def _uninstall_remote_auto_continue(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        targets = self._selected_remote_auto_targets()
+        target_label = "、".join("Claude" if p == "claude" else "Codex" for p in targets)
+
+        def do_uninstall():
+            results = []
+            failures = []
+            for provider in targets:
+                try:
+                    results.append(remote_auto_continue.uninstall_remote_auto_continue(server_name, provider))
+                except Exception as e:
+                    failures.append(f"{provider}: {e}")
+
+            statuses = []
+            for provider in targets:
+                try:
+                    statuses.append(remote_auto_continue.get_remote_auto_continue_status(server_name, provider))
+                except Exception:
+                    pass
+            self._set_remote_auto_status(self._summarize_remote_auto_status(statuses, failures), bool(failures))
+
+            message = " | ".join(results)
+            if failures:
+                message = (message + " | " if message else "") + "失败: " + "；".join(failures)
+            show_toast(self.winfo_toplevel(), message or "远端自动续跑已卸载", is_error=bool(failures))
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="卸载远端自动续跑",
+            message=f"确定要从服务器 \"{server_name}\" 卸载 {target_label} 自动续跑吗？\n这会移除远端 hook、脚本、设置和指导块。",
+            on_confirm=do_uninstall,
+        )
 
     def _pull_from_server(self):
         server_name = self._server_combo.get()
