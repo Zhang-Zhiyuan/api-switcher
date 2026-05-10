@@ -106,9 +106,9 @@
 
 ## 🔐 跨电脑迁移 Profile
 
-在“备份管理”中使用“导出迁移包”可以生成加密的 `.asxprofile` 文件。迁移包只包含 Claude/Codex/SSH 的第三方 API Profile 元数据，以及 API Key、SSH 密码、SSH 密钥口令等由软件管理的密钥。导入到另一台电脑时，输入同一个迁移密码，软件会把密钥重新写入新电脑的本机凭据存储。
+在“备份管理”中使用“导出迁移包”可以生成加密的 `.asxprofile` 文件。迁移包包含 Claude/Codex/SSH 的第三方 API Profile 元数据、API Key、SSH 密码、SSH 密钥口令，以及浏览器 Profile 目录中的 Cookies、Local State、本地存储、IndexedDB、Session Storage、Service Worker 等登录态相关数据。导入到另一台电脑时，输入同一个迁移密码，软件会把密钥重新写入新电脑的本机凭据存储，并把浏览器数据恢复到本机托管的 `browser_profiles` 目录。
 
-浏览器 Profile 只作为本机隔离、启动和清理工具使用，不再通过迁移包或浏览器 Tab 做跨机器导入/导出；官方账号登录态、OAuth Token、cookies、Local State、本地存储、IndexedDB、Session Storage 等浏览器数据不会被打包。
+浏览器迁移会跳过 Cache、崩溃日志、SingletonLock 等临时/锁定文件。Chromium 在 Windows 上可能使用系统账号加密 Cookies，完整目录迁移也可能受浏览器自身加密机制限制；如果导入后登录态不可用，需要在新电脑重新登录一次。
 
 ## 📖 详细文档
 

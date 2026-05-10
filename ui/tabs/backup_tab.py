@@ -32,7 +32,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         ctk.CTkLabel(
             title_area,
-            text="创建本机备份，或导出可跨电脑迁移的加密 API Profile 包；浏览器 Profile 仅保留本机使用",
+            text="创建本机备份，或导出可跨电脑迁移的加密 Profile 包，包含托管浏览器登录数据",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
@@ -203,6 +203,10 @@ class BackupTab(ctk.CTkScrollableFrame):
                 message = f"迁移包已导出: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
                 if result.missing_secret_refs:
                     message += f"，{len(result.missing_secret_refs)} 个密钥缺失"
+                if result.browser_file_count:
+                    message += f"，浏览器文件 {result.browser_file_count} 个"
+                if result.skipped_browser_files:
+                    message += f"，{len(result.skipped_browser_files)} 个浏览器文件跳过"
                 show_toast(self.winfo_toplevel(), message)
             except Exception as e:
                 show_toast(self.winfo_toplevel(), f"导出失败: {e}", is_error=True)
@@ -210,7 +214,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         PasswordDialog(
             self.winfo_toplevel(),
             title="设置迁移密码",
-            message="迁移包会包含第三方 API Profile、API Key、SSH 密码和 SSH 密钥口令；不会包含官方账号登录态或浏览器 Profile 数据。请设置一个强密码。",
+            message="迁移包会包含 API/SSH Profile 密钥，以及浏览器 Profile 的 Cookies、Local Storage、IndexedDB 等登录数据。Chromium Cookies 仍可能受原电脑系统账号加密限制。请设置强密码。",
             confirm_password=True,
             on_confirm=do_export,
         )
@@ -232,6 +236,10 @@ class BackupTab(ctk.CTkScrollableFrame):
             try:
                 result = portable_migration.import_portable_profiles(input_path, password)
                 message = f"迁移包已导入: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                if result.browser_file_count:
+                    message += f"，浏览器文件 {result.browser_file_count} 个"
+                if result.skipped_browser_files:
+                    message += f"，{len(result.skipped_browser_files)} 个浏览器文件跳过"
                 show_toast(self.winfo_toplevel(), message)
                 top = self.winfo_toplevel()
                 if hasattr(top, "refresh_all"):
@@ -244,7 +252,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         PasswordDialog(
             self.winfo_toplevel(),
             title="输入迁移密码",
-            message="导入会合并迁移包中的 API/SSH Profile；同名 Profile 会被替换，密钥会写入本机凭据存储。浏览器 Profile 和官方账号登录态不会导入。",
+            message="导入会合并迁移包中的 API/SSH/浏览器 Profile；同名 Profile 会被替换，浏览器数据会恢复到本机托管目录。",
             confirm_password=False,
             on_confirm=do_import,
         )
