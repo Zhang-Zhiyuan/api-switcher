@@ -113,26 +113,45 @@ def sync_selected_to_server(ssh_name: str, target_kind: str, name: str) -> str:
 def sync_all_to_server(ssh_name: str) -> str:
     """Sync currently active local Claude + Codex target to remote server."""
     results = []
+    failures = []
 
     claude_api = {p.name for p in profile_manager.list_switchable_claude_profiles()}
     claude_accounts = {p.name for p in profile_manager.list_claude_account_profiles()}
     active_claude_api = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
     active_claude_account = profile_manager.get_current_claude_account_name() or profile_manager.get_active_claude_account_name()
     if active_claude_api in claude_api:
-        results.append(sync_claude_to_server(ssh_name, active_claude_api))
+        try:
+            results.append(sync_claude_to_server(ssh_name, active_claude_api))
+        except Exception as e:
+            failures.append(f"Claude: {e}")
     elif active_claude_account in claude_accounts:
-        results.append(sync_claude_account_to_server(ssh_name, active_claude_account))
+        try:
+            results.append(sync_claude_account_to_server(ssh_name, active_claude_account))
+        except Exception as e:
+            failures.append(f"Claude 账号: {e}")
 
     codex_api = {p.name for p in profile_manager.list_switchable_codex_profiles()}
     codex_accounts = {p.name for p in profile_manager.list_codex_account_profiles()}
     active_codex_api = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
     active_codex_account = profile_manager.get_current_codex_account_name() or profile_manager.get_active_codex_account_name()
     if active_codex_api in codex_api:
-        results.append(sync_codex_to_server(ssh_name, active_codex_api))
+        try:
+            results.append(sync_codex_to_server(ssh_name, active_codex_api))
+        except Exception as e:
+            failures.append(f"Codex: {e}")
     elif active_codex_account in codex_accounts:
-        results.append(sync_codex_account_to_server(ssh_name, active_codex_account))
+        try:
+            results.append(sync_codex_account_to_server(ssh_name, active_codex_account))
+        except Exception as e:
+            failures.append(f"Codex 账号: {e}")
 
-    return " | ".join(results) if results else "没有当前生效的 API 或账号可同步"
+    if results and failures:
+        return " | ".join(results) + " | 部分失败: " + "；".join(failures)
+    if results:
+        return " | ".join(results)
+    if failures:
+        raise RuntimeError("；".join(failures))
+    return "没有当前生效的 API 或账号可同步"
 
 
 def pull_claude_from_server(ssh_name: str) -> str:

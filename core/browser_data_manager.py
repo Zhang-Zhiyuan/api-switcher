@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 
@@ -41,10 +43,15 @@ class BrowserDataManager:
                 logger.debug(f"Error checking lock on {candidate}: {e}")
                 continue
 
-        # 2) Fallback to process-name heuristic only for the selected browser family.
+        # 2) Match running Chromium processes by --user-data-dir. This avoids blocking
+        # cleanup just because an unrelated Chrome/Edge window is open.
+        process_match = self._is_profile_used_by_browser_process(profile, profile_dir)
+        if process_match is not None:
+            return process_match
+
+        # 3) Conservative fallback if process command-line inspection is unavailable.
         process_names = ["chrome"] if profile.browser_type == "chrome" else ["msedge"]
         try:
-            import subprocess
             command = (
                 "$names=@('" + "','".join(process_names) + "'); "
                 "Get-Process -ErrorAction SilentlyContinue | "
@@ -68,6 +75,111 @@ class BrowserDataManager:
         except Exception as e:
             logger.error(f"Error checking browser process: {e}")
             return True  # Conservative fallback
+
+    def _is_profile_used_by_browser_process(self, profile: BrowserProfile, profile_dir: Path) -> bool | None:
+        if profile.browser_type == "chrome":
+            process_name = "chrome.exe"
+        elif profile.browser_type == "edge":
+            process_name = "msedge.exe"
+        else:
+            return None
+
+        try:
+            profile_key = self._path_key(profile_dir)
+        except Exception as e:
+            logger.debug(f"Unable to normalize profile path for process matching: {e}")
+            return None
+
+        ps_script = (
+            "$ErrorActionPreference='Stop'; "
+            f"Get-CimInstance Win32_Process -Filter \"name='{process_name}'\" | "
+            "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                timeout=6,
+            )
+            if result.returncode != 0:
+                logger.debug(f"Process command-line query failed: {result.stderr}")
+                return None
+
+            output = (result.stdout or "").strip()
+            if not output:
+                return False
+            try:
+                payload = json.loads(output)
+            except json.JSONDecodeError as e:
+                logger.debug(f"Failed to parse process query output: {e}")
+                return None
+
+            rows = payload if isinstance(payload, list) else [payload]
+            process_count = 0
+            visible_command_count = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                process_count += 1
+                command_line = str(row.get("CommandLine") or "")
+                if not command_line:
+                    continue
+                visible_command_count += 1
+                if self._command_line_uses_profile(command_line, profile_key):
+                    logger.debug(f"Browser process uses profile {profile_dir}: pid={row.get('ProcessId')}")
+                    return True
+
+            if process_count > 0 and visible_command_count == 0:
+                logger.debug("Browser processes found but command lines are unavailable; using conservative fallback")
+                return None
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("Process command-line query timed out")
+            return None
+        except Exception as e:
+            logger.debug(f"Error matching browser process to profile: {e}")
+            return None
+
+    def _path_key(self, path: Path) -> str:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path.absolute()
+        return str(resolved).replace("/", "\\").rstrip("\\").casefold()
+
+    def _command_line_uses_profile(self, command_line: str, profile_key: str) -> bool:
+        normalized = command_line.replace("/", "\\").casefold()
+        marker = "--user-data-dir="
+        start = 0
+        while True:
+            marker_index = normalized.find(marker, start)
+            if marker_index < 0:
+                return False
+            value_start = marker_index + len(marker)
+            value = normalized[value_start:].lstrip()
+            if not value:
+                return False
+
+            quote = value[0] if value[0] in {'"', "'"} else ""
+            if quote:
+                value = value[1:]
+                end = value.find(quote)
+            else:
+                end_candidates = [
+                    index for index in (
+                        value.find('"'),
+                        value.find("'"),
+                        value.find(" --"),
+                    )
+                    if index >= 0
+                ]
+                end = min(end_candidates) if end_candidates else len(value)
+
+            candidate = value[:end].strip().rstrip("\\")
+            if candidate == profile_key:
+                return True
+            start = value_start
 
     def _is_file_locked(self, path: Path) -> bool:
         """Check if a file is locked by attempting a rename operation."""

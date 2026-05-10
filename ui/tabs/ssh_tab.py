@@ -398,9 +398,21 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
 
-        try:
-            msg1 = sync_manager.pull_claude_from_server(server_name)
-            msg2 = sync_manager.pull_codex_from_server(server_name)
-            show_toast(self.winfo_toplevel(), f"{msg1} | {msg2}")
-        except Exception as e:
-            show_toast(self.winfo_toplevel(), f"拉取失败: {e}", is_error=True)
+        results = []
+        failures = []
+        for label, puller in [
+            ("Claude", sync_manager.pull_claude_from_server),
+            ("Codex", sync_manager.pull_codex_from_server),
+        ]:
+            try:
+                results.append(puller(server_name))
+            except Exception as e:
+                failures.append(f"{label}: {e}")
+
+        if results and failures:
+            show_toast(self.winfo_toplevel(), " | ".join(results) + " | 部分失败: " + "；".join(failures), is_error=True)
+        elif results:
+            show_toast(self.winfo_toplevel(), " | ".join(results))
+        else:
+            show_toast(self.winfo_toplevel(), "拉取失败: " + "；".join(failures), is_error=True)
+        self.refresh()
