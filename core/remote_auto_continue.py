@@ -804,6 +804,31 @@ def _iter_codex_hook_commands(hooks: dict, event_name: str):
                     yield str(command)
 
 
+def _codex_hooks_has_entries(hooks: dict) -> bool:
+    if not isinstance(hooks, dict):
+        return False
+    for value in hooks.values():
+        if isinstance(value, dict):
+            if value.get("command"):
+                return True
+            hook_list = value.get("hooks")
+            if isinstance(hook_list, list) and any(isinstance(hook, dict) and hook.get("command") for hook in hook_list):
+                return True
+        elif isinstance(value, list):
+            if any(isinstance(item, dict) and item.get("command") for item in value):
+                return True
+    return False
+
+
+def _set_codex_hooks_enabled(client, paths: RemoteAutoContinuePaths, enabled: bool) -> None:
+    config = _read_toml(client, paths.provider_config_path, strict=False)
+    if enabled:
+        config["codex_hooks"] = True
+    elif config.get("codex_hooks") is not None:
+        config["codex_hooks"] = False
+    _write_toml(client, paths.provider_config_path, config)
+
+
 def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -> None:
     if not paths.codex_hooks_path:
         raise RuntimeError("Codex hooks 路径缺失")
@@ -813,9 +838,7 @@ def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -
     hooks["Stop"] = {"command": command, "timeout": 10}
     _write_json(client, paths.codex_hooks_path, hooks)
 
-    config = _read_toml(client, paths.provider_config_path)
-    config["codex_hooks"] = True
-    _write_toml(client, paths.provider_config_path, config)
+    _set_codex_hooks_enabled(client, paths, True)
 
 
 def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
@@ -826,6 +849,8 @@ def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
         if any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Stop")):
             hooks.pop("Stop", None)
             _write_json(client, paths.codex_hooks_path, hooks)
+            if not _codex_hooks_has_entries(hooks):
+                _set_codex_hooks_enabled(client, paths, False)
 
 
 def _install_guidance(client, path: str) -> None:
@@ -1021,7 +1046,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
         status.issues.append("Hook 脚本缺失")
     if not status.hook_registered:
         status.issues.append("Hook 未注册")
-    if provider == "codex" and not status.codex_hooks_enabled:
+    if provider == "codex" and status.enabled and not status.codex_hooks_enabled:
         status.issues.append("config.toml 未开启 codex_hooks")
     if not status.guidance_installed:
         status.issues.append("指导文件未安装")
