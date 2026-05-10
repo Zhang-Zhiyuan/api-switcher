@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 
 CHATGPT_URL = "https://chatgpt.com/"
 CLAUDE_URL = "https://claude.ai/"
+MIN_WINDOW_WIDTH = 640
+MIN_WINDOW_HEIGHT = 480
+MAX_WINDOW_WIDTH = 3840
+MAX_WINDOW_HEIGHT = 2160
 
 
 class BrowserLauncher:
@@ -30,7 +34,7 @@ class BrowserLauncher:
 
         candidates: list[Path] = []
         try:
-            local = Path.home().parent / "AppData" / "Local"
+            local = Path.home() / "AppData" / "Local"
         except Exception as e:
             logger.error(f"Failed to resolve home directory: {e}")
             local = Path("C:/Users/Default/AppData/Local")
@@ -95,6 +99,28 @@ class BrowserLauncher:
             return custom_url
         raise ValueError(f"未知目标站点: {use_target}")
 
+    def _launch_window_size(self, profile: BrowserProfile) -> tuple[int, int]:
+        def clamp(value: object, default: int, minimum: int, maximum: int) -> int:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                number = default
+            return max(minimum, min(maximum, number))
+
+        width = clamp(getattr(profile, "launch_width", 1280), 1280, MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH)
+        height = clamp(getattr(profile, "launch_height", 900), 900, MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT)
+        return width, height
+
+    def _launch_language(self, profile: BrowserProfile) -> str | None:
+        language = (getattr(profile, "launch_language", "") or "").strip()
+        if not language:
+            return None
+        # Chrome accepts BCP-47-ish language tags here. Keep it conservative.
+        if len(language) > 20 or any(ch for ch in language if not (ch.isalnum() or ch == "-")):
+            logger.warning("Ignoring invalid browser launch language: %s", language)
+            return None
+        return language
+
     def launch(self, profile: BrowserProfile, target: str | None = None) -> subprocess.Popen:
         """Launch browser with comprehensive validation and error handling."""
         # Validate browser executable
@@ -138,11 +164,23 @@ class BrowserLauncher:
             raise ValueError(f"无法解析目标 URL: {e}") from e
 
         # Build command
+        width, height = self._launch_window_size(profile)
+        language = self._launch_language(profile)
         cmd = [
             str(exe),
             f"--user-data-dir={str(user_data_dir)}",
-            url,
+            "--profile-directory=Default",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-mode",
+            "--new-window",
+            f"--window-size={width},{height}",
         ]
+        if language:
+            cmd.append(f"--lang={language}")
+        cmd.append(
+            url,
+        )
 
         # Launch process with error handling
         try:
@@ -155,12 +193,9 @@ class BrowserLauncher:
             )
 
             # Quick check if process started successfully
-            try:
-                returncode = process.poll()
-                if returncode is not None:
-                    raise RuntimeError(f"浏览器进程立即退出，返回码: {returncode}")
-            except Exception:
-                pass  # Process is still running, which is expected
+            returncode = process.poll()
+            if returncode is not None:
+                raise RuntimeError(f"浏览器进程立即退出，返回码: {returncode}")
 
             return process
         except FileNotFoundError as e:

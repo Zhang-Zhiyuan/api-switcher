@@ -12,8 +12,8 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
     def __init__(self, master, title="编辑浏览器 Profile", profile: BrowserProfile | None = None, on_save=None):
         super().__init__(master)
         self.title(title)
-        self.geometry("680x680")
-        self.minsize(560, 540)
+        self.geometry("700x760")
+        self.minsize(580, 600)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.grab_set()
@@ -40,6 +40,21 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
         self._add_combo(scroll, "默认目标", "start_target", ["chatgpt", "claude", "custom"], profile.start_target if profile else "chatgpt")
         self._add_field(scroll, "自定义 URL", "custom_url", profile.custom_url if profile else "")
         self._add_field(scroll, "备注", "notes", profile.notes if profile else "")
+
+        launch_box = ctk.CTkFrame(scroll, fg_color=COLORS["surface"], corner_radius=8, border_width=1, border_color=COLORS["border_soft"])
+        launch_box.pack(fill="x", pady=(12, 6))
+        ctk.CTkLabel(launch_box, text="隔离启动", text_color=COLORS["text"], font=font(13, "bold")).pack(anchor="w", padx=12, pady=(10, 4))
+        self._add_field(launch_box, "窗口宽度", "launch_width", getattr(profile, "launch_width", 1280) if profile else 1280)
+        self._add_field(launch_box, "窗口高度", "launch_height", getattr(profile, "launch_height", 900) if profile else 900)
+        self._add_field(launch_box, "语言代码", "launch_language", getattr(profile, "launch_language", "zh-CN") if profile else "zh-CN")
+        ctk.CTkLabel(
+            launch_box,
+            text="Profile 会隔离 Cookies、本地存储、IndexedDB 和浏览器缓存；网页仍可能基于 IP、系统、显卡、字体、WebGL、Canvas、时区等生成设备指纹，跨机器无法保证完全一致。",
+            text_color=COLORS["muted"],
+            font=font(11),
+            justify="left",
+            wraplength=500,
+        ).pack(fill="x", padx=12, pady=(4, 10))
 
         # Executable row
         exe_row = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -152,6 +167,15 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
         self._fields["profile_mode"].set("managed")
         self._created_by_app.select()
 
+    def _field_int(self, key: str, label: str) -> int:
+        value = self._fields[key].get().strip()
+        if not value:
+            raise ValueError(f"{label}不能为空")
+        try:
+            return int(value)
+        except ValueError as e:
+            raise ValueError(f"{label}必须是数字") from e
+
     def _collect_profile(self) -> BrowserProfile:
         return BrowserProfile(
             name=self._fields["name"].get().strip(),
@@ -164,6 +188,9 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
             allow_full_reset=self._allow_full_reset.get() == 1,
             created_by_app=self._created_by_app.get() == 1,
             browser_executable=self._exe_entry.get().strip() or None,
+            launch_width=self._field_int("launch_width", "窗口宽度"),
+            launch_height=self._field_int("launch_height", "窗口高度"),
+            launch_language=self._fields["launch_language"].get().strip() or None,
         )
 
     def _validate_profile(self):

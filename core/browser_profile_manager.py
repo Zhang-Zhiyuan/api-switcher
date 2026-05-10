@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from config.paths import STORAGE_DIR
@@ -10,6 +11,7 @@ from core import profile_manager
 MANAGED_BROWSER_PROFILES_DIR = STORAGE_DIR / "browser_profiles"
 SUPPORTED_BROWSERS = {"chrome", "edge"}
 SUPPORTED_START_TARGETS = {"chatgpt", "claude", "custom"}
+LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
 
 
 class BrowserProfileManager:
@@ -29,6 +31,11 @@ class BrowserProfileManager:
             return False, "start_target 无效"
         if profile.start_target == "custom" and not (profile.custom_url or "").strip():
             return False, "自定义目标需要填写 URL"
+        if not self._is_window_size_valid(profile.launch_width, profile.launch_height):
+            return False, "启动窗口尺寸需要在 640x480 到 3840x2160 之间"
+        language = (profile.launch_language or "").strip()
+        if language and not LANGUAGE_TAG_RE.match(language):
+            return False, "语言代码格式无效，例如 zh-CN 或 en-US"
         if not profile.user_data_dir.strip():
             return False, "user_data_dir 不能为空"
         if profile.browser_executable:
@@ -53,6 +60,14 @@ class BrowserProfileManager:
             if managed_root not in resolved.parents and resolved != managed_root:
                 return False, "托管 Profile 必须位于应用的 browser_profiles 目录下"
         return True, ""
+
+    def _is_window_size_valid(self, width: object, height: object) -> bool:
+        try:
+            parsed_width = int(width)
+            parsed_height = int(height)
+        except (TypeError, ValueError):
+            return False
+        return 640 <= parsed_width <= 3840 and 480 <= parsed_height <= 2160
 
     def build_managed_profile_path(self, name: str, browser_type: str) -> Path:
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name).strip("_") or "profile"
@@ -99,6 +114,7 @@ class BrowserProfileManager:
             "browser_running": browser_running,
             "can_full_reset": can_reset,
             "full_reset_reason": reset_reason,
+            "isolation_note": "独立 user-data-dir + Default 分区；网站设备指纹仍受硬件、系统、IP、字体、WebGL 等影响",
         }
 
     def build_template_profile(self, browser_type: str, target: str) -> BrowserProfile:
@@ -123,6 +139,9 @@ class BrowserProfileManager:
             allow_full_reset=True,
             created_by_app=True,
             browser_executable=None,
+            launch_width=1280,
+            launch_height=900,
+            launch_language="zh-CN",
         )
 
     def create_template_profile(self, browser_type: str, target: str) -> BrowserProfile:
@@ -159,6 +178,9 @@ class BrowserProfileManager:
             allow_full_reset=True,
             created_by_app=True,
             browser_executable=source.browser_executable,
+            launch_width=source.launch_width,
+            launch_height=source.launch_height,
+            launch_language=source.launch_language,
         )
         self.save_profile(cloned)
         return cloned

@@ -169,10 +169,12 @@ class BrowserTab(ctk.CTkScrollableFrame):
             info_frame.pack(fill="x", padx=14, pady=(0, 8))
             info_lines = [
                 f"浏览器: {p.browser_type}  |  模式: {p.profile_mode}  |  默认目标: {p.start_target}",
+                f"隔离启动: Default 分区  |  窗口 {p.launch_width}x{p.launch_height}  |  语言 {p.launch_language or '浏览器默认'}",
                 f"路径: {p.user_data_dir}",
                 f"可执行文件: {p.browser_executable or '(自动探测)'}",
                 f"诊断: 配置{'正常' if diagnosis['valid'] else '异常'}  |  EXE {'就绪' if diagnosis['executable_found'] else '缺失'}  |  路径 {'存在' if diagnosis['profile_path_exists'] else '缺失'}  |  占用 {'是' if diagnosis['browser_running'] else '否'}",
                 f"整目录清理: {'允许' if diagnosis['can_full_reset'] else '不允许'}",
+                "设备一致性: 可保持站点数据隔离；不承诺跨机器硬件/系统指纹完全相同",
             ]
             if not diagnosis["valid"] and diagnosis["validation_error"]:
                 info_lines.append(f"配置问题: {diagnosis['validation_error']}")

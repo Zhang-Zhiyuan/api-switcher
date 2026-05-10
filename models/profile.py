@@ -133,6 +133,9 @@ class BrowserProfile:
     allow_full_reset: bool = False
     created_by_app: bool = False
     browser_executable: Optional[str] = None
+    launch_width: int = 1280
+    launch_height: int = 900
+    launch_language: Optional[str] = "zh-CN"
 
     def to_dict(self) -> dict:
         return asdict(self)
