@@ -18,6 +18,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
+        self._sync_status_label = None
+        self._ssh_busy = False
         self._remote_auto_provider_combo = None
         self._remote_auto_status_label = None
         self._remote_auto_buttons = []
@@ -149,6 +151,17 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._sync_selected,
             **button_style("primary"),
         ).grid(row=1, column=3, sticky="e", pady=(10, 0))
+
+        self._sync_status_label = ctk.CTkLabel(
+            sync_controls,
+            text="就绪",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._sync_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
         auto_header.pack(fill="x", padx=14, pady=(4, 5))
@@ -399,16 +412,66 @@ class SSHTab(ctk.CTkScrollableFrame):
                       message=f"确定要删除 \"{name}\" 吗？\n关联的密钥也会被清除。",
                       on_confirm=do_delete)
 
+    def _set_sync_status(self, message: str, severity: str = "info"):
+        if not self._sync_status_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._sync_status_label.configure(text=message, text_color=color)
+
+    def _run_ssh_task(self, busy_message: str, worker, on_done=None, refresh: bool = False):
+        if self._ssh_busy:
+            show_toast(self.winfo_toplevel(), "SSH 操作正在进行中，请稍等", is_error=True)
+            return
+
+        self._ssh_busy = True
+        self._set_sync_status(busy_message)
+
+        def run():
+            try:
+                payload = {"ok": True, "result": worker(), "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._ssh_busy = False
+                if on_done:
+                    on_done(payload)
+                elif payload["ok"]:
+                    message = str(payload["result"] or "操作完成")
+                    self._set_sync_status(message, "success")
+                    show_toast(self.winfo_toplevel(), message)
+                else:
+                    message = f"操作失败: {payload['error']}"
+                    self._set_sync_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                if refresh:
+                    self.refresh()
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _connect(self, name):
-        try:
-            profiles = profile_manager.list_ssh_profiles()
-            profile = next((p for p in profiles if p.name == name), None)
-            if profile:
-                ssh_manager.ssh_manager.connect(profile)
-                show_toast(self.winfo_toplevel(), f"已连接到 {profile.host}")
-                self.refresh()
-        except Exception as e:
-            show_toast(self.winfo_toplevel(), f"连接失败: {e}", is_error=True)
+        profiles = profile_manager.list_ssh_profiles()
+        profile = next((p for p in profiles if p.name == name), None)
+        if not profile:
+            show_toast(self.winfo_toplevel(), f"未找到服务器: {name}", is_error=True)
+            return
+
+        self._run_ssh_task(
+            f"正在连接 {profile.host}:{profile.port}...",
+            lambda: (ssh_manager.ssh_manager.connect(profile), f"已连接到 {profile.host}")[1],
+            refresh=True,
+        )
 
     def _disconnect(self, name):
         ssh_manager.ssh_manager.disconnect(name)
@@ -421,11 +484,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
 
-        try:
-            message = sync_manager.sync_all_to_server(server_name)
-            show_toast(self.winfo_toplevel(), message)
-        except Exception as e:
-            show_toast(self.winfo_toplevel(), f"同步失败: {e}", is_error=True)
+        self._run_ssh_task(
+            f"正在推送当前生效配置到 {server_name}...",
+            lambda: sync_manager.sync_all_to_server(server_name),
+        )
 
     def _selected_sync_kind(self) -> str:
         if not self._sync_kind_combo:
@@ -468,11 +530,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         kind = self._selected_sync_kind()
 
         def do_sync():
-            try:
-                message = sync_manager.sync_selected_to_server(server_name, kind, profile_name)
-                show_toast(self.winfo_toplevel(), message)
-            except Exception as e:
-                show_toast(self.winfo_toplevel(), f"推送失败: {e}", is_error=True)
+            self._run_ssh_task(
+                f"正在推送 {profile_name} 到 {server_name}...",
+                lambda: sync_manager.sync_selected_to_server(server_name, kind, profile_name),
+            )
 
         if kind in {"claude_account", "codex_account"}:
             ConfirmDialog(
@@ -500,11 +561,16 @@ class SSHTab(ctk.CTkScrollableFrame):
             return None
         return server_name
 
-    def _set_remote_auto_status(self, message: str, is_error: bool = False):
+    def _set_remote_auto_status(self, message: str, is_error: bool = False, severity: str | None = None):
         if self._remote_auto_status_label:
+            level = severity or ("error" if is_error else "info")
+            color = {
+                "error": COLORS["danger"],
+                "warning": COLORS["warning"],
+            }.get(level, COLORS["muted"])
             self._remote_auto_status_label.configure(
                 text=message,
-                text_color=COLORS["danger"] if is_error else COLORS["muted"],
+                text_color=color,
             )
 
     def _set_remote_auto_busy(self, busy: bool, message: str | None = None):
@@ -569,12 +635,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                 failures.append(f"{provider}: {e}")
         return statuses, failures
 
-    def _show_remote_auto_result(self, payload, default_message: str):
+    def _show_remote_auto_result(self, payload, default_message: str, expect_ready: bool = False):
         statuses = payload.get("statuses", [])
         failures = payload.get("failures", [])
         results = payload.get("results", [])
         message = self._summarize_remote_auto_status(statuses, failures)
-        self._set_remote_auto_status(message, bool(failures))
+        has_not_ready = expect_ready and any(not status.ready for status in statuses)
+        severity = "error" if failures else "warning" if has_not_ready else "info"
+        self._set_remote_auto_status(message, severity=severity)
         toast_message = " | ".join(results)
         if failures:
             toast_message = (toast_message + " | " if toast_message else "") + "失败: " + "；".join(failures)
@@ -594,7 +662,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._run_remote_auto_task(
             f"正在检查 {server_name} 的远端自动续跑状态...",
             worker,
-            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑检查完成"),
+            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑检查完成", expect_ready=True),
         )
 
     def _install_remote_auto_continue(self):
@@ -619,7 +687,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._run_remote_auto_task(
             f"正在安装/修复 {server_name} 的远端自动续跑...",
             worker,
-            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑安装完成"),
+            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑安装完成", expect_ready=True),
         )
 
     def _pause_remote_auto_continue(self):
@@ -687,21 +755,43 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
 
-        results = []
-        failures = []
-        for label, puller in [
-            ("Claude", sync_manager.pull_claude_from_server),
-            ("Codex", sync_manager.pull_codex_from_server),
-        ]:
-            try:
-                results.append(puller(server_name))
-            except Exception as e:
-                failures.append(f"{label}: {e}")
+        def worker():
+            results = []
+            failures = []
+            for label, puller in [
+                ("Claude", sync_manager.pull_claude_from_server),
+                ("Codex", sync_manager.pull_codex_from_server),
+            ]:
+                try:
+                    results.append(puller(server_name))
+                except Exception as e:
+                    failures.append(f"{label}: {e}")
+            return results, failures
 
-        if results and failures:
-            show_toast(self.winfo_toplevel(), " | ".join(results) + " | 部分失败: " + "；".join(failures), is_error=True)
-        elif results:
-            show_toast(self.winfo_toplevel(), " | ".join(results))
-        else:
-            show_toast(self.winfo_toplevel(), "拉取失败: " + "；".join(failures), is_error=True)
-        self.refresh()
+        def done(payload):
+            if not payload["ok"]:
+                message = f"拉取失败: {payload['error']}"
+                self._set_sync_status(message, "error")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+                return
+
+            results, failures = payload["result"]
+            if results and failures:
+                message = " | ".join(results) + " | 部分失败: " + "；".join(failures)
+                self._set_sync_status(message, "warning")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+            elif results:
+                message = " | ".join(results)
+                self._set_sync_status(message, "success")
+                show_toast(self.winfo_toplevel(), message)
+            else:
+                message = "拉取失败: " + "；".join(failures)
+                self._set_sync_status(message, "error")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+            self.refresh()
+
+        self._run_ssh_task(
+            f"正在从 {server_name} 拉取配置...",
+            worker,
+            on_done=done,
+        )
