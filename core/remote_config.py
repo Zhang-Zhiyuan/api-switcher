@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 REMOTE_PATHS = {
     "claude_settings": "~/.claude/settings.json",
     "claude_config": "~/.claude/config.json",
+    "claude_credentials": "~/.claude/.credentials.json",
     "codex_config": "~/.codex/config.toml",
     "codex_auth": "~/.codex/auth.json",
 }
@@ -84,6 +85,14 @@ def read_remote_claude_config(client: paramiko.SSHClient) -> dict | None:
 
 def write_remote_claude_config(client: paramiko.SSHClient, data: dict):
     write_remote_json(client, REMOTE_PATHS["claude_config"], data)
+
+
+def read_remote_claude_credentials(client: paramiko.SSHClient) -> dict | None:
+    return read_remote_json(client, REMOTE_PATHS["claude_credentials"])
+
+
+def write_remote_claude_credentials(client: paramiko.SSHClient, data: dict):
+    write_remote_json(client, REMOTE_PATHS["claude_credentials"], data)
 
 
 def read_remote_codex_config(client: paramiko.SSHClient) -> dict | None:

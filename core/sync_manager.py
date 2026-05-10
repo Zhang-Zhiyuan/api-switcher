@@ -1,94 +1,138 @@
 import logging
 from core import remote_config, parser, toml_parser, auth_parser, profile_manager, security
 from core.ssh_manager import ssh_manager
-from models.profile import SSHProfile
 
 logger = logging.getLogger(__name__)
 
 
+def _find_profile(profiles: list, name: str, label: str):
+    profile = next((p for p in profiles if p.name == name), None)
+    if not profile:
+        raise ValueError(f"未找到 {label}: {name}")
+    return profile
+
+
+def _connect_ssh(ssh_name: str):
+    ssh_profile = _find_profile(profile_manager.list_ssh_profiles(), ssh_name, "SSH 服务器")
+    return ssh_profile, ssh_manager.connect(ssh_profile)
+
+
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
     """Sync Claude profile to remote server. Returns status message."""
-    profiles = profile_manager.list_switchable_claude_profiles()
-    claude_profile = next((p for p in profiles if p.name == claude_name), None)
-    if not claude_profile:
-        raise ValueError(f"Claude profile '{claude_name}' not found")
+    claude_profile = _find_profile(profile_manager.list_switchable_claude_profiles(), claude_name, "Claude API Profile")
     if not profile_manager.is_third_party_claude_profile(claude_profile):
         raise ValueError("只能同步第三方 Claude API Profile")
     if not (security.get_secret(claude_profile.auth_token_ref) or security.get_secret(getattr(claude_profile, "primary_api_key_ref", None))):
         raise ValueError("Claude API Profile 需要 Auth Token")
 
-    ssh_profiles = profile_manager.list_ssh_profiles()
-    ssh_profile = next((p for p in ssh_profiles if p.name == ssh_name), None)
-    if not ssh_profile:
-        raise ValueError(f"SSH server '{ssh_name}' not found")
+    ssh_profile, client = _connect_ssh(ssh_name)
 
-    client = ssh_manager.connect(ssh_profile)
-
-    # Get current local settings and apply profile
-    settings = parser.read_claude_settings()
+    settings = remote_config.read_remote_claude_settings(client) or {}
     settings = parser.apply_claude_profile(settings, claude_profile)
-    config = parser.read_claude_config()
+    config = remote_config.read_remote_claude_config(client) or {}
     config = parser.apply_claude_config(config, claude_profile)
 
-    # Write to remote
     remote_config.write_remote_claude_settings(client, settings)
     remote_config.write_remote_claude_config(client, config)
 
-    logger.info(f"Synced Claude profile '{claude_name}' to {ssh_profile.host}")
-    return f"已同步 Claude 配置到 {ssh_profile.host}"
+    logger.info(f"Synced Claude API profile '{claude_name}' to {ssh_profile.host}")
+    return f"已同步 Claude API '{claude_name}' 到 {ssh_profile.host}"
+
+
+def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
+    """Sync a saved Claude official account snapshot to the remote server."""
+    account = _find_profile(profile_manager.list_claude_account_profiles(), account_name, "Claude 官方账号")
+    credentials = profile_manager.load_claude_account_credentials(account)
+
+    ssh_profile, client = _connect_ssh(ssh_name)
+
+    remote_config.write_remote_claude_credentials(client, credentials)
+
+    settings = remote_config.read_remote_claude_settings(client) or {}
+    remote_config.write_remote_claude_settings(client, parser.clear_claude_api_overrides(settings))
+
+    config = remote_config.read_remote_claude_config(client) or {}
+    remote_config.write_remote_claude_config(client, parser.clear_claude_config_auth(config))
+
+    logger.info(f"Synced Claude account '{account_name}' to {ssh_profile.host}")
+    return f"已同步 Claude 账号 '{account_name}' 到 {ssh_profile.host}"
 
 
 def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
     """Sync Codex profile to remote server. Returns status message."""
-    profiles = profile_manager.list_switchable_codex_profiles()
-    codex_profile = next((p for p in profiles if p.name == codex_name), None)
-    if not codex_profile:
-        raise ValueError(f"Codex profile '{codex_name}' not found")
+    codex_profile = _find_profile(profile_manager.list_switchable_codex_profiles(), codex_name, "Codex API Profile")
     if not profile_manager.is_third_party_codex_profile(codex_profile):
         raise ValueError("只能同步第三方 Codex API Profile")
     if not security.get_secret(codex_profile.api_key_ref):
         raise ValueError("Codex API Profile 需要 API Key")
 
-    ssh_profiles = profile_manager.list_ssh_profiles()
-    ssh_profile = next((p for p in ssh_profiles if p.name == ssh_name), None)
-    if not ssh_profile:
-        raise ValueError(f"SSH server '{ssh_name}' not found")
+    ssh_profile, client = _connect_ssh(ssh_name)
 
-    client = ssh_manager.connect(ssh_profile)
-
-    # Update config.toml
-    config = toml_parser.read_codex_config()
+    config = remote_config.read_remote_codex_config(client) or {}
     config = toml_parser.apply_codex_profile(config, codex_profile)
     remote_config.write_remote_codex_config(client, config)
 
-    # Update auth.json
-    auth = auth_parser.read_codex_auth()
+    auth = remote_config.read_remote_codex_auth(client) or {}
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth)
 
-    logger.info(f"Synced Codex profile '{codex_name}' to {ssh_profile.host}")
-    return f"已同步 Codex 配置到 {ssh_profile.host}"
+    logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
+    return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host}"
+
+
+def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
+    """Sync a saved Codex official account snapshot to the remote server."""
+    account = _find_profile(profile_manager.list_codex_account_profiles(), account_name, "Codex 官方账号")
+    auth = profile_manager.load_codex_account_auth(account)
+
+    ssh_profile, client = _connect_ssh(ssh_name)
+
+    remote_config.write_remote_codex_auth(client, auth)
+
+    config = remote_config.read_remote_codex_config(client) or {}
+    remote_config.write_remote_codex_config(client, toml_parser.apply_codex_official_account(config))
+
+    logger.info(f"Synced Codex account '{account_name}' to {ssh_profile.host}")
+    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}"
+
+
+def sync_selected_to_server(ssh_name: str, target_kind: str, name: str) -> str:
+    """Sync one explicit local API profile or official account snapshot to the remote server."""
+    handlers = {
+        "claude_api": sync_claude_to_server,
+        "claude_account": sync_claude_account_to_server,
+        "codex_api": sync_codex_to_server,
+        "codex_account": sync_codex_account_to_server,
+    }
+    handler = handlers.get(target_kind)
+    if not handler:
+        raise ValueError(f"不支持的同步类型: {target_kind}")
+    return handler(ssh_name, name)
 
 
 def sync_all_to_server(ssh_name: str) -> str:
-    """Sync current local Claude + Codex config to remote server."""
+    """Sync currently active local Claude + Codex target to remote server."""
     results = []
 
-    # Sync Claude
-    switchable_claude = {p.name for p in profile_manager.list_switchable_claude_profiles()}
-    active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
-    if active_claude:
-        if active_claude in switchable_claude:
-            results.append(sync_claude_to_server(ssh_name, active_claude))
+    claude_api = {p.name for p in profile_manager.list_switchable_claude_profiles()}
+    claude_accounts = {p.name for p in profile_manager.list_claude_account_profiles()}
+    active_claude_api = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
+    active_claude_account = profile_manager.get_current_claude_account_name() or profile_manager.get_active_claude_account_name()
+    if active_claude_api in claude_api:
+        results.append(sync_claude_to_server(ssh_name, active_claude_api))
+    elif active_claude_account in claude_accounts:
+        results.append(sync_claude_account_to_server(ssh_name, active_claude_account))
 
-    # Sync Codex
-    switchable_codex = {p.name for p in profile_manager.list_switchable_codex_profiles()}
-    active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
-    if active_codex:
-        if active_codex in switchable_codex:
-            results.append(sync_codex_to_server(ssh_name, active_codex))
+    codex_api = {p.name for p in profile_manager.list_switchable_codex_profiles()}
+    codex_accounts = {p.name for p in profile_manager.list_codex_account_profiles()}
+    active_codex_api = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
+    active_codex_account = profile_manager.get_current_codex_account_name() or profile_manager.get_active_codex_account_name()
+    if active_codex_api in codex_api:
+        results.append(sync_codex_to_server(ssh_name, active_codex_api))
+    elif active_codex_account in codex_accounts:
+        results.append(sync_codex_account_to_server(ssh_name, active_codex_account))
 
-    return " | ".join(results) if results else "没有活动的 Profile 可同步"
+    return " | ".join(results) if results else "没有当前生效的 API 或账号可同步"
 
 
 def pull_claude_from_server(ssh_name: str) -> str:

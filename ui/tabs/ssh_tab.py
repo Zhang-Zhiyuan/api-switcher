@@ -15,6 +15,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         self.configure(fg_color="transparent")
         self._cards_frame = None
         self._sync_frame = None
+        self._sync_kind_combo = None
+        self._profile_combo = None
+        self._sync_kind_options = {
+            "Claude API": "claude_api",
+            "Claude 账号": "claude_account",
+            "Codex API": "codex_api",
+            "Codex 账号": "codex_account",
+        }
         self._build_ui()
 
     def _build_ui(self):
@@ -32,7 +40,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         ctk.CTkLabel(
             title_area,
-            text="连接远程服务器，并同步当前 Claude 与 Codex 配置",
+            text="连接远程服务器，并把本机 API 或账号配置推送到远程环境",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
@@ -66,6 +74,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         sync_controls = ctk.CTkFrame(self._sync_frame, fg_color="transparent")
         sync_controls.pack(fill="x", padx=14, pady=14)
         sync_controls.grid_columnconfigure(1, weight=1)
+        sync_controls.grid_columnconfigure(2, weight=1)
 
         # Server selector
         ctk.CTkLabel(
@@ -83,10 +92,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._server_combo.grid(row=0, column=1, sticky="ew", padx=(8, 12))
 
-        # Sync buttons
         ctk.CTkButton(
             sync_controls,
-            text="同步当前配置",
+            text="推送当前生效",
             width=126,
             command=self._sync_current,
             **button_style("primary"),
@@ -98,6 +106,39 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._pull_from_server,
             **button_style("accent"),
         ).grid(row=0, column=3, sticky="e")
+
+        ctk.CTkLabel(
+            sync_controls,
+            text="推送内容",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self._sync_kind_combo = ctk.CTkComboBox(
+            sync_controls,
+            values=list(self._sync_kind_options.keys()),
+            width=132,
+            command=lambda _value: self._refresh_sync_profile_combo(),
+            **combo_style(),
+        )
+        self._sync_kind_combo.grid(row=1, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._sync_kind_combo.set("Claude API")
+
+        self._profile_combo = ctk.CTkComboBox(
+            sync_controls,
+            values=["(无)"],
+            width=220,
+            **combo_style(),
+        )
+        self._profile_combo.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
+
+        ctk.CTkButton(
+            sync_controls,
+            text="推送所选",
+            width=126,
+            command=self._sync_selected,
+            **button_style("primary"),
+        ).grid(row=1, column=3, sticky="e", pady=(10, 0))
 
         self.refresh()
 
@@ -214,11 +255,13 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         # Update server combo
         server_names = [p.name for p in profiles]
+        current_server = self._server_combo.get()
         self._server_combo.configure(values=server_names if server_names else ["(无)"])
         if server_names:
-            self._server_combo.set(server_names[0])
+            self._server_combo.set(current_server if current_server in server_names else server_names[0])
         else:
             self._server_combo.set("(无)")
+        self._refresh_sync_profile_combo()
 
     def _create_server(self):
         def on_save(profile, _):
@@ -283,6 +326,64 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message)
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"同步失败: {e}", is_error=True)
+
+    def _selected_sync_kind(self) -> str:
+        if not self._sync_kind_combo:
+            return "claude_api"
+        return self._sync_kind_options.get(self._sync_kind_combo.get(), "claude_api")
+
+    def _profile_names_for_kind(self, kind: str) -> list[str]:
+        if kind == "claude_api":
+            return [p.name for p in profile_manager.list_switchable_claude_profiles()]
+        if kind == "claude_account":
+            return [p.name for p in profile_manager.list_claude_account_profiles()]
+        if kind == "codex_api":
+            return [p.name for p in profile_manager.list_switchable_codex_profiles()]
+        if kind == "codex_account":
+            return [p.name for p in profile_manager.list_codex_account_profiles()]
+        return []
+
+    def _refresh_sync_profile_combo(self):
+        if not self._profile_combo:
+            return
+        current_profile = self._profile_combo.get()
+        profile_names = self._profile_names_for_kind(self._selected_sync_kind())
+        self._profile_combo.configure(values=profile_names if profile_names else ["(无)"])
+        if profile_names:
+            self._profile_combo.set(current_profile if current_profile in profile_names else profile_names[0])
+        else:
+            self._profile_combo.set("(无)")
+
+    def _sync_selected(self):
+        server_name = self._server_combo.get()
+        if server_name == "(无)":
+            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+            return
+
+        profile_name = self._profile_combo.get()
+        if profile_name == "(无)":
+            show_toast(self.winfo_toplevel(), "请先选择要推送的 API 或账号", is_error=True)
+            return
+
+        kind = self._selected_sync_kind()
+
+        def do_sync():
+            try:
+                message = sync_manager.sync_selected_to_server(server_name, kind, profile_name)
+                show_toast(self.winfo_toplevel(), message)
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"推送失败: {e}", is_error=True)
+
+        if kind in {"claude_account", "codex_account"}:
+            ConfirmDialog(
+                self.winfo_toplevel(),
+                title="确认推送账号",
+                message=f"将把 \"{profile_name}\" 的官方登录凭据写入服务器 \"{server_name}\"。\n确定继续吗？",
+                on_confirm=do_sync,
+            )
+            return
+
+        do_sync()
 
     def _pull_from_server(self):
         server_name = self._server_combo.get()
