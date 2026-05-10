@@ -28,10 +28,24 @@ BACKUP_FILES = {
 BACKUP_META_FILE = "backup_meta.json"
 
 
+def _allocate_backup_dir(timestamp: str) -> Path:
+    """Return a unique backup directory for the timestamp."""
+    base = BACKUPS_DIR / timestamp
+    if not base.exists():
+        return base
+
+    for index in range(2, 1000):
+        candidate = BACKUPS_DIR / f"{timestamp}-{index:02d}"
+        if not candidate.exists():
+            return candidate
+
+    raise RuntimeError("无法创建唯一备份目录，请稍后重试")
+
+
 def create_backup(description: str = "") -> BackupEntry:
     """Create a backup of all config files. Returns the backup entry."""
     ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    backup_dir = BACKUPS_DIR / ts
+    backup_dir = _allocate_backup_dir(ts)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     backed_up = []
@@ -86,6 +100,12 @@ def list_backups() -> list[BackupEntry]:
     return backups
 
 
+def get_latest_backup() -> BackupEntry | None:
+    """Return the most recent backup entry, if any."""
+    backups = list_backups()
+    return backups[0] if backups else None
+
+
 def restore_backup(entry: BackupEntry) -> list[str]:
     """Restore config files from a backup. Returns list of restored file names."""
     # Create a safety backup first
@@ -103,6 +123,14 @@ def restore_backup(entry: BackupEntry) -> list[str]:
             logger.info(f"Restored {src} -> {dst}")
 
     return restored
+
+
+def restore_latest_backup() -> tuple[BackupEntry, list[str]]:
+    """Restore the most recent backup and return the entry plus restored files."""
+    entry = get_latest_backup()
+    if not entry:
+        raise ValueError("暂无可回滚的备份")
+    return entry, restore_backup(entry)
 
 
 def prune_backups(keep_count: int = 20) -> int:

@@ -117,6 +117,14 @@ class App(ctk.CTk):
 
         ctk.CTkButton(
             button_group,
+            text="回滚上次",
+            width=96,
+            command=self._restore_latest_backup,
+            **button_style("warning"),
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(
+            button_group,
             text="刷新全部",
             width=96,
             command=self.refresh_all,
@@ -331,6 +339,39 @@ class App(ctk.CTk):
 
         # Reload quick switch profiles
         self._load_quick_switch_profiles()
+
+    def _restore_latest_backup(self):
+        """Restore the newest config backup after confirmation."""
+        from core import backup_manager
+        from ui.dialogs.confirm_dialog import ConfirmDialog
+        from ui.widgets.toast import show_toast
+
+        entry = backup_manager.get_latest_backup()
+        if not entry:
+            show_toast(self, "暂无可回滚的备份", is_error=True)
+            return
+
+        def do_restore():
+            try:
+                restored = backup_manager.restore_backup(entry)
+                self.refresh_all()
+                show_toast(self, f"已回滚 {len(restored)} 个配置文件")
+                self._status.configure(text=f"已回滚到备份: {entry.timestamp}")
+            except Exception as e:
+                logger.error(f"Failed to restore latest backup: {e}", exc_info=True)
+                show_toast(self, f"回滚失败: {e}", is_error=True)
+
+        ConfirmDialog(
+            self,
+            title="回滚上一次配置",
+            message=(
+                f"确定要回滚到最近备份吗？\n\n"
+                f"时间: {entry.timestamp}\n"
+                f"说明: {entry.description or '-'}\n\n"
+                "当前配置会先自动备份，然后再执行回滚。"
+            ),
+            on_confirm=do_restore,
+        )
 
     def _show_health_check(self):
         """显示健康检查对话框"""

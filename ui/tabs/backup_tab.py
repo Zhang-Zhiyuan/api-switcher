@@ -60,6 +60,13 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(
             header,
+            text="回滚最近",
+            width=108,
+            command=self._restore_latest,
+            **button_style("warning"),
+        ).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            header,
             text="立即备份",
             width=108,
             command=self._create_backup,
@@ -147,13 +154,24 @@ class BackupTab(ctk.CTkScrollableFrame):
             try:
                 restored = backup_manager.restore_backup(entry)
                 show_toast(self.winfo_toplevel(), f"已回滚 {len(restored)} 个文件")
-                self.refresh()
+                top = self.winfo_toplevel()
+                if hasattr(top, "refresh_all"):
+                    top.refresh_all()
+                else:
+                    self.refresh()
             except Exception as e:
                 show_toast(self.winfo_toplevel(), f"回滚失败: {e}", is_error=True)
 
         ConfirmDialog(self.winfo_toplevel(), title="确认回滚",
                       message=f"确定要回滚到 {entry.timestamp} 吗？\n当前配置会被先自动备份。",
                       on_confirm=do_restore)
+
+    def _restore_latest(self):
+        entry = backup_manager.get_latest_backup()
+        if not entry:
+            show_toast(self.winfo_toplevel(), "暂无可回滚的备份", is_error=True)
+            return
+        self._restore(entry)
 
     def _prune(self):
         def do_prune():
