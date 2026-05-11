@@ -116,6 +116,31 @@ def test_session_migration_round_trip(tmp_path):
     assert imported_again.session_count == 0
     assert imported_again.skipped_existing == 3
 
+    remap_claude_home = tmp_path / "claude_c"
+    remap_codex_home = tmp_path / "codex_c"
+    target_project = tmp_path / "new_machine" / "Project中文"
+    target_project.mkdir(parents=True)
+    remapped = session_migration.import_sessions(
+        bundle,
+        claude_home=remap_claude_home,
+        codex_home=remap_codex_home,
+        target_project_path=target_project,
+    )
+    assert remapped.session_count == 2
+    remapped_project_key = session_migration._claude_project_key_for_path(str(target_project.resolve()))
+    remapped_claude_file = remap_claude_home / "projects" / remapped_project_key / "claude-session-1.jsonl"
+    assert remapped_claude_file.exists()
+    assert json.loads(remapped_claude_file.read_text(encoding="utf-8").splitlines()[0])["cwd"] == str(target_project.resolve())
+
+    remapped_codex_file = remap_codex_home / "sessions" / "2026" / "05" / "01" / codex_file.name
+    codex_meta = json.loads(remapped_codex_file.read_text(encoding="utf-8").splitlines()[0])
+    assert codex_meta["payload"]["cwd"] == str(target_project.resolve())
+
+    summary = session_migration.inspect_package(bundle)
+    assert summary.session_count == 2
+    assert summary.providers == {"claude": 1, "codex": 1}
+    assert summary.file_count == 3
+
 
 def _reset_store() -> None:
     profile_manager._save_store(profile_manager._get_default_store())

@@ -56,6 +56,15 @@ class SessionImportResult:
     skipped_invalid: int
 
 
+@dataclass(frozen=True)
+class SessionPackageSummary:
+    session_count: int
+    file_count: int
+    total_bytes: int
+    providers: dict[str, int]
+    project_paths: list[str]
+
+
 def default_claude_home() -> Path:
     return Path.home() / ".claude"
 
@@ -160,10 +169,12 @@ def import_sessions(
     claude_home: Path | None = None,
     codex_home: Path | None = None,
     overwrite: bool = False,
+    target_project_path: str | Path | None = None,
 ) -> SessionImportResult:
     """Import a .asxsession package into local Claude/Codex session folders."""
     claude_home = claude_home or default_claude_home()
     codex_home = codex_home or default_codex_home()
+    target_project_text = _normalize_project_path(target_project_path)
     imported_codex: list[dict[str, Any]] = []
     imported_sessions: set[str] = set()
     file_count = 0
@@ -193,6 +204,7 @@ def import_sessions(
                     skipped_invalid += 1
                     continue
                 try:
+                    relative_path = _remap_relative_path(provider, relative_path, target_project_text)
                     destination = _safe_destination(home, relative_path)
                 except ValueError:
                     skipped_invalid += 1
@@ -203,8 +215,12 @@ def import_sessions(
                     continue
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.open(archive_path, "r") as source, destination.open("wb") as target:
-                    shutil.copyfileobj(source, target)
+                if target_project_text and destination.suffix.lower() == ".jsonl":
+                    data = bundle.read(archive_path)
+                    destination.write_bytes(_rewrite_jsonl_cwd(data, target_project_text))
+                else:
+                    with bundle.open(archive_path, "r") as source, destination.open("wb") as target:
+                        shutil.copyfileobj(source, target)
                 file_count += 1
                 imported_main = imported_main or bool(file_entry.get("main"))
 
@@ -223,6 +239,40 @@ def import_sessions(
         skipped_existing=skipped_existing,
         skipped_invalid=skipped_invalid,
     )
+
+
+def inspect_package(input_path: str | Path) -> SessionPackageSummary:
+    """Read a migration package manifest without importing it."""
+    with zipfile.ZipFile(input_path, "r") as bundle:
+        manifest = _read_manifest(bundle)
+        providers: dict[str, int] = {}
+        project_paths: list[str] = []
+        seen_projects: set[str] = set()
+        file_count = 0
+        total_bytes = 0
+        for session in manifest.get("sessions", []):
+            if not isinstance(session, dict):
+                continue
+            provider = str(session.get("provider") or "unknown")
+            providers[provider] = providers.get(provider, 0) + 1
+            project_path = str(session.get("project_path") or "")
+            if project_path and project_path not in seen_projects:
+                project_paths.append(project_path)
+                seen_projects.add(project_path)
+            for file_entry in session.get("files", []):
+                if isinstance(file_entry, dict):
+                    file_count += 1
+                    try:
+                        total_bytes += int(file_entry.get("size") or 0)
+                    except (TypeError, ValueError):
+                        pass
+        return SessionPackageSummary(
+            session_count=len([item for item in manifest.get("sessions", []) if isinstance(item, dict)]),
+            file_count=file_count,
+            total_bytes=total_bytes,
+            providers=providers,
+            project_paths=project_paths,
+        )
 
 
 def format_size(size_bytes: int) -> str:
@@ -440,6 +490,64 @@ def _provider_home(provider: str, claude_home: Path, codex_home: Path) -> Path:
     if provider == "codex":
         return codex_home
     raise ValueError(f"不支持的会话来源: {provider}")
+
+
+def _normalize_project_path(value: str | Path | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve())
+    except OSError:
+        return str(Path(text).expanduser().absolute())
+
+
+def _claude_project_key_for_path(project_path: str) -> str:
+    text = project_path.replace("/", "\\")
+    if len(text) >= 2 and text[1] == ":":
+        text = text[0].lower() + text[1:]
+    return "".join(char if char.isascii() and char.isalnum() else "-" for char in text)
+
+
+def _remap_relative_path(provider: str, relative_path: str, target_project_path: str) -> str:
+    if provider != "claude" or not target_project_path:
+        return relative_path
+    pure = PurePosixPath(relative_path)
+    parts = list(pure.parts)
+    if len(parts) >= 3 and parts[0] == "projects":
+        parts[1] = _claude_project_key_for_path(target_project_path)
+        return PurePosixPath(*parts).as_posix()
+    return relative_path
+
+
+def _rewrite_jsonl_cwd(data: bytes, target_project_path: str) -> bytes:
+    output: list[str] = []
+    for raw_line in data.decode("utf-8", errors="replace").splitlines():
+        if not raw_line.strip():
+            output.append(raw_line)
+            continue
+        try:
+            item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            output.append(raw_line)
+            continue
+        _rewrite_cwd_values(item, target_project_path)
+        output.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+    return ("\n".join(output) + ("\n" if output else "")).encode("utf-8")
+
+
+def _rewrite_cwd_values(value: Any, target_project_path: str) -> None:
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            if key == "cwd" and isinstance(item, str):
+                value[key] = target_project_path
+            else:
+                _rewrite_cwd_values(item, target_project_path)
+    elif isinstance(value, list):
+        for item in value:
+            _rewrite_cwd_values(item, target_project_path)
 
 
 def _record_files(record: SessionRecord) -> list[Path]:

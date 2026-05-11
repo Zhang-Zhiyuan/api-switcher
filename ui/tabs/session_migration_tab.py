@@ -56,6 +56,13 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         actions.pack(side="right", padx=(12, 0))
         ctk.CTkButton(
             actions,
+            text="导入到项目",
+            width=112,
+            command=self._import_package_to_project,
+            **button_style("primary"),
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            actions,
             text="导入迁移包",
             width=112,
             command=self._import_package,
@@ -263,7 +270,62 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"导出失败: {exc}", is_error=True)
 
     def _import_package(self):
-        input_path = filedialog.askopenfilename(
+        input_path = self._choose_package()
+        if not input_path:
+            return
+
+        def do_import():
+            try:
+                result = session_migration.import_sessions(input_path, overwrite=False)
+                self._show_import_result(result)
+            except Exception as exc:
+                show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="确认导入会话",
+            message=(
+                self._package_summary_text(input_path)
+                + "\n\n导入会把迁移包中的 Claude/Codex 会话写入本机对应历史目录；已有文件默认跳过，不会覆盖。"
+            ),
+            on_confirm=do_import,
+        )
+
+    def _import_package_to_project(self):
+        input_path = self._choose_package()
+        if not input_path:
+            return
+        target_project = filedialog.askdirectory(
+            parent=self.winfo_toplevel(),
+            title="选择新机器上的项目目录",
+        )
+        if not target_project:
+            return
+
+        def do_import():
+            try:
+                result = session_migration.import_sessions(
+                    input_path,
+                    overwrite=False,
+                    target_project_path=target_project,
+                )
+                self._show_import_result(result)
+            except Exception as exc:
+                show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="确认导入并重映射项目",
+            message=(
+                self._package_summary_text(input_path)
+                + f"\n\n会话中的 cwd 会改写为:\n{target_project}\n\n"
+                "Claude 会话也会写入该项目对应的 projects 目录；已有文件默认跳过，不会覆盖。"
+            ),
+            on_confirm=do_import,
+        )
+
+    def _choose_package(self):
+        return filedialog.askopenfilename(
             parent=self.winfo_toplevel(),
             title="导入会话迁移包",
             filetypes=[
@@ -271,28 +333,34 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 ("所有文件", "*.*"),
             ],
         )
-        if not input_path:
-            return
 
-        def do_import():
-            try:
-                result = session_migration.import_sessions(input_path, overwrite=False)
-                message = f"会话迁移包已导入: {result.session_count} 个会话, {result.file_count} 个文件"
-                if result.skipped_existing:
-                    message += f"，跳过已有文件 {result.skipped_existing} 个"
-                if result.skipped_invalid:
-                    message += f"，跳过无效条目 {result.skipped_invalid} 个"
-                show_toast(self.winfo_toplevel(), message)
-                self.refresh()
-            except Exception as exc:
-                show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
+    def _package_summary_text(self, input_path: str) -> str:
+        try:
+            summary = session_migration.inspect_package(input_path)
+        except Exception:
+            return "会话迁移包摘要读取失败，但仍可尝试导入。"
 
-        ConfirmDialog(
-            self.winfo_toplevel(),
-            title="确认导入会话",
-            message="导入会把迁移包中的 Claude/Codex 会话写入本机对应历史目录；已有文件默认跳过，不会覆盖。",
-            on_confirm=do_import,
-        )
+        provider_text = ", ".join(f"{name}: {count}" for name, count in sorted(summary.providers.items()))
+        lines = [
+            f"迁移包包含 {summary.session_count} 个会话、{summary.file_count} 个文件、{session_migration.format_size(summary.total_bytes)}。",
+        ]
+        if provider_text:
+            lines.append(f"来源: {provider_text}")
+        if summary.project_paths:
+            shown = summary.project_paths[:3]
+            lines.append("原项目: " + " | ".join(shown))
+            if len(summary.project_paths) > len(shown):
+                lines.append(f"另有 {len(summary.project_paths) - len(shown)} 个项目路径")
+        return "\n".join(lines)
+
+    def _show_import_result(self, result: session_migration.SessionImportResult):
+        message = f"会话迁移包已导入: {result.session_count} 个会话, {result.file_count} 个文件"
+        if result.skipped_existing:
+            message += f"，跳过已有文件 {result.skipped_existing} 个"
+        if result.skipped_invalid:
+            message += f"，跳过无效条目 {result.skipped_invalid} 个"
+        show_toast(self.winfo_toplevel(), message)
+        self.refresh()
 
     def _display_time(self, value: str) -> str:
         if not value:
