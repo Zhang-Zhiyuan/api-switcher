@@ -108,6 +108,7 @@ class AutoContinueControl(ctk.CTkFrame):
             info_lines.append(f"错误恢复: {'✓ 已启用' if status.error_recovery_installed else '✗ 未启用'}")
 
             if settings:
+                info_lines.append(f"Git snapshot: {'ON' if settings.git_auto_snapshot and settings.git_snapshot_on_start else 'OFF'}")
                 info_lines.append(f"最大续跑次数: {settings.max_continuations}")
                 info_lines.append(f"保守模式: {'是' if settings.conservative_mode else '否'}")
                 if settings.error_recovery_enabled:

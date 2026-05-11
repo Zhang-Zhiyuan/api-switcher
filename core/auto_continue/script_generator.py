@@ -84,12 +84,18 @@ try {{
         exit 0  # Allow stop if settings invalid
     }}
 
-    if (-not $settings.enabled) {{
-        exit 0  # Allow stop if disabled
-    }}
-
     $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
     $gitSnapshotOnStart = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_start"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_start }}
+
+    # Git snapshots are intentionally independent from auto-continue.
+    if ($gitAutoSnapshot -and $gitSnapshotOnStart) {{
+        Write-Log "Creating git snapshot on stop hook..." "INFO"
+        Create-GitSnapshot -Message "git-snapshot"
+    }}
+
+    if (-not $settings.enabled) {{
+        exit 0  # Allow stop if auto-continue is disabled
+    }}
 
     # Validate settings
     if ($null -eq $settings.max_continuations -or $settings.max_continuations -lt 0) {{
@@ -250,12 +256,6 @@ try {{
         # Decision: block stop and continue
         $count++
         $state[$stateKey] = $count
-
-        # 创建Git快照（如果启用）
-        if ($gitAutoSnapshot -and $gitSnapshotOnStart) {{
-            Write-Log "Creating git snapshot before continue..." "INFO"
-            Create-GitSnapshot -Message "auto-continue"
-        }}
 
         # Save state with atomic write
         try {{

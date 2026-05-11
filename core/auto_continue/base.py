@@ -39,6 +39,15 @@ class AutoContinueProvider(ABC):
         """Register the hook in the provider's config."""
         pass
 
+    def register_hook_for_settings(self, settings: AutoContinueSettings) -> None:
+        """Register the hook, preserving provider-specific settings where needed."""
+        import inspect
+
+        if "apply_to_subagents" in inspect.signature(self.register_hook).parameters:
+            self.register_hook(apply_to_subagents=getattr(settings, "apply_to_subagents", False))
+        else:
+            self.register_hook()
+
     @abstractmethod
     def unregister_hook(self) -> None:
         """Unregister the hook from the provider's config."""
@@ -178,7 +187,12 @@ class AutoContinueProvider(ABC):
             if settings:
                 settings.enabled = False
                 self.save_settings(settings)
-            self.unregister_hook()
+
+            if settings and settings.git_auto_snapshot and settings.git_snapshot_on_start:
+                self.install_hook_script()
+                self.register_hook_for_settings(settings)
+            else:
+                self.unregister_hook()
         except Exception as e:
             raise RuntimeError(f"Failed to pause auto-continue: {e}") from e
 
@@ -233,9 +247,15 @@ class AutoContinueProvider(ABC):
             settings.enabled = current.enabled
         self.save_settings(settings)
 
-        # Re-install script if enabled (to pick up new settings)
-        if settings.enabled:
+        # Re-install/register the stop hook for either auto-continue or standalone Git snapshots.
+        if settings.enabled or (settings.git_auto_snapshot and settings.git_snapshot_on_start):
             try:
                 self.install_hook_script()
+                self.register_hook_for_settings(settings)
             except Exception as e:
                 logger.warning(f"Failed to update hook script: {e}")
+        else:
+            try:
+                self.unregister_hook()
+            except Exception as e:
+                logger.warning(f"Failed to unregister hook after disabling features: {e}")

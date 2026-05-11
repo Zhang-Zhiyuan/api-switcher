@@ -3,7 +3,7 @@ from io import BytesIO
 
 import pytest
 
-from core import profile_manager, remote_config, security, sync_manager
+from core import profile_manager, remote_auto_continue, remote_config, security, sync_manager
 from core.ssh_manager import SSHManager, ssh_manager
 from core.ssh_profile_builder import build_ssh_profile_from_data
 from models.profile import ClaudeAccountProfile, CodexAccountProfile, CodexProfile, SSHProfile
@@ -403,3 +403,45 @@ def test_remote_config_uses_sftp_home_fallback_when_home_env_is_empty():
     remote_config.write_remote_claude_settings(client, {"model": "claude-sonnet-4"})
 
     assert "/home/fallback/.claude/settings.json" in sftp.files
+
+
+def test_remote_git_snapshot_status_ready_without_auto_continue():
+    status = remote_auto_continue.RemoteAutoContinueStatus(
+        provider_name="codex",
+        enabled=False,
+        git_snapshot_enabled=True,
+        git_available=True,
+        hook_script_exists=True,
+        hook_registered=True,
+        settings_valid=True,
+        runtime_ready=True,
+        codex_hooks_enabled=True,
+    )
+
+    assert status.ready
+
+
+def test_remote_git_snapshot_status_requires_git():
+    status = remote_auto_continue.RemoteAutoContinueStatus(
+        provider_name="codex",
+        enabled=False,
+        git_snapshot_enabled=True,
+        git_available=False,
+        hook_script_exists=True,
+        hook_registered=True,
+        settings_valid=True,
+        runtime_ready=True,
+        codex_hooks_enabled=True,
+    )
+
+    assert not status.ready
+
+
+def test_remote_dependency_install_commands():
+    assert (
+        remote_auto_continue._install_command_for_packages("apt-get", ["git", "python"])
+        == "DEBIAN_FRONTEND=noninteractive apt-get update && "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y git python3"
+    )
+    assert remote_auto_continue._install_command_for_packages("pacman", ["python"]) == "pacman -Sy --noconfirm python"
+    assert remote_auto_continue._install_command_for_packages("apk", ["git"]) == "apk add --no-cache git"

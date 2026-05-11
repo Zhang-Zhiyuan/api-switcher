@@ -49,10 +49,7 @@ class AutoContinueManager:
         provider.install_hook_script()
 
         # Register hook
-        if provider_name.lower() == "claude":
-            provider.register_hook(apply_to_subagents=apply_to_subagents)
-        else:
-            provider.register_hook()
+        provider.register_hook_for_settings(settings)
 
         # Install guidance
         if hasattr(provider, 'install_guidance'):
@@ -80,9 +77,8 @@ class AutoContinueManager:
         provider = self.get_provider(provider_name)
         provider.update_settings(settings)
 
-        # Re-install script with new settings
-        if settings.enabled:
-            provider.install_hook_script()
+        # provider.update_settings re-installs/registers the hook when either
+        # auto-continue or standalone Git snapshots need it.
 
     def repair(self, provider_name: str) -> None:
         """Repair installation (re-enable with current settings)."""

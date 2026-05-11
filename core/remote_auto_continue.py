@@ -9,7 +9,7 @@ import posixpath
 import shlex
 from typing import Any
 
-from core import profile_manager, remote_config
+from core import profile_manager, remote_config, security
 from core.auto_continue.manager import auto_continue_manager
 from core.ssh_manager import ssh_manager
 from models.auto_continue import AutoContinueSettings
@@ -59,6 +59,8 @@ class RemoteAutoContinueStatus:
     hook_registered: bool = False
     guidance_installed: bool = False
     settings_valid: bool = False
+    git_snapshot_enabled: bool = False
+    git_available: bool = False
     runtime_ready: bool = False
     codex_hooks_enabled: bool | None = None
     issues: list[str] = field(default_factory=list)
@@ -69,19 +71,23 @@ class RemoteAutoContinueStatus:
 
     @property
     def ready(self) -> bool:
+        hook_required = self.enabled or self.git_snapshot_enabled
         return (
-            self.enabled
+            hook_required
             and self.hook_script_exists
             and self.hook_registered
             and self.settings_valid
             and self.runtime_ready
             and (self.codex_hooks_enabled is not False)
+            and (not self.git_snapshot_enabled or self.git_available)
         )
 
     def summary(self) -> str:
         state = "正常" if self.ready else "需处理"
         parts = [
             f"{self.label}: {state}",
+            f"Git snapshot {'on' if self.git_snapshot_enabled else 'off'}",
+            f"Git {'ok' if self.git_available else 'missing'}",
             f"系统 {self.remote_os or 'unknown'}",
             f"状态 {'已启用' if self.enabled else '未启用'}",
             f"脚本 {'存在' if self.hook_script_exists else '缺失'}",
@@ -272,10 +278,17 @@ def _probe_remote_environment(client) -> dict:
         "command -v python3; "
         "elif command -v python >/dev/null 2>&1 && python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' 2>/dev/null; then "
         "command -v python; "
-        "fi; printf '\\n'"
+        "fi; printf '\\n'; "
+        "printf 'git='; (command -v git 2>/dev/null || true); printf '\\n'; "
+        "printf 'sudo='; (command -v sudo 2>/dev/null || true); printf '\\n'; "
+        "printf 'uid='; (id -u 2>/dev/null || printf unknown); printf '\\n'; "
+        "printf 'pkg='; "
+        "for pm in apt-get dnf yum microdnf apk pacman zypper; do "
+        "if command -v \"$pm\" >/dev/null 2>&1; then printf '%s' \"$pm\"; break; fi; "
+        "done; printf '\\n'"
     )
     stdout, _stderr = ssh_manager.execute_command(client, command, timeout=10)
-    result = {"os": "unknown", "sh": "", "python": "", "is_posix": False}
+    result = {"os": "unknown", "sh": "", "python": "", "git": "", "sudo": "", "uid": "", "pkg": "", "is_posix": False}
     for line in stdout.splitlines():
         if "=" not in line:
             continue
@@ -283,6 +296,7 @@ def _probe_remote_environment(client) -> dict:
         result[key.strip()] = value.strip()
     os_name = result.get("os", "unknown").lower()
     result["is_posix"] = any(token in os_name for token in ["linux", "darwin", "freebsd", "openbsd", "netbsd"])
+    result["is_root"] = result.get("uid") == "0"
     return result
 
 
@@ -295,6 +309,115 @@ def _ensure_runtime_ready(env: dict) -> None:
         raise RuntimeError("远端缺少 Python 3.6+，无法运行自动续跑判断逻辑")
 
 
+def _ensure_runtime_ready_with_git(env: dict, require_git: bool = False) -> None:
+    _ensure_runtime_ready(env)
+    if require_git and not env.get("git"):
+        raise RuntimeError("远端缺少 git，无法创建 Git 快照")
+
+
+def _sudo_command(client, ssh_profile, env: dict, command: str, timeout: int = 180) -> tuple[int, str, str]:
+    if env.get("is_root"):
+        return ssh_manager.execute_command_with_status(client, command, timeout=timeout)
+
+    if not env.get("sudo"):
+        raise RuntimeError("远端不是 root，且没有 sudo，无法自动安装依赖")
+
+    sudo_cmd = f"sudo -n sh -c {shlex.quote(command)}"
+    status, stdout, stderr = ssh_manager.execute_command_with_status(client, sudo_cmd, timeout=timeout)
+    if status == 0:
+        return status, stdout, stderr
+
+    if getattr(ssh_profile, "auth_type", None) != "password" or not getattr(ssh_profile, "password_ref", None):
+        raise RuntimeError("远端需要 sudo 密码，但当前 SSH 配置不是密码登录，无法自动输入 sudo 密码")
+
+    password = security.get_secret(ssh_profile.password_ref)
+    if not password:
+        raise RuntimeError("无法读取已保存的 SSH 密码，不能自动输入 sudo 密码")
+
+    sudo_cmd = f"sudo -S -p '' sh -c {shlex.quote(command)}"
+    return ssh_manager.execute_command_with_status(
+        client,
+        sudo_cmd,
+        timeout=timeout,
+        input_data=f"{password}\n",
+        log_command=False,
+        get_pty=True,
+    )
+
+
+def _install_command_for_packages(package_manager: str, missing: list[str]) -> str:
+    wants_git = "git" in missing
+    wants_python = "python" in missing
+
+    if package_manager == "apt-get":
+        packages = []
+        if wants_git:
+            packages.append("git")
+        if wants_python:
+            packages.append("python3")
+        return "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y " + " ".join(packages)
+    if package_manager in {"dnf", "yum", "microdnf"}:
+        packages = []
+        if wants_git:
+            packages.append("git")
+        if wants_python:
+            packages.append("python3")
+        return f"{package_manager} install -y " + " ".join(packages)
+    if package_manager == "apk":
+        packages = []
+        if wants_git:
+            packages.append("git")
+        if wants_python:
+            packages.append("python3")
+        return "apk add --no-cache " + " ".join(packages)
+    if package_manager == "pacman":
+        packages = []
+        if wants_git:
+            packages.append("git")
+        if wants_python:
+            packages.append("python")
+        return "pacman -Sy --noconfirm " + " ".join(packages)
+    if package_manager == "zypper":
+        packages = []
+        if wants_git:
+            packages.append("git")
+        if wants_python:
+            packages.append("python3")
+        return "zypper --non-interactive install " + " ".join(packages)
+
+    raise RuntimeError(f"不支持自动安装的包管理器: {package_manager or 'unknown'}")
+
+
+def _ensure_remote_runtime(client, ssh_profile, require_git: bool = False) -> dict:
+    env = _probe_remote_environment(client)
+
+    if not env.get("is_posix"):
+        _ensure_runtime_ready_with_git(env, require_git=require_git)
+    if not env.get("sh"):
+        raise RuntimeError("远端缺少 sh。因为 SSH 命令和安装脚本都需要 shell，无法自动安装 sh")
+
+    missing = []
+    if not env.get("python"):
+        missing.append("python")
+    if require_git and not env.get("git"):
+        missing.append("git")
+
+    if missing:
+        package_manager = env.get("pkg") or ""
+        if not package_manager:
+            raise RuntimeError(f"远端缺少 {', '.join(missing)}，但未检测到支持的包管理器，无法自动安装")
+
+        install_cmd = _install_command_for_packages(package_manager, missing)
+        status, _stdout, stderr = _sudo_command(client, ssh_profile, env, install_cmd, timeout=300)
+        if status != 0:
+            raise RuntimeError(f"自动安装依赖失败: {stderr.strip() or 'unknown error'}")
+
+        env = _probe_remote_environment(client)
+
+    _ensure_runtime_ready_with_git(env, require_git=require_git)
+    return env
+
+
 def _load_local_settings(provider_name: str, settings: AutoContinueSettings | None = None) -> AutoContinueSettings:
     provider = _normal_provider(provider_name)
     source = settings or auto_continue_manager.get_settings(provider) or AutoContinueSettings()
@@ -305,6 +428,21 @@ def _load_local_settings(provider_name: str, settings: AutoContinueSettings | No
     valid, error = copied.validate()
     if not valid:
         raise ValueError(f"自动续跑设置无效: {error}")
+    return copied
+
+
+def _load_git_snapshot_settings(provider_name: str, settings: AutoContinueSettings | None = None) -> AutoContinueSettings:
+    provider = _normal_provider(provider_name)
+    source = settings or auto_continue_manager.get_settings(provider) or AutoContinueSettings()
+    copied = AutoContinueSettings.from_dict(source.to_dict())
+    copied.enabled = False
+    copied.git_auto_snapshot = True
+    copied.git_snapshot_on_start = True
+    if provider == "codex":
+        copied.apply_to_subagents = False
+    valid, error = copied.validate()
+    if not valid:
+        raise ValueError(f"Git snapshot settings invalid: {error}")
     return copied
 
 
@@ -499,7 +637,7 @@ def run_git_snapshot():
             run(["git", "config", "user.email", "auto@api-switcher.local"], timeout=5)
 
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        run(["git", "commit", "-m", f"[auto-continue] {stamp}"], timeout=30)
+        run(["git", "commit", "-m", f"[git-snapshot] {stamp}"], timeout=30)
     except Exception as exc:
         log(f"Git snapshot failed: {exc}", "WARN")
 
@@ -516,6 +654,9 @@ def main():
     except Exception as exc:
         log(f"Failed to load settings: {exc}", "ERROR")
         return
+
+    if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_start"), True):
+        run_git_snapshot()
 
     if not as_bool(settings.get("enabled"), False):
         return
@@ -621,9 +762,6 @@ def main():
         count += 1
         state[state_key] = count
         save_state(state_path, state)
-
-        if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_start"), True):
-            run_git_snapshot()
 
         continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
         write_jsonl(
@@ -889,12 +1027,15 @@ def install_remote_auto_continue(
 ) -> str:
     """Install or repair remote auto-continue for one provider."""
     provider = _normal_provider(provider_name)
+    resolved_settings = _load_local_settings(provider, settings)
     ssh_profile, client = _connect(ssh_name)
-    env = _probe_remote_environment(client)
-    _ensure_runtime_ready(env)
+    _ensure_remote_runtime(
+        client,
+        ssh_profile,
+        require_git=bool(resolved_settings.git_auto_snapshot and resolved_settings.git_snapshot_on_start),
+    )
 
     paths = _paths(client, ssh_profile, provider)
-    resolved_settings = _load_local_settings(provider, settings)
     snapshot_paths = [
         paths.settings_path,
         paths.script_path,
@@ -925,6 +1066,46 @@ def install_remote_auto_continue(
     return f"已在 {ssh_profile.host} 安装/修复 {_provider_label(provider)} 远端自动续跑"
 
 
+def install_remote_git_snapshot(
+    ssh_name: str,
+    provider_name: str,
+    settings: AutoContinueSettings | None = None,
+) -> str:
+    """Install only the remote Git snapshot stop hook for one provider."""
+    provider = _normal_provider(provider_name)
+    resolved_settings = _load_git_snapshot_settings(provider, settings)
+    ssh_profile, client = _connect(ssh_name)
+    _ensure_remote_runtime(client, ssh_profile, require_git=True)
+
+    paths = _paths(client, ssh_profile, provider)
+    snapshot_paths = [
+        paths.settings_path,
+        paths.script_path,
+        paths.provider_config_path,
+    ]
+    if paths.codex_hooks_path:
+        snapshot_paths.append(paths.codex_hooks_path)
+    snapshots = _snapshot_remote_files(client, snapshot_paths)
+
+    try:
+        _write_json(client, paths.settings_path, resolved_settings.to_dict())
+
+        script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+        _write_text(client, paths.script_path, script, mode=0o700)
+
+        command = f"sh {shlex.quote(paths.script_path)}"
+        if provider == "claude":
+            _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents)
+        else:
+            _register_codex_hook(client, paths, command)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
+
+    logger.info(f"Installed remote Git snapshot hook for {provider} on {ssh_profile.host}")
+    return f"Installed {_provider_label(provider)} remote Git snapshot hook on {ssh_profile.host}"
+
+
 def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     """Disable remote auto-continue while keeping script/settings on the server."""
     provider = _normal_provider(provider_name)
@@ -932,14 +1113,17 @@ def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     paths = _paths(client, ssh_profile, provider)
 
     settings = _read_json(client, paths.settings_path, default={}, strict=False)
+    keep_git_snapshot = False
     if isinstance(settings, dict):
         settings["enabled"] = False
+        keep_git_snapshot = bool(settings.get("git_auto_snapshot", True) and settings.get("git_snapshot_on_start", True))
         _write_json(client, paths.settings_path, settings)
 
-    if provider == "claude":
-        _unregister_claude_hook(client, paths)
-    else:
-        _unregister_codex_hook(client, paths)
+    if not keep_git_snapshot:
+        if provider == "claude":
+            _unregister_claude_hook(client, paths)
+        else:
+            _unregister_codex_hook(client, paths)
 
     return f"已暂停 {ssh_profile.host} 的 {_provider_label(provider)} 远端自动续跑"
 
@@ -981,6 +1165,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
         config_dir=paths.config_dir,
         script_path=paths.script_path,
         settings_path=paths.settings_path,
+        git_available=bool(env.get("git")),
         runtime_ready=bool(env.get("is_posix") and env.get("sh") and env.get("python")),
     )
 
@@ -1003,6 +1188,9 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             parsed = AutoContinueSettings.from_dict(settings)
             status.settings_valid = True
             status.enabled = parsed.enabled
+            status.git_snapshot_enabled = bool(parsed.git_auto_snapshot and parsed.git_snapshot_on_start)
+            if status.git_snapshot_enabled and not env.get("git"):
+                status.issues.append("缺少 git")
         except Exception as e:
             status.issues.append(f"设置无效: {e}")
     else:
@@ -1042,13 +1230,15 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append(f"Codex config.toml 读取失败: {e}")
         status.codex_hooks_enabled = bool(config.get("codex_hooks"))
 
-    if not status.hook_script_exists:
+    hook_required = status.enabled or status.git_snapshot_enabled
+
+    if hook_required and not status.hook_script_exists:
         status.issues.append("Hook 脚本缺失")
-    if not status.hook_registered:
+    if hook_required and not status.hook_registered:
         status.issues.append("Hook 未注册")
-    if provider == "codex" and status.enabled and not status.codex_hooks_enabled:
+    if provider == "codex" and hook_required and not status.codex_hooks_enabled:
         status.issues.append("config.toml 未开启 codex_hooks")
-    if not status.guidance_installed:
+    if status.enabled and not status.guidance_installed:
         status.issues.append("指导文件未安装")
 
     return status

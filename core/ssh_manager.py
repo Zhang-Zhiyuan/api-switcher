@@ -296,6 +296,42 @@ class SSHManager:
             logger.error(f"Error executing command: {e}")
             raise RuntimeError(f"执行远程命令失败: {e}") from e
 
+    def execute_command_with_status(
+        self,
+        client: paramiko.SSHClient,
+        cmd: str,
+        timeout: int = 30,
+        input_data: str | None = None,
+        log_command: bool = True,
+        get_pty: bool = False,
+    ) -> tuple[int, str, str]:
+        """Execute a command and return (exit_status, stdout, stderr)."""
+        if not cmd or not cmd.strip():
+            raise ValueError("命令不能为空")
+
+        try:
+            logger.debug(f"Executing command: {cmd if log_command else '[redacted]'}")
+            stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout, get_pty=get_pty)
+            if input_data is not None:
+                stdin.write(input_data)
+                stdin.flush()
+            try:
+                stdin.channel.shutdown_write()
+            except Exception:
+                pass
+
+            stdout_data = stdout.read().decode("utf-8", errors="replace")
+            stderr_data = stderr.read().decode("utf-8", errors="replace")
+
+            exit_status = stdout.channel.recv_exit_status()
+            logger.debug(f"Command exit status: {exit_status}")
+
+            return exit_status, stdout_data, stderr_data
+
+        except Exception as e:
+            logger.error(f"Error executing command: {e}")
+            raise RuntimeError(f"执行远程命令失败: {e}") from e
+
     def test_connection(self, profile: SSHProfile) -> tuple[bool, str]:
         """Test SSH connection with comprehensive validation."""
         try:

@@ -183,7 +183,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         auto_controls = ctk.CTkFrame(auto_frame, fg_color="transparent")
         auto_controls.pack(fill="x", padx=14, pady=14)
         auto_controls.grid_columnconfigure(1, weight=1)
-        auto_controls.grid_columnconfigure(4, weight=1)
+        auto_controls.grid_columnconfigure(5, weight=1)
 
         ctk.CTkLabel(
             auto_controls,
@@ -209,6 +209,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary"),
         )
         check_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
+        git_snapshot_button = ctk.CTkButton(
+            auto_controls,
+            text="Git快照",
+            width=78,
+            command=self._install_remote_git_snapshot,
+            **button_style("secondary"),
+        )
+        git_snapshot_button.grid(row=0, column=3, sticky="e", padx=(0, 8))
         install_button = ctk.CTkButton(
             auto_controls,
             text="安装/修复",
@@ -216,7 +224,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._install_remote_auto_continue,
             **button_style("primary"),
         )
-        install_button.grid(row=0, column=3, sticky="e", padx=(0, 8))
+        install_button.grid(row=0, column=4, sticky="e", padx=(0, 8))
         pause_button = ctk.CTkButton(
             auto_controls,
             text="暂停",
@@ -224,7 +232,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._pause_remote_auto_continue,
             **button_style("warning"),
         )
-        pause_button.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        pause_button.grid(row=0, column=5, sticky="e", padx=(0, 8))
         uninstall_button = ctk.CTkButton(
             auto_controls,
             text="卸载",
@@ -232,8 +240,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._uninstall_remote_auto_continue,
             **button_style("danger"),
         )
-        uninstall_button.grid(row=0, column=5, sticky="e")
-        self._remote_auto_buttons = [check_button, install_button, pause_button, uninstall_button]
+        uninstall_button.grid(row=0, column=6, sticky="e")
+        self._remote_auto_buttons = [check_button, git_snapshot_button, install_button, pause_button, uninstall_button]
 
         self._remote_auto_status_label = ctk.CTkLabel(
             auto_controls,
@@ -243,7 +251,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_status_label.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        self._remote_auto_status_label.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
@@ -663,6 +671,31 @@ class SSHTab(ctk.CTkScrollableFrame):
             f"正在检查 {server_name} 的远端自动续跑状态...",
             worker,
             lambda payload: self._show_remote_auto_result(payload, "远端自动续跑检查完成", expect_ready=True),
+        )
+
+    def _install_remote_git_snapshot(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        targets = self._selected_remote_auto_targets()
+
+        def worker():
+            results = []
+            failures = []
+            for provider in targets:
+                try:
+                    results.append(remote_auto_continue.install_remote_git_snapshot(server_name, provider))
+                except Exception as e:
+                    failures.append(f"{provider}: {e}")
+            statuses, status_failures = self._collect_remote_auto_statuses(server_name, targets)
+            failures.extend(status_failures)
+            return {"statuses": statuses, "failures": failures, "results": results}
+
+        self._run_remote_auto_task(
+            f"Installing Git snapshot hooks on {server_name}...",
+            worker,
+            lambda payload: self._show_remote_auto_result(payload, "Git snapshot hook installed", expect_ready=False),
         )
 
     def _install_remote_auto_continue(self):
