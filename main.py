@@ -1,11 +1,13 @@
 import sys
 import os
 import logging
+from datetime import datetime
 
 # Ensure the app directory is in the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.paths import STORAGE_DIR, STORAGE_DIR_SOURCE, STORAGE_DIR_WARNINGS, ensure_storage_dirs
+from core.log_handler import log_manager
 
 # Ensure storage dirs exist
 migrated_storage_items = ensure_storage_dirs()
@@ -15,7 +17,6 @@ LOGS_DIR = STORAGE_DIR / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Setup logging
-from datetime import datetime
 log_file = LOGS_DIR / f"app_{datetime.now().strftime('%Y%m%d')}.log"
 
 logging.basicConfig(
@@ -28,7 +29,6 @@ logging.basicConfig(
 )
 
 # Initialize GUI log handler
-from core.log_handler import log_manager
 log_manager.initialize()
 
 logger = logging.getLogger(__name__)

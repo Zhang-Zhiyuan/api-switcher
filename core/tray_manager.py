@@ -41,7 +41,7 @@ class TrayManager:
         try:
             # Try to use a nice font, fallback to default if not available
             font = ImageFont.truetype("arial.ttf", 20)
-        except:
+        except Exception:
             font = ImageFont.load_default()
 
         text = "API"

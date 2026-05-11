@@ -405,6 +405,40 @@ def test_remote_config_uses_sftp_home_fallback_when_home_env_is_empty():
     assert "/home/fallback/.claude/settings.json" in sftp.files
 
 
+def test_remote_codex_hooks_preserve_existing_entries(monkeypatch):
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    hooks_path = "/home/test/.codex/hooks.json"
+    sftp.files[hooks_path] = json.dumps({
+        "Stop": {"command": "sh /home/test/user_stop.sh", "timeout": 3},
+        "Other": {"command": "sh /home/test/other.sh", "timeout": 2},
+    }).encode("utf-8")
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="codex",
+        config_dir="/home/test/.codex",
+        hooks_dir="/home/test/.codex/hooks",
+        settings_path="/home/test/.codex/auto_continue_settings.json",
+        script_path="/home/test/.codex/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.codex/tmp",
+        guidance_path="/home/test/.codex/AGENTS.md",
+        provider_config_path="/home/test/.codex/config.toml",
+        codex_hooks_path=hooks_path,
+    )
+    monkeypatch.setattr(remote_auto_continue, "_set_codex_hooks_enabled", lambda *args, **kwargs: None)
+
+    remote_auto_continue._register_codex_hook(client, paths, "sh /home/test/.codex/hooks/auto_continue_stop.sh")
+    hooks = json.loads(sftp.files[hooks_path].decode("utf-8"))
+    stop_commands = list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
+    assert "sh /home/test/user_stop.sh" in stop_commands
+    assert "sh /home/test/.codex/hooks/auto_continue_stop.sh" in stop_commands
+    assert hooks["Other"]["command"] == "sh /home/test/other.sh"
+
+    remote_auto_continue._unregister_codex_hook(client, paths)
+    hooks = json.loads(sftp.files[hooks_path].decode("utf-8"))
+    assert hooks["Stop"]["command"] == "sh /home/test/user_stop.sh"
+    assert hooks["Other"]["command"] == "sh /home/test/other.sh"
+
+
 def test_remote_git_snapshot_status_ready_without_auto_continue():
     status = remote_auto_continue.RemoteAutoContinueStatus(
         provider_name="codex",

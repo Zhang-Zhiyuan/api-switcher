@@ -72,7 +72,6 @@ def build_claude_api_preview(name: str) -> SwitchPreview:
     runtime = profile_manager.get_claude_runtime_summary()
     account_runtime = profile_manager.get_claude_account_runtime_summary()
     settings = parser.read_claude_settings()
-    config = parser.read_claude_config()
     env = settings.get("env", {}) if isinstance(settings.get("env"), dict) else {}
 
     provider_label = _provider_label(target.provider, target.custom_provider_name)
@@ -199,7 +198,7 @@ def build_claude_account_preview(name: str) -> SwitchPreview:
         PreviewChange("Claude 官方账号", current_account, target.name, important=True),
         PreviewChange("账号身份", _display(account_runtime.get("identity")), _display(target.identity)),
         PreviewChange("第三方 API 状态", current_api, "会清理 API Key/Base URL 覆盖", "切回官方账号后新终端会话生效。", True),
-        PreviewChange("模型兜底", _display(runtime.get("model")), "保留 Claude 模型；非 Claude 模型会重置为 claude-sonnet-4"),
+        PreviewChange("模型兜底", _display(runtime.get("model")), "保留 Claude 官方模型和别名；非 Claude 模型会重置为 claude-sonnet-4"),
     ]
 
     checks = _validate_claude_account_target(target)

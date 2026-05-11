@@ -19,7 +19,7 @@ function Write-Log {{
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp [$Level] $Message"
-    Write-Error $logMessage
+    [Console]::Error.WriteLine($logMessage)
 }}
 
 # Git快照函数
@@ -103,18 +103,8 @@ try {{
         exit 0
     }}
 
-    # Read stdin (hook input) with timeout protection
-    $stdinLines = @()
-    $timeout = 5  # seconds
-    $startTime = Get-Date
-    while ($null -ne ($line = [Console]::ReadLine())) {{
-        $stdinLines += $line
-        if (((Get-Date) - $startTime).TotalSeconds -gt $timeout) {{
-            Write-Log "Stdin read timeout" "WARN"
-            break
-        }}
-    }}
-    $stdin = $stdinLines -join "`n"
+    # Read stdin (hook input)
+    $stdin = [Console]::In.ReadToEnd()
 
     if ([string]::IsNullOrWhiteSpace($stdin)) {{
         exit 0  # Allow stop if no input
@@ -122,21 +112,21 @@ try {{
 
     # Parse input JSON with error handling
     try {{
-        $input = $stdin | ConvertFrom-Json -ErrorAction Stop
+        $hookInput = $stdin | ConvertFrom-Json -ErrorAction Stop
     }} catch {{
         Write-Log "Failed to parse input JSON: $_" "ERROR"
         exit 0
     }}
 
     # Determine provider based on input structure
-    $isClaude = $null -ne $input.hook_event_name
-    $isCodex = $null -eq $input.hook_event_name
+    $isClaude = $null -ne $hookInput.hook_event_name
+    $isCodex = $null -eq $hookInput.hook_event_name
 
     # Get session ID and last message
-    $sessionId = if ($isClaude) {{ $input.session_id }} else {{ $input.session_id }}
-    $lastMessage = if ($isClaude) {{ $input.last_assistant_message }} else {{ $input.last_message }}
-    $hookEvent = if ($isClaude) {{ $input.hook_event_name }} else {{ "Stop" }}
-    $agentId = if ($isClaude) {{ $input.agent_id }} else {{ $null }}
+    $sessionId = if ($isClaude) {{ $hookInput.session_id }} else {{ $hookInput.session_id }}
+    $lastMessage = if ($isClaude) {{ $hookInput.last_assistant_message }} else {{ $hookInput.last_message }}
+    $hookEvent = if ($isClaude) {{ $hookInput.hook_event_name }} else {{ "Stop" }}
+    $agentId = if ($isClaude) {{ $hookInput.agent_id }} else {{ $null }}
 
     if ([string]::IsNullOrWhiteSpace($lastMessage)) {{
         exit 0  # Allow stop if no message
@@ -211,7 +201,7 @@ try {{
         }}
 
         # Check conservative mode for Claude Code
-        if ($isClaude -and $settings.conservative_mode -and $input.stop_hook_active) {{
+        if ($isClaude -and $settings.conservative_mode -and $hookInput.stop_hook_active) {{
             exit 0  # Allow stop in conservative mode when already continuing
         }}
 

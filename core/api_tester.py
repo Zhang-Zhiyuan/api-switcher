@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,11 +25,21 @@ class TestResult:
 
 
 @dataclass
+class ModelInfo:
+    """Normalized metadata for a model returned by a provider."""
+    id: str
+    display_name: str = ""
+    created: int = 0
+
+
+@dataclass
 class ModelListResult:
     """Result of a remote model-list request."""
     success: bool
     message: str
     models: list[str] = field(default_factory=list)
+    recommended_model: Optional[str] = None
+    model_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     response_time: Optional[float] = None
     status_code: Optional[int] = None
     error_details: Optional[str] = None
@@ -36,6 +47,33 @@ class ModelListResult:
 
 class APITester:
     """Test API connections and refresh model lists."""
+
+    _NON_CHAT_MODEL_MARKERS = (
+        "embedding",
+        "embed",
+        "rerank",
+        "moderation",
+        "image",
+        "dall-e",
+        "tts",
+        "audio",
+        "whisper",
+        "transcrib",
+        "speech",
+        "realtime",
+        "preview-image",
+    )
+
+    _MODEL_ALIAS_PRIORITY = {
+        "opus[1m]": 1_000_000,
+        "sonnet[1m]": 900_000,
+        "opus": 800_000,
+        "opusplan": 750_000,
+        "sonnet": 700_000,
+        "best": 650_000,
+        "default": 50_000,
+        "haiku": 100_000,
+    }
 
     @staticmethod
     def _normalize_base_url(base_url: str, default: str) -> str:
@@ -81,25 +119,205 @@ class APITester:
     @staticmethod
     def _extract_model_ids(data: Any) -> list[str]:
         """Extract model ids from common model-list response shapes."""
+        return [model.id for model in APITester._extract_model_infos(data)]
+
+    @staticmethod
+    def _extract_model_infos(data: Any) -> list[ModelInfo]:
+        """Extract normalized model metadata from common response shapes."""
         if isinstance(data, dict):
             candidates = data.get("data") or data.get("models") or data.get("items")
         else:
             candidates = data
 
-        models: list[str] = []
+        models: dict[str, ModelInfo] = {}
         if not isinstance(candidates, list):
-            return models
+            return []
 
         for item in candidates:
             model_id = None
+            display_name = ""
+            created = 0
             if isinstance(item, str):
                 model_id = item
             elif isinstance(item, dict):
                 model_id = item.get("id") or item.get("name") or item.get("model")
+                display_name = str(item.get("display_name") or item.get("displayName") or "")
+                created = APITester._parse_model_created(
+                    item.get("created")
+                    or item.get("created_at")
+                    or item.get("createdAt")
+                    or item.get("created_time")
+                    or item.get("createdTime")
+                )
             if model_id:
-                models.append(str(model_id))
+                model_id = str(model_id).strip()
+                if not model_id:
+                    continue
+                info = ModelInfo(id=model_id, display_name=display_name, created=created)
+                existing = models.get(model_id)
+                if not existing or APITester._model_info_quality(info) > APITester._model_info_quality(existing):
+                    models[model_id] = info
 
-        return sorted(dict.fromkeys(models), key=str.lower)
+        return sorted(models.values(), key=lambda model: model.id.lower())
+
+    @staticmethod
+    def _model_info_quality(model: ModelInfo) -> tuple[int, int]:
+        return (1 if model.display_name else 0, model.created)
+
+    @staticmethod
+    def _model_metadata_from_infos(infos: list[ModelInfo]) -> dict[str, dict[str, Any]]:
+        return {
+            info.id: {"display_name": info.display_name, "created": info.created}
+            for info in infos
+            if info.display_name or info.created
+        }
+
+    @staticmethod
+    def _parse_model_created(value: Any) -> int:
+        if value is None or isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            created = int(value)
+            return created // 1000 if created > 10_000_000_000 else max(created, 0)
+        if not isinstance(value, str):
+            return 0
+
+        text = value.strip()
+        if not text:
+            return 0
+        if text.isdigit():
+            if len(text) == 8 and text.startswith("20"):
+                try:
+                    return int(datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp())
+                except ValueError:
+                    return 0
+            created = int(text)
+            return created // 1000 if created > 10_000_000_000 else created
+
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+
+    @staticmethod
+    def recommend_best_model(models: list[str],
+                             model_metadata: Optional[dict[str, dict[str, Any]]] = None) -> Optional[str]:
+        """Pick the strongest/latest chat model from a provider model list."""
+        candidates = [str(model).strip() for model in models if str(model).strip()]
+        if not candidates:
+            return None
+        return max(
+            dict.fromkeys(candidates),
+            key=lambda model: APITester._model_preference_score(model, model_metadata),
+        )
+
+    @staticmethod
+    def sort_models_by_preference(models: list[str],
+                                  model_metadata: Optional[dict[str, dict[str, Any]]] = None) -> list[str]:
+        """Return models in recommended order with duplicates removed."""
+        unique = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
+        return sorted(
+            unique,
+            key=lambda model: APITester._model_preference_score(model, model_metadata),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _model_preference_score(model: str,
+                                model_metadata: Optional[dict[str, dict[str, Any]]] = None) -> tuple[int, int, str]:
+        name = model.lower()
+        metadata = APITester._metadata_for_model(model, model_metadata)
+        display_name = str(metadata.get("display_name") or metadata.get("displayName") or "")
+        search_text = f"{name} {display_name.lower()}".strip()
+        if any(marker in search_text for marker in APITester._NON_CHAT_MODEL_MARKERS):
+            return (-1_000_000, APITester._metadata_created_score(metadata), name)
+
+        if name in APITester._MODEL_ALIAS_PRIORITY:
+            return (APITester._MODEL_ALIAS_PRIORITY[name], APITester._metadata_created_score(metadata), name)
+
+        score = 0
+        if "[1m]" in search_text or "1m" in search_text:
+            score += 70_000
+
+        # Most /models endpoints expose ids rather than capability metadata, so
+        # this uses transparent naming heuristics and still leaves manual input.
+        if "opus" in search_text:
+            score += 600_000
+        elif "sonnet" in search_text:
+            score += 500_000
+        elif "haiku" in search_text:
+            score += 100_000
+        elif "gpt-" in search_text:
+            score += 450_000
+        elif name.startswith("o") and len(name) > 1 and name[1].isdigit():
+            score += 420_000
+        elif "glm" in search_text:
+            score += 380_000
+        elif "kimi" in search_text or "moonshot" in search_text:
+            score += 360_000
+        elif "deepseek" in search_text:
+            score += 340_000
+
+        if any(token in search_text for token in ("pro", "max", "ultra")):
+            score += 30_000
+        if any(token in search_text for token in ("thinking", "reasoner", "reasoning")):
+            score += 20_000
+        if "turbo" in search_text:
+            score += 5_000
+        if any(token in search_text for token in ("mini", "nano", "flash", "lite", "air")):
+            score -= 30_000
+
+        score += APITester._version_score(search_text)
+        score += APITester._date_score(search_text)
+        return (score, APITester._metadata_created_score(metadata), name)
+
+    @staticmethod
+    def _metadata_for_model(model: str,
+                            model_metadata: Optional[dict[str, dict[str, Any]]]) -> dict[str, Any]:
+        if not model_metadata:
+            return {}
+        metadata = model_metadata.get(model)
+        if isinstance(metadata, dict):
+            return metadata
+        model_lower = model.lower()
+        for key, value in model_metadata.items():
+            if str(key).lower() == model_lower and isinstance(value, dict):
+                return value
+        return {}
+
+    @staticmethod
+    def _metadata_created_score(metadata: dict[str, Any]) -> int:
+        created = APITester._parse_model_created(
+            metadata.get("created")
+            or metadata.get("created_at")
+            or metadata.get("createdAt")
+        )
+        return created // 86_400 if created else 0
+
+    @staticmethod
+    def _version_score(name: str) -> int:
+        import re
+
+        clean_name = re.sub(r"20\d{6}", "", name)
+        best = 0
+        for match in re.finditer(r"(?<!\d)(\d{1,2}(?:[.-]\d{1,3}){0,3})(?!\d)", clean_name):
+            token = match.group(1).replace("-", ".")
+            value = 0
+            for index, part in enumerate(token.split(".")[:4]):
+                if part.isdigit():
+                    value += int(part) * (1000 // (10 ** index))
+            best = max(best, value)
+        return best
+
+    @staticmethod
+    def _date_score(name: str) -> int:
+        import re
+
+        dates = [int(match.group(0)) for match in re.finditer(r"20\d{6}", name)]
+        return (max(dates) - 20_000_000) // 10 if dates else 0
 
     @staticmethod
     def _parse_error_body(error_body: str) -> str:
@@ -209,11 +427,16 @@ class APITester:
                 error_details=result.error_details,
             )
 
-        models = APITester._extract_model_ids(data)
+        model_infos = APITester._extract_model_infos(data)
+        models = [model.id for model in model_infos]
+        model_metadata = APITester._model_metadata_from_infos(model_infos)
+        recommended_model = APITester.recommend_best_model(models, model_metadata)
         return ModelListResult(
             success=bool(models),
             message=f"获取到 {len(models)} 个模型" if models else "接口返回中没有模型列表",
             models=models,
+            recommended_model=recommended_model,
+            model_metadata=model_metadata,
             response_time=result.response_time,
             status_code=result.status_code,
         )
@@ -244,11 +467,16 @@ class APITester:
                 error_details=result.error_details,
             )
 
-        models = APITester._extract_model_ids(data)
+        model_infos = APITester._extract_model_infos(data)
+        models = [model.id for model in model_infos]
+        model_metadata = APITester._model_metadata_from_infos(model_infos)
+        recommended_model = APITester.recommend_best_model(models, model_metadata)
         return ModelListResult(
             success=bool(models),
             message=f"获取到 {len(models)} 个模型" if models else "接口返回中没有模型列表",
             models=models,
+            recommended_model=recommended_model,
+            model_metadata=model_metadata,
             response_time=result.response_time,
             status_code=result.status_code,
         )

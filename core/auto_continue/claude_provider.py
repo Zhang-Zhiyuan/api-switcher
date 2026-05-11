@@ -162,7 +162,7 @@ class ClaudeProvider(AutoContinueProvider):
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
         script_content = generate_hook_script(settings_path, enable_git)
 
-        with open(script_path, 'w', encoding='utf-8') as f:
+        with open(script_path, 'w', encoding='utf-8-sig') as f:
             f.write(script_content)
 
         logger.info(f"Installed hook script: {script_path}")
@@ -260,7 +260,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
         script_content = generate_error_recovery_script(settings_path, enable_git)
 
-        with open(script_path, 'w', encoding='utf-8') as f:
+        with open(script_path, 'w', encoding='utf-8-sig') as f:
             f.write(script_content)
 
         logger.info(f"Installed error recovery script: {script_path}")

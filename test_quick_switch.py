@@ -5,6 +5,7 @@
 
 import sys
 import tempfile
+import re
 from pathlib import Path
 
 # Add project root to path
@@ -12,8 +13,10 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from core import profile_manager
+from core.api_tester import APITester
 import core.usage_stats as usage_stats_module
 from core.usage_stats import format_token_count as format_tokens
+from models.auto_continue import AutoContinueSettings, DEFAULT_BLOCKER_PATTERNS, DEFAULT_INCOMPLETE_PATTERNS
 
 
 def _isolated_usage_manager(tmp_path, monkeypatch=None):
@@ -110,6 +113,173 @@ def test_usage_stats(tmp_path, monkeypatch):
         print(f"    - 输入: {format_tokens(stats.input_tokens)}")
         print(f"    - 输出: {format_tokens(stats.output_tokens)}")
         print()
+
+
+def test_usage_stats_load_ignores_unknown_fields(tmp_path, monkeypatch):
+    stats_file = tmp_path / "usage_stats.json"
+    stats_file.write_text(
+        """
+{
+  "claude:legacy": {
+    "profile_name": "legacy",
+    "profile_type": "claude",
+    "switch_count": 2,
+    "future_field": "ignored",
+    "daily_history": {
+      "2026-05-11": {
+        "date": "2026-05-11",
+        "switch_count": 2,
+        "future_daily_field": "ignored"
+      }
+    }
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(usage_stats_module, "STATS_FILE", stats_file)
+
+    manager = usage_stats_module.UsageStatsManager()
+    stats = manager.get_stats("legacy", "claude")
+
+    assert stats.switch_count == 2
+    assert stats.daily_history["2026-05-11"].switch_count == 2
+
+
+def _matches_incomplete(text: str, settings: AutoContinueSettings | None = None) -> bool:
+    settings = settings or AutoContinueSettings()
+    return any(re.search(pattern, text) for pattern in settings.incomplete_patterns)
+
+
+def _matches_blocker(text: str, settings: AutoContinueSettings | None = None) -> bool:
+    settings = settings or AutoContinueSettings()
+    return any(re.search(pattern, text) for pattern in settings.blocker_patterns)
+
+
+def test_auto_continue_patterns_match_chinese_unfinished_work():
+    examples = [
+        "还有一处未完成：需要补充远程 hook 的验证。",
+        "接下来需要修复中文识别规则。",
+        "下一步：继续验证打包后的 exe。",
+        "后续步骤：添加更多回归测试。",
+        "这个功能仍然需要优化错误提示。",
+    ]
+
+    for message in examples:
+        assert _matches_incomplete(message), message
+
+
+def test_auto_continue_patterns_do_not_match_completed_chinese_summary():
+    assert not _matches_incomplete("已经完成，测试也通过了。")
+    assert not _matches_incomplete("不需要继续处理，当前结果可以停止。")
+    assert not _matches_incomplete("无需继续优化，这一轮已经收尾。")
+
+
+def test_auto_continue_blocker_patterns_match_chinese_user_input_requests():
+    examples = [
+        "需要你确认要使用哪个配置。",
+        "请选择下一步操作。",
+        "等待用户输入 API Key 后才能继续。",
+        "缺少必要文件，无法继续。",
+        "找不到配置文件。",
+        "当前没有权限写入目标目录。",
+    ]
+
+    for message in examples:
+        assert _matches_blocker(message), message
+
+
+def test_auto_continue_blocker_patterns_do_not_match_finished_chinese_summary():
+    assert not _matches_blocker("已经确认完成，测试通过。")
+    assert not _matches_blocker("已提供完整结果，无需用户继续操作。")
+    assert not _matches_blocker("不存在问题，所有检查都已经通过。")
+
+
+def test_auto_continue_from_dict_preserves_custom_patterns_and_adds_defaults():
+    custom_pattern = r"自定义未完模式"
+    settings = AutoContinueSettings.from_dict({
+        "incomplete_patterns": [custom_pattern],
+        "blocker_patterns": [],
+    })
+
+    assert settings.incomplete_patterns[0] == custom_pattern
+    for pattern in DEFAULT_INCOMPLETE_PATTERNS:
+        assert pattern in settings.incomplete_patterns
+    for pattern in DEFAULT_BLOCKER_PATTERNS:
+        assert pattern in settings.blocker_patterns
+    assert _matches_incomplete("接下来需要测试中文规则。", settings)
+
+
+def test_api_model_recommendation_prefers_strong_latest_models():
+    assert APITester.recommend_best_model([
+        "claude-haiku-4-5",
+        "claude-opus-4-6",
+        "opus[1m]",
+        "claude-opus-4-7",
+    ]) == "opus[1m]"
+
+    assert APITester.recommend_best_model([
+        "text-embedding-3-large",
+        "gpt-5.5-mini",
+        "gpt-4.1",
+        "gpt-5.5",
+    ]) == "gpt-5.5"
+
+    assert APITester.recommend_best_model([
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-chat",
+    ]) == "deepseek-v4-pro"
+
+    assert APITester.recommend_best_model([
+        "default",
+        "gpt-5.5",
+    ]) == "gpt-5.5"
+
+
+def test_api_model_preference_sort_filters_utility_models_to_the_end():
+    models = APITester.sort_models_by_preference([
+        "text-embedding-3-large",
+        "gpt-5.5",
+        "gpt-4.1",
+    ])
+
+    assert models[0] == "gpt-5.5"
+    assert models[-1] == "text-embedding-3-large"
+
+
+def test_api_model_metadata_breaks_ties_by_created_time():
+    models = ["gpt-5.5-stable", "gpt-5.5-candidate"]
+    metadata = {
+        "gpt-5.5-stable": {"created": "2026-01-01T00:00:00Z"},
+        "gpt-5.5-candidate": {"created": "2026-05-01T00:00:00Z"},
+    }
+
+    assert APITester.recommend_best_model(models, metadata) == "gpt-5.5-candidate"
+    assert APITester.sort_models_by_preference(models, metadata)[0] == "gpt-5.5-candidate"
+
+
+def test_api_model_extraction_preserves_display_metadata():
+    data = {
+        "data": [
+            {
+                "id": "opaque-utility",
+                "display_name": "Text Embedding 3 Large",
+                "created": 1_760_000_000,
+            },
+            {
+                "id": "opaque-chat",
+                "display_name": "GPT-5.5",
+                "created_at": "2026-05-01T00:00:00Z",
+            },
+        ]
+    }
+    infos = APITester._extract_model_infos(data)
+    models = [model.id for model in infos]
+    metadata = APITester._model_metadata_from_infos(infos)
+
+    assert APITester._extract_model_ids(data) == ["opaque-chat", "opaque-utility"]
+    assert APITester.recommend_best_model(models, metadata) == "opaque-chat"
 
 
 def test_token_formatting():

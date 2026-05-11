@@ -275,7 +275,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             try:
                 last_used = datetime.fromisoformat(stats.last_used)
                 time_str = last_used.strftime("%m-%d %H:%M")
-            except:
+            except Exception:
                 time_str = "N/A"
         else:
             time_str = "从未"
@@ -451,7 +451,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
                     date_obj = datetime.strptime(day_data["date"], "%Y-%m-%d")
                     date_label = date_obj.strftime("%m/%d")
                     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][date_obj.weekday()]
-                except:
+                except Exception:
                     date_label = day_data["date"][-5:]
                     weekday = ""
 

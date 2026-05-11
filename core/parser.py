@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG, CLAUDE_CREDENTIALS
+from core.providers import CLAUDE_CODE_MODEL_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +83,20 @@ def clear_claude_api_overrides(settings: dict) -> dict:
     # When returning to an official login, keep valid Claude model choices but
     # fall back to the current app default if the model clearly belongs elsewhere.
     model = str(settings.get("model") or "").strip()
-    if model and not model.startswith("claude-"):
+    if model and not _is_claude_code_model(model):
         settings["model"] = "claude-sonnet-4"
 
     effort = str(settings.get("effortLevel") or "").strip()
     if effort and effort not in {"low", "medium", "high", "xhigh"}:
         settings["effortLevel"] = "high"
     return settings
+
+
+def _is_claude_code_model(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    if normalized in CLAUDE_CODE_MODEL_ALIASES:
+        return True
+    return normalized.startswith("claude-")
 
 
 def clear_claude_config_auth(config: dict) -> dict:

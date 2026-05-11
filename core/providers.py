@@ -32,6 +32,16 @@ class ProviderConfig:
 
 CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh"]
+CLAUDE_CODE_MODEL_ALIASES = [
+    "default",
+    "best",
+    "sonnet",
+    "sonnet[1m]",
+    "opus[1m]",
+    "opus",
+    "opusplan",
+    "haiku",
+]
 
 
 PROVIDERS = {
@@ -41,6 +51,17 @@ PROVIDERS = {
         default_base_url="https://api.anthropic.com",
         default_model="claude-sonnet-4",
         supported_models=[
+            "sonnet",
+            "sonnet[1m]",
+            "opus[1m]",
+            "opus",
+            "opusplan",
+            "haiku",
+            "claude-opus-4-7",
+            "claude-opus-4-7[1m]",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6[1m]",
+            "claude-haiku-4-5",
             "claude-opus-4",
             "claude-sonnet-4",
             "claude-haiku-4",

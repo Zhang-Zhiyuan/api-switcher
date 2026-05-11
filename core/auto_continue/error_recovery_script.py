@@ -20,7 +20,7 @@ function Write-Log {{
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp [$Level] $Message"
-    Write-Error $logMessage
+    [Console]::Error.WriteLine($logMessage)
 }}
 
 # Git快照函数
@@ -106,9 +106,16 @@ function Get-ErrorType {{
         "content_length_exceeds_threshold",
         "context.*length.*exceeded",
         "maximum context length",
+        "maximum[_\\s-]?context[_\\s-]?length",
+        "context.*window.*(limit|full|exceed|overflow)",
+        "(reached|hit|exceed(ed|s)?).*context.*window",
+        "context.*limit.*(reached|exceed(ed|s)?)",
         "对话内容超出长度限制",
         "内容太长",
         "tokens?.*exceed",
+        "(input|prompt|request|messages?).*(too\\s*long|too\\s*large|exceed(ed|s)?)",
+        "提示词.*过长",
+        "输入.*过长",
         "上下文.*超出"
     )
     foreach ($pattern in $contentPatterns) {{
@@ -218,6 +225,54 @@ function Get-RetryAfter {{
     return $null
 }}
 
+function Get-TextValue {{
+    param($Value)
+
+    if ($null -eq $Value) {{ return $null }}
+    if ($Value -is [string]) {{
+        if ([string]::IsNullOrWhiteSpace($Value)) {{ return $null }}
+        return $Value
+    }}
+    if ($Value -is [System.Array]) {{
+        foreach ($item in $Value) {{
+            $text = Get-TextValue $item
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+        }}
+        return $null
+    }}
+    if ($Value.PSObject -and $Value.PSObject.Properties) {{
+        foreach ($name in @("message", "error_message", "errorMessage", "detail", "hint", "text", "content", "body", "error", "errors", "data")) {{
+            $prop = $Value.PSObject.Properties[$name]
+            if ($null -ne $prop) {{
+                $text = Get-TextValue $prop.Value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+            }}
+        }}
+    }}
+    try {{
+        $json = $Value | ConvertTo-Json -Compress -Depth 10
+        if (-not [string]::IsNullOrWhiteSpace($json)) {{ return $json }}
+    }} catch {{
+        $text = [string]$Value
+        if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+    }}
+    return $null
+}}
+
+function Get-FirstTextField {{
+    param($Object, [string[]]$Names)
+
+    if ($null -eq $Object) {{ return $null }}
+    foreach ($name in $Names) {{
+        $prop = $Object.PSObject.Properties[$name]
+        if ($null -ne $prop) {{
+            $text = Get-TextValue $prop.Value
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+        }}
+    }}
+    return $null
+}}
+
 try {{
     # 读取配置
     $settingsPath = "{settings_path}"
@@ -242,17 +297,7 @@ try {{
     $gitSnapshotOnRecovery = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_recovery"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_recovery }}
 
     # 读取 stdin (Hook 输入)
-    $stdinLines = @()
-    $timeout = 5
-    $startTime = Get-Date
-    while ($null -ne ($line = [Console]::ReadLine())) {{
-        $stdinLines += $line
-        if (((Get-Date) - $startTime).TotalSeconds -gt $timeout) {{
-            Write-Log "Stdin read timeout" "WARN"
-            break
-        }}
-    }}
-    $stdin = $stdinLines -join "`n"
+    $stdin = [Console]::In.ReadToEnd()
 
     if ([string]::IsNullOrWhiteSpace($stdin)) {{
         exit 0
@@ -260,23 +305,32 @@ try {{
 
     # 解析输入 JSON
     try {{
-        $input = $stdin | ConvertFrom-Json -ErrorAction Stop
+        $hookInput = $stdin | ConvertFrom-Json -ErrorAction Stop
     }} catch {{
         Write-Log "Failed to parse input JSON: $_" "ERROR"
         exit 0
     }}
 
     # 提取错误信息
-    $errorCode = $input.error_code
-    $errorMessage = $input.error_message
-    $httpStatus = $input.status
-    $sessionId = $input.session_id
+    $errorCode = Get-FirstTextField $hookInput @("error_code", "code", "errorCode", "error_type", "type")
+    $errorMessage = Get-FirstTextField $hookInput @("error_message", "message", "error", "errorMessage", "hint", "detail", "response", "body", "data", "errors", "stderr", "stdout")
+    $httpStatusText = Get-FirstTextField $hookInput @("status", "http_status", "status_code", "statusCode")
+    [int]$httpStatus = 0
+    if (-not [string]::IsNullOrWhiteSpace($httpStatusText)) {{
+        [int]::TryParse([string]$httpStatusText, [ref]$httpStatus) | Out-Null
+    }}
+    $sessionId = Get-FirstTextField $hookInput @("session_id", "sessionId", "conversation_id", "conversationId")
 
     # 尝试从嵌套的 error 对象中提取
-    if ($input.error) {{
-        if ($input.error.code) {{ $errorCode = $input.error.code }}
-        if ($input.error.message) {{ $errorMessage = $input.error.message }}
-        if ($input.error.status) {{ $httpStatus = $input.error.status }}
+    if ($hookInput.error) {{
+        $nestedCode = Get-FirstTextField $hookInput.error @("code", "type", "error_code", "errorCode")
+        $nestedMessage = Get-FirstTextField $hookInput.error @("message", "error_message", "errorMessage", "detail", "hint", "response", "body", "data", "errors")
+        $nestedStatusText = Get-FirstTextField $hookInput.error @("status", "status_code", "statusCode", "http_status")
+        if (-not [string]::IsNullOrWhiteSpace($nestedCode)) {{ $errorCode = $nestedCode }}
+        if (-not [string]::IsNullOrWhiteSpace($nestedMessage)) {{ $errorMessage = $nestedMessage }}
+        if (-not [string]::IsNullOrWhiteSpace($nestedStatusText)) {{
+            [int]::TryParse([string]$nestedStatusText, [ref]$httpStatus) | Out-Null
+        }}
     }}
 
     if ([string]::IsNullOrWhiteSpace($errorCode) -and [string]::IsNullOrWhiteSpace($errorMessage)) {{
@@ -477,7 +531,7 @@ function Write-Log {{
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp [$Level] $Message"
-    Write-Error $logMessage
+    [Console]::Error.WriteLine($logMessage)
 }}
 
 # Git快照函数
@@ -525,7 +579,7 @@ function Get-ErrorType {{
     param([string]$ErrorCode, [string]$ErrorMessage)
     $combined = "$ErrorCode $ErrorMessage".ToLower()
 
-    if ($combined -match "content.*length|context.*length|内容.*长|上下文.*超") {{
+    if ($combined -match "content.*length|context.*length|context.*window.*(limit|full|exceed|overflow)|(reached|hit|exceed(ed|s)?).*context.*window|context.*limit.*(reached|exceed(ed|s)?)|tokens?.*exceed|(input|prompt|request|messages?).*(too\\s*long|too\\s*large|exceed(ed|s)?)|内容.*长|上下文.*超|提示词.*过长|输入.*过长") {{
         return "content_length"
     }}
     if ($combined -match "rate.*limit|too.*many|频繁|速率") {{
@@ -547,6 +601,54 @@ function Get-ErrorType {{
     return "unknown"
 }}
 
+function Get-TextValue {{
+    param($Value)
+
+    if ($null -eq $Value) {{ return $null }}
+    if ($Value -is [string]) {{
+        if ([string]::IsNullOrWhiteSpace($Value)) {{ return $null }}
+        return $Value
+    }}
+    if ($Value -is [System.Array]) {{
+        foreach ($item in $Value) {{
+            $text = Get-TextValue $item
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+        }}
+        return $null
+    }}
+    if ($Value.PSObject -and $Value.PSObject.Properties) {{
+        foreach ($name in @("message", "error_message", "errorMessage", "detail", "hint", "text", "content", "body", "error", "errors", "data")) {{
+            $prop = $Value.PSObject.Properties[$name]
+            if ($null -ne $prop) {{
+                $text = Get-TextValue $prop.Value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+            }}
+        }}
+    }}
+    try {{
+        $json = $Value | ConvertTo-Json -Compress -Depth 10
+        if (-not [string]::IsNullOrWhiteSpace($json)) {{ return $json }}
+    }} catch {{
+        $text = [string]$Value
+        if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+    }}
+    return $null
+}}
+
+function Get-FirstTextField {{
+    param($Object, [string[]]$Names)
+
+    if ($null -eq $Object) {{ return $null }}
+    foreach ($name in $Names) {{
+        $prop = $Object.PSObject.Properties[$name]
+        if ($null -ne $prop) {{
+            $text = Get-TextValue $prop.Value
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{ return $text }}
+        }}
+    }}
+    return $null
+}}
+
 try {{
     $settingsPath = "{settings_path}"
     if (-not (Test-Path $settingsPath)) {{
@@ -562,30 +664,23 @@ try {{
     $gitSnapshotOnRecovery = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_recovery"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_recovery }}
 
     # 读取输入
-    $stdinLines = @()
-    $timeout = 5
-    $startTime = Get-Date
-    while ($null -ne ($line = [Console]::ReadLine())) {{
-        $stdinLines += $line
-        if (((Get-Date) - $startTime).TotalSeconds -gt $timeout) {{
-            break
-        }}
-    }}
-    $stdin = $stdinLines -join "`n"
+    $stdin = [Console]::In.ReadToEnd()
 
     if ([string]::IsNullOrWhiteSpace($stdin)) {{
         exit 0
     }}
 
-    $input = $stdin | ConvertFrom-Json
-    $errorCode = $input.error_code
-    $errorMessage = $input.error_message
-    $sessionId = $input.session_id
+    $hookInput = $stdin | ConvertFrom-Json
+    $errorCode = Get-FirstTextField $hookInput @("error_code", "code", "errorCode", "error_type", "type")
+    $errorMessage = Get-FirstTextField $hookInput @("error_message", "message", "error", "errorMessage", "hint", "detail", "response", "body", "data", "errors", "stderr", "stdout")
+    $sessionId = Get-FirstTextField $hookInput @("session_id", "sessionId", "conversation_id", "conversationId")
 
     # 尝试从嵌套对象提取
-    if ($input.error) {{
-        if ($input.error.code) {{ $errorCode = $input.error.code }}
-        if ($input.error.message) {{ $errorMessage = $input.error.message }}
+    if ($hookInput.error) {{
+        $nestedCode = Get-FirstTextField $hookInput.error @("code", "type", "error_code", "errorCode")
+        $nestedMessage = Get-FirstTextField $hookInput.error @("message", "error_message", "errorMessage", "detail", "hint", "response", "body", "data", "errors")
+        if (-not [string]::IsNullOrWhiteSpace($nestedCode)) {{ $errorCode = $nestedCode }}
+        if (-not [string]::IsNullOrWhiteSpace($nestedMessage)) {{ $errorMessage = $nestedMessage }}
     }}
 
     if ([string]::IsNullOrWhiteSpace($errorCode) -and [string]::IsNullOrWhiteSpace($errorMessage)) {{

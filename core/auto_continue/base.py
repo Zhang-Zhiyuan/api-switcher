@@ -99,6 +99,14 @@ class AutoContinueProvider(ABC):
             if not is_valid:
                 logger.warning(f"Invalid settings in {settings_path}: {error}")
                 return None
+            if (
+                data.get("incomplete_patterns") != settings.incomplete_patterns
+                or data.get("blocker_patterns") != settings.blocker_patterns
+            ):
+                try:
+                    self.save_settings(settings)
+                except Exception as e:
+                    logger.warning(f"Failed to migrate settings in {settings_path}: {e}")
             return settings
         except Exception as e:
             logger.error(f"Error loading settings from {settings_path}: {e}")
@@ -126,7 +134,7 @@ class AutoContinueProvider(ABC):
         )
         try:
             with open(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(settings.to_dict(), f, indent=2)
+                json.dump(settings.to_dict(), f, indent=2, ensure_ascii=False)
             # Move temp file to target (atomic on most filesystems)
             shutil.move(temp_path, settings_path)
             self._settings = settings

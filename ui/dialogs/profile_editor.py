@@ -149,8 +149,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         widget, _ = self._fields[key]
         ctk.CTkButton(
             widget.master,
-            text="刷新",
-            width=64,
+            text="刷新最佳",
+            width=78,
             command=self._refresh_models,
             **button_style("secondary", compact=True),
         ).pack(side="left", padx=(8, 0))
@@ -530,13 +530,17 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             api_key = self._get_secret_value("auth_token", getattr(self._profile, "auth_token_ref", None))
             base_url = data.get("base_url") or (provider.base_url_for_claude() if provider else "https://api.anthropic.com")
             fallback_models = provider.supported_models if provider else []
-            fetcher = lambda: APITester.fetch_claude_models(api_key, base_url)
+
+            def fetcher():
+                return APITester.fetch_claude_models(api_key, base_url)
         else:
             provider = self._current_codex_provider()
             api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
             base_url = data.get("custom_base_url") or (provider.base_url_for_codex() if provider else "")
             fallback_models = provider.supported_models if provider else []
-            fetcher = lambda: APITester.fetch_openai_models(api_key, base_url)
+
+            def fetcher():
+                return APITester.fetch_openai_models(api_key, base_url)
 
         if not base_url and not fallback_models:
             self._show_error("请先填写 API 端点")
@@ -544,7 +548,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         if not api_key:
             if fallback_models:
-                self._apply_model_list(fallback_models, "未输入密钥，已使用内置模型列表", is_error=False)
+                self._apply_model_list(fallback_models, "未输入密钥，已使用内置模型列表并选择推荐模型", is_error=False)
             else:
                 self._show_error("刷新远程模型列表需要先输入 API Key")
             return
@@ -553,11 +557,20 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         def run_refresh():
             result = fetcher()
-            self._safe_after(lambda: self._handle_model_refresh_result(result, fallback_models))
+            self._safe_after(lambda: self._handle_model_refresh_result(result, fallback_models, provider))
 
         threading.Thread(target=run_refresh, daemon=True).start()
 
-    def _apply_model_list(self, models: list[str], message: str, is_error: bool = False) -> None:
+    def _remote_models_for_selection(self, remote_models: list[str], fallback_models: list[str], provider) -> list[str]:
+        if provider and getattr(provider, "name", "") == "anthropic":
+            return list(dict.fromkeys(remote_models + fallback_models))
+        return remote_models
+
+    def _apply_model_list(self, models: list[str], message: str, is_error: bool = False,
+                          preferred_model: str | None = None,
+                          model_metadata: dict | None = None) -> None:
+        from core.api_tester import APITester
+
         if not self.winfo_exists():
             return
         if not models:
@@ -565,16 +578,32 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             return
 
         model_widget, _ = self._fields["model"]
-        current = model_widget.get()
-        model_widget.configure(values=models)
-        model_widget.set(current if current in models else models[0])
-        self._show_error(message) if is_error else self._show_status(message, "success")
+        sorted_models = APITester.sort_models_by_preference(models, model_metadata)
+        recommended = (
+            preferred_model
+            if preferred_model in sorted_models
+            else APITester.recommend_best_model(sorted_models, model_metadata)
+        )
+        model_widget.configure(values=sorted_models)
+        model_widget.set(recommended or sorted_models[0])
+        suffix = f"；已选择推荐模型 {recommended}" if recommended else ""
+        self._show_error(message + suffix) if is_error else self._show_status(message + suffix, "success")
 
-    def _handle_model_refresh_result(self, result, fallback_models: list[str]):
+    def _handle_model_refresh_result(self, result, fallback_models: list[str], provider):
         if not self.winfo_exists():
             return
         if result.success and result.models:
-            self._apply_model_list(result.models, result.message, is_error=False)
+            models = self._remote_models_for_selection(result.models, fallback_models, provider)
+            preferred = result.recommended_model
+            if provider and getattr(provider, "name", "") == "anthropic":
+                preferred = "opus[1m]" if "opus[1m]" in models else preferred
+            self._apply_model_list(
+                models,
+                result.message,
+                is_error=False,
+                preferred_model=preferred,
+                model_metadata=getattr(result, "model_metadata", None),
+            )
             return
 
         if fallback_models:

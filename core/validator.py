@@ -3,7 +3,6 @@
 """
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 import sys
 
@@ -148,7 +147,7 @@ class ConfigValidator:
         category = "Claude Code"
 
         try:
-            from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG
+            from config.paths import CLAUDE_SETTINGS
             from core import profile_manager
 
             # 检查配置文件

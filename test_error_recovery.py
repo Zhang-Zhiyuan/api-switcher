@@ -32,6 +32,41 @@ def test_error_parser():
             "expected_strategy": RecoveryStrategy.COMPACT_AND_CONTINUE
         },
         {
+            "name": "context window limit 错误",
+            "data": {
+                "error_message": "API Error: The model has reached its context window limit.",
+                "status": 400
+            },
+            "expected_type": ErrorType.CONTENT_LENGTH_EXCEEDED,
+            "expected_strategy": RecoveryStrategy.COMPACT_AND_CONTINUE
+        },
+        {
+            "name": "wrapped context window limit 错误",
+            "data": {
+                "response": {
+                    "data": {
+                        "error": {
+                            "message": "API Error: The model has reached its context window limit."
+                        }
+                    }
+                },
+                "status": 400
+            },
+            "expected_type": ErrorType.CONTENT_LENGTH_EXCEEDED,
+            "expected_strategy": RecoveryStrategy.COMPACT_AND_CONTINUE
+        },
+        {
+            "name": "prompt too long 错误",
+            "data": {
+                "error": {
+                    "message": "Prompt is too long for this model."
+                },
+                "status": 400
+            },
+            "expected_type": ErrorType.CONTENT_LENGTH_EXCEEDED,
+            "expected_strategy": RecoveryStrategy.COMPACT_AND_CONTINUE
+        },
+        {
             "name": "速率限制错误",
             "data": {
                 "error_message": "rate limit exceeded, please retry after 60 seconds",
@@ -209,12 +244,132 @@ def test_script_generation():
     print(f"  包含错误类型枚举: {'ErrorTypes' in claude_script}")
     print(f"  包含恢复策略: {'RecoveryStrategies' in claude_script}")
     print(f"  包含压缩命令: {'compact' in claude_script}")
+    assert "context.*window.*(limit|full|exceed|overflow)" in claude_script
+    assert "prompt|request|messages?" in claude_script
+    assert "Get-FirstTextField" in claude_script
+    assert '"message", "error", "errorMessage"' in claude_script
+    assert '"body", "data", "errors"' in claude_script
 
     print("\n生成 Codex CLI 错误恢复脚本...")
     codex_script = generate_codex_error_recovery_script(settings_path)
     print(f"  脚本长度: {len(codex_script)} 字符")
     print(f"  包含错误分类: {'Get-ErrorType' in codex_script}")
     print(f"  包含压缩命令: {'compress' in codex_script}")
+    assert "context.*window.*(limit|full|exceed|overflow)" in codex_script
+    assert "prompt|request|messages?" in codex_script
+    assert "Get-FirstTextField" in codex_script
+    assert '"message", "error", "errorMessage"' in codex_script
+    assert '"body", "data", "errors"' in codex_script
+
+
+def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
+    """Codex hooks.json install/uninstall should only replace API Switcher hooks."""
+    from core.auto_continue.codex_provider import CodexProvider
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(json.dumps({
+        "Stop": {
+            "command": "powershell.exe -File user_stop.ps1",
+            "timeout": 4,
+        },
+        "Error": {
+            "hooks": [
+                {
+                    "command": "powershell.exe -File user_error.ps1",
+                    "timeout": 5,
+                }
+            ]
+        },
+    }), encoding="utf-8")
+
+    provider = CodexProvider()
+    provider.register_hook()
+    provider._register_error_recovery_hook()
+
+    hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+    stop_commands = [hook["command"] for hook in hooks["Stop"]["hooks"]]
+    error_commands = [hook["command"] for hook in hooks["Error"]["hooks"]]
+    assert "powershell.exe -File user_stop.ps1" in stop_commands
+    assert any("auto_continue_stop.ps1" in command for command in stop_commands)
+    assert "powershell.exe -File user_error.ps1" in error_commands
+    assert any("error_recovery.ps1" in command for command in error_commands)
+    assert provider.is_hook_registered()
+    assert provider.is_error_recovery_installed() is False
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+
+    provider.get_error_recovery_script_path().parent.mkdir(parents=True, exist_ok=True)
+    provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
+    assert provider.is_error_recovery_installed()
+
+    provider.unregister_hook()
+    provider.uninstall_error_recovery()
+
+    hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+    assert hooks["Stop"]["command"] == "powershell.exe -File user_stop.ps1"
+    assert hooks["Error"]["command"] == "powershell.exe -File user_error.ps1"
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+
+
+def test_local_codex_hooks_toggle_config_when_no_hooks_remain(tmp_path, monkeypatch):
+    from core.auto_continue.codex_provider import CodexProvider
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    provider = CodexProvider()
+    provider.register_hook()
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+    provider.unregister_hook()
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is False
+
+    provider._register_error_recovery_hook()
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+    provider.get_error_recovery_script_path().parent.mkdir(parents=True, exist_ok=True)
+    provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
+    provider.uninstall_error_recovery()
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is False
+
+
+def test_load_settings_migrates_chinese_incomplete_patterns(tmp_path, monkeypatch):
+    from core.auto_continue.codex_provider import CodexProvider
+    from models.auto_continue import DEFAULT_INCOMPLETE_PATTERNS
+
+    old_patterns = [
+        r"(?i)(still|remaining|todo|wip|work in progress|not (yet )?complete)",
+        r"(?i)(will|need to|should|must).{0,50}(implement|add|create|fix|test|verify)",
+        r"(?i)(next|following) steps?:",
+        r"(?i)to be (done|completed|implemented)",
+    ]
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    settings_path = tmp_path / "auto_continue_settings.json"
+    settings_path.write_text(
+        json.dumps({
+            "enabled": True,
+            "max_continuations": 3,
+            "continuation_prompt": "continue",
+            "incomplete_patterns": old_patterns,
+        }),
+        encoding="utf-8",
+    )
+
+    settings = CodexProvider().load_settings()
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    raw_saved = settings_path.read_text(encoding="utf-8")
+
+    assert settings is not None
+    assert "下一步" in raw_saved
+    for pattern in DEFAULT_INCOMPLETE_PATTERNS:
+        assert pattern in settings.incomplete_patterns
+        assert pattern in saved["incomplete_patterns"]
 
 
 def main():

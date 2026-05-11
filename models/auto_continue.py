@@ -3,6 +3,45 @@ from typing import Optional
 import re
 
 
+DEFAULT_INCOMPLETE_PATTERNS = [
+    r"(?i)(still|remaining|todo|wip|work in progress|not (yet )?complete)",
+    r"(?i)(will|need to|should|must).{0,50}(implement|add|create|fix|test|verify)",
+    r"(?i)(next|following) steps?:",
+    r"(?i)to be (done|completed|implemented)",
+    r"(待办|待完成|待实现|待处理|未完成|未实现|未处理|未修复|未测试|未验证|尚未完成|尚未实现|还没完成|还未完成|进行中)",
+    r"(?<![不无])(?:还|仍|仍然|尚|接下来)?\s*(?:需要|需|必须|应当|应该|(?<![不无需])要).{0,50}(实现|添加|新增|创建|修复|测试|验证|检查|处理|完成|继续|优化)",
+    r"(下一步|接下来|后续步骤|后续计划|下一阶段)[:：]",
+    r"(后续|之后|下一步|接下来).{0,20}(需要|继续|会|将).{0,50}(实现|添加|新增|创建|修复|测试|验证|检查|处理|完成|优化)",
+]
+
+
+DEFAULT_BLOCKER_PATTERNS = [
+    r"(?i)(error|failed|cannot|unable to|blocked by)",
+    r"(?i)(missing|not found|does not exist)",
+    r"(?i)(need.{0,30}(your|user) (input|decision|approval|confirmation))",
+    r"(?i)which (option|approach|method) (do you|would you like)",
+    r"(错误|失败|无法|不能|被阻塞|卡住|没有权限|权限不足)",
+    r"(缺少|找不到|不存在).{0,20}(文件|配置|路径|命令|依赖|参数|信息|凭证|权限|API|api|key|token|模型|账号|目录|环境变量)",
+    r"(需要|请|等待|等你|等用户|由你|由用户).{0,40}(输入|确认|选择|决定|授权|批准|同意|提供|补充|回复|告知|指定)",
+    r"(请选择|请确认|请提供|请授权|请决定|需要你确认|需要你选择|需要用户确认|等待用户|等你确认)",
+]
+
+
+def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> list[str]:
+    """Return user patterns plus any missing built-in patterns."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    source = patterns if isinstance(patterns, list) else []
+
+    for pattern in source + defaults:
+        value = str(pattern).strip()
+        if value and value not in seen:
+            merged.append(value)
+            seen.add(value)
+
+    return merged
+
+
 @dataclass
 class AutoContinueSettings:
     """Settings for auto-continue functionality."""
@@ -22,20 +61,10 @@ class AutoContinueSettings:
     git_snapshot_on_recovery: bool = True  # 错误恢复前创建快照
 
     # Incomplete patterns (regex)
-    incomplete_patterns: list[str] = field(default_factory=lambda: [
-        r"(?i)(still|remaining|todo|wip|work in progress|not (yet )?complete)",
-        r"(?i)(will|need to|should|must).{0,50}(implement|add|create|fix|test|verify)",
-        r"(?i)(next|following) steps?:",
-        r"(?i)to be (done|completed|implemented)",
-    ])
+    incomplete_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_INCOMPLETE_PATTERNS))
 
     # Blocker patterns (regex) - 遇到这些就不续跑
-    blocker_patterns: list[str] = field(default_factory=lambda: [
-        r"(?i)(error|failed|cannot|unable to|blocked by)",
-        r"(?i)(missing|not found|does not exist)",
-        r"(?i)(need.{0,30}(your|user) (input|decision|approval|confirmation))",
-        r"(?i)which (option|approach|method) (do you|would you like)",
-    ])
+    blocker_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_BLOCKER_PATTERNS))
 
     def validate(self) -> tuple[bool, str]:
         """Validate settings. Returns (is_valid, error_message)."""
@@ -80,6 +109,16 @@ class AutoContinueSettings:
         """Create settings from dict with validation."""
         # Filter to known fields only
         known_fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        if "incomplete_patterns" in known_fields:
+            known_fields["incomplete_patterns"] = _merge_unique_patterns(
+                known_fields.get("incomplete_patterns"),
+                DEFAULT_INCOMPLETE_PATTERNS,
+            )
+        if "blocker_patterns" in known_fields:
+            known_fields["blocker_patterns"] = _merge_unique_patterns(
+                known_fields.get("blocker_patterns"),
+                DEFAULT_BLOCKER_PATTERNS,
+            )
 
         # Create instance
         instance = cls(**known_fields)

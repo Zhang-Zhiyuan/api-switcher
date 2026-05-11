@@ -25,3 +25,31 @@ def test_backup_dirs_are_unique_and_latest_can_restore(tmp_path, monkeypatch):
     assert restored_files == ["config.json"]
     assert source.read_text(encoding="utf-8") == "two"
     assert backup_manager.get_latest_backup().description == "回滚前自动备份"
+
+
+def test_backup_prune_ignores_directory_from_metadata(tmp_path, monkeypatch):
+    backups_dir = tmp_path / "backups"
+    backup_dir = backups_dir / "2026-01-01T00-00-00"
+    backup_dir.mkdir(parents=True)
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    (external_dir / "keep.txt").write_text("do not delete", encoding="utf-8")
+    (backup_dir / backup_manager.BACKUP_META_FILE).write_text(
+        (
+            "{"
+            f'"timestamp": "2026-01-01T00:00:00", '
+            f'"directory": "{external_dir.as_posix()}", '
+            '"description": "malicious", '
+            '"files": []'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+
+    [entry] = backup_manager.list_backups()
+    assert entry.directory == backup_dir
+    assert backup_manager.prune_backups(keep_count=0) == 1
+    assert not backup_dir.exists()
+    assert (external_dir / "keep.txt").exists()

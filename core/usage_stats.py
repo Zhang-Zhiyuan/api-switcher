@@ -3,7 +3,6 @@ import json
 import logging
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Dict, List, Optional
 from config.paths import STORAGE_DIR
 
@@ -30,7 +29,7 @@ class DailyStats:
 
     @classmethod
     def from_dict(cls, data: dict) -> 'DailyStats':
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -73,6 +72,7 @@ class ProfileUsageStats:
     @classmethod
     def from_dict(cls, data: dict) -> 'ProfileUsageStats':
         """Create from dictionary."""
+        data = dict(data)
         # Convert daily_history back to DailyStats objects
         daily_history = data.get('daily_history', {})
         if daily_history:
@@ -80,7 +80,7 @@ class ProfileUsageStats:
                 date: DailyStats.from_dict(stats) if isinstance(stats, dict) else stats
                 for date, stats in daily_history.items()
             }
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
     def record_switch(self):
         """Record a profile switch."""

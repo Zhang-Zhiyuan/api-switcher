@@ -942,6 +942,55 @@ def _iter_codex_hook_commands(hooks: dict, event_name: str):
                     yield str(command)
 
 
+def _codex_event_hooks(value) -> list[dict]:
+    if isinstance(value, dict):
+        hooks = []
+        if value.get("command"):
+            hooks.append(dict(value))
+        nested = value.get("hooks")
+        if isinstance(nested, list):
+            hooks.extend(dict(hook) for hook in nested if isinstance(hook, dict) and hook.get("command"))
+        return hooks
+    if isinstance(value, list):
+        return [dict(hook) for hook in value if isinstance(hook, dict) and hook.get("command")]
+    return []
+
+
+def _format_codex_event_hooks(hook_list: list[dict]):
+    if not hook_list:
+        return None
+    if len(hook_list) == 1:
+        return hook_list[0]
+    return {"hooks": hook_list}
+
+
+def _upsert_codex_event_hook(hooks: dict, event_name: str, hook_def: dict) -> None:
+    existing = [
+        hook for hook in _codex_event_hooks(hooks.get(event_name))
+        if not _is_our_command(str(hook.get("command", "")))
+    ]
+    existing.append(hook_def)
+    hooks[event_name] = _format_codex_event_hooks(existing)
+
+
+def _remove_codex_event_hook(hooks: dict, event_name: str) -> bool:
+    if event_name not in hooks:
+        return False
+    existing = _codex_event_hooks(hooks.get(event_name))
+    remaining = [
+        hook for hook in existing
+        if not _is_our_command(str(hook.get("command", "")))
+    ]
+    if len(remaining) == len(existing):
+        return False
+    formatted = _format_codex_event_hooks(remaining)
+    if formatted is None:
+        hooks.pop(event_name, None)
+    else:
+        hooks[event_name] = formatted
+    return True
+
+
 def _codex_hooks_has_entries(hooks: dict) -> bool:
     if not isinstance(hooks, dict):
         return False
@@ -973,7 +1022,7 @@ def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -
     hooks = _read_json(client, paths.codex_hooks_path, default={})
     if not isinstance(hooks, dict):
         hooks = {}
-    hooks["Stop"] = {"command": command, "timeout": 10}
+    _upsert_codex_event_hook(hooks, "Stop", {"command": command, "timeout": 10})
     _write_json(client, paths.codex_hooks_path, hooks)
 
     _set_codex_hooks_enabled(client, paths, True)
@@ -984,8 +1033,7 @@ def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
         return
     hooks = _read_json(client, paths.codex_hooks_path, default={}, strict=False)
     if isinstance(hooks, dict) and "Stop" in hooks:
-        if any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Stop")):
-            hooks.pop("Stop", None)
+        if _remove_codex_event_hook(hooks, "Stop"):
             _write_json(client, paths.codex_hooks_path, hooks)
             if not _codex_hooks_has_entries(hooks):
                 _set_codex_hooks_enabled(client, paths, False)

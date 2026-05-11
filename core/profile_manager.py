@@ -5,7 +5,6 @@ import re
 import shutil
 import base64
 from datetime import datetime
-from pathlib import Path
 from urllib.parse import urlparse
 
 from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
@@ -786,7 +785,6 @@ def get_current_claude_account_name() -> str | None:
     if not ok or _claude_api_override_active(settings, config):
         return None
 
-    identity = _claude_account_identity_from_credentials(credentials)
     for profile in list_claude_account_profiles():
         if _claude_account_matches_credentials(profile, credentials):
             return profile.name
@@ -1565,7 +1563,6 @@ def get_current_codex_account_name() -> str | None:
     if not _codex_official_auth_available(auth) or _codex_account_override_active(config, auth):
         return None
 
-    identity = _codex_account_identity_from_auth(auth)
     for profile in list_codex_account_profiles():
         if _codex_account_matches_auth(profile, auth):
             return profile.name

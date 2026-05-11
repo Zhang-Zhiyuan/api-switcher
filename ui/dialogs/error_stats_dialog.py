@@ -233,22 +233,22 @@ class ErrorStatsDialog(ctk.CTkToplevel):
                 action = entry.get("action", "N/A")
                 recovery_count = entry.get("recovery_count", 0)
 
-                self._insert_text(f"时间: ", "label")
+                self._insert_text("时间: ", "label")
                 self._insert_text(f"{timestamp}\n", "normal")
 
-                self._insert_text(f"类型: ", "label")
+                self._insert_text("类型: ", "label")
                 self._insert_text(f"{error_type}\n", "normal")
 
-                self._insert_text(f"代码: ", "label")
+                self._insert_text("代码: ", "label")
                 self._insert_text(f"{error_code}\n", "normal")
 
-                self._insert_text(f"消息: ", "label")
+                self._insert_text("消息: ", "label")
                 self._insert_text(f"{error_message}\n", "normal")
 
-                self._insert_text(f"操作: ", "label")
+                self._insert_text("操作: ", "label")
                 self._insert_text(f"{action}\n", "normal")
 
-                self._insert_text(f"恢复次数: ", "label")
+                self._insert_text("恢复次数: ", "label")
                 self._insert_text(f"{recovery_count}\n", "count")
 
                 self._insert_text("-" * 80 + "\n\n", "separator")

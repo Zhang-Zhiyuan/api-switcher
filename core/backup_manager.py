@@ -28,6 +28,14 @@ BACKUP_FILES = {
 BACKUP_META_FILE = "backup_meta.json"
 
 
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def _allocate_backup_dir(timestamp: str) -> Path:
     """Return a unique backup directory for the timestamp."""
     base = BACKUPS_DIR / timestamp
@@ -84,7 +92,10 @@ def list_backups() -> list[BackupEntry]:
             try:
                 import json
                 data = json.loads(meta_path.read_text(encoding="utf-8"))
-                backups.append(BackupEntry.from_dict(data))
+                entry = BackupEntry.from_dict(data)
+                # Trust the directory we scanned, not editable metadata inside it.
+                entry.directory = d
+                backups.append(entry)
             except Exception as e:
                 logger.warning(f"Failed to read backup meta in {d}: {e}")
         else:
@@ -141,9 +152,14 @@ def prune_backups(keep_count: int = 20) -> int:
 
     to_remove = backups[keep_count:]
     removed = 0
+    backup_root = BACKUPS_DIR.resolve()
     for entry in to_remove:
         try:
-            shutil.rmtree(entry.directory)
+            target = Path(entry.directory).resolve()
+            if target == backup_root or not _is_relative_to(target, backup_root):
+                logger.warning(f"Skipped suspicious backup directory: {entry.directory}")
+                continue
+            shutil.rmtree(target)
             removed += 1
         except Exception as e:
             logger.warning(f"Failed to remove backup {entry.directory}: {e}")

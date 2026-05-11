@@ -2,7 +2,6 @@
 API 错误解析器
 支持多种 API 提供商的错误格式，提取结构化错误信息
 """
-import json
 import re
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
@@ -70,12 +69,19 @@ class ErrorParser:
         r"CONTENT_LENGTH_EXCEEDS_THRESHOLD",
         r"context[_\s]?length[_\s]?exceeded",
         r"maximum context length",
+        r"maximum[_\s-]?context[_\s-]?length",
+        r"context.*window.*(limit|full|exceed|overflow)",
+        r"(reached|hit|exceed(?:ed|s)?).*context.*window",
+        r"context.*limit.*(reached|exceed(?:ed|s)?)",
         r"对话内容超出长度限制",
         r"内容太长",
         r"tokens?.*exceed",
         r"context.*too.*long",
+        r"(input|prompt|request|messages?).*(too\s*long|too\s*large|exceed(?:ed|s)?)",
         r"请求.*过长",
         r"上下文.*超出",
+        r"提示词.*过长",
+        r"输入.*过长",
     ]
 
     # 速率限制错误模式
@@ -218,17 +224,31 @@ class ErrorParser:
     def _extract_error_message(self, data: Dict[str, Any]) -> Optional[str]:
         """提取错误消息"""
         # 尝试多种可能的字段名
-        for key in ["error_message", "message", "error", "errorMessage", "hint", "detail"]:
+        for key in [
+            "error_message", "message", "error", "errorMessage", "hint", "detail",
+            "text", "content",
+            "response", "body", "data", "errors", "stderr", "stdout",
+        ]:
             if key in data and data[key]:
                 msg = data[key]
                 if isinstance(msg, str):
                     return msg
-                elif isinstance(msg, dict) and "message" in msg:
-                    return str(msg["message"])
+                elif isinstance(msg, dict):
+                    nested = self._extract_error_message(msg)
+                    if nested:
+                        return nested
+                elif isinstance(msg, list):
+                    for item in msg:
+                        if isinstance(item, str) and item:
+                            return item
+                        if isinstance(item, dict):
+                            nested = self._extract_error_message(item)
+                            if nested:
+                                return nested
 
         # 尝试从嵌套的 error 对象中提取
         if "error" in data and isinstance(data["error"], dict):
-            for key in ["message", "detail", "hint"]:
+            for key in ["message", "detail", "hint", "error_message", "errorMessage"]:
                 if key in data["error"]:
                     return str(data["error"][key])
 

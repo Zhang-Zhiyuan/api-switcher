@@ -5,7 +5,6 @@ import logging
 import shutil
 import sqlite3
 import subprocess
-import time
 from pathlib import Path
 
 from models.profile import BrowserProfile
@@ -283,7 +282,7 @@ class BrowserDataManager:
             errors.append(f"清理存储数据失败: {e}")
 
         if errors:
-            raise RuntimeError(f"部分清理操作失败:\n" + "\n".join(errors))
+            raise RuntimeError("部分清理操作失败:\n" + "\n".join(errors))
 
     def _clear_cookies_db(self, default_dir: Path, domains: list[str]) -> None:
         """Clear cookies database with backup and validation."""
@@ -421,7 +420,7 @@ class BrowserDataManager:
         # Final safety check: ensure it's within managed directory
         managed_root = MANAGED_BROWSER_PROFILES_DIR.resolve()
         if managed_root not in profile_dir.parents and profile_dir != managed_root:
-            raise RuntimeError(f"安全检查失败: 目标目录不在托管目录下")
+            raise RuntimeError("安全检查失败: 目标目录不在托管目录下")
 
         # Perform reset with backup
         backup_dir = profile_dir.with_name(profile_dir.name + ".backup")

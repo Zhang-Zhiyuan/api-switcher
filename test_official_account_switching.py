@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from core import auth_parser, backup_manager, parser, profile_manager, security, switcher, toml_parser
+from core.providers import ProviderRegistry
 
 
 def _jwt(payload: dict) -> str:
@@ -62,6 +63,22 @@ def test_switch_claude_account_clears_api_overrides_and_resets_third_party_model
     assert settings["effortLevel"] == "high"
     assert "primaryApiKey" not in parser.read_claude_config()
     assert profile_manager.get_current_claude_account_name() == account.name
+
+
+def test_switch_claude_account_preserves_official_model_aliases(isolated_accounts):
+    for model in ["opus[1m]", "sonnet[1m]", "opusplan", "claude-opus-4-7[1m]"]:
+        settings = parser.clear_claude_api_overrides({"model": model, "env": {}})
+        assert settings["model"] == model
+
+    settings = parser.clear_claude_api_overrides({"model": "gpt-5.5", "env": {}})
+    assert settings["model"] == "claude-sonnet-4"
+
+
+def test_anthropic_presets_include_opus_1m_alias():
+    provider = ProviderRegistry.get_provider("anthropic")
+    assert provider is not None
+    assert "opus[1m]" in provider.supported_models
+    assert provider.supported_models.index("opus[1m]") < provider.supported_models.index("opus")
 
 
 def test_switch_codex_account_normalizes_mixed_auth_and_provider(isolated_accounts):
