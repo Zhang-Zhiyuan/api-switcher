@@ -4,8 +4,117 @@ import tempfile
 from pathlib import Path
 
 from config import paths
-from core import portable_migration, profile_manager, security
+from core import portable_migration, profile_manager, security, session_migration
 from models.profile import BrowserProfile, ClaudeProfile, CodexProfile, SSHProfile
+
+
+def test_session_migration_round_trip(tmp_path):
+    claude_home = tmp_path / "claude_a"
+    codex_home = tmp_path / "codex_a"
+    claude_project = claude_home / "projects" / "c--Users-Test-Project"
+    claude_project.mkdir(parents=True)
+    claude_file = claude_project / "claude-session-1.jsonl"
+    claude_file.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:00Z",
+                "sessionId": "claude-session-1",
+                "cwd": "C:\\Users\\Test\\Project",
+                "message": {"content": [{"type": "text", "text": "迁移 Claude 会话"}]},
+            }, ensure_ascii=False),
+            json.dumps({
+                "type": "assistant",
+                "timestamp": "2026-05-01T00:01:00Z",
+                "sessionId": "claude-session-1",
+                "message": {"model": "opus[1m]", "content": "ok"},
+            }, ensure_ascii=False),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    support_file = claude_project / "claude-session-1" / "tool-results" / "result.txt"
+    support_file.parent.mkdir(parents=True)
+    support_file.write_text("tool output", encoding="utf-8")
+
+    codex_session_dir = codex_home / "sessions" / "2026" / "05" / "01"
+    codex_session_dir.mkdir(parents=True)
+    codex_file = codex_session_dir / "rollout-2026-05-01T00-00-00-codex-session-1.jsonl"
+    codex_file.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-session-1",
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "cwd": "C:\\Users\\Test\\Project",
+                    "model_provider": "openai",
+                },
+            }, ensure_ascii=False),
+            json.dumps({
+                "timestamp": "2026-05-01T00:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "迁移 Codex 会话"}],
+                },
+            }, ensure_ascii=False),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps({
+            "id": "codex-session-1",
+            "thread_name": "Codex 迁移测试",
+            "updated_at": "2026-05-01T00:02:00Z",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    records = session_migration.list_sessions(claude_home=claude_home, codex_home=codex_home)
+    assert {record.provider for record in records} == {"claude", "codex"}
+    assert any(record.title == "Codex 迁移测试" for record in records)
+    assert any(record.summary == "迁移 Claude 会话" for record in records)
+
+    bundle = tmp_path / "sessions.asxsession"
+    exported = session_migration.export_sessions(
+        bundle,
+        {record.key for record in records},
+        claude_home=claude_home,
+        codex_home=codex_home,
+    )
+    assert exported.session_count == 2
+    assert exported.file_count == 3
+
+    imported_claude_home = tmp_path / "claude_b"
+    imported_codex_home = tmp_path / "codex_b"
+    imported = session_migration.import_sessions(
+        bundle,
+        claude_home=imported_claude_home,
+        codex_home=imported_codex_home,
+    )
+    assert imported.session_count == 2
+    assert imported.file_count == 3
+    assert (imported_claude_home / "projects" / "c--Users-Test-Project" / "claude-session-1.jsonl").exists()
+    assert (
+        imported_claude_home
+        / "projects"
+        / "c--Users-Test-Project"
+        / "claude-session-1"
+        / "tool-results"
+        / "result.txt"
+    ).read_text(encoding="utf-8") == "tool output"
+    assert (imported_codex_home / "sessions" / "2026" / "05" / "01" / codex_file.name).exists()
+    assert "Codex 迁移测试" in (imported_codex_home / "session_index.jsonl").read_text(encoding="utf-8")
+
+    imported_again = session_migration.import_sessions(
+        bundle,
+        claude_home=imported_claude_home,
+        codex_home=imported_codex_home,
+    )
+    assert imported_again.session_count == 0
+    assert imported_again.skipped_existing == 3
 
 
 def _reset_store() -> None:

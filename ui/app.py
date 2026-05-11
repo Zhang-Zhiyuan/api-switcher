@@ -6,6 +6,7 @@ from ui.tabs.common_tab import CommonTab
 from ui.tabs.backup_tab import BackupTab
 from ui.tabs.ssh_tab import SSHTab
 from ui.tabs.browser_tab import BrowserTab
+from ui.tabs.session_migration_tab import SessionMigrationTab
 from ui.tabs.log_viewer_tab import LogViewerTab
 from ui.tabs.usage_stats_tab import UsageStatsTab
 from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
@@ -150,6 +151,7 @@ class App(ctk.CTk):
         self._claude_tab = ClaudeTab(self._tabview.add("Claude Code"))
         self._codex_tab = CodexTab(self._tabview.add("Codex CLI"))
         self._browser_tab = BrowserTab(self._tabview.add("浏览器 Profile"))
+        self._session_migration_tab = SessionMigrationTab(self._tabview.add("会话迁移"))
         self._ssh_tab = SSHTab(self._tabview.add("SSH 服务器"))
         self._common_tab = CommonTab(self._tabview.add("通用设置"))
         self._usage_stats_tab = UsageStatsTab(self._tabview.add("使用统计"))
@@ -157,7 +159,7 @@ class App(ctk.CTk):
         self._log_viewer_tab = LogViewerTab(self._tabview.add("日志查看器"))
 
         # Make tabs fill the space
-        for tab in [self._claude_tab, self._codex_tab, self._browser_tab, self._ssh_tab,
+        for tab in [self._claude_tab, self._codex_tab, self._browser_tab, self._session_migration_tab, self._ssh_tab,
                     self._common_tab, self._usage_stats_tab, self._backup_tab, self._log_viewer_tab]:
             tab.pack(fill="both", expand=True)
 
@@ -325,6 +327,7 @@ class App(ctk.CTk):
         self._claude_tab.refresh()
         self._codex_tab.refresh()
         self._browser_tab.refresh()
+        self._session_migration_tab.refresh()
         self._ssh_tab.refresh()
         self._common_tab.refresh()
         self._usage_stats_tab.refresh()
