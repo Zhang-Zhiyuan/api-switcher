@@ -40,6 +40,8 @@ def create_spec_file() -> None:
     for source, target in [
         ("config", "config"),
         ("assets", "assets"),
+        ("icon.ico", "."),
+        ("icon.png", "."),
         ("PENDING_WORK.md", "."),
     ]:
         if Path(source).exists():

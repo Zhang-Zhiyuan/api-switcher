@@ -2,7 +2,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from config import paths
-from core import parser, toml_parser, auth_parser, vscode_parser, switcher
+from core import parser, toml_parser, auth_parser, startup_manager, vscode_parser, switcher
 from ui.widgets.toast import show_toast
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
@@ -67,6 +67,51 @@ class CommonTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", padx=14, pady=(0, 12))
+
+        # --- System Integration ---
+        system_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        system_frame.pack(fill="x", padx=14, pady=(0, 10))
+
+        system_head = ctk.CTkFrame(system_frame, fg_color="transparent")
+        system_head.pack(fill="x", padx=14, pady=(12, 8))
+        ctk.CTkLabel(
+            system_head,
+            text="系统集成",
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+        ).pack(side="left")
+
+        self._startup_repair_button = ctk.CTkButton(
+            system_head,
+            text="修复自启动",
+            width=92,
+            command=self._repair_startup,
+            **button_style("secondary", compact=True),
+        )
+        self._startup_repair_button.pack(side="right")
+
+        self._startup_var = ctk.BooleanVar(value=False)
+        self._startup_switch = ctk.CTkSwitch(
+            system_frame,
+            text="开机自启动，并自动进入系统托盘",
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+            variable=self._startup_var,
+            command=self._toggle_startup,
+        )
+        self._startup_switch.pack(anchor="w", padx=14, pady=(0, 6))
+
+        self._startup_status_label = ctk.CTkLabel(
+            system_frame,
+            text="",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._startup_status_label.pack(fill="x", padx=14, pady=(0, 12))
+        bind_wraplength(system_frame, self._startup_status_label, padding=32)
 
         # --- Data Directory ---
         storage_frame = ctk.CTkFrame(self, **card_frame_kwargs())
@@ -174,6 +219,7 @@ class CommonTab(ctk.CTkScrollableFrame):
         )
         self._overview_text.pack(fill="x", padx=14, pady=(0, 14))
 
+        self._refresh_startup_info()
         self._refresh_overview()
         self._refresh_storage_info()
 
@@ -182,6 +228,7 @@ class CommonTab(ctk.CTkScrollableFrame):
         settings = parser.read_claude_settings()
         enabled = settings.get("permissions", {}).get("defaultMode") == "bypassPermissions"
         self._bypass_var.set(enabled)
+        self._refresh_startup_info()
         self._refresh_storage_info()
         self._refresh_overview()
 
@@ -193,6 +240,66 @@ class CommonTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"Bypass Permissions {state}")
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"操作失败: {e}", is_error=True)
+
+    def _refresh_startup_info(self):
+        status = startup_manager.get_startup_status()
+        self._startup_var.set(status.enabled)
+
+        if not status.supported:
+            self._startup_switch.configure(state="disabled")
+            self._startup_repair_button.configure(state="disabled")
+            self._startup_status_label.configure(
+                text="当前系统不支持此开机自启动方式。Windows 下会写入当前用户的 Run 注册表项。",
+                text_color=COLORS["muted"],
+            )
+            return
+
+        self._startup_switch.configure(state="normal")
+        repair_enabled = bool(status.enabled and not status.matches_expected and not status.error)
+        self._startup_repair_button.configure(state="normal" if repair_enabled else "disabled")
+        if status.error:
+            text = f"读取自启动状态失败: {status.error}"
+            color = COLORS["danger"]
+        elif status.enabled and status.matches_expected:
+            text = "已启用。下次登录 Windows 后会自动启动，并以托盘模式运行。"
+            color = COLORS["success"]
+        elif status.enabled:
+            text = "已启用，但启动命令不是当前程序路径。点击“修复自启动”可更新到当前版本。"
+            color = COLORS["warning"]
+        else:
+            text = "未启用。开启后会注册到当前 Windows 用户，不需要管理员权限。"
+            color = COLORS["muted"]
+        self._startup_status_label.configure(text=text, text_color=color)
+
+    def _toggle_startup(self):
+        enabled = self._startup_var.get()
+        try:
+            status = startup_manager.set_startup_enabled(enabled)
+            self._refresh_startup_info()
+            top = self.winfo_toplevel()
+            tray = getattr(top, "tray_manager", None)
+            if tray and tray.is_running():
+                tray.update_menu()
+            if enabled and status.enabled:
+                show_toast(top, "已开启开机自启动，启动后会进入系统托盘")
+            elif not enabled:
+                show_toast(top, "已关闭开机自启动")
+        except Exception as e:
+            self._startup_var.set(not enabled)
+            self._refresh_startup_info()
+            show_toast(self.winfo_toplevel(), f"自启动设置失败: {e}", is_error=True)
+
+    def _repair_startup(self):
+        try:
+            startup_manager.enable_startup()
+            self._refresh_startup_info()
+            top = self.winfo_toplevel()
+            tray = getattr(top, "tray_manager", None)
+            if tray and tray.is_running():
+                tray.update_menu()
+            show_toast(top, "已更新开机自启动命令")
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"修复失败: {e}", is_error=True)
 
     def _refresh_storage_info(self):
         info = paths.get_storage_info()

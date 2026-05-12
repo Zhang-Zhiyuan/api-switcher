@@ -19,19 +19,26 @@ logger = logging.getLogger(__name__)
 class App(ctk.CTk):
     """Main application window."""
 
-    def __init__(self):
+    def __init__(self, start_minimized: bool = False):
         super().__init__()
 
         self.title("API 配置切换器")
         self.geometry("1120x760")
         self.minsize(980, 620)
         self.configure(fg_color=COLORS["app_bg"])
+        self._exit_requested = False
+        self._tray_hint_shown = False
 
         # Initialize tray manager
         self.tray_manager = TrayManager(
             on_show_window=self._show_window,
-            on_exit=self._exit_app
+            on_exit=self._exit_app,
+            on_startup_changed=self._on_startup_changed_from_tray,
+            on_hide_window=self._hide_to_tray,
         )
+        self._start_minimized_to_tray = bool(start_minimized and self.tray_manager.is_available())
+        if self._start_minimized_to_tray:
+            self.withdraw()
 
         # Handle window close event (minimize to tray instead of exit)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -305,22 +312,62 @@ class App(ctk.CTk):
         if not self.tray_manager.is_available():
             self._exit_app()
             return
-        self.withdraw()  # Hide window
+        self._hide_to_tray()
+
+    def _hide_to_tray(self, icon=None, item=None):
+        """Hide the main window to the system tray."""
+        self._run_on_ui_thread(self._hide_to_tray_now)
+
+    def _hide_to_tray_now(self):
+        if not self.tray_manager.is_available():
+            return
+        self.withdraw()
+        if self.tray_manager.is_running() and not self._tray_hint_shown and not self._start_minimized_to_tray:
+            self.tray_manager.notify("程序已在后台运行，右键托盘图标可恢复或退出。")
+            self._tray_hint_shown = True
         logger.info("Window minimized to tray")
 
     def _show_window(self, icon=None, item=None):
         """Show the main window from tray."""
-        self.deiconify()  # Show window
-        self.lift()  # Bring to front
-        self.focus_force()  # Give focus
+        self._run_on_ui_thread(self._show_window_now)
+
+    def _show_window_now(self):
+        self._start_minimized_to_tray = False
+        self.deiconify()
+        try:
+            self.state("normal")
+        except Exception:
+            pass
+        self.lift()
+        self.focus_force()
         logger.info("Window restored from tray")
 
     def _exit_app(self):
         """Exit the application completely."""
+        self._run_on_ui_thread(self._exit_app_now)
+
+    def _exit_app_now(self):
+        if self._exit_requested:
+            return
+        self._exit_requested = True
         logger.info("Exiting application")
         self.tray_manager.stop()
         self.quit()
         self.destroy()
+
+    def _on_startup_changed_from_tray(self):
+        def refresh_startup():
+            if hasattr(self, "_common_tab"):
+                self._common_tab.refresh()
+
+        self._run_on_ui_thread(refresh_startup)
+
+    def _run_on_ui_thread(self, callback):
+        try:
+            if self.winfo_exists():
+                self.after(0, callback)
+        except Exception as e:
+            logger.debug("Failed to schedule UI callback: %s", e)
 
     def refresh_all(self):
         """Refresh all tabs."""

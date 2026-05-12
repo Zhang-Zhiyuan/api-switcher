@@ -1,6 +1,7 @@
 import sys
 import os
 import logging
+import argparse
 from datetime import datetime
 
 # Ensure the app directory is in the path
@@ -40,13 +41,28 @@ if migrated_storage_items:
     logger.info("Migrated legacy storage items: %s", ", ".join(migrated_storage_items))
 
 
+def parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="API Switcher")
+    parser.add_argument(
+        "--minimized",
+        "--start-minimized",
+        "--tray",
+        action="store_true",
+        dest="start_minimized",
+        help="Start hidden in the system tray when tray support is available.",
+    )
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
 def main():
+    args = parse_args()
     import customtkinter as ctk
     ctk.set_default_color_theme("blue")
     ctk.set_appearance_mode("dark")
 
     from ui.app import App
-    app = App()
+    app = App(start_minimized=args.start_minimized)
 
     try:
         app.mainloop()
