@@ -16,6 +16,7 @@ from core import profile_manager
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
+ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
 
 
 class App(ctk.CTk):
@@ -119,8 +120,8 @@ class App(ctk.CTk):
         button_group.pack(side="right", padx=(0, 12), pady=9)
         ctk.CTkButton(
             button_group,
-            text=ENV_TAB_LABEL,
-            width=96,
+            text=ENV_TAB_BUTTON_TEXT,
+            width=108,
             command=self._show_env_tab,
             **button_style("primary"),
         ).pack(side="left", padx=(8, 0))

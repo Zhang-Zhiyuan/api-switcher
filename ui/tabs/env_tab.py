@@ -42,8 +42,8 @@ class EnvTab(ctk.CTkScrollableFrame):
 
         self._local_env_control = PersistentEnvControl(
             self,
-            title="本机 Windows 用户",
-            status_text="写入当前 Windows 用户环境变量；新打开的 PowerShell/CMD/终端会自动读取。",
+            title="本机 Windows 用户（默认 HF_TOKEN）",
+            status_text="变量名默认 HF_TOKEN，也可下拉选择 OpenAI、Google Drive、代理等变量；新打开的 PowerShell/CMD/终端会自动读取。",
             write_label="写入本机用户",
             delete_label="删除本机变量",
             on_write=self._write_local_env,
@@ -87,8 +87,8 @@ class EnvTab(ctk.CTkScrollableFrame):
 
         self._remote_env_control = PersistentEnvControl(
             self,
-            title="SSH 登录用户",
-            status_text="选择上方 SSH 服务器后，写入对应登录用户 HOME，不修改系统级 /etc/environment。",
+            title="SSH 登录用户（默认 HF_TOKEN）",
+            status_text="选择上方 SSH 服务器后，写入对应登录用户 HOME；变量名默认 HF_TOKEN，不修改系统级 /etc/environment。",
             write_label="写入 SSH 用户",
             delete_label="删除 SSH 变量",
             on_write=self._write_remote_env,
