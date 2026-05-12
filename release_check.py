@@ -8,7 +8,33 @@ import sys
 from pathlib import Path
 
 
+RUNTIME_DEPENDENCY_IMPORTS = (
+    "customtkinter",
+    "keyring",
+    "tomli_w",
+    "PIL",
+    "win32api",
+    "paramiko",
+    "pystray",
+    "cryptography",
+)
+
+DEPENDENCY_CHECK_SCRIPT = (
+    "import importlib\n"
+    f"modules = {RUNTIME_DEPENDENCY_IMPORTS!r}\n"
+    "missing = []\n"
+    "for name in modules:\n"
+    "    try:\n"
+    "        importlib.import_module(name)\n"
+    "    except Exception as exc:\n"
+    "        missing.append(f'{name}: {exc}')\n"
+    "if missing:\n"
+    "    raise SystemExit('Missing runtime dependencies: ' + '; '.join(missing))\n"
+    "print('Runtime dependencies import successfully')\n"
+)
+
 CHECKS = [
+    ("dependencies", [sys.executable, "-c", DEPENDENCY_CHECK_SCRIPT]),
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
     ("compileall", [sys.executable, "-m", "compileall", "-q", "."]),
     ("pytest", [sys.executable, "-m", "pytest", "-q"]),
