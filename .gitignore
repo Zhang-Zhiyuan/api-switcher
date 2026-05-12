@@ -54,10 +54,6 @@ desktop.ini
 *.exe
 *.spec
 
-# Test files
-test_*.py
-*_test.py
-
 # Temporary files
 *.tmp
 *.bak

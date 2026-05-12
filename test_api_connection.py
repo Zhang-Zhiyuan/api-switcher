@@ -94,7 +94,7 @@ def test_openai_api():
 def test_gui():
     """测试 GUI 对话框"""
     import customtkinter as ctk
-    from core.api_tester import APITester, TestResult
+    from core.api_tester import TestResult
     from ui.dialogs.api_test_result_dialog import APITestResultDialog
 
     print("\n" + "="*60)

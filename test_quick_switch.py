@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 测试快速切换和使用统计功能
 """
@@ -108,7 +109,7 @@ def test_usage_stats(tmp_path, monkeypatch):
         print(f"【{stats.profile_name}】({stats.profile_type.upper()})")
         print(f"  切换次数: {stats.switch_count}")
         print(f"  最后使用: {stats.last_used}")
-        print(f"  Token 使用:")
+        print("  Token 使用:")
         print(f"    - 总计: {format_tokens(stats.total_tokens)}")
         print(f"    - 输入: {format_tokens(stats.input_tokens)}")
         print(f"    - 输出: {format_tokens(stats.output_tokens)}")

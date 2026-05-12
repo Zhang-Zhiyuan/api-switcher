@@ -4,7 +4,6 @@
 """
 import json
 import sys
-from pathlib import Path
 from core.auto_continue.error_parser import error_parser, ErrorType, RecoveryStrategy
 from core.auto_continue.error_analyzer import get_analyzer
 from core.auto_continue.manager import auto_continue_manager
@@ -214,12 +213,12 @@ def test_error_analyzer():
             print(f"  平均恢复次数: {stats.avg_recovery_count:.1f}")
 
             if stats.errors_by_type:
-                print(f"  错误类型分布:")
+                print("  错误类型分布:")
                 for error_type, count in sorted(stats.errors_by_type.items(),
                                                key=lambda x: x[1], reverse=True):
                     print(f"    - {error_type}: {count}")
             else:
-                print(f"  暂无错误记录")
+                print("  暂无错误记录")
 
         except Exception as e:
             print(f"  错误: {e}")
