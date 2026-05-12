@@ -99,17 +99,21 @@ class EnvTab(ctk.CTkScrollableFrame):
         self.refresh()
 
     def refresh(self):
+        self._refresh_import_sources()
+        self._refresh_server_combo()
+
+    def _refresh_import_sources(self):
         if self._local_env_control:
             self._local_env_control.refresh_sources()
         if self._remote_env_control:
             self._remote_env_control.refresh_sources()
-        self._refresh_server_combo()
 
     def _write_local_env(self, control):
         try:
             result = persistent_env.set_local_user_env(control.env_update())
             message = f"{result.summary()}。{result.details}"
             control.set_status(message, "success")
+            self._refresh_import_sources()
             show_toast(self.winfo_toplevel(), result.summary())
         except Exception as e:
             message = f"写入失败: {e}"
@@ -121,6 +125,7 @@ class EnvTab(ctk.CTkScrollableFrame):
             result = persistent_env.delete_local_user_env(control.env_names())
             message = f"{result.summary()}。{result.details}"
             control.set_status(message, "warning")
+            self._refresh_import_sources()
             show_toast(self.winfo_toplevel(), result.summary())
         except Exception as e:
             message = f"删除失败: {e}"
