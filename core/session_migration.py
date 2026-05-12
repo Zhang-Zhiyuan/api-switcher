@@ -208,10 +208,6 @@ def import_sessions(
                     continue
                 try:
                     info = _package_file_info(bundle, archive_path)
-                    imported_bytes += info.file_size
-                    if imported_bytes > MAX_PACKAGE_TOTAL_BYTES:
-                        skipped_invalid += 1
-                        continue
                     relative_path = _remap_relative_path(provider, relative_path, target_project_text)
                     destination = _safe_destination(home, relative_path)
                 except ValueError:
@@ -221,6 +217,9 @@ def import_sessions(
                 if destination.exists() and not overwrite:
                     skipped_existing += 1
                     continue
+                if imported_bytes + info.file_size > MAX_PACKAGE_TOTAL_BYTES:
+                    skipped_invalid += 1
+                    continue
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if target_project_text and destination.suffix.lower() == ".jsonl":
@@ -229,6 +228,7 @@ def import_sessions(
                 else:
                     with bundle.open(info, "r") as source, destination.open("wb") as target:
                         shutil.copyfileobj(source, target)
+                imported_bytes += info.file_size
                 file_count += 1
                 imported_main = imported_main or bool(file_entry.get("main"))
 

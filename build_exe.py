@@ -20,15 +20,18 @@ def check_pyinstaller() -> bool:
     try:
         import PyInstaller  # noqa: F401
 
-        print("PyInstaller is installed.")
+        print("PyInstaller is installed.", flush=True)
         return True
     except ImportError:
-        print("PyInstaller is not installed. Installing...")
+        print("PyInstaller is not installed. Installing...", flush=True)
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "pyinstaller"],
+                stderr=subprocess.STDOUT,
+            )
             return True
         except Exception as exc:
-            print(f"Failed to install PyInstaller: {exc}")
+            print(f"Failed to install PyInstaller: {exc}", flush=True)
             return False
 
 
@@ -102,11 +105,11 @@ exe = EXE(
 """
 
     SPEC_PATH.write_text(spec_content, encoding="utf-8")
-    print(f"Spec file written: {SPEC_PATH}")
+    print(f"Spec file written: {SPEC_PATH}", flush=True)
 
 
 def build_exe() -> bool:
-    print("\nStarting PyInstaller build...\n")
+    print("\nStarting PyInstaller build...\n", flush=True)
     try:
         subprocess.check_call(
             [
@@ -116,34 +119,35 @@ def build_exe() -> bool:
                 "--clean",
                 "--noconfirm",
                 str(SPEC_PATH),
-            ]
+            ],
+            stderr=subprocess.STDOUT,
         )
     except subprocess.CalledProcessError as exc:
-        print(f"Build failed: {exc}")
+        print(f"Build failed: {exc}", flush=True)
         return False
 
     exe_path = Path("dist") / f"{APP_NAME}.exe"
-    print(f"\nBuild complete: {exe_path.resolve()}")
+    print(f"\nBuild complete: {exe_path.resolve()}", flush=True)
     return True
 
 
 def main() -> None:
-    print("=" * 80)
-    print("API Switcher build tool")
-    print("=" * 80)
+    print("=" * 80, flush=True)
+    print("API Switcher build tool", flush=True)
+    print("=" * 80, flush=True)
 
     if not Path("main.py").exists():
-        print("main.py was not found. Run this script from the project root.")
+        print("main.py was not found. Run this script from the project root.", flush=True)
         return
 
     if not Path("icon.ico").exists():
-        print("icon.ico not found. Creating icon...")
+        print("icon.ico not found. Creating icon...", flush=True)
         try:
             import create_icon
 
             create_icon.create_icon()
         except Exception as exc:
-            print(f"Icon creation failed, continuing without it: {exc}")
+            print(f"Icon creation failed, continuing without it: {exc}", flush=True)
 
     if not check_pyinstaller():
         return
