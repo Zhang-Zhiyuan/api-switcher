@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -19,27 +20,33 @@ RUNTIME_DEPENDENCY_IMPORTS = (
     "cryptography",
 )
 
-DEPENDENCY_CHECK_SCRIPT = (
-    "import importlib\n"
-    f"modules = {RUNTIME_DEPENDENCY_IMPORTS!r}\n"
-    "missing = []\n"
-    "for name in modules:\n"
-    "    try:\n"
-    "        importlib.import_module(name)\n"
-    "    except Exception as exc:\n"
-    "        missing.append(f'{name}: {exc}')\n"
-    "if missing:\n"
-    "    raise SystemExit('Missing runtime dependencies: ' + '; '.join(missing))\n"
-    "print('Runtime dependencies import successfully')\n"
-)
-
 CHECKS = [
-    ("dependencies", [sys.executable, "-c", DEPENDENCY_CHECK_SCRIPT]),
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
     ("compileall", [sys.executable, "-m", "compileall", "-q", "."]),
     ("pytest", [sys.executable, "-m", "pytest", "-q"]),
     ("diff-check", ["git", "diff", "--check"]),
 ]
+
+
+def check_runtime_dependencies() -> bool:
+    print("\n== dependencies ==", flush=True)
+    missing = []
+    for name in RUNTIME_DEPENDENCY_IMPORTS:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:
+            missing.append(f"{name}: {exc}")
+
+    if missing:
+        print("Missing runtime dependencies:", flush=True)
+        for item in missing:
+            print(f"  - {item}", flush=True)
+        print("dependencies: FAILED", flush=True)
+        return False
+
+    print("Runtime dependencies: " + ", ".join(RUNTIME_DEPENDENCY_IMPORTS), flush=True)
+    print("dependencies: OK", flush=True)
+    return True
 
 
 def run_command(label: str, command: list[str]) -> bool:
@@ -80,7 +87,10 @@ def main() -> int:
         print("main.py was not found. Run this script from the project root.", flush=True)
         return 2
 
-    failed = [label for label, command in CHECKS if not run_command(label, command)]
+    failed = []
+    if not check_runtime_dependencies():
+        failed.append("dependencies")
+    failed.extend(label for label, command in CHECKS if not run_command(label, command))
     if failed:
         print("\nRelease check failed: " + ", ".join(failed), flush=True)
         return 1

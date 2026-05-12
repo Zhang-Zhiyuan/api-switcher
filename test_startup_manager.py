@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core import startup_manager
+from main import parse_args
 
 
 class _FakeKey:
@@ -85,3 +86,10 @@ def test_build_startup_command_for_source_run_includes_minimized(monkeypatch, tm
     assert str(pythonw_exe) in command
     assert str(Path("main.py")) in command
     assert "--minimized" in command
+
+
+def test_main_start_minimized_aliases():
+    assert parse_args(["--minimized"]).start_minimized is True
+    assert parse_args(["--start-minimized"]).start_minimized is True
+    assert parse_args(["--tray"]).start_minimized is True
+    assert parse_args([]).start_minimized is False
