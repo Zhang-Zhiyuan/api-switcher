@@ -130,6 +130,10 @@ def build_exe() -> bool:
         return False
 
     exe_path = Path("dist") / f"{APP_NAME}.exe"
+    if not exe_path.is_file() or exe_path.stat().st_size <= 0:
+        print(f"Build failed: expected EXE was not created: {exe_path.resolve()}", flush=True)
+        return False
+
     print(f"\nBuild complete: {exe_path.resolve()}", flush=True)
     return True
 
