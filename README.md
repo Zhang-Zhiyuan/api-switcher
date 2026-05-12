@@ -61,6 +61,7 @@
 - 把本机第三方 API 或官方账号快照推送到 SSH 服务器
 - 从 SSH 服务器拉取第三方 Claude/Codex API 配置
 - 在 SSH 服务器上检查、安装/修复、暂停和卸载 Claude/Codex 远端自动续跑
+- 支持把 `HF_TOKEN`、Google Drive/Gemini、代理等环境变量永久写入或删除于本机 Windows 用户、所选 SSH 登录用户
 - 管理 Chrome / Edge 托管 Profile，用于本机隔离 ChatGPT / Claude 登录态
 - 支持托管浏览器 Profile 的加密迁移、站点数据清理和整目录重置
 
@@ -112,6 +113,12 @@
 5. LocalAppData / 临时目录 fallback
 
 “通用设置 > 数据存储”可以打开当前数据目录、复制路径、选择自定义目录、启用便携模式或恢复默认；更改目录会复制当前数据，并在下次启动后生效。
+
+## 🌱 永久环境变量
+
+“通用设置 > 永久环境变量”可以把 `HF_TOKEN`、`OPENAI_API_KEY`、Google Drive/Gemini、代理等变量写入当前 Windows 用户环境变量，也可以按变量名删除。支持从已保存的 Claude/Codex API Profile 或本机已有环境变量导入密钥/Token。写入或删除后，新打开的 PowerShell/CMD/终端会自动读取最新状态，已经打开的终端需要重开。
+
+“SSH 服务器 > 远端用户环境变量”会把变量写入所选服务器的当前 SSH 登录用户 HOME：密钥保存在 `~/.api_switcher_env`，并在常见 shell 启动文件中自动 source；也可以复用同一套导入来源，把本机保存的 API Key 或已有 Google Drive token 推送到远端。删除时只移除对应变量行，其他变量会保留，不会修改系统级 `/etc/environment`。
 
 ## 🔐 跨电脑迁移 Profile
 

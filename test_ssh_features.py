@@ -3,10 +3,10 @@ from io import BytesIO
 
 import pytest
 
-from core import profile_manager, remote_auto_continue, remote_config, security, sync_manager
+from core import persistent_env, profile_manager, remote_auto_continue, remote_config, security, sync_manager
 from core.ssh_manager import SSHManager, ssh_manager
 from core.ssh_profile_builder import build_ssh_profile_from_data
-from models.profile import ClaudeAccountProfile, CodexAccountProfile, CodexProfile, SSHProfile
+from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile, SSHProfile
 
 
 @pytest.fixture()
@@ -403,6 +403,123 @@ def test_remote_config_uses_sftp_home_fallback_when_home_env_is_empty():
     remote_config.write_remote_claude_settings(client, {"model": "claude-sonnet-4"})
 
     assert "/home/fallback/.claude/settings.json" in sftp.files
+
+
+def test_persistent_env_validates_names_and_values():
+    assert persistent_env.normalize_env_updates({"HF_TOKEN": " hf_123 "}) == {"HF_TOKEN": "hf_123"}
+    assert persistent_env.normalize_env_names(["HF_TOKEN", "HF_TOKEN"]) == ["HF_TOKEN"]
+    assert "GOOGLE_DRIVE_REFRESH_TOKEN" in persistent_env.COMMON_ENV_NAMES
+    assert persistent_env._uses_windows_expansion("%USERPROFILE%\\.cache\\huggingface")
+    assert persistent_env._uses_windows_expansion("C:\\Users\\%USERNAME%\\tokens")
+    assert persistent_env._uses_windows_expansion("%ProgramFiles(x86)%\\Google\\Cloud")
+    assert not persistent_env._uses_windows_expansion("%USERPROFILE%\\secret", "HF_TOKEN")
+    assert not persistent_env._uses_windows_expansion("token%with-percent")
+    assert not persistent_env._uses_windows_expansion("100%")
+
+    with pytest.raises(ValueError):
+        persistent_env.normalize_env_updates({"BAD-NAME": "x"})
+
+    with pytest.raises(ValueError):
+        persistent_env.normalize_env_updates({"HF_TOKEN": "line\nbreak"})
+
+
+def test_persistent_env_import_sources_include_existing_environment(monkeypatch):
+    monkeypatch.setenv("GOOGLE_DRIVE_REFRESH_TOKEN", "drive-refresh-token")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "C:/Users/Zzy/google-service-account.json")
+
+    sources = persistent_env.list_env_import_sources(include_profiles=False)
+    source = next(item for item in sources if item.env_name == "GOOGLE_DRIVE_REFRESH_TOKEN")
+    credentials = next(item for item in sources if item.env_name == "GOOGLE_APPLICATION_CREDENTIALS")
+
+    assert source.label == "本机环境: GOOGLE_DRIVE_REFRESH_TOKEN"
+    assert source.value == "drive-refresh-token"
+    assert source.masked_value() == "drive-re...oken"
+    assert source.preview_value() == "drive-re...oken"
+    assert "GOOGLE_DRIVE_REFRESH_TOKEN=drive-re...oken" in source.display_label()
+    assert credentials.preview_value() == "C:/Users/Zzy/google-service-account.json"
+
+
+def test_persistent_env_import_sources_include_saved_api_profiles(isolated_ssh):
+    security.set_secret("claude:relay:auth_token", "deepseek-key")
+    security.set_secret("codex:kimi:api_key", "moonshot-key")
+    profile_manager.save_claude_profile(
+        ClaudeProfile(
+            name="relay",
+            auth_token_ref="claude:relay:auth_token",
+            base_url="https://api.deepseek.com/anthropic",
+            provider="deepseek",
+        )
+    )
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="kimi",
+            api_key_ref="codex:kimi:api_key",
+            model_provider="kimi",
+        )
+    )
+
+    sources = persistent_env.list_env_import_sources(include_environment=False)
+    values = {(source.label, source.env_name, source.value) for source in sources}
+
+    assert ("Claude API: relay -> ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "deepseek-key") in values
+    assert ("Claude API: relay -> DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY", "deepseek-key") in values
+    assert ("Codex API: kimi -> OPENAI_API_KEY", "OPENAI_API_KEY", "moonshot-key") in values
+    assert ("Codex API: kimi -> MOONSHOT_API_KEY", "MOONSHOT_API_KEY", "moonshot-key") in values
+
+
+def test_remote_user_env_writes_login_user_home_and_sources_existing_shells():
+    sftp = _FakeSFTP()
+    sftp.files["/home/test/.bashrc"] = b"# existing bashrc\n"
+    client = _FakeClient(sftp, command_outputs=["/home/test"])
+
+    result = persistent_env.set_remote_user_env(client, {"HF_TOKEN": "hf_test"})
+
+    env_text = sftp.files["/home/test/.api_switcher_env"].decode("utf-8")
+    profile_text = sftp.files["/home/test/.profile"].decode("utf-8")
+    bashrc_text = sftp.files["/home/test/.bashrc"].decode("utf-8")
+
+    assert result.env_file == "/home/test/.api_switcher_env"
+    assert "export HF_TOKEN='hf_test'" in env_text
+    assert persistent_env.REMOTE_SOURCE_BEGIN in profile_text
+    assert persistent_env.REMOTE_SOURCE_BEGIN in bashrc_text
+    assert "/home/test/.zshrc" not in sftp.files
+    assert ("/home/test/.api_switcher_env", 0o600) in sftp.chmod_calls
+
+
+def test_remote_user_env_upserts_without_dropping_existing_exports():
+    sftp = _FakeSFTP()
+    sftp.files["/home/test/.api_switcher_env"] = (
+        b"# Managed by API\n"
+        b"export OLD_TOKEN='old'\n"
+        b"export HF_TOKEN='old_hf'\n"
+    )
+    client = _FakeClient(sftp, command_outputs=["/home/test"])
+
+    persistent_env.set_remote_user_env(client, {"HF_TOKEN": "new'hf"})
+
+    env_text = sftp.files["/home/test/.api_switcher_env"].decode("utf-8")
+    assert "export OLD_TOKEN='old'" in env_text
+    assert "export HF_TOKEN='new'\"'\"'hf'" in env_text
+    assert "old_hf" not in env_text
+
+
+def test_remote_user_env_delete_removes_only_selected_exports():
+    sftp = _FakeSFTP()
+    sftp.files["/home/test/.api_switcher_env"] = (
+        b"# Managed by API\n"
+        b"export OLD_TOKEN='old'\n"
+        b"export HF_TOKEN='old_hf'\n"
+        b"export OPENAI_API_KEY='sk-test'\n"
+    )
+    client = _FakeClient(sftp, command_outputs=["/home/test"])
+
+    result = persistent_env.delete_remote_user_env(client, "HF_TOKEN")
+
+    env_text = sftp.files["/home/test/.api_switcher_env"].decode("utf-8")
+    assert result.summary() == "已删除 SSH 登录用户 /home/test: HF_TOKEN"
+    assert "export OLD_TOKEN='old'" in env_text
+    assert "export OPENAI_API_KEY='sk-test'" in env_text
+    assert "HF_TOKEN" not in env_text
 
 
 def test_remote_codex_hooks_preserve_existing_entries(monkeypatch):

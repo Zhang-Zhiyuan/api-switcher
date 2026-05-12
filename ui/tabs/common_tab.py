@@ -2,7 +2,8 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from config import paths
-from core import parser, toml_parser, auth_parser, startup_manager, vscode_parser, switcher
+from core import parser, toml_parser, auth_parser, startup_manager, vscode_parser, switcher, persistent_env
+from ui.widgets.persistent_env_control import PersistentEnvControl
 from ui.widgets.toast import show_toast
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
@@ -13,6 +14,7 @@ class CommonTab(ctk.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._local_env_control = None
         self._build_ui()
 
     def _build_ui(self):
@@ -112,6 +114,17 @@ class CommonTab(ctk.CTkScrollableFrame):
         )
         self._startup_status_label.pack(fill="x", padx=14, pady=(0, 12))
         bind_wraplength(system_frame, self._startup_status_label, padding=32)
+
+        self._local_env_control = PersistentEnvControl(
+            self,
+            title="永久环境变量",
+            status_text="写入当前 Windows 用户环境变量；也可以从已保存 API 配置或本机已有环境变量导入。",
+            write_label="写入本机用户",
+            delete_label="删除本机变量",
+            on_write=self._write_local_env,
+            on_delete=self._delete_local_env,
+        )
+        self._local_env_control.pack(fill="x", padx=14, pady=(0, 10))
 
         # --- Data Directory ---
         storage_frame = ctk.CTkFrame(self, **card_frame_kwargs())
@@ -230,6 +243,8 @@ class CommonTab(ctk.CTkScrollableFrame):
         self._bypass_var.set(enabled)
         self._refresh_startup_info()
         self._refresh_storage_info()
+        if self._local_env_control:
+            self._local_env_control.refresh_sources()
         self._refresh_overview()
 
     def _toggle_bypass(self):
@@ -300,6 +315,28 @@ class CommonTab(ctk.CTkScrollableFrame):
             show_toast(top, "已更新开机自启动命令")
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"修复失败: {e}", is_error=True)
+
+    def _write_local_env(self, control):
+        try:
+            result = persistent_env.set_local_user_env(control.env_update())
+            message = f"{result.summary()}。{result.details}"
+            control.set_status(message, "success")
+            show_toast(self.winfo_toplevel(), result.summary())
+        except Exception as e:
+            message = f"写入失败: {e}"
+            control.set_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+
+    def _delete_local_env(self, control):
+        try:
+            result = persistent_env.delete_local_user_env(control.env_names())
+            message = f"{result.summary()}。{result.details}"
+            control.set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), result.summary())
+        except Exception as e:
+            message = f"删除失败: {e}"
+            control.set_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
 
     def _refresh_storage_info(self):
         info = paths.get_storage_info()
