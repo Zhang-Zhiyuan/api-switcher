@@ -1,11 +1,10 @@
 import threading
 import customtkinter as ctk
 from ui.widgets.empty_state import EmptyState
-from ui.widgets.persistent_env_control import PersistentEnvControl
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue, persistent_env
+from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 
 
@@ -25,7 +24,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_status_label = None
         self._remote_auto_buttons = []
         self._remote_auto_busy = False
-        self._remote_env_control = None
         self._sync_kind_options = {
             "Claude API": "claude_api",
             "Claude 账号": "claude_account",
@@ -164,31 +162,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._sync_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
-
-        env_header = ctk.CTkFrame(self, fg_color="transparent")
-        env_header.pack(fill="x", padx=14, pady=(4, 5))
-        ctk.CTkLabel(
-            env_header,
-            text="远端用户环境变量",
-            text_color=COLORS["text"],
-            font=font(16, "bold"),
-        ).pack(side="left")
-        ctk.CTkLabel(
-            env_header,
-            text="写入所选 SSH 登录用户的 HOME，不修改系统级环境",
-            text_color=COLORS["muted"],
-            font=font(12),
-        ).pack(side="left", padx=(10, 0))
-
-        self._remote_env_control = PersistentEnvControl(
-            self,
-            status_text="使用上方“目标服务器”。可以从已保存 API 配置或本机已有环境变量导入，再写入 SSH 登录用户 HOME。",
-            write_label="写入所选服务器",
-            delete_label="删除远端变量",
-            on_write=self._write_remote_env,
-            on_delete=self._delete_remote_env,
-        )
-        self._remote_env_control.pack(fill="x", padx=14, pady=(0, 12))
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
         auto_header.pack(fill="x", padx=14, pady=(4, 5))
@@ -410,8 +383,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         else:
             self._server_combo.set("(无)")
         self._refresh_sync_profile_combo()
-        if self._remote_env_control:
-            self._remote_env_control.refresh_sources()
 
     def _create_server(self):
         def on_save(profile, _):
@@ -582,97 +553,6 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         do_sync()
-
-    def _write_remote_env(self, control):
-        server_name = self._selected_server_name()
-        if not server_name:
-            return
-
-        profiles = profile_manager.list_ssh_profiles()
-        profile = next((p for p in profiles if p.name == server_name), None)
-        if not profile:
-            show_toast(self.winfo_toplevel(), f"未找到服务器: {server_name}", is_error=True)
-            return
-
-        try:
-            variables = control.env_update()
-        except Exception as e:
-            message = f"写入失败: {e}"
-            control.set_status(message, "error")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
-
-        def worker():
-            client = ssh_manager.ssh_manager.connect(profile)
-            return persistent_env.set_remote_user_env(client, variables)
-
-        def done(payload):
-            if not payload["ok"]:
-                message = f"写入失败: {payload['error']}"
-                self._set_sync_status(message, "error")
-                control.set_status(message, "error")
-                show_toast(self.winfo_toplevel(), message, is_error=True)
-                return
-
-            result = payload["result"]
-            source_files = "、".join(result.shell_files) if result.shell_files else "shell 启动文件"
-            message = f"{result.summary()}。文件: {result.env_file}；已接入: {source_files}"
-            self._set_sync_status(result.summary(), "success")
-            control.set_status(message, "success")
-            show_toast(self.winfo_toplevel(), result.summary())
-
-        names = ", ".join(variables.keys())
-        control.set_status(f"正在向 {server_name} 写入环境变量: {names}...")
-        self._run_ssh_task(
-            f"正在向 {server_name} 写入环境变量: {names}...",
-            worker,
-            on_done=done,
-        )
-
-    def _delete_remote_env(self, control):
-        server_name = self._selected_server_name()
-        if not server_name:
-            return
-
-        profiles = profile_manager.list_ssh_profiles()
-        profile = next((p for p in profiles if p.name == server_name), None)
-        if not profile:
-            show_toast(self.winfo_toplevel(), f"未找到服务器: {server_name}", is_error=True)
-            return
-
-        try:
-            variable_names = control.env_names()
-        except Exception as e:
-            message = f"删除失败: {e}"
-            control.set_status(message, "error")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
-
-        def worker():
-            client = ssh_manager.ssh_manager.connect(profile)
-            return persistent_env.delete_remote_user_env(client, variable_names)
-
-        def done(payload):
-            if not payload["ok"]:
-                message = f"删除失败: {payload['error']}"
-                self._set_sync_status(message, "error")
-                control.set_status(message, "error")
-                show_toast(self.winfo_toplevel(), message, is_error=True)
-                return
-
-            result = payload["result"]
-            message = f"{result.summary()}。文件: {result.env_file}；{result.details}"
-            self._set_sync_status(result.summary(), "success")
-            control.set_status(message, "warning")
-            show_toast(self.winfo_toplevel(), result.summary())
-
-        names = ", ".join(variable_names)
-        control.set_status(f"正在从 {server_name} 删除环境变量: {names}...")
-        self._run_ssh_task(
-            f"正在从 {server_name} 删除环境变量: {names}...",
-            worker,
-            on_done=done,
-        )
 
     def _selected_remote_auto_targets(self) -> list[str]:
         if not self._remote_auto_provider_combo:
