@@ -14,6 +14,8 @@ PACKAGE_FORMAT = "api-switcher-session-migration"
 PACKAGE_VERSION = 1
 PACKAGE_EXTENSION = ".asxsession"
 MAX_SCAN_LINES = 2000
+MAX_PACKAGE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_PACKAGE_FILE_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ def import_sessions(
     file_count = 0
     skipped_existing = 0
     skipped_invalid = 0
+    imported_bytes = 0
 
     with zipfile.ZipFile(input_path, "r") as bundle:
         manifest = _read_manifest(bundle)
@@ -204,6 +207,11 @@ def import_sessions(
                     skipped_invalid += 1
                     continue
                 try:
+                    info = _package_file_info(bundle, archive_path)
+                    imported_bytes += info.file_size
+                    if imported_bytes > MAX_PACKAGE_TOTAL_BYTES:
+                        skipped_invalid += 1
+                        continue
                     relative_path = _remap_relative_path(provider, relative_path, target_project_text)
                     destination = _safe_destination(home, relative_path)
                 except ValueError:
@@ -216,10 +224,10 @@ def import_sessions(
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if target_project_text and destination.suffix.lower() == ".jsonl":
-                    data = bundle.read(archive_path)
+                    data = bundle.read(info)
                     destination.write_bytes(_rewrite_jsonl_cwd(data, target_project_text))
                 else:
-                    with bundle.open(archive_path, "r") as source, destination.open("wb") as target:
+                    with bundle.open(info, "r") as source, destination.open("wb") as target:
                         shutil.copyfileobj(source, target)
                 file_count += 1
                 imported_main = imported_main or bool(file_entry.get("main"))
@@ -261,11 +269,12 @@ def inspect_package(input_path: str | Path) -> SessionPackageSummary:
                 seen_projects.add(project_path)
             for file_entry in session.get("files", []):
                 if isinstance(file_entry, dict):
-                    file_count += 1
                     try:
-                        total_bytes += int(file_entry.get("size") or 0)
-                    except (TypeError, ValueError):
-                        pass
+                        info = _package_file_info(bundle, str(file_entry.get("archive_path") or ""))
+                    except ValueError:
+                        continue
+                    file_count += 1
+                    total_bytes += info.file_size
         return SessionPackageSummary(
             session_count=len([item for item in manifest.get("sessions", []) if isinstance(item, dict)]),
             file_count=file_count,
@@ -568,6 +577,27 @@ def _safe_destination(root: Path, relative_path: str) -> Path:
     if target != resolved_root and resolved_root not in target.parents:
         raise ValueError(f"目标路径越界: {relative_path}")
     return target
+
+
+def _safe_archive_path(archive_path: str) -> None:
+    pure = PurePosixPath(archive_path)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        raise ValueError(f"不安全的包内路径: {archive_path}")
+    if not pure.parts or pure.parts[0] != "files":
+        raise ValueError(f"不支持的包内路径: {archive_path}")
+
+
+def _package_file_info(bundle: zipfile.ZipFile, archive_path: str) -> zipfile.ZipInfo:
+    _safe_archive_path(archive_path)
+    try:
+        info = bundle.getinfo(archive_path)
+    except KeyError as e:
+        raise ValueError(f"会话迁移包缺少文件: {archive_path}") from e
+    if info.is_dir():
+        raise ValueError(f"会话迁移包条目不是文件: {archive_path}")
+    if info.file_size > MAX_PACKAGE_FILE_BYTES:
+        raise ValueError(f"会话迁移包文件过大: {archive_path}")
+    return info
 
 
 def _read_manifest(bundle: zipfile.ZipFile) -> dict[str, Any]:

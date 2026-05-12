@@ -1,6 +1,7 @@
 """Regression checks for password-protected portable profile migration."""
 import json
 import tempfile
+import zipfile
 from pathlib import Path
 
 from config import paths
@@ -140,6 +141,70 @@ def test_session_migration_round_trip(tmp_path):
     assert summary.session_count == 2
     assert summary.providers == {"claude": 1, "codex": 1}
     assert summary.file_count == 3
+
+
+def test_session_migration_skips_invalid_package_entries(tmp_path):
+    package = tmp_path / "invalid.asxsession"
+    manifest = {
+        "format": session_migration.PACKAGE_FORMAT,
+        "version": session_migration.PACKAGE_VERSION,
+        "sessions": [
+            {
+                "provider": "claude",
+                "session_id": "bad-archive-path",
+                "relative_path": "projects/demo/bad-archive-path.jsonl",
+                "files": [
+                    {
+                        "relative_path": "projects/demo/bad-archive-path.jsonl",
+                        "archive_path": "../bad.jsonl",
+                        "main": True,
+                    }
+                ],
+            },
+            {
+                "provider": "codex",
+                "session_id": "missing-file",
+                "relative_path": "sessions/2026/05/01/missing.jsonl",
+                "files": [
+                    {
+                        "relative_path": "sessions/2026/05/01/missing.jsonl",
+                        "archive_path": "files/1/missing.jsonl",
+                        "main": True,
+                    }
+                ],
+            },
+            {
+                "provider": "codex",
+                "session_id": "good-file",
+                "relative_path": "sessions/2026/05/01/good.jsonl",
+                "title": "Good",
+                "updated_at": "2026-05-01T00:00:00Z",
+                "files": [
+                    {
+                        "relative_path": "sessions/2026/05/01/good.jsonl",
+                        "archive_path": "files/2/good.jsonl",
+                        "main": True,
+                    }
+                ],
+            },
+        ],
+    }
+    with zipfile.ZipFile(package, "w") as bundle:
+        bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+        bundle.writestr("../bad.jsonl", "{}\n")
+        bundle.writestr("files/2/good.jsonl", "{}\n")
+
+    imported = session_migration.import_sessions(
+        package,
+        claude_home=tmp_path / "claude",
+        codex_home=tmp_path / "codex",
+    )
+
+    assert imported.session_count == 1
+    assert imported.file_count == 1
+    assert imported.skipped_invalid == 2
+    assert (tmp_path / "codex" / "sessions" / "2026" / "05" / "01" / "good.jsonl").exists()
+    assert not (tmp_path / "bad.jsonl").exists()
 
 
 def _reset_store() -> None:
