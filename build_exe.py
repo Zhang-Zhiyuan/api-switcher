@@ -69,6 +69,7 @@ a = Analysis(
         'paramiko',
         'cryptography',
         'pystray',
+        'ui.dialogs.close_choice_dialog',
     ],
     hookspath=[],
     hooksconfig={{}},
@@ -133,14 +134,14 @@ def build_exe() -> bool:
     return True
 
 
-def main() -> None:
+def main() -> int:
     print("=" * 80, flush=True)
     print("API Switcher build tool", flush=True)
     print("=" * 80, flush=True)
 
     if not Path("main.py").exists():
         print("main.py was not found. Run this script from the project root.", flush=True)
-        return
+        return 2
 
     if not Path("icon.ico").exists():
         print("icon.ico not found. Creating icon...", flush=True)
@@ -152,11 +153,11 @@ def main() -> None:
             print(f"Icon creation failed, continuing without it: {exc}", flush=True)
 
     if not check_pyinstaller():
-        return
+        return 1
 
     create_spec_file()
-    build_exe()
+    return 0 if build_exe() else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

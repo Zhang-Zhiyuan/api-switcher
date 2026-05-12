@@ -28,6 +28,7 @@ class App(ctk.CTk):
         self.configure(fg_color=COLORS["app_bg"])
         self._exit_requested = False
         self._tray_hint_shown = False
+        self._close_dialog = None
 
         # Initialize tray manager
         self.tray_manager = TrayManager(
@@ -308,11 +309,41 @@ class App(ctk.CTk):
                 on_cancel()
 
     def _on_closing(self):
-        """Handle window close event - minimize to tray instead of exit."""
-        if not self.tray_manager.is_available():
+        """Ask whether the close button should exit or minimize to tray."""
+        if self._exit_requested:
+            return
+        if not self.tray_manager.is_available() or not self.tray_manager.is_running():
             self._exit_app()
             return
+
+        if self._close_dialog and self._close_dialog.winfo_exists():
+            self._close_dialog.lift()
+            self._close_dialog.focus_force()
+            return
+
+        try:
+            from ui.dialogs.close_choice_dialog import CloseChoiceDialog
+
+            self._close_dialog = CloseChoiceDialog(
+                self,
+                on_minimize=self._close_dialog_minimize,
+                on_exit=self._close_dialog_exit,
+                on_cancel=self._clear_close_dialog,
+            )
+        except Exception as e:
+            logger.error("Failed to show close choice dialog: %s", e, exc_info=True)
+            self._hide_to_tray()
+
+    def _clear_close_dialog(self):
+        self._close_dialog = None
+
+    def _close_dialog_minimize(self):
+        self._clear_close_dialog()
         self._hide_to_tray()
+
+    def _close_dialog_exit(self):
+        self._clear_close_dialog()
+        self._exit_app()
 
     def _hide_to_tray(self, icon=None, item=None):
         """Hide the main window to the system tray."""
