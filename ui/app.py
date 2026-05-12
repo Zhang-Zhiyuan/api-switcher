@@ -2,6 +2,7 @@ import customtkinter as ctk
 import logging
 from ui.tabs.claude_tab import ClaudeTab
 from ui.tabs.codex_tab import CodexTab
+from ui.tabs.env_tab import EnvTab
 from ui.tabs.common_tab import CommonTab
 from ui.tabs.backup_tab import BackupTab
 from ui.tabs.ssh_tab import SSHTab
@@ -14,6 +15,7 @@ from core.tray_manager import TrayManager
 from core import profile_manager
 
 logger = logging.getLogger(__name__)
+ENV_TAB_LABEL = "环境变量"
 
 
 class App(ctk.CTk):
@@ -117,6 +119,14 @@ class App(ctk.CTk):
         button_group.pack(side="right", padx=(0, 12), pady=9)
         ctk.CTkButton(
             button_group,
+            text=ENV_TAB_LABEL,
+            width=96,
+            command=self._show_env_tab,
+            **button_style("primary"),
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(
+            button_group,
             text="健康检查",
             width=96,
             command=self._show_health_check,
@@ -158,6 +168,7 @@ class App(ctk.CTk):
         # Create tabs
         self._claude_tab = ClaudeTab(self._tabview.add("Claude Code"))
         self._codex_tab = CodexTab(self._tabview.add("Codex CLI"))
+        self._env_tab = EnvTab(self._tabview.add(ENV_TAB_LABEL))
         self._browser_tab = BrowserTab(self._tabview.add("浏览器 Profile"))
         self._session_migration_tab = SessionMigrationTab(self._tabview.add("会话迁移"))
         self._ssh_tab = SSHTab(self._tabview.add("SSH 服务器"))
@@ -167,8 +178,9 @@ class App(ctk.CTk):
         self._log_viewer_tab = LogViewerTab(self._tabview.add("日志查看器"))
 
         # Make tabs fill the space
-        for tab in [self._claude_tab, self._codex_tab, self._browser_tab, self._session_migration_tab, self._ssh_tab,
-                    self._common_tab, self._usage_stats_tab, self._backup_tab, self._log_viewer_tab]:
+        for tab in [self._claude_tab, self._codex_tab, self._env_tab, self._browser_tab,
+                    self._session_migration_tab, self._ssh_tab, self._common_tab, self._usage_stats_tab,
+                    self._backup_tab, self._log_viewer_tab]:
             tab.pack(fill="both", expand=True)
 
         # Status bar
@@ -400,10 +412,16 @@ class App(ctk.CTk):
         except Exception as e:
             logger.debug("Failed to schedule UI callback: %s", e)
 
+    def _show_env_tab(self):
+        self._tabview.set(ENV_TAB_LABEL)
+        self._env_tab.refresh()
+        self._status.configure(text="已打开环境变量管理")
+
     def refresh_all(self):
         """Refresh all tabs."""
         self._claude_tab.refresh()
         self._codex_tab.refresh()
+        self._env_tab.refresh()
         self._browser_tab.refresh()
         self._session_migration_tab.refresh()
         self._ssh_tab.refresh()

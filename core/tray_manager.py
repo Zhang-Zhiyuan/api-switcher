@@ -22,6 +22,13 @@ from core import profile_manager, startup_manager, switcher
 logger = logging.getLogger(__name__)
 
 
+def _profile_checked(name: str, active_name: str | None):
+    def checked(_item):
+        return name == active_name
+
+    return checked
+
+
 class TrayManager:
     """Manages the system tray icon and menu."""
 
@@ -102,18 +109,18 @@ class TrayManager:
         ]
         if self.on_hide_window is not None:
             menu_items.append(Item("隐藏到托盘", self.on_hide_window))
-        menu_items.append(Item.SEPARATOR)
+        menu_items.append(pystray.Menu.SEPARATOR)
 
         menu_items.append(Item(f"当前 API: {self.get_active_profiles_text()}", None, enabled=False))
-        menu_items.append(Item.SEPARATOR)
+        menu_items.append(pystray.Menu.SEPARATOR)
 
         claude_profiles = profile_manager.list_switchable_claude_profiles()
         if claude_profiles:
             claude_items = [
                 Item(
                     profile.name,
-                    lambda _icon=None, _item=None, name=profile.name: self._switch_claude(name),
-                    checked=lambda _item, name=profile.name: name == active_claude,
+                    self._switch_claude_action(profile.name),
+                    checked=_profile_checked(profile.name, active_claude),
                 )
                 for profile in claude_profiles[:10]
             ]
@@ -126,8 +133,8 @@ class TrayManager:
             codex_items = [
                 Item(
                     profile.name,
-                    lambda _icon=None, _item=None, name=profile.name: self._switch_codex(name),
-                    checked=lambda _item, name=profile.name: name == active_codex,
+                    self._switch_codex_action(profile.name),
+                    checked=_profile_checked(profile.name, active_codex),
                 )
                 for profile in codex_profiles[:10]
             ]
@@ -135,7 +142,7 @@ class TrayManager:
                 codex_items.append(Item(f"仅显示前 10 个，共 {len(codex_profiles)} 个", None, enabled=False))
             menu_items.append(Item("Codex API 配置", pystray.Menu(*codex_items)))
 
-        menu_items.append(Item.SEPARATOR)
+        menu_items.append(pystray.Menu.SEPARATOR)
 
         startup_status = startup_manager.get_startup_status()
         if startup_status.supported:
@@ -148,9 +155,21 @@ class TrayManager:
             )
         menu_items.append(Item("刷新菜单", lambda _icon=None, _item=None: self.update_menu()))
 
-        menu_items.append(Item.SEPARATOR)
+        menu_items.append(pystray.Menu.SEPARATOR)
         menu_items.append(Item("退出", self._on_exit_clicked))
         return tuple(menu_items)
+
+    def _switch_claude_action(self, name: str):
+        def action(_icon=None, _item=None):
+            self._switch_claude(name)
+
+        return action
+
+    def _switch_codex_action(self, name: str):
+        def action(_icon=None, _item=None):
+            self._switch_codex(name)
+
+        return action
 
     def _switch_claude(self, name: str):
         """Switch Claude profile from tray menu."""

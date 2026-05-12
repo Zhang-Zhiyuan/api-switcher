@@ -116,9 +116,9 @@
 
 ## 🌱 永久环境变量
 
-“通用设置 > 永久环境变量”可以把 `HF_TOKEN`、`OPENAI_API_KEY`、Google Drive/Gemini、代理等变量写入当前 Windows 用户环境变量，也可以按变量名删除。支持从已保存的 Claude/Codex API Profile 或本机已有环境变量导入密钥/Token。写入或删除后，新打开的 PowerShell/CMD/终端会自动读取最新状态，已经打开的终端需要重开。
+顶部“环境变量”按钮或“环境变量”页可以把 `HF_TOKEN`、`OPENAI_API_KEY`、Google Drive/Gemini、代理等变量写入当前 Windows 用户环境变量，也可以按变量名删除。支持从已保存的 Claude/Codex API Profile 或本机已有环境变量导入密钥/Token。写入或删除后，新打开的 PowerShell/CMD/终端会自动读取最新状态，已经打开的终端需要重开。
 
-“SSH 服务器 > 远端用户环境变量”会把变量写入所选服务器的当前 SSH 登录用户 HOME：密钥保存在 `~/.api_switcher_env`，并在常见 shell 启动文件中自动 source；也可以复用同一套导入来源，把本机保存的 API Key 或已有 Google Drive token 推送到远端。删除时只移除对应变量行，其他变量会保留，不会修改系统级 `/etc/environment`。
+“环境变量 > SSH 登录用户”会把变量写入所选服务器的当前 SSH 登录用户 HOME：密钥保存在 `~/.api_switcher_env`，并在常见 shell 启动文件中自动 source；也可以复用同一套导入来源，把本机保存的 API Key 或已有 Google Drive token 推送到远端。删除时只移除对应变量行，其他变量会保留，不会修改系统级 `/etc/environment`。
 
 ## 🔐 跨电脑迁移 Profile
 
