@@ -19,12 +19,27 @@ echo.
 
 echo [3/3] 开始打包...
 python build_exe.py
+if errorlevel 1 (
+    echo.
+    echo 打包失败，请检查上方错误信息。
+    echo.
+    pause
+    exit /b 1
+)
+
+if not exist "dist\API切换器\API切换器.exe" (
+    echo.
+    echo 打包失败：未找到 dist\API切换器\API切换器.exe
+    echo.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ================================================================================
 echo 打包完成！
 echo ================================================================================
 echo.
-echo EXE 文件位置: dist\API切换器.exe
+echo EXE 文件位置: dist\API切换器\API切换器.exe
 echo.
 pause

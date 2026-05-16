@@ -205,6 +205,29 @@ try {{
             exit 0  # Allow stop in conservative mode when already continuing
         }}
 
+        # Transient API transport failures should continue even if "error" matches a blocker.
+        $recoverableApiErrorPatterns = @(
+            "error running remote compact task",
+            "stream disconnected before completion",
+            "upstream connect error",
+            "disconnect/reset before headers",
+            "reset reason.*connection termination",
+            "error sending request for url",
+            "backend-api/codex/responses/compact",
+            "responses/compact"
+        )
+        $isRecoverableApiError = $false
+        foreach ($pattern in $recoverableApiErrorPatterns) {{
+            try {{
+                if ($lastMessage -match $pattern) {{
+                    $isRecoverableApiError = $true
+                    break
+                }}
+            }} catch {{
+                Write-Log "Invalid recoverable API error pattern: $pattern" "WARN"
+            }}
+        }}
+
         # Check blocker patterns with error handling
         $isBlocked = $false
         if ($settings.blocker_patterns) {{
@@ -220,7 +243,7 @@ try {{
             }}
         }}
 
-        if ($isBlocked) {{
+        if ($isBlocked -and -not $isRecoverableApiError) {{
             exit 0  # Allow stop if blocked
         }}
 
@@ -239,7 +262,7 @@ try {{
             }}
         }}
 
-        if (-not $isIncomplete) {{
+        if (-not $isIncomplete -and -not $isRecoverableApiError) {{
             exit 0  # Allow stop if complete
         }}
 
@@ -256,6 +279,8 @@ try {{
             Write-Log "Failed to save state: $_" "ERROR"
         }}
 
+        $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} else {{ "incomplete_work_detected" }}
+
         # Log decision
         $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
         $logEntry = @{{
@@ -264,7 +289,7 @@ try {{
             hook_event = $hookEvent
             agent_id = $agentId
             decision = "block_stop"
-            reason = "incomplete_work_detected"
+            reason = $continueReason
             count = $count
             continuation_prompt = $settings.continuation_prompt
         }} | ConvertTo-Json -Compress

@@ -155,6 +155,11 @@ function Get-ErrorType {{
         return $ErrorTypes.QUOTA_EXCEEDED
     }}
 
+    # Compact transport failures can arrive with HTTP 503, but they are retryable network resets.
+    if ($combined -match "upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|remote compact task|backend-api/codex/responses/compact|responses/compact") {{
+        return $ErrorTypes.NETWORK_ERROR
+    }}
+
     # 模型过载
     if ($HttpStatus -eq 503 -or $combined -match "model.*overloaded|server.*overloaded|capacity.*exceeded|服务器.*繁忙") {{
         return $ErrorTypes.MODEL_OVERLOADED
@@ -166,7 +171,7 @@ function Get-ErrorType {{
     }}
 
     # 网络错误
-    if ($combined -match "network.*error|connection.*failed|connection.*refused|网络.*错误|连接.*失败") {{
+    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
         return $ErrorTypes.NETWORK_ERROR
     }}
 
@@ -468,22 +473,45 @@ try {{
     }} elseif ($recoveryStrategy -eq $RecoveryStrategies.RETRY_WITH_BACKOFF) {{
         # 指数退避重试
         $backoffSeconds = [Math]::Min(5 * [Math]::Pow(2, $recoveryCount - 1), 60)  # 5, 10, 20, 40, 60
+        $isCompactTransportError = $errorMessage -match "remote compact task|backend-api/codex/responses/compact|responses/compact"
 
-        $output = @{{
-            decision = "recover"
-            commands = @(
-                @{{
-                    type = "wait"
-                    seconds = $backoffSeconds
-                }},
-                @{{
-                    type = "user_message"
-                    message = "继续"
-                }}
-            )
-            suppressOutput = $true
-            userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
-        }} | ConvertTo-Json -Depth 10
+        if ($isCompactTransportError) {{
+            $output = @{{
+                decision = "recover"
+                commands = @(
+                    @{{
+                        type = "wait"
+                        seconds = $backoffSeconds
+                    }},
+                    @{{
+                        type = "slash_command"
+                        command = "compact"
+                    }},
+                    @{{
+                        type = "user_message"
+                        message = "继续"
+                    }}
+                )
+                suppressOutput = $true
+                userMessage = "压缩任务连接中断，等待 $backoffSeconds 秒后重新压缩并继续..."
+            }} | ConvertTo-Json -Depth 10
+        }} else {{
+            $output = @{{
+                decision = "recover"
+                commands = @(
+                    @{{
+                        type = "wait"
+                        seconds = $backoffSeconds
+                    }},
+                    @{{
+                        type = "user_message"
+                        message = "继续"
+                    }}
+                )
+                suppressOutput = $true
+                userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
+            }} | ConvertTo-Json -Depth 10
+        }}
 
     }} elseif ($recoveryStrategy -eq $RecoveryStrategies.NOTIFY_USER) {{
         # 通知用户
@@ -587,6 +615,9 @@ function Get-ErrorType {{
     }}
     if ($combined -match "timeout|超时") {{
         return "timeout"
+    }}
+    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
+        return "network"
     }}
     if ($combined -match "overload|繁忙|503") {{
         return "overload"
@@ -784,14 +815,20 @@ try {{
         }} | ConvertTo-Json
         Write-Log "Recovery: wait $waitSeconds seconds + continue" "INFO"
 
-    }} elseif ($errorType -in @("timeout", "overload")) {{
+    }} elseif ($errorType -in @("timeout", "overload", "network")) {{
         # 指数退避
         $backoffSeconds = [Math]::Min(5 * [Math]::Pow(2, $recoveryCount - 1), 60)
+        $commands = @("继续")
+        $userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
+        if ($errorMessage -match "remote compact task|backend-api/codex/responses/compact|responses/compact") {{
+            $commands = @("/compress", "继续")
+            $userMessage = "压缩任务连接中断，等待 $backoffSeconds 秒后重新压缩并继续..."
+        }}
         $output = @{{
             recover = $true
             wait = $backoffSeconds
-            commands = @("继续")
-            userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
+            commands = $commands
+            userMessage = $userMessage
         }} | ConvertTo-Json
         Write-Log "Recovery: backoff $backoffSeconds seconds + continue" "INFO"
 

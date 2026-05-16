@@ -1,12 +1,17 @@
-import customtkinter as ctk
+import logging
+import threading
 from datetime import datetime
 from tkinter import filedialog
+
+import customtkinter as ctk
 
 from core import session_migration
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
+
+logger = logging.getLogger(__name__)
 
 
 class SessionMigrationTab(ctk.CTkScrollableFrame):
@@ -27,6 +32,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._provider_filter = "all"
         self._records: list[session_migration.SessionRecord] = []
         self._selected_keys: set[str] = set()
+        self._refresh_generation = 0
         self._build_ui()
 
     def _build_ui(self):
@@ -139,15 +145,53 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def refresh(self):
         if not self._cards_frame:
             return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        provider_filter = self._provider_filter
         for widget in self._cards_frame.winfo_children():
             widget.destroy()
 
-        try:
-            self._records = session_migration.list_sessions(self._provider_filter)
-        except Exception as exc:
-            self._records = []
-            show_toast(self.winfo_toplevel(), f"读取会话失败: {exc}", is_error=True)
+        if self._stats_label:
+            self._stats_label.configure(text="正在读取本机会话...")
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="正在读取本机会话...",
+            text_color=COLORS["muted"],
+            font=font(13),
+        ).pack(fill="x", pady=(22, 6))
 
+        def worker():
+            try:
+                payload = {
+                    "records": session_migration.list_sessions(provider_filter),
+                    "error": None,
+                }
+            except Exception as exc:
+                payload = {"records": [], "error": str(exc)}
+
+            def finish():
+                try:
+                    if not self.winfo_exists() or generation != self._refresh_generation:
+                        return
+                    if payload["error"]:
+                        show_toast(self.winfo_toplevel(), f"读取会话失败: {payload['error']}", is_error=True)
+                    self._records = payload["records"]
+                    self._render_records()
+                except Exception:
+                    logger.exception("Failed to finish session migration refresh")
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                logger.exception("Failed to schedule session migration refresh")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_records(self):
+        if not self._cards_frame:
+            return
+        for widget in self._cards_frame.winfo_children():
+            widget.destroy()
         visible_keys = {record.key for record in self._records}
         self._selected_keys.intersection_update(visible_keys)
         total_size = sum(record.size_bytes for record in self._records)
@@ -232,15 +276,15 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             self._selected_keys.add(key)
         else:
             self._selected_keys.discard(key)
-        self.refresh()
+        self._render_records()
 
     def _select_visible(self):
         self._selected_keys.update(record.key for record in self._records)
-        self.refresh()
+        self._render_records()
 
     def _clear_selection(self):
         self._selected_keys.clear()
-        self.refresh()
+        self._render_records()
 
     def _export_selected(self):
         if not self._selected_keys:

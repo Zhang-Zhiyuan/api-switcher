@@ -103,6 +103,33 @@ def test_error_parser():
             "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
         },
         {
+            "name": "Codex compact stream 断开错误",
+            "data": {
+                "error_message": (
+                    "Error running remote compact task: stream disconnected before completion: "
+                    "error sending request for url "
+                    "(https://chatgpt.com/backend-api/codex/responses/compact)"
+                )
+            },
+            "expected_type": ErrorType.NETWORK_ERROR,
+            "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
+        },
+        {
+            "name": "Codex compact upstream 503 reset",
+            "data": {
+                "error_message": (
+                    "Error running remote compact task: unexpected status 503 Service Unavailable: "
+                    "upstream connect error or disconnect/reset before headers. "
+                    "reset reason: connection termination, url: "
+                    "https://chatgpt.com/backend-api/codex/responses/compact, "
+                    "cf-ray: 9fb0944f59b1269d-NRT"
+                ),
+                "status": 503
+            },
+            "expected_type": ErrorType.NETWORK_ERROR,
+            "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
+        },
+        {
             "name": "配额超限",
             "data": {
                 "error_message": "quota exceeded, insufficient balance",
@@ -248,6 +275,12 @@ def test_script_generation():
     assert "Get-FirstTextField" in claude_script
     assert '"message", "error", "errorMessage"' in claude_script
     assert '"body", "data", "errors"' in claude_script
+    assert "stream.*disconnect" in claude_script
+    assert "upstream connect error" in claude_script
+    assert "disconnect/reset before headers" in claude_script
+    assert "connection termination" in claude_script
+    assert "backend-api/codex/responses/compact" in claude_script
+    assert "压缩任务连接中断" in claude_script
 
     print("\n生成 Codex CLI 错误恢复脚本...")
     codex_script = generate_codex_error_recovery_script(settings_path)
@@ -259,6 +292,34 @@ def test_script_generation():
     assert "Get-FirstTextField" in codex_script
     assert '"message", "error", "errorMessage"' in codex_script
     assert '"body", "data", "errors"' in codex_script
+    assert 'return "network"' in codex_script
+    assert '"timeout", "overload", "network"' in codex_script
+    assert "stream.*disconnect" in codex_script
+    assert "upstream connect error" in codex_script
+    assert "disconnect/reset before headers" in codex_script
+    assert "connection termination" in codex_script
+    assert "backend-api/codex/responses/compact" in codex_script
+    assert 'commands = @("/compress", "继续")' in codex_script
+    assert "压缩任务连接中断" in codex_script
+
+
+def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
+    from core import remote_auto_continue
+    from core.auto_continue.script_generator import generate_hook_script
+
+    local_script = generate_hook_script("C:\\Users\\Test\\.codex\\auto_continue_settings.json")
+    remote_script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+
+    for script in [local_script, remote_script]:
+        assert "recoverable_api_error_detected" in script
+        assert "stream disconnected before completion" in script
+        assert "upstream connect error" in script
+        assert "disconnect/reset before headers" in script
+        assert "connection termination" in script
+        assert "backend-api/codex/responses/compact" in script
 
 
 def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):

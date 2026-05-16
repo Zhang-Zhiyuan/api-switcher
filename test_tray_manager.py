@@ -6,31 +6,27 @@ from core import tray_manager
 
 
 def test_tray_menu_accepts_profile_actions(monkeypatch):
-    if tray_manager.pystray is None:
+    pystray_module, _menu_item = tray_manager._load_pystray()
+    if pystray_module is None:
         pytest.skip("pystray is not installed")
 
-    monkeypatch.setattr(
-        tray_manager.profile_manager,
-        "list_switchable_claude_profiles",
-        lambda: [SimpleNamespace(name="claude-relay")],
+    fake_profile_manager = SimpleNamespace(
+        list_switchable_claude_profiles=lambda: [SimpleNamespace(name="claude-relay")],
+        list_switchable_codex_profiles=lambda: [SimpleNamespace(name="codex-relay")],
+        get_current_claude_name=lambda: "claude-relay",
+        get_active_claude_name=lambda: "",
+        get_current_codex_name=lambda: "codex-relay",
+        get_active_codex_name=lambda: "",
     )
-    monkeypatch.setattr(
-        tray_manager.profile_manager,
-        "list_switchable_codex_profiles",
-        lambda: [SimpleNamespace(name="codex-relay")],
+    fake_startup_manager = SimpleNamespace(
+        get_startup_status=lambda: SimpleNamespace(supported=True, enabled=False),
     )
-    monkeypatch.setattr(tray_manager.profile_manager, "get_current_claude_name", lambda: "claude-relay")
-    monkeypatch.setattr(tray_manager.profile_manager, "get_active_claude_name", lambda: "")
-    monkeypatch.setattr(tray_manager.profile_manager, "get_current_codex_name", lambda: "codex-relay")
-    monkeypatch.setattr(tray_manager.profile_manager, "get_active_codex_name", lambda: "")
-    monkeypatch.setattr(
-        tray_manager.startup_manager,
-        "get_startup_status",
-        lambda: SimpleNamespace(supported=True, enabled=False),
-    )
+    monkeypatch.setattr(tray_manager, "profile_manager", fake_profile_manager)
+    monkeypatch.setattr(tray_manager, "startup_manager", fake_startup_manager)
+    monkeypatch.setattr(tray_manager, "_app_managers_imported", True)
 
     manager = tray_manager.TrayManager(lambda *_: None, lambda *_: None)
     menu = manager.create_menu()
 
     assert menu
-    assert any(item is tray_manager.pystray.Menu.SEPARATOR for item in menu)
+    assert any(item is pystray_module.Menu.SEPARATOR for item in menu)

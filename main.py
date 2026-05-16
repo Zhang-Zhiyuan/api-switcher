@@ -21,6 +21,16 @@ def parse_args(argv: list[str] | None = None) -> Namespace:
         dest="start_minimized",
         help="Start hidden in the system tray when tray support is available.",
     )
+    parser.add_argument(
+        "--no-splash",
+        action="store_true",
+        help="Disable the startup splash window.",
+    )
+    parser.add_argument(
+        "--splash-child",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args, _unknown = parser.parse_known_args(argv)
     return args
 
@@ -55,23 +65,62 @@ def configure_logging():
 
 def main(argv: list[str] | None = None):
     args = parse_args(argv)
-    log_manager = configure_logging()
+    if args.splash_child:
+        from ui.startup_splash import run_splash_process
 
-    import customtkinter as ctk
-    ctk.set_default_color_theme("blue")
-    ctk.set_appearance_mode("dark")
+        return run_splash_process()
 
-    from ui.app import App
-    app = App(start_minimized=args.start_minimized)
+    splash = None
+    if not args.start_minimized and not args.no_splash:
+        try:
+            from ui.startup_splash import StartupSplash
 
+            splash = StartupSplash()
+        except Exception:
+            splash = None
+
+    def pulse(message: str) -> None:
+        if splash:
+            splash.pulse(message)
+
+    log_manager = None
     try:
+        pulse("正在准备配置...")
+        log_manager = configure_logging()
+
+        pulse("正在加载界面组件...")
+        import customtkinter as ctk
+
+        ctk.set_default_color_theme("blue")
+        ctk.set_appearance_mode("dark")
+
+        pulse("正在创建主窗口...")
+        from ui.app import App
+
+        app = App(start_minimized=args.start_minimized)
+        pulse("即将完成...")
+        if splash:
+            if not args.start_minimized:
+                try:
+                    app.update_idletasks()
+                    app.update()
+                except Exception:
+                    logger.exception("Failed to draw main window before closing splash")
+            splash.keep_visible_for(0.45)
+            splash.close()
+            splash = None
         app.mainloop()
     except Exception as e:
         logger.error(f"Application error: {e}", exc_info=True)
+        return 1
     finally:
+        if splash:
+            splash.close()
         logger.info("Application shutting down...")
-        log_manager.shutdown()
+        if log_manager:
+            log_manager.shutdown()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -7,19 +7,52 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image, ImageDraw, ImageFont
-
-try:
-    import pystray
-    from pystray import MenuItem as Item
-except ImportError:
-    pystray = None
-    Item = None
-
 from config.paths import APP_DIR
-from core import profile_manager, startup_manager, switcher
 
 logger = logging.getLogger(__name__)
+
+pystray = None
+Item = None
+profile_manager = None
+startup_manager = None
+switcher = None
+_pystray_imported = False
+_app_managers_imported = False
+
+
+def _load_pystray():
+    global Item, _pystray_imported, pystray
+
+    if _pystray_imported:
+        return pystray, Item
+
+    try:
+        import pystray as pystray_module
+        from pystray import MenuItem
+    except ImportError:
+        pystray = None
+        Item = None
+    else:
+        pystray = pystray_module
+        Item = MenuItem
+    _pystray_imported = True
+    return pystray, Item
+
+
+def _load_app_managers() -> None:
+    global _app_managers_imported, profile_manager, startup_manager, switcher
+
+    if _app_managers_imported:
+        return
+
+    from core import profile_manager as profile_manager_module
+    from core import startup_manager as startup_manager_module
+    from core import switcher as switcher_module
+
+    profile_manager = profile_manager or profile_manager_module
+    startup_manager = startup_manager or startup_manager_module
+    switcher = switcher or switcher_module
+    _app_managers_imported = True
 
 
 def _profile_checked(name: str, active_name: str | None):
@@ -46,8 +79,10 @@ class TrayManager:
         self.icon: object | None = None
         self._thread: threading.Thread | None = None
 
-    def create_icon_image(self) -> Image.Image:
+    def create_icon_image(self):
         """Create the tray icon image."""
+        from PIL import Image, ImageDraw, ImageFont
+
         for base in _resource_roots():
             for name in ("icon.png", "icon.ico"):
                 icon_path = base / name
@@ -83,6 +118,8 @@ class TrayManager:
 
     def get_active_profiles_text(self) -> str:
         """Get text showing currently active API configurations."""
+        _load_app_managers()
+
         claude_names = {p.name for p in profile_manager.list_switchable_claude_profiles()}
         codex_names = {p.name for p in profile_manager.list_switchable_codex_profiles()}
         active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
@@ -98,26 +135,28 @@ class TrayManager:
 
     def create_menu(self) -> tuple:
         """Create the tray menu."""
-        if pystray is None or Item is None:
+        pystray_module, menu_item = _load_pystray()
+        if pystray_module is None or menu_item is None:
             return tuple()
+        _load_app_managers()
 
         active_claude = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
         active_codex = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
 
         menu_items = [
-            Item("显示主窗口", self.on_show_window, default=True),
+            menu_item("显示主窗口", self.on_show_window, default=True),
         ]
         if self.on_hide_window is not None:
-            menu_items.append(Item("隐藏到托盘", self.on_hide_window))
-        menu_items.append(pystray.Menu.SEPARATOR)
+            menu_items.append(menu_item("隐藏到托盘", self.on_hide_window))
+        menu_items.append(pystray_module.Menu.SEPARATOR)
 
-        menu_items.append(Item(f"当前 API: {self.get_active_profiles_text()}", None, enabled=False))
-        menu_items.append(pystray.Menu.SEPARATOR)
+        menu_items.append(menu_item(f"当前 API: {self.get_active_profiles_text()}", None, enabled=False))
+        menu_items.append(pystray_module.Menu.SEPARATOR)
 
         claude_profiles = profile_manager.list_switchable_claude_profiles()
         if claude_profiles:
             claude_items = [
-                Item(
+                menu_item(
                     profile.name,
                     self._switch_claude_action(profile.name),
                     checked=_profile_checked(profile.name, active_claude),
@@ -125,13 +164,13 @@ class TrayManager:
                 for profile in claude_profiles[:10]
             ]
             if len(claude_profiles) > 10:
-                claude_items.append(Item(f"仅显示前 10 个，共 {len(claude_profiles)} 个", None, enabled=False))
-            menu_items.append(Item("Claude API 配置", pystray.Menu(*claude_items)))
+                claude_items.append(menu_item(f"仅显示前 10 个，共 {len(claude_profiles)} 个", None, enabled=False))
+            menu_items.append(menu_item("Claude API 配置", pystray_module.Menu(*claude_items)))
 
         codex_profiles = profile_manager.list_switchable_codex_profiles()
         if codex_profiles:
             codex_items = [
-                Item(
+                menu_item(
                     profile.name,
                     self._switch_codex_action(profile.name),
                     checked=_profile_checked(profile.name, active_codex),
@@ -139,24 +178,24 @@ class TrayManager:
                 for profile in codex_profiles[:10]
             ]
             if len(codex_profiles) > 10:
-                codex_items.append(Item(f"仅显示前 10 个，共 {len(codex_profiles)} 个", None, enabled=False))
-            menu_items.append(Item("Codex API 配置", pystray.Menu(*codex_items)))
+                codex_items.append(menu_item(f"仅显示前 10 个，共 {len(codex_profiles)} 个", None, enabled=False))
+            menu_items.append(menu_item("Codex API 配置", pystray_module.Menu(*codex_items)))
 
-        menu_items.append(pystray.Menu.SEPARATOR)
+        menu_items.append(pystray_module.Menu.SEPARATOR)
 
         startup_status = startup_manager.get_startup_status()
         if startup_status.supported:
             menu_items.append(
-                Item(
+                menu_item(
                     "开机自启动",
                     self._toggle_startup,
                     checked=lambda _item: startup_manager.get_startup_status().enabled,
                 )
             )
-        menu_items.append(Item("刷新菜单", lambda _icon=None, _item=None: self.update_menu()))
+        menu_items.append(menu_item("刷新菜单", lambda _icon=None, _item=None: self.update_menu()))
 
-        menu_items.append(pystray.Menu.SEPARATOR)
-        menu_items.append(Item("退出", self._on_exit_clicked))
+        menu_items.append(pystray_module.Menu.SEPARATOR)
+        menu_items.append(menu_item("退出", self._on_exit_clicked))
         return tuple(menu_items)
 
     def _switch_claude_action(self, name: str):
@@ -173,6 +212,7 @@ class TrayManager:
 
     def _switch_claude(self, name: str):
         """Switch Claude profile from tray menu."""
+        _load_app_managers()
         try:
             switcher.switch_claude_profile(name)
             logger.info("Switched Claude profile to: %s (from tray)", name)
@@ -182,6 +222,7 @@ class TrayManager:
 
     def _switch_codex(self, name: str):
         """Switch Codex profile from tray menu."""
+        _load_app_managers()
         try:
             switcher.switch_codex_profile(name)
             logger.info("Switched Codex profile to: %s (from tray)", name)
@@ -196,6 +237,7 @@ class TrayManager:
 
     def _toggle_startup(self, icon=None, item=None):
         """Toggle Windows startup from the tray menu."""
+        _load_app_managers()
         try:
             status = startup_manager.get_startup_status()
             startup_manager.set_startup_enabled(not status.enabled)
@@ -207,17 +249,19 @@ class TrayManager:
 
     def update_menu(self):
         """Update the tray menu with current profiles."""
-        if not self.icon or pystray is None:
+        pystray_module, _menu_item = _load_pystray()
+        if not self.icon or pystray_module is None:
             return
         try:
-            self.icon.menu = pystray.Menu(*self.create_menu())
+            self.icon.menu = pystray_module.Menu(*self.create_menu())
             self.icon.title = _tooltip_text(self.get_active_profiles_text())
         except Exception as e:
             logger.error("Failed to update tray menu: %s", e, exc_info=True)
 
     def start(self):
         """Start the tray icon in a separate thread."""
-        if pystray is None:
+        pystray_module, _menu_item = _load_pystray()
+        if pystray_module is None:
             logger.warning("pystray is not installed; tray icon is disabled")
             return
 
@@ -226,11 +270,11 @@ class TrayManager:
             return
 
         try:
-            icon = pystray.Icon(
+            icon = pystray_module.Icon(
                 "api_switcher",
                 self.create_icon_image(),
                 _tooltip_text(self.get_active_profiles_text()),
-                pystray.Menu(*self.create_menu()),
+                pystray_module.Menu(*self.create_menu()),
             )
             self.icon = icon
         except Exception as e:
@@ -270,7 +314,8 @@ class TrayManager:
 
     def is_available(self) -> bool:
         """Check if tray support is available in this environment."""
-        return pystray is not None
+        pystray_module, _menu_item = _load_pystray()
+        return pystray_module is not None
 
     def notify(self, message: str, title: str = "API切换器") -> None:
         """Show a best-effort tray notification."""

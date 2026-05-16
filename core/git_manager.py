@@ -30,6 +30,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
             return result.returncode == 0
@@ -54,6 +56,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10
             )
 
@@ -126,6 +130,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
             return bool(result.stdout.strip())
@@ -175,6 +181,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10
             )
 
@@ -200,6 +208,8 @@ class GitManager:
                         cwd=self.project_path,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=10
                     )
 
@@ -212,6 +222,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
             commit_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else "unknown"
@@ -246,6 +258,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5
             )
 
@@ -304,6 +318,8 @@ class GitManager:
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10
             )
 

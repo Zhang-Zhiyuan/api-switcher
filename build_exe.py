@@ -1,7 +1,10 @@
-"""Build API Switcher as a single Windows EXE with PyInstaller."""
+"""Build API Switcher with PyInstaller."""
 
 from __future__ import annotations
 
+import argparse
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -9,11 +12,32 @@ from pathlib import Path
 
 APP_NAME = "API切换器"
 SPEC_PATH = Path(f"{APP_NAME}.spec")
+DEFAULT_BUNDLE_MODE = "onedir"
+SUPPORTED_BUNDLE_MODES = {"onefile", "onedir"}
+UI_TAB_HIDDEN_IMPORTS = [
+    "ui.tabs.claude_tab",
+    "ui.tabs.codex_tab",
+    "ui.tabs.env_tab",
+    "ui.tabs.browser_tab",
+    "ui.tabs.session_migration_tab",
+    "ui.tabs.ssh_tab",
+    "ui.tabs.common_tab",
+    "ui.tabs.usage_stats_tab",
+    "ui.tabs.backup_tab",
+    "ui.tabs.log_viewer_tab",
+]
 
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _utf8_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def check_pyinstaller() -> bool:
@@ -26,8 +50,9 @@ def check_pyinstaller() -> bool:
         print("PyInstaller is not installed. Installing...", flush=True)
         try:
             subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "pyinstaller"],
+                [sys.executable, "-X", "utf8", "-m", "pip", "install", "pyinstaller"],
                 stderr=subprocess.STDOUT,
+                env=_utf8_subprocess_env(),
             )
             return True
         except Exception as exc:
@@ -35,7 +60,10 @@ def check_pyinstaller() -> bool:
             return False
 
 
-def create_spec_file() -> None:
+def create_spec_file(bundle_mode: str = DEFAULT_BUNDLE_MODE) -> None:
+    if bundle_mode not in SUPPORTED_BUNDLE_MODES:
+        raise ValueError(f"Unsupported bundle mode: {bundle_mode}")
+
     datas = []
     for source, target in [
         ("config", "config"),
@@ -49,41 +77,8 @@ def create_spec_file() -> None:
 
     icon_line = "icon='icon.ico'," if Path("icon.ico").exists() else "icon=None,"
 
-    spec_content = f"""# -*- mode: python ; coding: utf-8 -*-
-
-block_cipher = None
-
-a = Analysis(
-    ['main.py'],
-    pathex=[],
-    binaries=[],
-    datas={datas!r},
-    hiddenimports=[
-        'customtkinter',
-        'PIL',
-        'PIL._tkinter_finder',
-        'keyring.backends.Windows',
-        'tomli_w',
-        'tomli',
-        'tomllib',
-        'paramiko',
-        'cryptography',
-        'pystray',
-        'ui.dialogs.close_choice_dialog',
-    ],
-    hookspath=[],
-    hooksconfig={{}},
-    runtime_hooks=[],
-    excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False,
-)
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-exe = EXE(
+    if bundle_mode == "onefile":
+        output_block = f"""exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
@@ -106,17 +101,130 @@ exe = EXE(
     {icon_line}
 )
 """
+    else:
+        output_block = f"""exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name={APP_NAME!r},
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    {icon_line}
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name={APP_NAME!r},
+)
+"""
+
+    hiddenimports = [
+        "customtkinter",
+        "PIL",
+        "PIL._tkinter_finder",
+        "keyring.backends.Windows",
+        "tomli_w",
+        "tomli",
+        "tomllib",
+        "paramiko",
+        "cryptography",
+        "pystray",
+        "ui.dialogs.close_choice_dialog",
+        *UI_TAB_HIDDEN_IMPORTS,
+    ]
+
+    spec_content = f"""# -*- mode: python ; coding: utf-8 -*-
+
+block_cipher = None
+
+a = Analysis(
+    ['main.py'],
+    pathex=[],
+    binaries=[],
+    datas={datas!r},
+    hiddenimports={hiddenimports!r},
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+{output_block}
+"""
 
     SPEC_PATH.write_text(spec_content, encoding="utf-8")
-    print(f"Spec file written: {SPEC_PATH}", flush=True)
+    print(f"Spec file written: {SPEC_PATH} ({bundle_mode})", flush=True)
 
 
-def build_exe() -> bool:
+def _artifact_path(bundle_mode: str) -> Path:
+    if bundle_mode == "onedir":
+        return Path("dist") / APP_NAME / f"{APP_NAME}.exe"
+    if bundle_mode == "onefile":
+        return Path("dist") / f"{APP_NAME}.exe"
+    raise ValueError(f"Unsupported bundle mode: {bundle_mode}")
+
+
+def _stale_artifact_path(bundle_mode: str) -> Path:
+    if bundle_mode == "onedir":
+        return Path("dist") / f"{APP_NAME}.exe"
+    if bundle_mode == "onefile":
+        return Path("dist") / APP_NAME
+    raise ValueError(f"Unsupported bundle mode: {bundle_mode}")
+
+
+def _remove_stale_artifact(bundle_mode: str) -> bool:
+    stale_path = _stale_artifact_path(bundle_mode)
+    if not stale_path.exists():
+        return True
+
+    dist_dir = Path("dist").resolve()
+    resolved = stale_path.resolve()
+    if resolved == dist_dir or dist_dir not in resolved.parents:
+        print(f"Refusing to remove unexpected artifact outside dist: {resolved}", flush=True)
+        return False
+
+    try:
+        if stale_path.is_dir():
+            shutil.rmtree(stale_path)
+        else:
+            stale_path.unlink()
+    except Exception as exc:
+        print(f"Build cleanup failed: could not remove stale artifact {resolved}: {exc}", flush=True)
+        return False
+
+    print(f"Removed stale artifact: {resolved}", flush=True)
+    return True
+
+
+def build_exe(bundle_mode: str = DEFAULT_BUNDLE_MODE) -> bool:
     print("\nStarting PyInstaller build...\n", flush=True)
     try:
         subprocess.check_call(
             [
                 sys.executable,
+                "-X",
+                "utf8",
                 "-m",
                 "PyInstaller",
                 "--clean",
@@ -124,23 +232,43 @@ def build_exe() -> bool:
                 str(SPEC_PATH),
             ],
             stderr=subprocess.STDOUT,
+            env=_utf8_subprocess_env(),
         )
     except subprocess.CalledProcessError as exc:
         print(f"Build failed: {exc}", flush=True)
         return False
 
-    exe_path = Path("dist") / f"{APP_NAME}.exe"
+    exe_path = _artifact_path(bundle_mode)
     if not exe_path.is_file() or exe_path.stat().st_size <= 0:
         print(f"Build failed: expected EXE was not created: {exe_path.resolve()}", flush=True)
+        return False
+
+    if not _remove_stale_artifact(bundle_mode):
         return False
 
     print(f"\nBuild complete: {exe_path.resolve()}", flush=True)
     return True
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build API Switcher with PyInstaller.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--onedir",
+        action="store_true",
+        help="Build the default dist/API切换器 folder.",
+    )
+    mode_group.add_argument(
+        "--onefile",
+        action="store_true",
+        help="Build a single-file EXE. This starts slower because it self-extracts on launch.",
+    )
+    args = parser.parse_args(argv)
+    bundle_mode = "onefile" if args.onefile else DEFAULT_BUNDLE_MODE
+
     print("=" * 80, flush=True)
     print("API Switcher build tool", flush=True)
+    print(f"Bundle mode: {bundle_mode}", flush=True)
     print("=" * 80, flush=True)
 
     if not Path("main.py").exists():
@@ -159,8 +287,8 @@ def main() -> int:
     if not check_pyinstaller():
         return 1
 
-    create_spec_file()
-    return 0 if build_exe() else 1
+    create_spec_file(bundle_mode)
+    return 0 if build_exe(bundle_mode) else 1
 
 
 if __name__ == "__main__":

@@ -576,6 +576,28 @@ def any_pattern(patterns, text):
     return False
 
 
+RECOVERABLE_API_ERROR_PATTERNS = [
+    r"error running remote compact task",
+    r"stream disconnected before completion",
+    r"upstream connect error",
+    r"disconnect/reset before headers",
+    r"reset reason.*connection termination",
+    r"error sending request for url",
+    r"backend-api/codex/responses/compact",
+    r"responses/compact",
+]
+
+
+def is_recoverable_api_error(text):
+    for pattern in RECOVERABLE_API_ERROR_PATTERNS:
+        try:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        except re.error as exc:
+            log(f"Invalid recoverable API error pattern ignored: {pattern}: {exc}", "WARN")
+    return False
+
+
 def load_state(path):
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -697,11 +719,13 @@ def main():
     if is_claude and as_bool(settings.get("conservative_mode"), True) and as_bool(data.get("stop_hook_active"), False):
         return
 
-    if any_pattern(settings.get("blocker_patterns"), last_message):
+    recoverable_api_error = is_recoverable_api_error(last_message)
+
+    if any_pattern(settings.get("blocker_patterns"), last_message) and not recoverable_api_error:
         return
 
     incomplete_patterns = settings.get("incomplete_patterns")
-    if not any_pattern(incomplete_patterns, last_message):
+    if not any_pattern(incomplete_patterns, last_message) and not recoverable_api_error:
         return
 
     session_id = (
@@ -764,6 +788,7 @@ def main():
         save_state(state_path, state)
 
         continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
+        continue_reason = "recoverable_api_error_detected" if recoverable_api_error else "incomplete_work_detected"
         write_jsonl(
             log_path,
             {
@@ -772,7 +797,7 @@ def main():
                 "hook_event": str(hook_event),
                 "agent_id": str(agent_id),
                 "decision": "block_stop",
-                "reason": "incomplete_work_detected",
+                "reason": continue_reason,
                 "count": count,
                 "continuation_prompt": continuation_prompt,
             },

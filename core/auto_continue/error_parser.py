@@ -146,6 +146,19 @@ class ErrorParser:
         r"network[_\s]?error",
         r"connection[_\s]?failed",
         r"connection[_\s]?refused",
+        r"connection[_\s]?(reset|aborted)",
+        r"stream.*disconnect(?:ed)?",
+        r"stream disconnected before completion",
+        r"upstream connect error",
+        r"disconnect/reset before headers",
+        r"reset reason:\s*connection termination",
+        r"connection termination",
+        r"error sending request for url",
+        r"remote compact task",
+        r"backend-api/codex/responses/compact",
+        r"responses/compact",
+        r"broken[_\s]?pipe",
+        r"socket[_\s]?hang[_\s]?up",
         r"网络.*错误",
         r"连接.*失败",
     ]
@@ -318,14 +331,14 @@ class ErrorParser:
         if self._matches_patterns(combined, self.QUOTA_PATTERNS):
             return ErrorType.QUOTA_EXCEEDED
 
+        if self._matches_patterns(combined, self.NETWORK_PATTERNS):
+            return ErrorType.NETWORK_ERROR
+
         if self._matches_patterns(combined, self.OVERLOAD_PATTERNS) or http_status == 503:
             return ErrorType.MODEL_OVERLOADED
 
         if self._matches_patterns(combined, self.TIMEOUT_PATTERNS) or http_status == 504:
             return ErrorType.TIMEOUT_ERROR
-
-        if self._matches_patterns(combined, self.NETWORK_PATTERNS):
-            return ErrorType.NETWORK_ERROR
 
         if self._matches_patterns(combined, self.SERVER_ERROR_PATTERNS) or (http_status and 500 <= http_status < 600):
             return ErrorType.SERVER_ERROR

@@ -1,22 +1,25 @@
-import customtkinter as ctk
+import importlib
 import logging
-from ui.tabs.claude_tab import ClaudeTab
-from ui.tabs.codex_tab import CodexTab
-from ui.tabs.env_tab import EnvTab
-from ui.tabs.common_tab import CommonTab
-from ui.tabs.backup_tab import BackupTab
-from ui.tabs.ssh_tab import SSHTab
-from ui.tabs.browser_tab import BrowserTab
-from ui.tabs.session_migration_tab import SessionMigrationTab
-from ui.tabs.log_viewer_tab import LogViewerTab
-from ui.tabs.usage_stats_tab import UsageStatsTab
+
+import customtkinter as ctk
 from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
 from core.tray_manager import TrayManager
-from core import profile_manager
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
 ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
+TAB_SPECS = [
+    ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
+    ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", True),
+    (ENV_TAB_LABEL, "_env_tab", "ui.tabs.env_tab", "EnvTab", False),
+    ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
+    ("会话迁移", "_session_migration_tab", "ui.tabs.session_migration_tab", "SessionMigrationTab", False),
+    ("SSH 服务器", "_ssh_tab", "ui.tabs.ssh_tab", "SSHTab", False),
+    ("通用设置", "_common_tab", "ui.tabs.common_tab", "CommonTab", False),
+    ("使用统计", "_usage_stats_tab", "ui.tabs.usage_stats_tab", "UsageStatsTab", False),
+    ("备份管理", "_backup_tab", "ui.tabs.backup_tab", "BackupTab", False),
+    ("日志查看器", "_log_viewer_tab", "ui.tabs.log_viewer_tab", "LogViewerTab", False),
+]
 
 
 class App(ctk.CTk):
@@ -32,6 +35,11 @@ class App(ctk.CTk):
         self._exit_requested = False
         self._tray_hint_shown = False
         self._close_dialog = None
+        self._tab_frames = {}
+        self._tab_class_cache = {}
+        self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
+        for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
+            setattr(self, attr, None)
 
         # Initialize tray manager
         self.tray_manager = TrayManager(
@@ -163,26 +171,18 @@ class App(ctk.CTk):
             segmented_button_unselected_color=COLORS["surface_alt"],
             segmented_button_unselected_hover_color=COLORS["surface_hover"],
             text_color=COLORS["text"],
+            command=self._on_tab_changed,
         )
         self._tabview.pack(fill="both", expand=True)
 
-        # Create tabs
-        self._claude_tab = ClaudeTab(self._tabview.add("Claude Code"))
-        self._codex_tab = CodexTab(self._tabview.add("Codex CLI"))
-        self._env_tab = EnvTab(self._tabview.add(ENV_TAB_LABEL))
-        self._browser_tab = BrowserTab(self._tabview.add("浏览器 Profile"))
-        self._session_migration_tab = SessionMigrationTab(self._tabview.add("会话迁移"))
-        self._ssh_tab = SSHTab(self._tabview.add("SSH 服务器"))
-        self._common_tab = CommonTab(self._tabview.add("通用设置"))
-        self._usage_stats_tab = UsageStatsTab(self._tabview.add("使用统计"))
-        self._backup_tab = BackupTab(self._tabview.add("备份管理"))
-        self._log_viewer_tab = LogViewerTab(self._tabview.add("日志查看器"))
+        for label, _attr, _module_name, _class_name, eager in TAB_SPECS:
+            self._tab_frames[label] = self._tabview.add(label)
+            if not eager:
+                self._install_tab_placeholder(label)
 
-        # Make tabs fill the space
-        for tab in [self._claude_tab, self._codex_tab, self._env_tab, self._browser_tab,
-                    self._session_migration_tab, self._ssh_tab, self._common_tab, self._usage_stats_tab,
-                    self._backup_tab, self._log_viewer_tab]:
-            tab.pack(fill="both", expand=True)
+        for label, _attr, _module_name, _class_name, eager in TAB_SPECS:
+            if eager:
+                self._ensure_tab(label)
 
         # Status bar
         footer = ctk.CTkFrame(
@@ -201,19 +201,122 @@ class App(ctk.CTk):
         )
         self._status.pack(anchor="w", padx=10, pady=6)
 
-        # Start tray icon when optional dependency is available.
+        self.claude_switch.configure(values=["正在加载..."], state="disabled")
+        self.codex_switch.configure(values=["正在加载..."], state="disabled")
+        self.after(20, self._load_quick_switch_profiles)
+        self.after(50, self._start_tray_icon)
+
+    def _install_tab_placeholder(self, label: str):
+        frame = self._tab_frames.get(label)
+        if frame is None:
+            return
+        placeholder = ctk.CTkFrame(frame, fg_color="transparent")
+        placeholder.pack(fill="both", expand=True, padx=24, pady=24)
+        ctk.CTkLabel(
+            placeholder,
+            text=f"{label} 尚未加载",
+            text_color=COLORS["text"],
+            font=font(16, "bold"),
+        ).pack(pady=(80, 6))
+        ctk.CTkLabel(
+            placeholder,
+            text="切换到此页时会自动加载，以缩短启动等待时间。",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(pady=(0, 12))
+        ctk.CTkButton(
+            placeholder,
+            text="加载",
+            width=96,
+            command=lambda name=label: self._ensure_tab(name),
+            **button_style("secondary"),
+        ).pack()
+
+    def _show_tab_error(self, label: str, error: Exception):
+        frame = self._tab_frames.get(label)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        message = f"{label} 加载失败: {error}"
+        ctk.CTkLabel(
+            frame,
+            text=message,
+            text_color=COLORS["danger"],
+            font=font(13),
+            wraplength=760,
+        ).pack(padx=24, pady=80)
+
+    def _ensure_tab(self, label: str):
+        spec = self._tab_specs.get(label)
+        frame = self._tab_frames.get(label)
+        if not spec or frame is None:
+            return None
+
+        attr, module_name, class_name, _eager = spec
+        existing = getattr(self, attr, None)
+        try:
+            if existing is not None and existing.winfo_exists():
+                return existing
+        except Exception:
+            pass
+
+        for child in frame.winfo_children():
+            child.destroy()
+        try:
+            tab_class = self._resolve_tab_class(label, module_name, class_name)
+            tab = tab_class(frame)
+            tab.pack(fill="both", expand=True)
+            setattr(self, attr, tab)
+            logger.debug("Loaded tab: %s", label)
+            return tab
+        except Exception as e:
+            setattr(self, attr, None)
+            logger.error("Failed to load tab %s: %s", label, e, exc_info=True)
+            self._show_tab_error(label, e)
+            return None
+
+    def _resolve_tab_class(self, label: str, module_name: str, class_name: str):
+        tab_class = self._tab_class_cache.get(label)
+        if tab_class is not None:
+            return tab_class
+
+        module = importlib.import_module(module_name)
+        tab_class = getattr(module, class_name)
+        self._tab_class_cache[label] = tab_class
+        return tab_class
+
+    def _on_tab_changed(self):
+        self._ensure_tab(self._tabview.get())
+
+    def _loaded_tab(self, attr: str):
+        tab = getattr(self, attr, None)
+        if tab is None:
+            return None
+        try:
+            return tab if tab.winfo_exists() else None
+        except Exception:
+            return None
+
+    def _refresh_loaded_tab(self, attr: str):
+        tab = self._loaded_tab(attr)
+        if tab and hasattr(tab, "refresh"):
+            tab.refresh()
+
+    def _start_tray_icon(self):
+        if self._exit_requested:
+            return
         if self.tray_manager.is_available():
             self.tray_manager.start()
             logger.info("Tray icon started")
         else:
             logger.info("Tray icon disabled: pystray is not installed")
 
-        # Load quick switch profiles
-        self._load_quick_switch_profiles()
-
     def _load_quick_switch_profiles(self):
         """Load profiles for quick switch menus."""
         try:
+            from core import profile_manager
+
             # Load Claude profiles
             claude_profiles = profile_manager.list_switchable_claude_profiles()
             claude_names = [p.name for p in claude_profiles]
@@ -262,8 +365,8 @@ class App(ctk.CTk):
                 show_toast(self, f"已切换 Claude API 配置: {profile_name}")
                 self._status.configure(text=f"已切换 Claude API 配置: {profile_name}")
 
-                self._claude_tab.refresh()
-                self._usage_stats_tab.refresh()
+                self._refresh_loaded_tab("_claude_tab")
+                self._refresh_loaded_tab("_usage_stats_tab")
                 self._load_quick_switch_profiles()
                 if self.tray_manager.is_running():
                     self.tray_manager.update_menu()
@@ -293,8 +396,8 @@ class App(ctk.CTk):
                 show_toast(self, f"已切换 Codex API 配置: {profile_name}")
                 self._status.configure(text=f"已切换 Codex API 配置: {profile_name}")
 
-                self._codex_tab.refresh()
-                self._usage_stats_tab.refresh()
+                self._refresh_loaded_tab("_codex_tab")
+                self._refresh_loaded_tab("_usage_stats_tab")
                 self._load_quick_switch_profiles()
                 if self.tray_manager.is_running():
                     self.tray_manager.update_menu()
@@ -401,8 +504,7 @@ class App(ctk.CTk):
 
     def _on_startup_changed_from_tray(self):
         def refresh_startup():
-            if hasattr(self, "_common_tab"):
-                self._common_tab.refresh()
+            self._refresh_loaded_tab("_common_tab")
 
         self._run_on_ui_thread(refresh_startup)
 
@@ -415,22 +517,20 @@ class App(ctk.CTk):
 
     def _show_env_tab(self):
         self._tabview.set(ENV_TAB_LABEL)
-        self._env_tab.refresh()
+        tab = self._ensure_tab(ENV_TAB_LABEL)
+        if tab:
+            tab.refresh()
         self._status.configure(text="已打开环境变量管理")
 
     def refresh_all(self):
         """Refresh all tabs."""
-        self._claude_tab.refresh()
-        self._codex_tab.refresh()
-        self._env_tab.refresh()
-        self._browser_tab.refresh()
-        self._session_migration_tab.refresh()
-        self._ssh_tab.refresh()
-        self._common_tab.refresh()
-        self._usage_stats_tab.refresh()
-        self._backup_tab.refresh()
-        self._log_viewer_tab.refresh()
-        self._status.configure(text="已刷新全部 API 配置和账号状态")
+        self._status.configure(text="正在刷新全部 API 配置和账号状态...")
+        self.update_idletasks()
+        for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
+            tab = self._loaded_tab(attr)
+            if tab and hasattr(tab, "refresh"):
+                tab.refresh()
+        self._status.configure(text="已刷新已加载页面和快捷菜单")
 
         # Update tray menu to reflect changes
         if self.tray_manager.is_running():
