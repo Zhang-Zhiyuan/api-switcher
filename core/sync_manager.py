@@ -1,5 +1,6 @@
 import logging
 from core import remote_config, parser, toml_parser, auth_parser, profile_manager, security
+from core.providers import ProviderRegistry
 from core.ssh_manager import ssh_manager
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,22 @@ def _make_claude_settings_root_safe(settings: dict, ssh_profile) -> tuple[dict, 
     settings["permissions"] = permissions
     settings["skipDangerousModePermissionPrompt"] = False
     return settings, True
+
+
+def _codex_profile_api_key(profile) -> str:
+    return security.get_secret(getattr(profile, "api_key_ref", None)) or ""
+
+
+def _codex_profile_env_key(profile) -> str:
+    return ProviderRegistry.get_codex_env_key_for_profile(profile)
+
+
+def _persist_remote_codex_env(client, profile, api_key: str) -> str:
+    from core import persistent_env
+
+    env_key = _codex_profile_env_key(profile)
+    persistent_env.set_remote_user_env(client, {env_key: api_key})
+    return env_key
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -98,7 +115,8 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
     codex_profile = _find_profile(profile_manager.list_switchable_codex_profiles(), codex_name, "Codex API Profile")
     if not profile_manager.is_third_party_codex_profile(codex_profile):
         raise ValueError("只能同步第三方 Codex API Profile")
-    if not security.get_secret(codex_profile.api_key_ref):
+    api_key = _codex_profile_api_key(codex_profile)
+    if not api_key:
         raise ValueError("Codex API Profile 需要 API Key")
 
     ssh_profile, client = _connect_ssh(ssh_name)
@@ -110,9 +128,10 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
     auth = remote_config.read_remote_codex_auth(client, ssh_profile) or {}
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth, ssh_profile)
+    env_key = _persist_remote_codex_env(client, codex_profile, api_key)
 
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
-    return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host}"
+    return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {env_key}"
 
 
 def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
@@ -294,6 +313,7 @@ def pull_codex_from_server(ssh_name: str) -> str:
             profile_kwargs["custom_base_url"] = custom.get("base_url")
             profile_kwargs["custom_name"] = custom.get("name")
             profile_kwargs["custom_wire_api"] = custom.get("wire_api")
+            profile_kwargs["custom_env_key"] = custom.get("env_key")
             profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
 
     ref = f"codex:{name}:api_key"

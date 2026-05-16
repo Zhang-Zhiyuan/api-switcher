@@ -170,6 +170,7 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
     monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {"auth_mode": "chatgpt", "tokens": {"id": "old"}})
     monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data, profile=None: written.setdefault("config", (client, data, profile)))
     monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data, profile=None: written.setdefault("auth", (client, data, profile)))
+    monkeypatch.setattr(persistent_env, "set_remote_user_env", lambda client, data: written.setdefault("env", (client, data)))
 
     message = sync_manager.sync_codex_to_server("remote", "relay")
 
@@ -178,6 +179,8 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
     assert written["auth"][1]["auth_mode"] == "api_key"
     assert written["auth"][1]["OPENAI_API_KEY"] == "sk-relay"
     assert written["auth"][2].name == "remote"
+    assert written["env"] == (fake_client, {"OPENAI_API_KEY": "sk-relay"})
+    assert "OPENAI_API_KEY" in message
     assert "ssh.example.com" in message
 
 

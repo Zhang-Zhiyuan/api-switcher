@@ -38,6 +38,7 @@ class CodexProfile:
     custom_base_url: Optional[str] = None
     custom_name: Optional[str] = None
     custom_wire_api: Optional[str] = None
+    custom_env_key: Optional[str] = None
     custom_requires_openai_auth: bool = False
     disable_response_storage: bool = True
 

@@ -82,7 +82,7 @@ def apply_codex_profile(config: dict, profile) -> dict:
 
             custom["base_url"] = base_url
             custom["name"] = profile.custom_name or (provider.display_name if provider else profile.model_provider)
-            custom["env_key"] = provider.codex_env_key if provider else "OPENAI_API_KEY"
+            custom["env_key"] = ProviderRegistry.get_codex_env_key_for_profile(profile)
             custom["requires_openai_auth"] = profile.custom_requires_openai_auth
 
             wire_api = profile.custom_wire_api or (provider.wire_api if provider else "responses")

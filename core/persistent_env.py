@@ -215,6 +215,15 @@ def _provider_env_key(provider_name: str | None) -> str:
     return PROVIDER_ENV_KEYS.get(str(provider_name or "").strip(), "OPENAI_API_KEY")
 
 
+def _codex_profile_env_key(profile) -> str:
+    try:
+        from core.providers import ProviderRegistry
+
+        return ProviderRegistry.get_codex_env_key_for_profile(profile)
+    except Exception:
+        return _provider_env_key(getattr(profile, "model_provider", None))
+
+
 def _append_source(sources: list[EnvImportSource], seen: set[tuple[str, str, str]], source: EnvImportSource) -> None:
     if not source.value:
         return
@@ -330,14 +339,14 @@ def _profile_sources(sources: list[EnvImportSource], seen: set[tuple[str, str, s
                     details=f"provider={provider}",
                 ),
             )
-            provider_key = _provider_env_key(provider)
-            if provider_key != "OPENAI_API_KEY":
+            codex_env_key = _codex_profile_env_key(profile)
+            if codex_env_key != "OPENAI_API_KEY":
                 _append_source(
                     sources,
                     seen,
                     EnvImportSource(
-                        f"Codex API: {profile.name} -> {provider_key}",
-                        provider_key,
+                        f"Codex API: {profile.name} -> {codex_env_key}",
+                        codex_env_key,
                         token,
                         "profile",
                         details=f"provider={provider}",

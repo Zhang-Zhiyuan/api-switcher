@@ -90,6 +90,7 @@ PROVIDERS = {
         auth_header="Authorization",
         wire_api="chat",
         requires_openai_auth=False,
+        codex_env_key="DEEPSEEK_API_KEY",
         notes="DeepSeek Codex uses the OpenAI-compatible chat endpoint; Claude Code uses the Anthropic-compatible endpoint.",
     ),
     "kimi": ProviderConfig(
@@ -116,6 +117,7 @@ PROVIDERS = {
         auth_header="Authorization",
         wire_api="chat",
         requires_openai_auth=False,
+        codex_env_key="MOONSHOT_API_KEY",
         claude_supported=False,
         notes="Kimi exposes OpenAI-compatible chat APIs. Use https://api.moonshot.cn/v1 instead if your key belongs to the China platform.",
     ),
@@ -141,6 +143,7 @@ PROVIDERS = {
         auth_header="Authorization",
         wire_api="chat",
         requires_openai_auth=False,
+        codex_env_key="ZHIPUAI_API_KEY",
         claude_env={
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "GLM-5.1",
             "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.1",
@@ -234,6 +237,24 @@ class ProviderRegistry:
     def get_codex_base_url(provider_name: str) -> str:
         provider = PROVIDERS.get(provider_name)
         return provider.base_url_for_codex() if provider else ""
+
+    @staticmethod
+    def get_codex_env_key(provider_name: str, custom_env_key: str | None = None, custom_name: str | None = None) -> str:
+        custom = str(custom_env_key or "").strip()
+        if custom:
+            return custom
+        provider = PROVIDERS.get(provider_name)
+        if not provider and custom_name:
+            provider = ProviderRegistry.get_provider_by_display_name(custom_name)
+        return provider.codex_env_key if provider else "OPENAI_API_KEY"
+
+    @staticmethod
+    def get_codex_env_key_for_profile(profile) -> str:
+        return ProviderRegistry.get_codex_env_key(
+            getattr(profile, "model_provider", "openai"),
+            getattr(profile, "custom_env_key", None),
+            getattr(profile, "custom_name", None),
+        )
 
     @staticmethod
     def get_default_model(provider_name: str) -> str:

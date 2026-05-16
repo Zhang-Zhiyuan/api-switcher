@@ -1,6 +1,8 @@
 import logging
+import os
 
 from core import backup_manager, parser, toml_parser, auth_parser, vscode_parser, profile_manager, security
+from core.providers import ProviderRegistry
 from core.usage_recorder import usage_recorder
 
 logger = logging.getLogger(__name__)
@@ -55,10 +57,23 @@ def switch_codex_profile(name: str) -> None:
 
     if not profile_manager.is_third_party_codex_profile(target):
         raise ValueError("只能切换第三方 Codex API 配置")
-    if not security.get_secret(target.api_key_ref):
+    api_key = security.get_secret(target.api_key_ref)
+    if not api_key:
         raise ValueError("Codex API 配置需要 API Key")
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
+
+    env_key = ProviderRegistry.get_codex_env_key_for_profile(target)
+    os.environ[env_key] = api_key
+    if os.name == "nt":
+        from core import persistent_env
+
+        try:
+            persistent_env.set_local_user_env({env_key: api_key})
+        except Exception as e:
+            raise RuntimeError(f"写入 Codex API 环境变量 {env_key} 失败: {e}") from e
+    else:
+        logger.warning("Local persistent env write skipped on non-Windows platform for %s", env_key)
 
     # Update config.toml
     config = toml_parser.read_codex_config()

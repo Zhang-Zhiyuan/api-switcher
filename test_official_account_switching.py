@@ -1,10 +1,11 @@
 import base64
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
 
-from core import auth_parser, backup_manager, parser, profile_manager, security, switcher, toml_parser
+from core import auth_parser, backup_manager, parser, persistent_env, profile_manager, security, switcher, toml_parser
 from core.providers import ProviderRegistry
 
 
@@ -149,6 +150,54 @@ def test_import_current_api_configs_use_station_names(isolated_accounts):
     codex_profile = profile_manager.import_current_codex()
     assert codex_profile is not None
     assert codex_profile.name == "Codex-KiloCode-中转-gpt-5.5"
+
+
+def test_switch_codex_profile_writes_matching_environment_key(isolated_accounts, monkeypatch):
+    from models.profile import CodexProfile
+
+    written_env = {}
+    monkeypatch.setattr(persistent_env, "set_local_user_env", lambda data: written_env.update(data))
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+        )
+    )
+
+    switcher.switch_codex_profile("deepseek")
+
+    config = toml_parser.read_codex_config()
+    auth = auth_parser.read_codex_auth()
+    assert config["model_providers"]["deepseek"]["env_key"] == "DEEPSEEK_API_KEY"
+    assert auth["OPENAI_API_KEY"] == "sk-deepseek"
+    if os.name == "nt":
+        assert written_env == {"DEEPSEEK_API_KEY": "sk-deepseek"}
+    assert os.environ["DEEPSEEK_API_KEY"] == "sk-deepseek"
+
+
+def test_import_current_codex_can_read_key_from_config_env_key(isolated_accounts, monkeypatch):
+    monkeypatch.setenv("RELAY_API_KEY", "relay-key")
+    toml_parser.write_codex_config({
+        "model": "relay-model",
+        "model_provider": "relay",
+        "model_providers": {
+            "relay": {
+                "name": "Relay",
+                "base_url": "https://relay.example.com/v1",
+                "env_key": "RELAY_API_KEY",
+            }
+        },
+    })
+    auth_parser.write_codex_auth({})
+
+    codex_profile = profile_manager.import_current_codex()
+
+    assert codex_profile is not None
+    assert codex_profile.custom_env_key == "RELAY_API_KEY"
+    assert security.get_secret(codex_profile.api_key_ref) == "relay-key"
 
 
 def test_import_current_accounts_use_human_identity_names(isolated_accounts):

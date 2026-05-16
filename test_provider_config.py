@@ -34,6 +34,11 @@ def check_codex_provider(provider_id, model, base_url, wire_api, writes_effort):
     assert_equal(config["model_provider"], provider_id, f"{provider_id} provider id")
     assert_equal(config["model_providers"][provider_id]["base_url"], base_url, f"{provider_id} base_url")
     assert_equal(config["model_providers"][provider_id]["wire_api"], wire_api, f"{provider_id} wire_api")
+    assert_equal(
+        config["model_providers"][provider_id]["env_key"],
+        ProviderRegistry.get_provider(provider_id).codex_env_key,
+        f"{provider_id} env_key",
+    )
 
     has_effort = "model_reasoning_effort" in config
     assert_equal(has_effort, writes_effort, f"{provider_id} reasoning effort presence")

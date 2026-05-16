@@ -277,6 +277,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._add_field(parent, "自定义端点", "custom_base_url", p.custom_base_url if p else "")
         self._add_field(parent, "自定义名称", "custom_name", p.custom_name if p else "")
         self._add_field(parent, "Wire API", "custom_wire_api", p.custom_wire_api if p else "responses")
+        self._add_field(parent, "环境变量名", "custom_env_key", p.custom_env_key if p else "OPENAI_API_KEY")
 
         self._add_field(parent, "审批策略", "approval_policy", ["never", "auto", "manual"], "combo")
         if p:
@@ -303,6 +304,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._fields["custom_name"][0].insert(0, p.custom_name or "")
                 self._fields["custom_wire_api"][0].delete(0, "end")
                 self._fields["custom_wire_api"][0].insert(0, p.custom_wire_api or "responses")
+                self._fields["custom_env_key"][0].delete(0, "end")
+                self._fields["custom_env_key"][0].insert(0, p.custom_env_key or ProviderRegistry.get_codex_env_key_for_profile(p))
 
     def _get_value(self, key):
         widget, ftype = self._fields[key]
@@ -333,7 +336,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             parts.append("该 provider 不暴露推理力度；保存时会自动忽略推理力度字段。")
 
         if is_codex:
-            parts.append(f"Codex wire_api: {provider.wire_api}。")
+            parts.append(f"Codex wire_api: {provider.wire_api}；默认环境变量: {provider.codex_env_key}。")
         if provider.name == "kimi":
             parts.append("Kimi 国际平台默认使用 .ai；中国平台密钥可把端点改为 https://api.moonshot.cn/v1。")
         if provider.name == "glm":
@@ -429,6 +432,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         if "custom_wire_api" in self._fields:
             self._fields["custom_wire_api"][0].delete(0, "end")
             self._fields["custom_wire_api"][0].insert(0, provider.wire_api)
+        if "custom_env_key" in self._fields:
+            self._fields["custom_env_key"][0].delete(0, "end")
+            self._fields["custom_env_key"][0].insert(0, provider.codex_env_key)
         if "model" in self._fields:
             if provider.supported_models:
                 self._fields["model"][0].configure(values=provider.supported_models)
@@ -645,6 +651,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 data["custom_base_url"] = data.get("custom_base_url") or provider.base_url_for_codex()
                 data["custom_name"] = data.get("custom_name") or provider.display_name
                 data["custom_wire_api"] = data.get("custom_wire_api") or provider.wire_api
+                data["custom_env_key"] = data.get("custom_env_key") or provider.codex_env_key
                 data["custom_requires_openai_auth"] = provider.requires_openai_auth
             else:
                 data["model_provider"] = "custom"
