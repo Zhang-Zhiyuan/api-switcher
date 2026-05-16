@@ -272,6 +272,69 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
     assert "ssh.example.com" in message
 
 
+def test_ssh_connect_reconnects_when_cached_profile_details_change(isolated_ssh, monkeypatch):
+    import core.ssh_manager as ssh_core
+
+    class _ActiveTransport:
+        def is_active(self):
+            return True
+
+    class _CachedSSHClient:
+        def __init__(self):
+            self.closed = False
+
+        def get_transport(self):
+            return _ActiveTransport()
+
+        def close(self):
+            self.closed = True
+
+    class _ConnectingSSHClient:
+        instances = []
+
+        def __init__(self):
+            self.kwargs = None
+            self.instances.append(self)
+
+        def set_missing_host_key_policy(self, _policy):
+            pass
+
+        def connect(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_transport(self):
+            return _ActiveTransport()
+
+    security.set_secret("ssh:remote:password", "secret-password")
+    manager = SSHManager()
+    old_profile = SSHProfile(
+        name="remote",
+        host="old.example.com",
+        username="root",
+        auth_type="password",
+        password_ref="ssh:remote:password",
+    )
+    new_profile = SSHProfile(
+        name="remote",
+        host="new.example.com",
+        username="root",
+        auth_type="password",
+        password_ref="ssh:remote:password",
+    )
+    cached_client = _CachedSSHClient()
+    manager._clients["remote"] = cached_client
+    manager._client_signatures["remote"] = manager._connection_signature(old_profile)
+
+    monkeypatch.setattr(ssh_core.paramiko, "SSHClient", _ConnectingSSHClient)
+
+    client = manager.connect(new_profile, timeout=1, max_retries=1)
+
+    assert cached_client.closed
+    assert client.kwargs["hostname"] == "new.example.com"
+    assert manager._clients["remote"] is client
+    assert manager._client_signatures["remote"] == manager._connection_signature(new_profile)
+
+
 class _FakeChannel:
     def settimeout(self, timeout):
         self.timeout = timeout

@@ -16,25 +16,47 @@ class SSHManager:
 
     def __init__(self):
         self._clients: dict[str, paramiko.SSHClient] = {}
+        self._client_signatures: dict[str, tuple] = {}
+
+    @staticmethod
+    def _connection_signature(profile: SSHProfile) -> tuple:
+        """Return fields that identify the remote endpoint and auth material."""
+        return (
+            str(profile.host or "").strip(),
+            str(profile.port or "").strip(),
+            str(profile.username or "").strip(),
+            str(profile.auth_type or "").strip(),
+            str(profile.private_key_path or "").strip(),
+            str(profile.private_key_passphrase_ref or "").strip(),
+            str(profile.password_ref or "").strip(),
+        )
 
     def connect(self, profile: SSHProfile, timeout: int = 10, max_retries: int = 3) -> paramiko.SSHClient:
         """Establish SSH connection with retry mechanism."""
+        signature = self._connection_signature(profile)
+
         # Check if already connected
         if profile.name in self._clients:
             client = self._clients[profile.name]
             try:
                 transport = client.get_transport()
-                if transport and transport.is_active():
+                if (
+                    transport
+                    and transport.is_active()
+                    and self._client_signatures.get(profile.name) == signature
+                ):
                     logger.debug(f"Reusing existing connection to {profile.host}")
                     return client
+                logger.debug(f"Cached SSH connection for {profile.name} is stale, reconnecting")
             except Exception as e:
                 logger.debug(f"Existing connection invalid: {e}")
-                # Clean up invalid connection
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                del self._clients[profile.name]
+            # Clean up invalid or stale connection
+            try:
+                client.close()
+            except Exception:
+                pass
+            del self._clients[profile.name]
+            self._client_signatures.pop(profile.name, None)
 
         # Validate profile
         if not profile.host or not profile.host.strip():
@@ -106,6 +128,7 @@ class SSHManager:
                     raise RuntimeError("连接建立后立即失效")
 
                 self._clients[profile.name] = client
+                self._client_signatures[profile.name] = signature
                 logger.info(f"Successfully connected to {profile.host} as {profile.username}")
                 return client
 
@@ -146,6 +169,7 @@ class SSHManager:
                 logger.warning(f"Error closing connection to {name}: {e}")
             finally:
                 del self._clients[name]
+                self._client_signatures.pop(name, None)
 
     def disconnect_all(self):
         """Disconnect all clients."""

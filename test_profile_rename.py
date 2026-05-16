@@ -30,6 +30,29 @@ def _store_names(key: str) -> list[str]:
     return [item["name"] for item in data[key]]
 
 
+def test_profile_store_replace_retries_transient_permission_error(tmp_path, monkeypatch):
+    source = tmp_path / "profiles.tmp"
+    target = tmp_path / "profiles.json"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+    original_replace = type(source).replace
+    attempts = {"count": 0}
+
+    def flaky_replace(self, destination):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("temporarily locked")
+        return original_replace(self, destination)
+
+    monkeypatch.setattr(type(source), "replace", flaky_replace)
+    monkeypatch.setattr(profile_manager.time, "sleep", lambda _seconds: None)
+
+    profile_manager._replace_with_retry(source, target, attempts=3)
+
+    assert attempts["count"] == 2
+    assert target.read_text(encoding="utf-8") == "new"
+
+
 def test_renaming_claude_profile_replaces_old_entry_and_keeps_shared_secret(isolated_profile_store):
     _secret_store, deleted_refs = isolated_profile_store
     old = ClaudeProfile(name="Old Claude", auth_token_ref="claude:old:auth_token", base_url="https://old.example")

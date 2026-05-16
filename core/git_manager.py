@@ -288,13 +288,43 @@ class GitManager:
             logger.debug(f"获取提交记录失败: {e}")
             return []
 
-    def rollback_to_commit(self, commit_hash: str, hard: bool = False) -> Tuple[bool, str]:
+    def _create_safety_tag(self, commit_hash: str) -> Tuple[bool, str]:
+        """为安全快照创建一个稳定可找回的标签"""
+        base_tag = f"api-switcher-safety-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+        for index in range(100):
+            tag_name = base_tag if index == 0 else f"{base_tag}-{index:02d}"
+            result = subprocess.run(
+                ["git", "tag", tag_name, commit_hash],
+                cwd=self.project_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5
+            )
+
+            if result.returncode == 0:
+                return True, tag_name
+
+            if "already exists" not in result.stderr:
+                return False, result.stderr.strip() or f"无法创建标签: {tag_name}"
+
+        return False, "无法创建唯一的安全快照标签"
+
+    def rollback_to_commit(
+        self,
+        commit_hash: str,
+        hard: bool = False,
+        create_safety_snapshot: bool = True
+    ) -> Tuple[bool, str]:
         """
         回滚到指定提交
 
         Args:
             commit_hash: 提交hash
             hard: 是否硬回滚（丢弃所有更改）
+            create_safety_snapshot: 回滚前是否自动保存当前未提交更改
 
         Returns:
             (成功, 消息)
@@ -314,6 +344,21 @@ class GitManager:
             if check_result.returncode != 0:
                 return False, f"提交不存在: {commit_hash}"
 
+            safety_tag = None
+            if create_safety_snapshot and self.has_changes():
+                snapshot_message = f"[rollback] Safety snapshot before reset to {commit_hash}"
+                snapshot_success, snapshot_result = self.create_snapshot(
+                    message=snapshot_message,
+                    tag="rollback"
+                )
+                if not snapshot_success:
+                    return False, f"回滚前安全快照失败: {snapshot_result}"
+                if snapshot_result != "没有需要提交的更改":
+                    tag_success, tag_result = self._create_safety_tag(snapshot_result)
+                    if not tag_success:
+                        return False, f"安全快照标签创建失败: {tag_result}"
+                    safety_tag = tag_result
+
             # 回滚
             reset_type = "--hard" if hard else "--soft"
             result = subprocess.run(
@@ -330,6 +375,8 @@ class GitManager:
                 return False, f"回滚失败: {result.stderr}"
 
             logger.info(f"回滚成功: {commit_hash} (hard={hard})")
+            if safety_tag:
+                return True, f"已回滚到 {commit_hash}（回滚前安全快照: {safety_tag}）"
             return True, f"已回滚到 {commit_hash}"
 
         except subprocess.TimeoutExpired:

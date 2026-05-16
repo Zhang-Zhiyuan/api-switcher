@@ -47,7 +47,8 @@ function Create-GitSnapshot {{
 
         # 检查git配置
         $userName = git config user.name 2>$null
-        if ([string]::IsNullOrWhiteSpace($userName)) {{
+        $userEmail = git config user.email 2>$null
+        if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($userEmail)) {{
             git config user.name "API-Switcher-Auto" 2>&1 | Out-Null
             git config user.email "auto@api-switcher.local" 2>&1 | Out-Null
             Write-Log "Configured git user" "INFO"
@@ -143,24 +144,37 @@ try {{
     $statePath = Join-Path $stateDir "auto_continue_stop_state.json"
     $lockPath = "$statePath.lock"
 
-    # Simple file-based locking (wait up to 2 seconds)
+    # Exclusive file-based locking (wait up to 2 seconds)
+    $lockStream = $null
     $lockWait = 0
-    while ((Test-Path $lockPath) -and $lockWait -lt 20) {{
-        Start-Sleep -Milliseconds 100
-        $lockWait++
+    while ($null -eq $lockStream -and $lockWait -lt 20) {{
+        try {{
+            $lockStream = [System.IO.File]::Open(
+                $lockPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+        }} catch [System.IO.IOException] {{
+            try {{
+                if ((Test-Path $lockPath) -and ((Get-Date) - (Get-Item $lockPath).LastWriteTime).TotalSeconds -gt 60) {{
+                    Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
+                    continue
+                }}
+            }} catch {{
+                # Ignore stale-lock inspection errors and wait.
+            }}
+            Start-Sleep -Milliseconds 100
+            $lockWait++
+        }} catch {{
+            Write-Log "Failed to create lock file: $_" "WARN"
+            exit 0
+        }}
     }}
 
-    if ($lockWait -ge 20) {{
+    if ($null -eq $lockStream) {{
         Write-Log "Failed to acquire state file lock" "WARN"
         exit 0  # Allow stop if can't acquire lock
-    }}
-
-    # Create lock file
-    try {{
-        New-Item -Path $lockPath -ItemType File -Force | Out-Null
-    }} catch {{
-        Write-Log "Failed to create lock file: $_" "WARN"
-        exit 0
     }}
 
     try {{
@@ -319,6 +333,13 @@ try {{
 
     }} finally {{
         # Always remove lock file
+        if ($null -ne $lockStream) {{
+            try {{
+                $lockStream.Dispose()
+            }} catch {{
+                # Ignore lock stream disposal errors
+            }}
+        }}
         if (Test-Path $lockPath) {{
             try {{
                 Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue

@@ -281,6 +281,7 @@ def test_script_generation():
     assert "connection termination" in claude_script
     assert "backend-api/codex/responses/compact" in claude_script
     assert "压缩任务连接中断" in claude_script
+    assert "git config user.email" in claude_script
 
     print("\n生成 Codex CLI 错误恢复脚本...")
     codex_script = generate_codex_error_recovery_script(settings_path)
@@ -301,6 +302,7 @@ def test_script_generation():
     assert "backend-api/codex/responses/compact" in codex_script
     assert 'commands = @("/compress", "继续")' in codex_script
     assert "压缩任务连接中断" in codex_script
+    assert "git config user.email" in codex_script
 
 
 def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
@@ -320,6 +322,12 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
         assert "disconnect/reset before headers" in script
         assert "connection termination" in script
         assert "backend-api/codex/responses/compact" in script
+
+    assert "git config user.email" in local_script
+    assert '["git", "config", "user.email"]' in remote_script
+    assert "[System.IO.FileMode]::CreateNew" in local_script
+    assert "New-Item -Path $lockPath -ItemType File -Force" not in local_script
+    assert "os.O_CREAT | os.O_EXCL | os.O_WRONLY" in remote_script
 
 
 def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):

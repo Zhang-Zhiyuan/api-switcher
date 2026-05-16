@@ -48,7 +48,8 @@ function Create-GitSnapshot {{
 
         # 检查git配置
         $userName = git config user.name 2>$null
-        if ([string]::IsNullOrWhiteSpace($userName)) {{
+        $userEmail = git config user.email 2>$null
+        if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($userEmail)) {{
             git config user.name "API-Switcher-Auto" 2>&1 | Out-Null
             git config user.email "auto@api-switcher.local" 2>&1 | Out-Null
             Write-Log "Configured git user" "INFO"
@@ -582,7 +583,8 @@ function Create-GitSnapshot {{
         git add -A 2>&1 | Out-Null
 
         $userName = git config user.name 2>$null
-        if ([string]::IsNullOrWhiteSpace($userName)) {{
+        $userEmail = git config user.email 2>$null
+        if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($userEmail)) {{
             git config user.name "API-Switcher-Auto" 2>&1 | Out-Null
             git config user.email "auto@api-switcher.local" 2>&1 | Out-Null
             Write-Log "Configured git user" "INFO"

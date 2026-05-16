@@ -654,12 +654,21 @@ def run_git_snapshot():
             text=True,
             timeout=5,
         )
-        if not username.stdout.strip():
+        email = subprocess.run(
+            ["git", "config", "user.email"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        if not username.stdout.strip() or not email.stdout.strip():
             run(["git", "config", "user.name", "API-Switcher-Auto"], timeout=5)
             run(["git", "config", "user.email", "auto@api-switcher.local"], timeout=5)
 
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        run(["git", "commit", "-m", f"[git-snapshot] {stamp}"], timeout=30)
+        commit = run(["git", "commit", "-m", f"[git-snapshot] {stamp}"], timeout=30)
+        if commit.returncode != 0:
+            log("Git snapshot commit did not complete", "WARN")
     except Exception as exc:
         log(f"Git snapshot failed: {exc}", "WARN")
 
@@ -1176,7 +1185,7 @@ def install_remote_git_snapshot(
         raise
 
     logger.info(f"Installed remote Git snapshot hook for {provider} on {ssh_profile.host}")
-    return f"Installed {_provider_label(provider)} remote Git snapshot hook on {ssh_profile.host}"
+    return f"已在 {ssh_profile.host} 安装 {_provider_label(provider)} 远端 Git 快照 Hook"
 
 
 def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
