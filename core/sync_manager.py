@@ -5,10 +5,9 @@ from core.ssh_manager import ssh_manager
 logger = logging.getLogger(__name__)
 
 
-ROOT_BYPASS_WARNING = (
-    "提示：目标 SSH 用户是 root，而 Claude Code 禁止 root/sudo 使用 "
-    "bypassPermissions（--dangerously-skip-permissions）。API 已同步；"
-    "请在远端 VS Code 将权限模式改为默认/确认模式，或改用非 root 用户运行 Claude Code。"
+ROOT_BYPASS_ADJUSTED_MESSAGE = (
+    "已兼容 root 登录：Claude Code 禁止 root/sudo 使用 "
+    "bypassPermissions（--dangerously-skip-permissions），已自动将远端权限模式改为 default。"
 )
 
 
@@ -24,12 +23,28 @@ def _connect_ssh(ssh_name: str):
     return ssh_profile, ssh_manager.connect(ssh_profile)
 
 
-def _claude_root_bypass_warning(ssh_profile, claude_profile) -> str:
+def _is_root_ssh_user(ssh_profile) -> bool:
     username = str(getattr(ssh_profile, "username", "") or "").strip().lower()
-    permission_mode = str(getattr(claude_profile, "permissions_mode", "") or "").strip()
-    if username == "root" and permission_mode == "bypassPermissions":
-        return ROOT_BYPASS_WARNING
-    return ""
+    return username == "root"
+
+
+def _make_claude_settings_root_safe(settings: dict, ssh_profile) -> tuple[dict, bool]:
+    if not _is_root_ssh_user(ssh_profile):
+        return settings, False
+
+    settings = dict(settings)
+    permissions = settings.get("permissions")
+    if not isinstance(permissions, dict):
+        return settings, False
+
+    if permissions.get("defaultMode") != "bypassPermissions":
+        return settings, False
+
+    permissions = dict(permissions)
+    permissions["defaultMode"] = "default"
+    settings["permissions"] = permissions
+    settings["skipDangerousModePermissionPrompt"] = False
+    return settings, True
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -44,6 +59,7 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
     settings = remote_config.read_remote_claude_settings(client, ssh_profile) or {}
     settings = parser.apply_claude_profile(settings, claude_profile)
+    settings, root_adjusted = _make_claude_settings_root_safe(settings, ssh_profile)
     config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     config = parser.apply_claude_config(config, claude_profile)
 
@@ -52,8 +68,7 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
     logger.info(f"Synced Claude API profile '{claude_name}' to {ssh_profile.host}")
     message = f"已同步 Claude API '{claude_name}' 到 {ssh_profile.host}"
-    warning = _claude_root_bypass_warning(ssh_profile, claude_profile)
-    return f"{message} | {warning}" if warning else message
+    return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted else message
 
 
 def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
@@ -66,13 +81,16 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
     remote_config.write_remote_claude_credentials(client, credentials, ssh_profile)
 
     settings = remote_config.read_remote_claude_settings(client, ssh_profile) or {}
-    remote_config.write_remote_claude_settings(client, parser.clear_claude_api_overrides(settings), ssh_profile)
+    settings = parser.clear_claude_api_overrides(settings)
+    settings, root_adjusted = _make_claude_settings_root_safe(settings, ssh_profile)
+    remote_config.write_remote_claude_settings(client, settings, ssh_profile)
 
     config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     remote_config.write_remote_claude_config(client, parser.clear_claude_config_auth(config), ssh_profile)
 
     logger.info(f"Synced Claude account '{account_name}' to {ssh_profile.host}")
-    return f"已同步 Claude 账号 '{account_name}' 到 {ssh_profile.host}"
+    message = f"已同步 Claude 账号 '{account_name}' 到 {ssh_profile.host}"
+    return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted else message
 
 
 def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
