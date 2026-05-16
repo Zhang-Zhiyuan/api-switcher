@@ -22,8 +22,8 @@ class GitManager:
         """
         self.project_path = project_path or Path.cwd()
 
-    def is_git_repo(self) -> bool:
-        """检查项目目录本身是否是git仓库根目录"""
+    def _repo_root(self) -> Path | None:
+        """返回当前目录所在的 Git 仓库根目录；不存在仓库时返回 None。"""
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
@@ -35,12 +35,88 @@ class GitManager:
                 timeout=5
             )
             if result.returncode != 0:
-                return False
-            repo_root = Path(result.stdout.strip()).resolve()
-            return repo_root == self.project_path.resolve()
+                return None
+            return Path(result.stdout.strip()).resolve()
         except Exception as e:
             logger.debug(f"检查git仓库失败: {e}")
-            return False
+            return None
+
+    def _git_cwd(self) -> Path:
+        """Git 命令执行目录：已有仓库用仓库根，新项目用项目目录。"""
+        return self._repo_root() or self.project_path
+
+    def _git_config_value(self, key: str, local_only: bool = False) -> str:
+        """读取 Git 配置值（优先本仓库，必要时会读到全局配置）"""
+        command = ["git", "config", "--get", key]
+        if local_only:
+            command = ["git", "config", "--local", "--get", key]
+        result = subprocess.run(
+            command,
+            cwd=self._git_cwd(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    def _set_local_git_config(self, key: str, value: str) -> None:
+        """写入当前仓库的本地 Git 配置"""
+        subprocess.run(
+            ["git", "config", "--local", key, value],
+            cwd=self._git_cwd(),
+            capture_output=True,
+            timeout=5,
+            check=True
+        )
+
+    def _ensure_local_identity(self) -> None:
+        """
+        确保本地快照可以提交。
+
+        已有仓库或已配置全局实名身份时保持不动；只有完全缺少身份时，才写入
+        API Switcher 的本地兜底身份。
+        """
+        user_name = self._git_config_value("user.name")
+        user_email = self._git_config_value("user.email")
+
+        if not user_name:
+            self._set_local_git_config("user.name", "API-Switcher-Auto")
+        if not user_email:
+            self._set_local_git_config("user.email", "auto@api-switcher.local")
+
+    def _resolve_commit(self, commit_hash: str) -> Tuple[bool, str]:
+        """解析 commit/tag/引用为具体 commit hash。"""
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{commit_hash}^{{commit}}"],
+            cwd=self._git_cwd(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5
+        )
+        if result.returncode != 0:
+            return False, result.stderr.strip() or f"提交不存在: {commit_hash}"
+        return True, result.stdout.strip()
+
+    def _current_head(self) -> str | None:
+        """获取当前 HEAD commit。空仓库返回 None。"""
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=self._git_cwd(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def is_git_repo(self) -> bool:
+        """检查当前目录是否已有可用 Git 仓库（包含父级仓库）。"""
+        return self._repo_root() is not None
 
     def init_repo(self) -> Tuple[bool, str]:
         """
@@ -50,8 +126,9 @@ class GitManager:
             (成功, 消息)
         """
         try:
-            if self.is_git_repo():
-                return True, "已经是git仓库"
+            repo_root = self._repo_root()
+            if repo_root:
+                return True, f"已使用现有 Git 仓库: {repo_root}"
 
             # 初始化仓库
             result = subprocess.run(
@@ -66,6 +143,8 @@ class GitManager:
 
             if result.returncode != 0:
                 return False, f"初始化失败: {result.stderr}"
+
+            self._ensure_local_identity()
 
             # 创建.gitignore（如果不存在）
             gitignore_path = self.project_path / ".gitignore"
@@ -97,6 +176,7 @@ class GitManager:
                     "venv/",
                     "ENV/",
                     "env/",
+                    ".venv/",
                     "",
                     "# IDE",
                     ".vscode/",
@@ -112,6 +192,24 @@ class GitManager:
                     "# Logs",
                     "*.log",
                     "logs/",
+                    "",
+                    "# Dependency caches / generated output",
+                    "node_modules/",
+                    ".next/",
+                    ".nuxt/",
+                    "target/",
+                    ".cache/",
+                    ".pytest_cache/",
+                    ".ruff_cache/",
+                    ".mypy_cache/",
+                    "coverage/",
+                    ".coverage",
+                    "",
+                    "# Local secrets",
+                    ".env",
+                    ".env.*",
+                    "!.env.example",
+                    "!.env.sample",
                 ]
                 gitignore_path.write_text("\n".join(default_ignores), encoding="utf-8")
 
@@ -130,7 +228,7 @@ class GitManager:
             # 检查工作区和暂存区
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
-                cwd=self.project_path,
+                cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -167,11 +265,13 @@ class GitManager:
             # 添加所有更改
             subprocess.run(
                 ["git", "add", "-A"],
-                cwd=self.project_path,
+                cwd=self._git_cwd(),
                 capture_output=True,
                 timeout=10,
                 check=True
             )
+
+            self._ensure_local_identity()
 
             # 生成提交消息
             if message is None:
@@ -181,7 +281,7 @@ class GitManager:
             # 提交
             result = subprocess.run(
                 ["git", "commit", "-m", message],
-                cwd=self.project_path,
+                cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -192,23 +292,11 @@ class GitManager:
             if result.returncode != 0:
                 # 可能是没有配置user.name/user.email
                 if "user.name" in result.stderr or "user.email" in result.stderr:
-                    # 设置默认配置
-                    subprocess.run(
-                        ["git", "config", "user.name", "API-Switcher-Auto"],
-                        cwd=self.project_path,
-                        capture_output=True,
-                        timeout=5
-                    )
-                    subprocess.run(
-                        ["git", "config", "user.email", "auto@api-switcher.local"],
-                        cwd=self.project_path,
-                        capture_output=True,
-                        timeout=5
-                    )
+                    self._ensure_local_identity()
                     # 重试提交
                     result = subprocess.run(
                         ["git", "commit", "-m", message],
-                        cwd=self.project_path,
+                        cwd=self._git_cwd(),
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
@@ -222,7 +310,7 @@ class GitManager:
             # 获取commit hash
             hash_result = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
-                cwd=self.project_path,
+                cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -258,7 +346,7 @@ class GitManager:
 
             result = subprocess.run(
                 ["git", "log", f"-{count}", "--pretty=format:%h|%s|%an|%ar"],
-                cwd=self.project_path,
+                cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -296,7 +384,7 @@ class GitManager:
             tag_name = base_tag if index == 0 else f"{base_tag}-{index:02d}"
             result = subprocess.run(
                 ["git", "tag", tag_name, commit_hash],
-                cwd=self.project_path,
+                cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -333,16 +421,11 @@ class GitManager:
             if not self.is_git_repo():
                 return False, "不是git仓库"
 
-            # 检查commit是否存在
-            check_result = subprocess.run(
-                ["git", "cat-file", "-t", commit_hash],
-                cwd=self.project_path,
-                capture_output=True,
-                timeout=5
-            )
-
-            if check_result.returncode != 0:
+            target_success, target_commit = self._resolve_commit(commit_hash)
+            if not target_success:
                 return False, f"提交不存在: {commit_hash}"
+
+            current_head = self._current_head()
 
             safety_tag = None
             if create_safety_snapshot and self.has_changes():
@@ -358,12 +441,17 @@ class GitManager:
                     if not tag_success:
                         return False, f"安全快照标签创建失败: {tag_result}"
                     safety_tag = tag_result
+            elif create_safety_snapshot and current_head and current_head != target_commit:
+                tag_success, tag_result = self._create_safety_tag(current_head)
+                if not tag_success:
+                    return False, f"回滚前版本标签创建失败: {tag_result}"
+                safety_tag = tag_result
 
             # 回滚
             reset_type = "--hard" if hard else "--soft"
             result = subprocess.run(
-                ["git", "reset", reset_type, commit_hash],
-                cwd=self.project_path,
+                ["git", "reset", reset_type, target_commit],
+                cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

@@ -132,8 +132,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
 
         git_help_text = ctk.CTkLabel(
             git_help_frame,
-            text="自动为项目创建 Git 快照，方便回滚到任意版本。\n"
-                 "如果项目不是 Git 仓库，会自动初始化。",
+            text="自动为项目创建本地 Git 快照，方便回滚到任意版本。\n"
+                 "已有仓库会保留 remote 和实名身份；没有仓库时才自动初始化。",
             font=font(11),
             text_color=COLORS["muted"],
             justify="left",

@@ -479,6 +479,40 @@ import sys
 import time
 
 
+DEFAULT_GITIGNORE_LINES = [
+    "# Python",
+    "__pycache__/",
+    "*.py[cod]",
+    "build/",
+    "dist/",
+    ".venv/",
+    "venv/",
+    "env/",
+    "",
+    "# Dependency caches / generated output",
+    "node_modules/",
+    ".next/",
+    ".nuxt/",
+    "target/",
+    ".cache/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    "coverage/",
+    ".coverage",
+    "",
+    "# Local secrets",
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.env.sample",
+    "",
+    "# Logs",
+    "*.log",
+    "logs/",
+]
+
+
 def log(message, level="INFO"):
     ts = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     print(f"{ts} [{level}] {message}", file=sys.stderr)
@@ -625,6 +659,18 @@ def write_jsonl(path, data):
         log(f"Failed to write log: {exc}", "WARN")
 
 
+def ensure_gitignore():
+    path = os.path.join(os.getcwd(), ".gitignore")
+    if os.path.exists(path):
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(DEFAULT_GITIGNORE_LINES) + "\n")
+        log("Created local .gitignore for Git snapshots")
+    except Exception as exc:
+        log(f"Failed to create local .gitignore: {exc}", "WARN")
+
+
 def run_git_snapshot():
     if not shutil.which("git"):
         return
@@ -633,8 +679,12 @@ def run_git_snapshot():
         return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
 
     try:
+        initialized_repo = False
         if run(["git", "rev-parse", "--git-dir"]).returncode != 0:
-            run(["git", "init"])
+            initialized_repo = run(["git", "init"]).returncode == 0
+
+        if initialized_repo:
+            ensure_gitignore()
 
         status = subprocess.run(
             ["git", "status", "--porcelain"],

@@ -24,16 +24,67 @@ function Write-Log {{
 }}
 
 # Git快照函数
+function Ensure-LocalGitIgnore {{
+    try {{
+        $gitignorePath = Join-Path (Get-Location) ".gitignore"
+        if (Test-Path $gitignorePath) {{
+            return
+        }}
+
+        @(
+            "# Python",
+            "__pycache__/",
+            "*.py[cod]",
+            "build/",
+            "dist/",
+            ".venv/",
+            "venv/",
+            "env/",
+            "",
+            "# Dependency caches / generated output",
+            "node_modules/",
+            ".next/",
+            ".nuxt/",
+            "target/",
+            ".cache/",
+            ".pytest_cache/",
+            ".ruff_cache/",
+            ".mypy_cache/",
+            "coverage/",
+            ".coverage",
+            "",
+            "# Local secrets",
+            ".env",
+            ".env.*",
+            "!.env.example",
+            "!.env.sample",
+            "",
+            "# Logs",
+            "*.log",
+            "logs/"
+        ) | Set-Content -Path $gitignorePath -Encoding UTF8
+        Write-Log "Created local .gitignore for Git snapshots" "INFO"
+    }} catch {{
+        Write-Log "Failed to create local .gitignore: $_" "WARN"
+    }}
+}}
+
 function Create-GitSnapshot {{
     param([string]$Message = "Auto snapshot before error recovery")
 
     try {{
         # 检查是否是git仓库
         $isGitRepo = git rev-parse --git-dir 2>$null
+        $initializedRepo = $false
         if (-not $isGitRepo) {{
             # 初始化git仓库
             git init 2>&1 | Out-Null
+            $initializedRepo = $true
             Write-Log "Initialized git repository" "INFO"
+        }}
+
+        if ($initializedRepo) {{
+            Ensure-LocalGitIgnore
         }}
 
         # 检查是否有更改
@@ -564,14 +615,65 @@ function Write-Log {{
 }}
 
 # Git快照函数
+function Ensure-LocalGitIgnore {{
+    try {{
+        $gitignorePath = Join-Path (Get-Location) ".gitignore"
+        if (Test-Path $gitignorePath) {{
+            return
+        }}
+
+        @(
+            "# Python",
+            "__pycache__/",
+            "*.py[cod]",
+            "build/",
+            "dist/",
+            ".venv/",
+            "venv/",
+            "env/",
+            "",
+            "# Dependency caches / generated output",
+            "node_modules/",
+            ".next/",
+            ".nuxt/",
+            "target/",
+            ".cache/",
+            ".pytest_cache/",
+            ".ruff_cache/",
+            ".mypy_cache/",
+            "coverage/",
+            ".coverage",
+            "",
+            "# Local secrets",
+            ".env",
+            ".env.*",
+            "!.env.example",
+            "!.env.sample",
+            "",
+            "# Logs",
+            "*.log",
+            "logs/"
+        ) | Set-Content -Path $gitignorePath -Encoding UTF8
+        Write-Log "Created local .gitignore for Git snapshots" "INFO"
+    }} catch {{
+        Write-Log "Failed to create local .gitignore: $_" "WARN"
+    }}
+}}
+
 function Create-GitSnapshot {{
     param([string]$Message = "Auto snapshot before error recovery")
 
     try {{
         $isGitRepo = git rev-parse --git-dir 2>$null
+        $initializedRepo = $false
         if (-not $isGitRepo) {{
             git init 2>&1 | Out-Null
+            $initializedRepo = $true
             Write-Log "Initialized git repository" "INFO"
+        }}
+
+        if ($initializedRepo) {{
+            Ensure-LocalGitIgnore
         }}
 
         $status = git status --porcelain 2>$null

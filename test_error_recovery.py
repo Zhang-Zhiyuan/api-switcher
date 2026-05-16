@@ -282,6 +282,11 @@ def test_script_generation():
     assert "backend-api/codex/responses/compact" in claude_script
     assert "压缩任务连接中断" in claude_script
     assert "git config user.email" in claude_script
+    assert "Ensure-LocalGitIgnore" in claude_script
+    assert "$initializedRepo = $false" in claude_script
+    assert "if ($initializedRepo)" in claude_script
+    assert "node_modules/" in claude_script
+    assert ".env.*" in claude_script
 
     print("\n生成 Codex CLI 错误恢复脚本...")
     codex_script = generate_codex_error_recovery_script(settings_path)
@@ -303,6 +308,11 @@ def test_script_generation():
     assert 'commands = @("/compress", "继续")' in codex_script
     assert "压缩任务连接中断" in codex_script
     assert "git config user.email" in codex_script
+    assert "Ensure-LocalGitIgnore" in codex_script
+    assert "$initializedRepo = $false" in codex_script
+    assert "if ($initializedRepo)" in codex_script
+    assert "node_modules/" in codex_script
+    assert ".env.*" in codex_script
 
 
 def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
@@ -324,7 +334,17 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
         assert "backend-api/codex/responses/compact" in script
 
     assert "git config user.email" in local_script
+    assert "Ensure-LocalGitIgnore" in local_script
+    assert "$initializedRepo = $false" in local_script
+    assert "if ($initializedRepo)" in local_script
+    assert "node_modules/" in local_script
+    assert ".env.*" in local_script
     assert '["git", "config", "user.email"]' in remote_script
+    assert "DEFAULT_GITIGNORE_LINES" in remote_script
+    assert "initialized_repo = False" in remote_script
+    assert "if initialized_repo:" in remote_script
+    assert "node_modules/" in remote_script
+    assert ".env.*" in remote_script
     assert "[System.IO.FileMode]::CreateNew" in local_script
     assert "New-Item -Path $lockPath -ItemType File -Force" not in local_script
     assert "os.O_CREAT | os.O_EXCL | os.O_WRONLY" in remote_script
