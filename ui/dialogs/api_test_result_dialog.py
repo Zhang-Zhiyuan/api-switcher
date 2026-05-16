@@ -1,6 +1,6 @@
 """Dialog for displaying API test results."""
 import customtkinter as ctk
-from ui.theme import COLORS, button_style, center_window, font
+from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, textbox_style
 
 
 class APITestResultDialog(ctk.CTkToplevel):
@@ -11,8 +11,9 @@ class APITestResultDialog(ctk.CTkToplevel):
         self._on_apply_wire_api = on_apply_wire_api
 
         self.title("API 连接测试")
-        self.geometry("500x400")
-        self.resizable(False, False)
+        self.geometry("620x520")
+        self.minsize(520, 420)
+        self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
 
         # Make modal
@@ -30,7 +31,7 @@ class APITestResultDialog(ctk.CTkToplevel):
 
         # Header
         header = ctk.CTkFrame(container, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
+        header.pack(fill="x", pady=(0, 16))
 
         # Icon and title
         if result.success:
@@ -45,7 +46,7 @@ class APITestResultDialog(ctk.CTkToplevel):
         icon_label = ctk.CTkLabel(
             header,
             text=icon,
-            font=font(48, "bold"),
+            font=font(44, "bold"),
             text_color=icon_color
         )
         icon_label.pack()
@@ -63,7 +64,7 @@ class APITestResultDialog(ctk.CTkToplevel):
                 header,
                 text=f"配置: {profile_name}",
                 font=font(12),
-                text_color=COLORS["muted"]
+                text_color=COLORS["muted"],
             )
             profile_label.pack(pady=(5, 0))
 
@@ -75,7 +76,7 @@ class APITestResultDialog(ctk.CTkToplevel):
             border_width=1,
             border_color=COLORS["border_soft"]
         )
-        details_frame.pack(fill="both", expand=True, pady=(0, 20))
+        details_frame.pack(fill="both", expand=True, pady=(0, 16))
 
         # Scrollable frame for details
         scroll_frame = ctk.CTkScrollableFrame(
@@ -107,9 +108,10 @@ class APITestResultDialog(ctk.CTkToplevel):
         if recommended_wire_api:
             self._add_detail_row(scroll_frame, "推荐 Wire API", recommended_wire_api, COLORS["success"])
 
-        # Error details
+        # Error details / benchmark details
         if result.error_details:
-            self._add_detail_row(scroll_frame, "错误详情", result.error_details, COLORS["muted"])
+            detail_label = "测试明细" if recommended_wire_api else "错误详情"
+            self._add_text_detail(scroll_frame, detail_label, result.error_details)
 
         # Recommendations
         if not result.success:
@@ -118,7 +120,7 @@ class APITestResultDialog(ctk.CTkToplevel):
 
             rec_label = ctk.CTkLabel(
                 scroll_frame,
-                text="💡 建议",
+                text="建议",
                 font=font(12, "bold"),
                 text_color=COLORS["text"],
                 anchor="w"
@@ -133,10 +135,11 @@ class APITestResultDialog(ctk.CTkToplevel):
                     font=font(11),
                     text_color=COLORS["muted"],
                     anchor="w",
-                    wraplength=420,
+                    wraplength=500,
                     justify="left"
                 )
                 rec_item.pack(fill="x", pady=2, padx=(10, 0))
+                bind_wraplength(scroll_frame, rec_item, padding=42, min_width=260, max_width=520)
 
         # Buttons
         button_frame = ctk.CTkFrame(container, fg_color="transparent")
@@ -193,10 +196,26 @@ class APITestResultDialog(ctk.CTkToplevel):
             font=font(11),
             text_color=value_color or COLORS["text"],
             anchor="w",
-            wraplength=350,
             justify="left"
         )
         value_widget.pack(side="left", fill="x", expand=True)
+        bind_wraplength(row, value_widget, padding=132, min_width=220, max_width=520)
+
+    def _add_text_detail(self, parent, label: str, value: str) -> None:
+        """Add a compact readonly textbox for multi-line details."""
+        label_widget = ctk.CTkLabel(
+            parent,
+            text=f"{label}:",
+            font=font(11, "bold"),
+            text_color=COLORS["text"],
+            anchor="w",
+        )
+        label_widget.pack(fill="x", pady=(8, 4))
+
+        detail_text = ctk.CTkTextbox(parent, height=96, wrap="word", **textbox_style(monospace=True))
+        detail_text.pack(fill="x", expand=False)
+        detail_text.insert("1.0", value)
+        detail_text.configure(state="disabled")
 
     def _get_recommendations(self, result) -> list:
         """Get recommendations based on test result."""

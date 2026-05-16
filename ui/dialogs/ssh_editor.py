@@ -1,8 +1,10 @@
+import threading
+
 import customtkinter as ctk
 from tkinter import filedialog
 from ui.widgets.masked_entry import MaskedEntry
 from models.profile import SSHProfile
-from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style
+from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 
 
 class SSHEditorDialog(ctk.CTkToplevel):
@@ -19,6 +21,9 @@ class SSHEditorDialog(ctk.CTkToplevel):
 
         self._on_save = on_save
         self._profile = profile
+        self._field_rows = {}
+        self._key_row = None
+        self._test_busy = False
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -57,9 +62,11 @@ class SSHEditorDialog(ctk.CTkToplevel):
             self._fields["auth_type"][0].set(profile.auth_type)
         else:
             self._fields["auth_type"][0].set("key")
+        self._fields["auth_type"][0].configure(command=self._on_auth_type_change)
 
         # Private key path
         key_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        self._key_row = key_row
         key_row.pack(fill="x", pady=5)
         ctk.CTkLabel(
             key_row,
@@ -72,7 +79,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
         self._key_entry = ctk.CTkEntry(key_row, width=296, **input_style())
         if profile and profile.private_key_path:
             self._key_entry.insert(0, profile.private_key_path)
-        self._key_entry.pack(side="left", padx=(0, 5))
+        self._key_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
         ctk.CTkButton(
             key_row,
             text="浏览",
@@ -86,6 +93,17 @@ class SSHEditorDialog(ctk.CTkToplevel):
 
         # Password
         self._add_field(scroll, "登录密码", "password", "", "masked")
+
+        self._auth_hint = ctk.CTkLabel(
+            scroll,
+            text="",
+            text_color=COLORS["muted"],
+            font=font(11),
+            anchor="w",
+            justify="left",
+        )
+        self._auth_hint.pack(fill="x", pady=(0, 6), padx=(128, 0))
+        bind_wraplength(scroll, self._auth_hint, padding=160, min_width=220, max_width=620)
 
         # Remote config directories
         self._add_field(
@@ -118,8 +136,11 @@ class SSHEditorDialog(ctk.CTkToplevel):
             text="",
             text_color=COLORS["muted"],
             font=font(12),
+            anchor="w",
+            justify="left",
         )
-        self._test_result.pack(pady=(0, 5))
+        self._test_result.pack(fill="x", pady=(0, 5))
+        bind_wraplength(scroll, self._test_result, padding=48, min_width=260, max_width=620)
 
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -140,10 +161,12 @@ class SSHEditorDialog(ctk.CTkToplevel):
         ).pack(side="right")
 
         center_window(self, master)
+        self._on_auth_type_change(self._get_value("auth_type"))
 
     def _add_field(self, parent, label, key, value="", field_type="entry"):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
+        self._field_rows[key] = row
         ctk.CTkLabel(
             row,
             text=label,
@@ -174,6 +197,37 @@ class SSHEditorDialog(ctk.CTkToplevel):
         self._fields[key] = (widget, field_type)
         return widget
 
+    def _pack_after(self, row, after_row) -> None:
+        if row is None:
+            return
+        try:
+            row.pack(fill="x", pady=5, after=after_row)
+        except Exception:
+            row.pack(fill="x", pady=5)
+
+    def _on_auth_type_change(self, _value=None):
+        auth_type = self._get_value("auth_type") if "auth_type" in self._fields else "key"
+        auth_row = self._field_rows.get("auth_type")
+        key_passphrase_row = self._field_rows.get("key_passphrase")
+        password_row = self._field_rows.get("password")
+
+        if auth_type == "password":
+            if self._key_row:
+                self._key_row.pack_forget()
+            if key_passphrase_row:
+                key_passphrase_row.pack_forget()
+            self._pack_after(password_row, auth_row)
+            self._auth_hint.configure(
+                text="密码认证适合 root/password 服务器；密码会通过系统凭据管理器本机保存。"
+            )
+            return
+
+        self._pack_after(self._key_row, auth_row)
+        self._pack_after(key_passphrase_row, self._key_row)
+        if password_row:
+            password_row.pack_forget()
+        self._auth_hint.configure(text="密钥认证需要填写私钥路径；私钥密码可留空，已有值会在保存时保留。")
+
     def _get_value(self, key):
         widget, ftype = self._fields[key]
         if ftype == "masked":
@@ -191,23 +245,54 @@ class SSHEditorDialog(ctk.CTkToplevel):
             self._key_entry.insert(0, path)
 
     def _test_connection(self):
-        self._test_result.configure(text="正在测试连接...", text_color=COLORS["muted"])
-        self.update()
-
+        if self._test_busy:
+            return
         try:
             data = self._collect_data()
             profile = self._build_profile(data)
-
-            from core.ssh_manager import ssh_manager
-            ssh_manager.disconnect(profile.name)
-            success, message = ssh_manager.test_connection(profile)
-
-            if success:
-                self._test_result.configure(text=message, text_color=COLORS["success"])
-            else:
-                self._test_result.configure(text=message, text_color=COLORS["danger"])
         except Exception as e:
             self._test_result.configure(text=f"测试失败: {e}", text_color=COLORS["danger"])
+            return
+
+        self._set_test_busy(True, "正在测试连接...")
+
+        def run_test():
+            from core.ssh_manager import ssh_manager
+
+            try:
+                ssh_manager.disconnect(profile.name)
+                success, message = ssh_manager.test_connection(profile)
+            except Exception as e:
+                success = False
+                message = f"测试失败: {e}"
+            self._safe_after(lambda: self._finish_test(success, message))
+
+        threading.Thread(target=run_test, name="ssh-editor-test", daemon=True).start()
+
+    def _set_test_busy(self, busy: bool, message: str | None = None) -> None:
+        self._test_busy = busy
+        self._test_btn.configure(
+            state="disabled" if busy else "normal",
+            text="测试中..." if busy else "测试连接",
+        )
+        if message:
+            self._test_result.configure(text=message, text_color=COLORS["muted"])
+
+    def _finish_test(self, success: bool, message: str) -> None:
+        if not self.winfo_exists():
+            return
+        self._set_test_busy(False)
+        self._test_result.configure(
+            text=message,
+            text_color=COLORS["success"] if success else COLORS["danger"],
+        )
+
+    def _safe_after(self, callback) -> None:
+        try:
+            if self.winfo_exists():
+                self.after(0, callback)
+        except Exception:
+            pass
 
     def _collect_data(self) -> dict:
         return {
