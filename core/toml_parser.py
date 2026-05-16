@@ -36,9 +36,23 @@ def write_codex_config(data: dict) -> None:
         raise
 
 
+def sanitize_codex_config(data: dict) -> dict:
+    """Normalize Codex config values that can make newer CLI builds fail fast."""
+    data = dict(data or {})
+    model_providers = data.get("model_providers")
+    if isinstance(model_providers, dict):
+        for table in model_providers.values():
+            if not isinstance(table, dict):
+                continue
+            wire_api = str(table.get("wire_api") or "").strip().lower()
+            if wire_api and wire_api != "responses":
+                table["wire_api"] = "responses"
+    return data
+
+
 def apply_codex_profile(config: dict, profile) -> dict:
     """Apply a CodexProfile to config dict. Only modifies model/provider fields."""
-    config = dict(config)
+    config = sanitize_codex_config(config)
 
     config["model"] = profile.model
     config["model_provider"] = profile.model_provider
@@ -87,15 +101,15 @@ def apply_codex_profile(config: dict, profile) -> dict:
 
             custom["wire_api"] = ProviderRegistry.get_codex_wire_api_for_profile(profile)
 
-    return config
+    return sanitize_codex_config(config)
 
 
 def apply_codex_official_account(config: dict) -> dict:
     """Make Codex use file-backed ChatGPT credentials instead of third-party API auth."""
-    config = dict(config)
+    config = sanitize_codex_config(config)
     previous_provider = config.get("model_provider", "openai")
     config["model_provider"] = "openai"
     config["cli_auth_credentials_store"] = "file"
     if previous_provider != "openai" or not config.get("model"):
         config["model"] = "gpt-5.5"
-    return config
+    return sanitize_codex_config(config)

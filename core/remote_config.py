@@ -112,7 +112,7 @@ def read_remote_json(client: paramiko.SSHClient, remote_path: str) -> dict | Non
     if content is None:
         return None
     try:
-        return json.loads(content)
+        return json.loads(content.lstrip("\ufeff"))
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse remote JSON {expanded}: {e}")
         return None

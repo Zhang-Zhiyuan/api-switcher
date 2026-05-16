@@ -353,6 +353,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 base_url,
                 profile.model,
                 repeat_count=3,
+                wire_apis=("responses",),
             )
 
             def show_result():
@@ -374,7 +375,7 @@ class CodexTab(ctk.CTkScrollableFrame):
 
     def _apply_profile_wire_api(self, name: str, wire_api: str) -> None:
         wire_api = str(wire_api or "").strip().lower()
-        if wire_api not in {"chat", "responses"}:
+        if wire_api != "responses":
             show_toast(self.winfo_toplevel(), f"不支持的 Wire API: {wire_api}", is_error=True)
             return
 

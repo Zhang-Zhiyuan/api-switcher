@@ -40,7 +40,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._codex_wire_api_options = {
             "远端自测选择": "auto",
             "使用本地配置": "profile",
-            "强制 chat": "chat",
             "强制 responses": "responses",
         }
         self._build_ui()

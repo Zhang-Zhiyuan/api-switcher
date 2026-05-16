@@ -56,13 +56,13 @@ def test_codex_runtime_env_keys_include_openai_fallback():
     assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(openai_profile) == ["OPENAI_API_KEY"]
 
 
-def test_layer4_codex_preset_uses_chat_wire_api():
+def test_layer4_codex_preset_uses_responses_wire_api():
     provider = ProviderRegistry.get_provider("layer4")
     assert provider is not None
     assert provider.codex_supported is True
     assert provider.claude_supported is False
     assert provider.base_url_for_codex() == "https://layer4.cc/v1"
-    assert provider.wire_api == "chat"
+    assert provider.wire_api == "responses"
     assert provider.codex_env_key == "OPENAI_API_KEY"
 
     profile = CodexProfile(
@@ -75,7 +75,7 @@ def test_layer4_codex_preset_uses_chat_wire_api():
 
     assert config["model"] == "gpt-5.5"
     assert layer4["base_url"] == "https://layer4.cc/v1"
-    assert layer4["wire_api"] == "chat"
+    assert layer4["wire_api"] == "responses"
     assert layer4["env_key"] == "OPENAI_API_KEY"
 
 
@@ -83,9 +83,9 @@ def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
     provider = ProviderRegistry.get_provider("layer4")
     assert provider is not None
 
-    assert ProviderRegistry.get_codex_wire_api("layer4") == "chat"
-    assert ProviderRegistry.get_codex_wire_api("layer4", "auto") == "chat"
-    assert ProviderRegistry.get_codex_wire_api("layer4", "invalid") == "chat"
+    assert ProviderRegistry.get_codex_wire_api("layer4") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("layer4", "auto") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("layer4", "invalid") == "responses"
     assert ProviderRegistry.get_codex_wire_api("custom", "") == "responses"
 
     config = apply_codex_profile(
@@ -98,7 +98,7 @@ def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
         ),
     )
 
-    assert config["model_providers"]["layer4"]["wire_api"] == "chat"
+    assert config["model_providers"]["layer4"]["wire_api"] == "responses"
 
 
 def check_claude_provider(provider_id, model, base_url, writes_effort):
@@ -161,7 +161,7 @@ def test_malformed_config_shapes_are_repaired():
     )
     config = apply_codex_profile({"model_providers": []}, codex_profile)
     assert_equal(isinstance(config["model_providers"], dict), True, "codex model_providers shape")
-    assert_equal(config["model_providers"]["kimi"]["wire_api"], "chat", "codex repaired wire_api")
+    assert_equal(config["model_providers"]["kimi"]["wire_api"], "responses", "codex repaired wire_api")
 
     openai_config = apply_codex_profile({"model_providers": []}, CodexProfile(name="openai"))
     assert_equal("model_providers" in openai_config, False, "openai malformed model_providers removed")
@@ -169,10 +169,10 @@ def test_malformed_config_shapes_are_repaired():
 
 def test_stale_codex_auth_is_cleared():
     api_auth = apply_codex_apikey({"OPENAI_API_KEY": "old", "tokens": {"old": True}}, CodexProfile(name="api"))
-    assert_equal(api_auth.get("OPENAI_API_KEY"), None, "stale codex api key")
-    assert_equal(api_auth.get("tokens"), {}, "codex api mode stale tokens")
+    assert_equal(api_auth.get("OPENAI_API_KEY"), "", "stale codex api key")
+    assert_equal("tokens" in api_auth, False, "codex api mode stale tokens")
     assert_equal(api_auth.get("auth_mode"), "apikey", "codex api mode")
-    assert_equal(api_auth.get("last_refresh"), None, "codex api mode stale last_refresh")
+    assert_equal("last_refresh" in api_auth, False, "codex api mode stale last_refresh")
 
 
 def test_claude_provider_detection():
@@ -227,7 +227,7 @@ def _write_codex_identity_files(api_key: str) -> None:
             '[model_providers.deepseek]',
             'base_url = "https://api.deepseek.com"',
             'name = "DeepSeek"',
-            'wire_api = "chat"',
+            'wire_api = "responses"',
             'requires_openai_auth = false',
             "",
         ]),
@@ -239,8 +239,6 @@ def _write_codex_identity_files(api_key: str) -> None:
             {
                 "auth_mode": "apikey",
                 "OPENAI_API_KEY": api_key,
-                "tokens": {},
-                "last_refresh": None,
             },
             ensure_ascii=False,
             indent=2,
@@ -280,10 +278,10 @@ def test_codex_import_names_and_runtime_detection():
 
 
 def main():
-    check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "chat", True)
-    check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "chat", False)
-    check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "chat", False)
-    check_codex_provider("layer4", "gpt-5.5", "https://layer4.cc/v1", "chat", True)
+    check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "responses", True)
+    check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "responses", False)
+    check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "responses", False)
+    check_codex_provider("layer4", "gpt-5.5", "https://layer4.cc/v1", "responses", True)
 
     check_claude_provider("deepseek", "deepseek-v4-pro", "https://api.deepseek.com/anthropic", True)
     check_claude_provider("glm", "GLM-5.1", "", False)

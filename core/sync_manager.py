@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import shlex
 from dataclasses import dataclass
 from core import remote_config, parser, toml_parser, auth_parser, profile_manager, security
@@ -26,7 +27,7 @@ class RemoteWireBenchmarkResult:
 
 CODEX_WIRE_API_AUTO = "auto"
 CODEX_WIRE_API_PROFILE = "profile"
-CODEX_WIRE_API_VALUES = {"chat", "responses"}
+CODEX_WIRE_API_VALUES = {"responses"}
 CODEX_WIRE_API_MODES = CODEX_WIRE_API_VALUES | {CODEX_WIRE_API_AUTO, CODEX_WIRE_API_PROFILE}
 
 
@@ -150,6 +151,13 @@ main()
 """
 
 
+_SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+")
+
+
+def _redact_output(text: str) -> str:
+    return _SECRET_PATTERN.sub(r"\1***", str(text or "")).strip()
+
+
 def normalize_codex_wire_api_mode(mode: str | None) -> str:
     value = str(mode or CODEX_WIRE_API_AUTO).strip().lower()
     aliases = {
@@ -159,6 +167,7 @@ def normalize_codex_wire_api_mode(mode: str | None) -> str:
         "benchmark": CODEX_WIRE_API_AUTO,
         "local": CODEX_WIRE_API_PROFILE,
         "use_profile": CODEX_WIRE_API_PROFILE,
+        "chat": "responses",
     }
     value = aliases.get(value, value)
     if value not in CODEX_WIRE_API_MODES:
@@ -287,7 +296,9 @@ def _remote_codex_model(config: dict, profile) -> str:
 
 def _set_remote_codex_wire_api(config: dict, profile, wire_api: str) -> bool:
     wire_api = str(wire_api or "").strip().lower()
-    if wire_api not in {"chat", "responses"}:
+    if wire_api == "chat":
+        wire_api = "responses"
+    if wire_api != "responses":
         return False
 
     provider_id = str(config.get("model_provider") or getattr(profile, "model_provider", "") or "custom").strip()
@@ -340,7 +351,7 @@ def _remote_benchmark_codex_wire_api(client, profile, config: dict, api_key: str
         "model": model,
         "timeout": 10,
         "repeat_count": 3,
-        "wire_apis": ["chat", "responses"],
+        "wire_apis": ["responses"],
     }
     command = (
         'PYTHON_BIN="$(command -v python3 || command -v python || true)"; '
@@ -376,6 +387,30 @@ def _remote_benchmark_codex_wire_api(client, profile, config: dict, api_key: str
     except Exception as e:
         logger.warning("Remote Codex wire_api benchmark skipped: %s", e)
         return RemoteWireBenchmarkResult(False, selected_model=model, error=str(e)[:300])
+
+
+def _remote_codex_login_status(client) -> tuple[bool, str]:
+    command = (
+        'CODEX_BIN="$(command -v codex || true)"; '
+        '[ -n "$CODEX_BIN" ] || CODEX_BIN="$(find "$HOME/.vscode-server/extensions" "$HOME/.cursor-server/extensions" '
+        '-path "*/bin/linux-x86_64/codex" -type f 2>/dev/null | sort | tail -n 1)"; '
+        '[ -n "$CODEX_BIN" ] || { echo "codex CLI not found"; exit 127; }; '
+        '"$CODEX_BIN" login status 2>&1'
+    )
+    try:
+        status, stdout, stderr = ssh_manager.execute_command_with_status(
+            client,
+            command,
+            timeout=30,
+            log_command=False,
+        )
+    except Exception as e:
+        return False, str(e)[:300]
+
+    output = _redact_output(stdout or stderr)
+    lowered = output.lower()
+    ok = status == 0 and "error " not in lowered and "invalid configuration" not in lowered
+    return ok, output[:300]
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -458,18 +493,23 @@ def sync_codex_to_server(ssh_name: str, codex_name: str, wire_api_mode: str | No
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
     message = f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
     current_wire_api = _remote_codex_current_wire_api(config, codex_profile)
+    validation_ok, validation_output = _remote_codex_login_status(client)
+    validation_detail = ""
+    if validation_output:
+        status_text = "通过" if validation_ok else "失败"
+        validation_detail = f" | 远端 Codex 验证{status_text}: {validation_output}"
     if benchmark and benchmark.success and benchmark.recommended_wire_api:
         detail = f" | 远端自测已选择 wire_api={benchmark.recommended_wire_api}"
         if benchmark.selected_model:
             detail += f"，模型={benchmark.selected_model}"
         if benchmark.summary:
             detail += f"（{benchmark.summary}）"
-        return message + detail
+        return message + detail + validation_detail
     if benchmark and benchmark.error:
-        return message + f" | 远端 wire_api 自测跳过: {benchmark.error}；当前使用 wire_api={current_wire_api}"
+        return message + f" | 远端 wire_api 自测跳过: {benchmark.error}；当前使用 wire_api={current_wire_api}" + validation_detail
     if wire_api_mode in CODEX_WIRE_API_VALUES:
-        return message + f" | 已手动选择 wire_api={current_wire_api}"
-    return message + f" | 使用本地配置 wire_api={current_wire_api}"
+        return message + f" | 已手动选择 wire_api={current_wire_api}" + validation_detail
+    return message + f" | 使用本地配置 wire_api={current_wire_api}" + validation_detail
 
 
 def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
@@ -657,7 +697,7 @@ def pull_codex_from_server(ssh_name: str) -> str:
         if custom:
             profile_kwargs["custom_base_url"] = custom.get("base_url")
             profile_kwargs["custom_name"] = custom.get("name")
-            profile_kwargs["custom_wire_api"] = custom.get("wire_api")
+            profile_kwargs["custom_wire_api"] = ProviderRegistry.normalize_codex_wire_api(custom.get("wire_api")) or ""
             profile_kwargs["custom_env_key"] = custom.get("env_key")
             profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
 

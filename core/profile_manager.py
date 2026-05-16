@@ -1201,9 +1201,11 @@ def _codex_profile_kwargs_from_current(name: str, config: dict, auth: dict) -> d
     provider_id = profile_kwargs["model_provider"]
     custom = _codex_provider_table(config, provider_id)
     if custom:
+        from core.providers import ProviderRegistry
+
         profile_kwargs["custom_base_url"] = custom.get("base_url")
         profile_kwargs["custom_name"] = custom.get("name")
-        profile_kwargs["custom_wire_api"] = custom.get("wire_api")
+        profile_kwargs["custom_wire_api"] = ProviderRegistry.normalize_codex_wire_api(custom.get("wire_api")) or ""
         profile_kwargs["custom_env_key"] = custom.get("env_key")
         profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
 

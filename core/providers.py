@@ -32,7 +32,7 @@ class ProviderConfig:
 
 CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh"]
-CODEX_WIRE_APIS = {"chat", "responses"}
+CODEX_WIRE_APIS = {"responses"}
 CLAUDE_CODE_MODEL_ALIASES = [
     "default",
     "best",
@@ -89,10 +89,10 @@ PROVIDERS = {
         reasoning_efforts=CLAUDE_CODE_EFFORTS,
         requires_auth=True,
         auth_header="Authorization",
-        wire_api="chat",
+        wire_api="responses",
         requires_openai_auth=False,
         codex_env_key="DEEPSEEK_API_KEY",
-        notes="DeepSeek Codex uses the OpenAI-compatible chat endpoint; Claude Code uses the Anthropic-compatible endpoint.",
+        notes="DeepSeek Codex uses the Responses wire API required by current Codex CLI builds; Claude Code uses the Anthropic-compatible endpoint.",
     ),
     "kimi": ProviderConfig(
         name="kimi",
@@ -116,11 +116,11 @@ PROVIDERS = {
         reasoning_efforts=[],
         requires_auth=True,
         auth_header="Authorization",
-        wire_api="chat",
+        wire_api="responses",
         requires_openai_auth=False,
         codex_env_key="MOONSHOT_API_KEY",
         claude_supported=False,
-        notes="Kimi exposes OpenAI-compatible chat APIs. Use https://api.moonshot.cn/v1 instead if your key belongs to the China platform.",
+        notes="Kimi uses the Responses wire API required by current Codex CLI builds. Use https://api.moonshot.cn/v1 instead if your key belongs to the China platform.",
     ),
     "glm": ProviderConfig(
         name="glm",
@@ -142,7 +142,7 @@ PROVIDERS = {
         reasoning_efforts=[],
         requires_auth=True,
         auth_header="Authorization",
-        wire_api="chat",
+        wire_api="responses",
         requires_openai_auth=False,
         codex_env_key="ZHIPUAI_API_KEY",
         claude_env={
@@ -150,7 +150,7 @@ PROVIDERS = {
             "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.1",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-4.5-air",
         },
-        notes="GLM Coding Plan exposes OpenAI-compatible chat APIs for coding agents.",
+        notes="GLM Coding Plan is configured with the Responses wire API required by current Codex CLI builds.",
     ),
     "layer4": ProviderConfig(
         name="layer4",
@@ -170,13 +170,13 @@ PROVIDERS = {
         reasoning_efforts=CODEX_REASONING_EFFORTS,
         requires_auth=True,
         auth_header="Authorization",
-        wire_api="chat",
+        wire_api="responses",
         requires_openai_auth=False,
         codex_env_key="OPENAI_API_KEY",
         claude_supported=False,
         notes=(
-            "Layer4 exposes OpenAI-compatible chat/completions for Codex. "
-            "Use wire_api=chat; responses can intermittently return upstream bad_response_body errors."
+            "Layer4 is configured with the Responses wire API because current Codex CLI builds "
+            "reject provider tables that contain wire_api=chat."
         ),
     ),
     "custom": ProviderConfig(

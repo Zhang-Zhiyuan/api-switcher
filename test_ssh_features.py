@@ -243,19 +243,18 @@ def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, mo
         "_remote_benchmark_codex_wire_api",
         lambda client, profile, config, api_key: sync_manager.RemoteWireBenchmarkResult(
             True,
-            recommended_wire_api="chat",
+            recommended_wire_api="responses",
             selected_model="gpt-5.5",
-            summary="chat 3/3 avg 1000ms; responses 1/3 avg 3000ms",
+            summary="responses 3/3 avg 1000ms",
         ),
     )
 
     message = sync_manager.sync_codex_to_server("remote", "layer4")
 
-    assert len(writes) == 2
+    assert len(writes) == 1
     assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
-    assert writes[1]["model_providers"]["layer4"]["wire_api"] == "chat"
-    assert "wire_api=chat" in message
-    assert "chat 3/3" in message
+    assert "wire_api=responses" in message
+    assert "responses 3/3" in message
 
 
 def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh, monkeypatch):
@@ -289,8 +288,8 @@ def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh,
     message = sync_manager.sync_codex_to_server("remote", "layer4", wire_api_mode="chat")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "chat"
-    assert "已手动选择 wire_api=chat" in message
+    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert "wire_api=responses" in message
 
 
 def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolated_ssh, monkeypatch):
@@ -324,8 +323,8 @@ def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolate
     message = sync_manager.sync_codex_to_server("remote", "layer4", wire_api_mode="profile")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "chat"
-    assert "使用本地配置 wire_api=chat" in message
+    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert "wire_api=responses" in message
 
 
 def test_remote_codex_wire_api_benchmark_handles_empty_output(monkeypatch):

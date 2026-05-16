@@ -283,7 +283,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         self._add_field(parent, "自定义端点", "custom_base_url", p.custom_base_url if p else "")
         self._add_field(parent, "自定义名称", "custom_name", p.custom_name if p else "")
-        wire_api_widget = self._add_field(parent, "Wire API", "custom_wire_api", ["auto", "chat", "responses"], "combo")
+        wire_api_widget = self._add_field(parent, "Wire API", "custom_wire_api", ["auto", "responses"], "combo")
         wire_api_widget.set(self._display_wire_api(p.custom_wire_api if p else None))
         self._add_field(parent, "环境变量名", "custom_env_key", p.custom_env_key if p else "OPENAI_API_KEY")
 
@@ -325,7 +325,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _display_wire_api(self, wire_api: str | None) -> str:
         wire_api = str(wire_api or "").strip().lower()
-        return wire_api if wire_api in {"chat", "responses"} else "auto"
+        return wire_api if wire_api == "responses" else "auto"
 
     def _set_wire_api_value(self, wire_api: str | None) -> None:
         if "custom_wire_api" not in self._fields:
@@ -530,6 +530,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                         base_url,
                         model,
                         repeat_count=3,
+                        wire_apis=("responses",),
                     )
             except Exception as exc:
                 from core.api_tester import TestResult
@@ -722,12 +723,13 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 model,
                 timeout=8,
                 repeat_count=3,
+                wire_apis=("responses",),
             )
             if result.recommended_wire_api:
                 return result.recommended_wire_api
         except Exception:
             pass
-        return (provider.wire_api if provider else "") or "chat"
+        return (provider.wire_api if provider else "") or "responses"
 
     def _save(self):
         data = self._collect_data()
@@ -779,8 +781,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
             wire_api = str(data.get("custom_wire_api") or "").strip().lower()
             data["custom_wire_api"] = "" if wire_api == "auto" else wire_api
-            if data["custom_wire_api"] and data["custom_wire_api"] not in {"chat", "responses"}:
-                self._show_error("Wire API 只能选择 auto、chat 或 responses")
+            if data["custom_wire_api"] and data["custom_wire_api"] != "responses":
+                self._show_error("Wire API 只能选择 auto 或 responses")
                 return
             if not data.get("model"):
                 self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
@@ -795,7 +797,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._show_error("无法自动选择模型，请手动填写模型名称")
                 return
             if not data.get("custom_wire_api"):
-                self._show_status("Wire API 为空，正在三轮测试 chat/responses 并选择最稳配置...", "warning")
+                self._show_status("Wire API 为空，正在三轮测试 responses 可用性...", "warning")
                 self.update_idletasks()
                 data["custom_wire_api"] = self._recommend_wire_api_for_save(
                     api_key,

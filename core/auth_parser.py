@@ -16,7 +16,7 @@ def read_codex_auth() -> dict:
     if not CODEX_AUTH.exists():
         return {}
     try:
-        return json.loads(CODEX_AUTH.read_text(encoding="utf-8"))
+        return json.loads(CODEX_AUTH.read_text(encoding="utf-8-sig"))
     except Exception as e:
         logger.error(f"Failed to read {CODEX_AUTH}: {e}")
         return {}
@@ -31,24 +31,18 @@ def apply_codex_apikey(auth: dict, profile) -> dict:
     """Apply API key from a CodexProfile to auth.json."""
     from core import security
 
-    # Third-party API profiles must override any official ChatGPT login state
-    # currently stored in auth.json. Do not resurrect older auth snapshots here.
-    auth = dict(auth)
-    # Codex CLI expects the auth mode token to be exactly "apikey".
-    # The older internal spelling "api_key" is still accepted when reading.
-    auth["auth_mode"] = "apikey"
+    # Third-party API profiles must override any official ChatGPT login state.
+    # Newer Codex CLI builds parse optional token/refresh fields strictly, so
+    # keep API-key auth minimal instead of leaving stale ChatGPT fields behind.
+    auth = {"auth_mode": "apikey"}
 
     api_key = security.get_secret(profile.api_key_ref)
     if api_key:
         auth["OPENAI_API_KEY"] = api_key
     elif profile.api_key_ref:
         logger.warning("API key reference exists but no secret value was found")
-        auth["OPENAI_API_KEY"] = None
+        auth["OPENAI_API_KEY"] = ""
     else:
-        auth["OPENAI_API_KEY"] = None
-
-    # Clear official-login tokens when switching to a third-party API profile.
-    auth["tokens"] = {}
-    auth["last_refresh"] = None
+        auth["OPENAI_API_KEY"] = ""
 
     return auth

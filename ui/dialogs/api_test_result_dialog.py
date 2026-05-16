@@ -147,7 +147,7 @@ class APITestResultDialog(ctk.CTkToplevel):
 
         if self._on_apply_wire_api:
             recommended = str(getattr(result, "recommended_wire_api", "") or "").strip().lower()
-            for wire_api in ["chat", "responses"]:
+            for wire_api in ["responses"]:
                 label = f"切换到 {wire_api}"
                 if wire_api == recommended:
                     label += "（推荐）"

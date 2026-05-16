@@ -219,7 +219,7 @@ def test_current_codex_rejects_invalid_wire_api_until_repaired(isolated_accounts
 
     switcher.switch_codex_profile("deepseek")
 
-    assert toml_parser.read_codex_config()["model_providers"]["deepseek"]["wire_api"] == "chat"
+    assert toml_parser.read_codex_config()["model_providers"]["deepseek"]["wire_api"] == "responses"
     assert profile_manager.get_current_codex_name() == "deepseek"
 
 
