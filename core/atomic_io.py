@@ -43,3 +43,16 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Write bytes to a unique temp file and atomically replace the target."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = temp_path_for(path)
+    try:
+        tmp.write_bytes(content)
+        replace_with_retry(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise

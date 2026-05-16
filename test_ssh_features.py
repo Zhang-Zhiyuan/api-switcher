@@ -372,6 +372,8 @@ class _FakeSFTP:
         self.dirs = {"/"}
         self.mkdir_calls = []
         self.chmod_calls = []
+        self.rename_calls = []
+        self.posix_rename_calls = []
 
     def get_channel(self):
         return _FakeChannel()
@@ -390,6 +392,11 @@ class _FakeSFTP:
         return _FakeWriter(self, path)
 
     def rename(self, source, target):
+        self.rename_calls.append((source, target))
+        self.files[target] = self.files.pop(source)
+
+    def posix_rename(self, source, target):
+        self.posix_rename_calls.append((source, target))
         self.files[target] = self.files.pop(source)
 
     def remove(self, path):
@@ -441,6 +448,8 @@ def test_ssh_remote_file_io_uses_binary_sftp_modes():
     assert "rb" in sftp.open_modes
     assert "wb" in sftp.open_modes
     assert sftp.files["/written.json"] == b'{"saved": true}'
+    assert sftp.posix_rename_calls
+    assert not sftp.rename_calls
     assert all("\\" not in path for path in sftp.mkdir_calls)
 
 
@@ -456,6 +465,11 @@ def test_remote_config_expands_home_and_custom_profile_dirs():
     remote_config.write_remote_codex_auth(client, {"tokens": {"id_token": "token"}}, profile)
 
     assert "/srv/users/alice/.config/codex/auth.json" in sftp.files
+    assert any(
+        path.startswith("/srv/users/alice/.config/codex/auth.json.tmp.")
+        for path, mode in sftp.chmod_calls
+        if mode == 0o600
+    )
     assert ("/srv/users/alice/.config/codex/auth.json", 0o600) in sftp.chmod_calls
 
 

@@ -12,6 +12,7 @@ from config.paths import (
     VSCODE_SETTINGS,
     BACKUPS_DIR,
 )
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 from models.profile import BackupEntry
 
 logger = logging.getLogger(__name__)
@@ -37,15 +38,23 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def _allocate_backup_dir(timestamp: str) -> Path:
-    """Return a unique backup directory for the timestamp."""
+    """Create and return a unique backup directory for the timestamp."""
     base = BACKUPS_DIR / timestamp
-    if not base.exists():
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        base.mkdir(parents=True, exist_ok=False)
         return base
+    except FileExistsError:
+        pass
 
     for index in range(2, 1000):
         candidate = BACKUPS_DIR / f"{timestamp}-{index:02d}"
-        if not candidate.exists():
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
             return candidate
+        except FileExistsError:
+            continue
 
     raise RuntimeError("无法创建唯一备份目录，请稍后重试")
 
@@ -54,7 +63,6 @@ def create_backup(description: str = "") -> BackupEntry:
     """Create a backup of all config files. Returns the backup entry."""
     ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     backup_dir = _allocate_backup_dir(ts)
-    backup_dir.mkdir(parents=True, exist_ok=True)
 
     backed_up = []
     for name, src in BACKUP_FILES.items():
@@ -73,7 +81,7 @@ def create_backup(description: str = "") -> BackupEntry:
     # Save metadata
     import json
     meta_path = backup_dir / BACKUP_META_FILE
-    meta_path.write_text(json.dumps(entry.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(meta_path, json.dumps(entry.to_dict(), indent=2, ensure_ascii=False))
 
     return entry
 
@@ -128,8 +136,7 @@ def restore_backup(entry: BackupEntry) -> list[str]:
     for name, dst in BACKUP_FILES.items():
         src = backup_dir / name
         if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            atomic_write_bytes(dst, src.read_bytes())
             restored.append(name)
             logger.info(f"Restored {src} -> {dst}")
 

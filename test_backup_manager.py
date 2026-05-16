@@ -27,6 +27,20 @@ def test_backup_dirs_are_unique_and_latest_can_restore(tmp_path, monkeypatch):
     assert backup_manager.get_latest_backup().description == "回滚前自动备份"
 
 
+def test_backup_allocator_reserves_unique_directory(tmp_path, monkeypatch):
+    backups_dir = tmp_path / "backups"
+    timestamp = "2026-01-01T00-00-00"
+    (backups_dir / timestamp).mkdir(parents=True)
+    (backups_dir / f"{timestamp}-02").mkdir()
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+
+    allocated = backup_manager._allocate_backup_dir(timestamp)
+
+    assert allocated == backups_dir / f"{timestamp}-03"
+    assert allocated.exists()
+
+
 def test_backup_prune_ignores_directory_from_metadata(tmp_path, monkeypatch):
     backups_dir = tmp_path / "backups"
     backup_dir = backups_dir / "2026-01-01T00-00-00"

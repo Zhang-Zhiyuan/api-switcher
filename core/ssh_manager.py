@@ -201,6 +201,38 @@ class SSHManager:
             raise ValueError("文件路径不能为空")
         return posixpath.normpath(text)
 
+    @staticmethod
+    def _sftp_operation_unsupported(error: BaseException) -> bool:
+        text = str(error).lower()
+        return (
+            getattr(error, "errno", None) in {errno.ENOSYS, errno.EOPNOTSUPP}
+            or "unsupported" in text
+            or "not implemented" in text
+        )
+
+    def _replace_remote_file(self, sftp, source: str, target: str) -> None:
+        """Atomically replace a remote file when the server supports it."""
+        posix_rename = getattr(sftp, "posix_rename", None)
+        if callable(posix_rename):
+            try:
+                posix_rename(source, target)
+                return
+            except Exception as e:
+                if not self._sftp_operation_unsupported(e):
+                    raise
+                logger.debug(f"SFTP posix_rename unsupported, falling back to rename: {e}")
+
+        try:
+            sftp.rename(source, target)
+        except Exception:
+            # Older SFTP servers often refuse rename-over-existing. This fallback
+            # keeps compatibility when posix_rename is unavailable.
+            try:
+                sftp.remove(target)
+            except Exception:
+                pass
+            sftp.rename(source, target)
+
     def read_remote_file(self, client: paramiko.SSHClient, path: str, timeout: int = 30) -> str | None:
         """Read a file from the remote server with timeout."""
         path = self._normalize_remote_path(path)
@@ -264,16 +296,13 @@ class SSHManager:
             with sftp.open(temp_path, "wb") as f:
                 f.write(content.encode("utf-8"))
 
-            # Atomic rename
-            try:
-                sftp.rename(temp_path, path)
-            except Exception:
-                # If rename fails, try remove + rename
+            if file_mode is not None:
                 try:
-                    sftp.remove(path)
-                except Exception:
-                    pass
-                sftp.rename(temp_path, path)
+                    sftp.chmod(temp_path, file_mode)
+                except Exception as e:
+                    logger.warning(f"Failed to chmod temporary remote file {temp_path}: {e}")
+
+            self._replace_remote_file(sftp, temp_path, path)
 
             if file_mode is not None:
                 try:
