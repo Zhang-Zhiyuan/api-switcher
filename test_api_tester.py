@@ -1,10 +1,46 @@
 """Regression checks for API tester URL handling and model parsing."""
+import urllib.request
+
 from core.api_tester import APITester
 
 
 def assert_equal(actual, expected, label):
     if actual != expected:
         raise AssertionError(f"{label}: expected {expected!r}, got {actual!r}")
+
+
+class _FakeHTMLResponse:
+    headers = {"Content-Type": "text/html; charset=utf-8"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return b"<!doctype html><html><body>not an api</body></html>"
+
+    def getcode(self):
+        return 200
+
+
+def test_request_json_rejects_html_success_response(monkeypatch):
+    def fake_urlopen(_request, timeout):
+        return _FakeHTMLResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    ok, data, result = APITester._request_json(
+        "https://example.com/anthropic/v1/messages",
+        headers={"Accept": "application/json"},
+    )
+
+    assert ok is False
+    assert data is None
+    assert result.status_code == 200
+    assert "JSON" in result.message
+    assert "text/html" in result.error_details
 
 
 def main():

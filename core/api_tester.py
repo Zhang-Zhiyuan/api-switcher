@@ -368,7 +368,21 @@ class APITester:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 response_time = (time.time() - start_time) * 1000
                 body = response.read().decode("utf-8", errors="replace")
-                parsed = json.loads(body) if body else {}
+                try:
+                    parsed = json.loads(body) if body else {}
+                except json.JSONDecodeError:
+                    content_type = response.headers.get("Content-Type", "") or response.headers.get("content-type", "")
+                    details = f"Content-Type: {content_type or 'unknown'}"
+                    snippet = body.strip()[:400]
+                    if snippet:
+                        details = f"{details}\nBody: {snippet}"
+                    return False, None, TestResult(
+                        success=False,
+                        message="响应不是 JSON，可能 Base URL 指向了网页入口或路径不正确",
+                        response_time=response_time,
+                        status_code=response.getcode(),
+                        error_details=details,
+                    )
                 return True, parsed, TestResult(
                     success=True,
                     message="连接成功",
