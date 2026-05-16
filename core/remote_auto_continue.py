@@ -60,6 +60,7 @@ class RemoteAutoContinueStatus:
     guidance_installed: bool = False
     settings_valid: bool = False
     git_snapshot_enabled: bool = False
+    permission_auto_approve_enabled: bool = False
     git_available: bool = False
     runtime_ready: bool = False
     codex_hooks_enabled: bool | None = None
@@ -71,7 +72,7 @@ class RemoteAutoContinueStatus:
 
     @property
     def ready(self) -> bool:
-        hook_required = self.enabled or self.git_snapshot_enabled
+        hook_required = self.enabled or self.git_snapshot_enabled or self.permission_auto_approve_enabled
         return (
             hook_required
             and self.hook_script_exists
@@ -87,6 +88,7 @@ class RemoteAutoContinueStatus:
         parts = [
             f"{self.label}: {state}",
             f"Git snapshot {'on' if self.git_snapshot_enabled else 'off'}",
+            f"权限自动确认 {'on' if self.permission_auto_approve_enabled else 'off'}",
             f"Git {'ok' if self.git_available else 'missing'}",
             f"系统 {self.remote_os or 'unknown'}",
             f"状态 {'已启用' if self.enabled else '未启用'}",
@@ -622,6 +624,9 @@ RECOVERABLE_API_ERROR_PATTERNS = [
 ]
 
 
+DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+
+
 def is_recoverable_api_error(text):
     for pattern in RECOVERABLE_API_ERROR_PATTERNS:
         try:
@@ -629,6 +634,26 @@ def is_recoverable_api_error(text):
                 return True
         except re.error as exc:
             log(f"Invalid recoverable API error pattern ignored: {pattern}: {exc}", "WARN")
+    return False
+
+
+def tool_allowed(tool_name, allowed_tools):
+    if not tool_name:
+        return False
+    tools = allowed_tools if isinstance(allowed_tools, list) and allowed_tools else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
+    for item in tools:
+        allowed = str(item or "").strip()
+        if not allowed:
+            continue
+        if allowed == "*" or allowed.lower() == tool_name.lower():
+            return True
+        if "*" in allowed:
+            pattern = "^" + re.escape(allowed).replace("\\*", ".*") + "$"
+            try:
+                if re.match(pattern, tool_name, re.IGNORECASE):
+                    return True
+            except re.error:
+                continue
     return False
 
 
@@ -757,10 +782,12 @@ def main():
         log(f"Failed to load settings: {exc}", "ERROR")
         return
 
+    auto_approve_enabled = as_bool(settings.get("auto_approve_permission_requests"), False)
+
     if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_start"), True):
         run_git_snapshot()
 
-    if not as_bool(settings.get("enabled"), False):
+    if not as_bool(settings.get("enabled"), False) and not auto_approve_enabled:
         return
 
     raw_input = ""
@@ -782,6 +809,110 @@ def main():
         return
 
     is_claude = data.get("hook_event_name") is not None
+    hook_event = data.get("hook_event_name") or "Stop"
+    agent_id = data.get("agent_id") or data.get("agentId") or ""
+    session_id = (
+        data.get("session_id")
+        or data.get("sessionId")
+        or data.get("conversation_id")
+        or data.get("transcript_path")
+        or data.get("transcriptPath")
+        or os.getcwd()
+    )
+
+    if is_claude and hook_event == "PermissionRequest":
+        if not auto_approve_enabled:
+            return
+        permission_request = data.get("permission_request") if isinstance(data.get("permission_request"), dict) else {}
+        request = data.get("request") if isinstance(data.get("request"), dict) else {}
+        tool_name = str(
+            data.get("tool_name")
+            or data.get("toolName")
+            or data.get("tool")
+            or permission_request.get("tool_name")
+            or request.get("tool_name")
+            or ""
+        ).strip()
+        if not tool_allowed(tool_name, settings.get("auto_approve_tools")):
+            return
+
+        max_auto_approvals = as_int(settings.get("auto_approve_max_per_session"), 3)
+        state_seed = f"{session_id}|PermissionRequest|{agent_id}"
+        state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
+        os.makedirs(state_dir, exist_ok=True)
+        state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
+        log_path = os.path.join(state_dir, "auto_continue_stop_log.jsonl")
+        lock_path = state_path + ".lock"
+
+        lock_fd = None
+        for _ in range(20):
+            try:
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock_path) > 60:
+                        os.unlink(lock_path)
+                        continue
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    pass
+                time.sleep(0.1)
+        if lock_fd is None:
+            return
+
+        try:
+            state = load_state(state_path)
+            count = as_int(state.get(state_key), 0)
+            if max_auto_approvals > 0 and count >= max_auto_approvals:
+                write_jsonl(log_path, {
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "session_id": str(session_id),
+                    "hook_event": "PermissionRequest",
+                    "agent_id": str(agent_id),
+                    "tool_name": tool_name,
+                    "decision": "ask_user",
+                    "reason": "auto_approve_limit_reached",
+                    "count": count,
+                })
+                return
+
+            count += 1
+            state[state_key] = count
+            save_state(state_path, state)
+            write_jsonl(log_path, {
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "session_id": str(session_id),
+                "hook_event": "PermissionRequest",
+                "agent_id": str(agent_id),
+                "tool_name": tool_name,
+                "decision": "auto_approve",
+                "reason": "configured_permission_request",
+                "count": count,
+            })
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"},
+                }
+            }, ensure_ascii=False))
+        finally:
+            try:
+                if lock_fd is not None:
+                    os.close(lock_fd)
+            finally:
+                try:
+                    os.unlink(lock_path)
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+        return
+
+    if not as_bool(settings.get("enabled"), False):
+        return
+
     last_message = pick_text(
         data,
         ["last_assistant_message", "last_message", "assistant_message", "message", "content", "text"],
@@ -808,16 +939,6 @@ def main():
     if not any_pattern(incomplete_patterns, last_message) and not recoverable_api_error:
         return
 
-    session_id = (
-        data.get("session_id")
-        or data.get("sessionId")
-        or data.get("conversation_id")
-        or data.get("transcript_path")
-        or data.get("transcriptPath")
-        or os.getcwd()
-    )
-    hook_event = data.get("hook_event_name") or "Stop"
-    agent_id = data.get("agent_id") or data.get("agentId") or ""
     state_seed = f"{session_id}|{hook_event}|{agent_id}"
     state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
 
@@ -919,7 +1040,7 @@ def _is_our_command(command: str) -> bool:
     return any(marker in str(command or "") for marker in SCRIPT_MARKERS)
 
 
-def _iter_claude_hook_commands(settings: dict, event_names: tuple[str, ...] = ("Stop", "SubagentStop")):
+def _iter_claude_hook_commands(settings: dict, event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PermissionRequest")):
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
         return
@@ -942,7 +1063,13 @@ def _iter_claude_hook_commands(settings: dict, event_names: tuple[str, ...] = ("
                     yield str(hook.get("command", ""))
 
 
-def _register_claude_hook(client, paths: RemoteAutoContinuePaths, command: str, apply_to_subagents: bool) -> None:
+def _register_claude_hook(
+    client,
+    paths: RemoteAutoContinuePaths,
+    command: str,
+    apply_to_subagents: bool,
+    settings_data: AutoContinueSettings | None = None,
+) -> None:
     settings = _read_json(client, paths.provider_config_path, default={})
     if not isinstance(settings, dict):
         settings = {}
@@ -989,6 +1116,12 @@ def _register_claude_hook(client, paths: RemoteAutoContinuePaths, command: str, 
         register_event("SubagentStop", subagent_hook)
     else:
         register_event("SubagentStop", None)
+    if settings_data and settings_data.auto_approve_permission_requests:
+        permission_hook = dict(hook_def)
+        permission_hook["statusMessage"] = "Auto-approving configured Claude permission request if allowed"
+        register_event("PermissionRequest", permission_hook)
+    else:
+        register_event("PermissionRequest", None)
 
     _write_json(client, paths.provider_config_path, settings)
 
@@ -1002,7 +1135,7 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
         return
 
     changed = False
-    for event_name in ("Stop", "SubagentStop"):
+    for event_name in ("Stop", "SubagentStop", "PermissionRequest"):
         groups = hooks.get(event_name, [])
         if isinstance(groups, dict):
             groups = [groups]
@@ -1208,7 +1341,7 @@ def install_remote_auto_continue(
 
         command = f"sh {shlex.quote(paths.script_path)}"
         if provider == "claude":
-            _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents)
+            _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents, resolved_settings)
         else:
             _register_codex_hook(client, paths, command)
     except Exception:
@@ -1248,7 +1381,7 @@ def install_remote_git_snapshot(
 
         command = f"sh {shlex.quote(paths.script_path)}"
         if provider == "claude":
-            _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents)
+            _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents, resolved_settings)
         else:
             _register_codex_hook(client, paths, command)
     except Exception:
@@ -1266,13 +1399,15 @@ def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     paths = _paths(client, ssh_profile, provider)
 
     settings = _read_json(client, paths.settings_path, default={}, strict=False)
-    keep_git_snapshot = False
+    keep_hook = False
     if isinstance(settings, dict):
         settings["enabled"] = False
-        keep_git_snapshot = bool(settings.get("git_auto_snapshot", True) and settings.get("git_snapshot_on_start", True))
+        keep_hook = bool(
+            settings.get("git_auto_snapshot", True) and settings.get("git_snapshot_on_start", True)
+        ) or bool(provider == "claude" and settings.get("auto_approve_permission_requests"))
         _write_json(client, paths.settings_path, settings)
 
-    if not keep_git_snapshot:
+    if not keep_hook:
         if provider == "claude":
             _unregister_claude_hook(client, paths)
         else:
@@ -1342,6 +1477,9 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.settings_valid = True
             status.enabled = parsed.enabled
             status.git_snapshot_enabled = bool(parsed.git_auto_snapshot and parsed.git_snapshot_on_start)
+            status.permission_auto_approve_enabled = bool(
+                provider == "claude" and parsed.auto_approve_permission_requests
+            )
             if status.git_snapshot_enabled and not env.get("git"):
                 status.issues.append("缺少 git")
         except Exception as e:
@@ -1383,7 +1521,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append(f"Codex config.toml 读取失败: {e}")
         status.codex_hooks_enabled = bool(config.get("codex_hooks"))
 
-    hook_required = status.enabled or status.git_snapshot_enabled
+    hook_required = status.enabled or status.git_snapshot_enabled or status.permission_auto_approve_enabled
 
     if hook_required and not status.hook_script_exists:
         status.issues.append("Hook 脚本缺失")

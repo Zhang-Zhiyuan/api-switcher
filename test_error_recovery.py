@@ -327,6 +327,8 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
 
     for script in [local_script, remote_script]:
         assert "recoverable_api_error_detected" in script
+        assert "PermissionRequest" in script
+        assert '"allow"' in script
         assert "stream disconnected before completion" in script
         assert "upstream connect error" in script
         assert "disconnect/reset before headers" in script
@@ -352,6 +354,51 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "def write_text_atomic(path, content):" in remote_script
     assert "write_text_atomic(path, json.dumps(data" in remote_script
     assert 'write_text_atomic(path, "\\n".join(DEFAULT_GITIGNORE_LINES) + "\\n")' in remote_script
+
+
+def test_auto_continue_settings_permission_auto_approve_validation():
+    from models.auto_continue import AutoContinueSettings
+
+    settings = AutoContinueSettings(
+        auto_approve_permission_requests=True,
+        auto_approve_max_per_session=0,
+        auto_approve_tools=["Edit", "MultiEdit", "Write"],
+    )
+
+    ok, error = settings.validate()
+    assert ok, error
+
+    restored = AutoContinueSettings.from_dict({
+        "auto_approve_permission_requests": True,
+        "auto_approve_max_per_session": 5,
+        "auto_approve_tools": ["Edit", "edit", "Write"],
+    })
+
+    assert restored.auto_approve_permission_requests is True
+    assert restored.auto_approve_max_per_session == 5
+    assert restored.auto_approve_tools == ["Edit", "Write"]
+
+
+def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from models.auto_continue import AutoContinueSettings
+
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    settings = AutoContinueSettings(auto_approve_permission_requests=True)
+
+    provider.save_settings(settings)
+    provider.install_hook_script()
+    provider.register_hook_for_settings(settings)
+
+    hooks = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))["hooks"]
+    assert "PermissionRequest" in hooks
+    commands = [
+        hook["command"]
+        for group in hooks["PermissionRequest"]
+        for hook in group.get("hooks", [])
+    ]
+    assert any("auto_continue_stop.ps1" in command for command in commands)
 
 
 def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):

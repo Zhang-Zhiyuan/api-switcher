@@ -57,23 +57,24 @@ class ClaudeProvider(AutoContinueProvider):
             logger.error(f"Failed to read Claude settings.json: {e}")
             return False
 
-    def register_hook(self, apply_to_subagents: bool = False) -> None:
+    def register_hook(self, apply_to_subagents: bool = False, settings=None) -> None:
         """Register hook in settings.json."""
+        auto_settings = settings
         settings_path = self.get_claude_settings_path()
         settings_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Read existing settings
-        settings = {}
+        claude_settings = {}
         if settings_path.exists():
             try:
                 with open(settings_path, 'r', encoding='utf-8') as f:
-                    settings = json.load(f)
+                    claude_settings = json.load(f)
             except Exception:
                 pass
 
         # Ensure hooks structure exists
-        if "hooks" not in settings:
-            settings["hooks"] = {}
+        if "hooks" not in claude_settings:
+            claude_settings["hooks"] = {}
 
         script_path = str(self.get_hook_script_path()).replace("\\", "\\\\")
         hook_def = {
@@ -84,18 +85,27 @@ class ClaudeProvider(AutoContinueProvider):
         }
 
         # Register Stop hook
-        self._register_hook_event(settings, "Stop", hook_def)
+        self._register_hook_event(claude_settings, "Stop", hook_def)
 
         # Optionally register SubagentStop
         if apply_to_subagents:
             subagent_hook = dict(hook_def)
             subagent_hook["statusMessage"] = "Checking whether Claude subagent should continue"
-            self._register_hook_event(settings, "SubagentStop", subagent_hook)
+            self._register_hook_event(claude_settings, "SubagentStop", subagent_hook)
+        else:
+            self._register_hook_event(claude_settings, "SubagentStop", None)
+
+        if getattr(auto_settings, "auto_approve_permission_requests", False):
+            approval_hook = dict(hook_def)
+            approval_hook["statusMessage"] = "Auto-approving configured Claude permission request if allowed"
+            self._register_hook_event(claude_settings, "PermissionRequest", approval_hook)
+        else:
+            self._register_hook_event(claude_settings, "PermissionRequest", None)
 
         # Write settings.json
-        atomic_write_text(settings_path, json.dumps(settings, indent=2))
+        atomic_write_text(settings_path, json.dumps(claude_settings, indent=2))
 
-    def _register_hook_event(self, settings: dict, event_name: str, hook_def: dict) -> None:
+    def _register_hook_event(self, settings: dict, event_name: str, hook_def: dict | None) -> None:
         """Register a hook for a specific event."""
         if event_name not in settings["hooks"]:
             settings["hooks"][event_name] = []
@@ -110,7 +120,8 @@ class ClaudeProvider(AutoContinueProvider):
                 filtered.append(hook_group)
 
         # Add our hook
-        filtered.append({"hooks": [hook_def]})
+        if hook_def:
+            filtered.append({"hooks": [hook_def]})
         settings["hooks"][event_name] = filtered
 
     def unregister_hook(self) -> None:
@@ -125,8 +136,8 @@ class ClaudeProvider(AutoContinueProvider):
 
             hooks = settings.get("hooks", {})
 
-            # Remove from Stop and SubagentStop
-            for event_name in ["Stop", "SubagentStop"]:
+            # Remove from Stop/SubagentStop/PermissionRequest
+            for event_name in ["Stop", "SubagentStop", "PermissionRequest"]:
                 if event_name in hooks:
                     filtered = []
                     for hook_group in hooks[event_name]:

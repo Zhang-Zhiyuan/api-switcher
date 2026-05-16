@@ -72,6 +72,35 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                                               button_color=COLORS["text"])
             subagents_switch.pack(anchor="w", pady=5)
 
+            ctk.CTkLabel(scroll, text="权限询问自动确认", text_color=COLORS["text"], font=font(14, "bold")).pack(
+                anchor="w", pady=(15, 5))
+            self._permission_auto_approve_var = ctk.BooleanVar(value=self.settings.auto_approve_permission_requests)
+            permission_switch = ctk.CTkSwitch(
+                scroll,
+                text="自动允许配置内的 Claude Code 权限询问（root 服务器推荐替代 bypass）",
+                variable=self._permission_auto_approve_var,
+                text_color=COLORS["text"],
+                progress_color=COLORS["warning"],
+                button_color=COLORS["text"],
+            )
+            permission_switch.pack(anchor="w", pady=5)
+            self._add_field(
+                scroll,
+                "自动确认最大次数 (0=一直)",
+                "auto_approve_max_per_session",
+                str(self.settings.auto_approve_max_per_session),
+            )
+            ctk.CTkLabel(
+                scroll,
+                text="自动确认工具（每行一个，支持 * 通配；默认只含编辑类工具，不自动批准 Bash）",
+                text_color=COLORS["muted"],
+                anchor="w",
+                font=font(12),
+            ).pack(fill="x", pady=(10, 2))
+            self._auto_approve_tools_text = ctk.CTkTextbox(scroll, height=70, **textbox_style(monospace=True))
+            self._auto_approve_tools_text.insert("1.0", "\n".join(self.settings.auto_approve_tools))
+            self._auto_approve_tools_text.pack(fill="x", pady=(0, 10))
+
         # Error recovery section
         ctk.CTkLabel(scroll, text="错误自动恢复", text_color=COLORS["text"], font=font(14, "bold")).pack(
             anchor="w", pady=(15, 5))
@@ -205,6 +234,18 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             git_snapshot_on_start = self._git_snapshot_on_start_var.get()
             git_snapshot_on_recovery = self._git_snapshot_on_recovery_var.get()
 
+            auto_approve_permission_requests = self.settings.auto_approve_permission_requests
+            auto_approve_max = self.settings.auto_approve_max_per_session
+            auto_approve_tools = list(self.settings.auto_approve_tools)
+            if hasattr(self, "_permission_auto_approve_var"):
+                auto_approve_permission_requests = self._permission_auto_approve_var.get()
+                auto_approve_max = int(self._auto_approve_max_per_session_entry.get())
+                auto_approve_tools = [
+                    line.strip()
+                    for line in self._auto_approve_tools_text.get("1.0", "end").replace(",", "\n").split("\n")
+                    if line.strip()
+                ]
+
             incomplete = [line.strip() for line in self._incomplete_text.get("1.0", "end").split("\n") if line.strip()]
             blocker = [line.strip() for line in self._blocker_text.get("1.0", "end").split("\n") if line.strip()]
 
@@ -219,6 +260,9 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 git_auto_snapshot=git_auto_snapshot,
                 git_snapshot_on_start=git_snapshot_on_start,
                 git_snapshot_on_recovery=git_snapshot_on_recovery,
+                auto_approve_permission_requests=auto_approve_permission_requests,
+                auto_approve_max_per_session=auto_approve_max,
+                auto_approve_tools=auto_approve_tools,
                 incomplete_patterns=incomplete,
                 blocker_patterns=blocker,
             )

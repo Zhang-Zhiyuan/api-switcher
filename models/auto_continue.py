@@ -27,6 +27,9 @@ DEFAULT_BLOCKER_PATTERNS = [
 ]
 
 
+DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+
+
 def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> list[str]:
     """Return user patterns plus any missing built-in patterns."""
     merged: list[str] = []
@@ -38,6 +41,22 @@ def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> l
         if value and value not in seen:
             merged.append(value)
             seen.add(value)
+
+    return merged
+
+
+def _merge_unique_strings(values: list[str] | None, defaults: list[str]) -> list[str]:
+    """Return user strings plus defaults, deduplicated case-insensitively."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    source = values if isinstance(values, list) else []
+
+    for item in source + defaults:
+        value = str(item).strip()
+        key = value.casefold()
+        if value and key not in seen:
+            merged.append(value)
+            seen.add(key)
 
     return merged
 
@@ -60,6 +79,9 @@ class AutoContinueSettings:
     git_snapshot_on_start: bool = True  # 对话开始时创建快照
     git_snapshot_on_recovery: bool = True  # 错误恢复前创建快照
 
+    auto_approve_permission_requests: bool = False
+    auto_approve_max_per_session: int = 3  # 0 means unlimited
+    auto_approve_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS))
     # Incomplete patterns (regex)
     incomplete_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_INCOMPLETE_PATTERNS))
 
@@ -81,6 +103,24 @@ class AutoContinueSettings:
 
         if self.max_error_recoveries > 10:
             return False, "max_error_recoveries too large (max: 10)"
+
+        # Validate auto approval settings
+        if not isinstance(self.auto_approve_permission_requests, bool):
+            return False, "auto_approve_permission_requests must be a boolean"
+
+        if not isinstance(self.auto_approve_max_per_session, int) or self.auto_approve_max_per_session < 0:
+            return False, "auto_approve_max_per_session must be a non-negative integer"
+
+        if self.auto_approve_max_per_session > 100:
+            return False, "auto_approve_max_per_session too large (max: 100)"
+
+        if not isinstance(self.auto_approve_tools, list):
+            return False, "auto_approve_tools must be a list"
+        for tool in self.auto_approve_tools:
+            if not isinstance(tool, str) or not tool.strip():
+                return False, "auto_approve_tools contains an empty tool name"
+            if len(tool.strip()) > 80:
+                return False, "auto_approve_tools contains a tool name that is too long"
 
         # Validate continuation_prompt
         if not isinstance(self.continuation_prompt, str) or not self.continuation_prompt.strip():
@@ -118,6 +158,11 @@ class AutoContinueSettings:
             known_fields["blocker_patterns"] = _merge_unique_patterns(
                 known_fields.get("blocker_patterns"),
                 DEFAULT_BLOCKER_PATTERNS,
+            )
+        if "auto_approve_tools" in known_fields:
+            known_fields["auto_approve_tools"] = _merge_unique_strings(
+                known_fields.get("auto_approve_tools"),
+                [],
             )
 
         # Create instance

@@ -138,6 +138,7 @@ try {{
 
     $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
     $gitSnapshotOnStart = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_start"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_start }}
+    $autoApprovePermissionRequests = if ($null -eq $settings.PSObject.Properties["auto_approve_permission_requests"]) {{ $false }} else {{ [bool]$settings.auto_approve_permission_requests }}
 
     # Git snapshots are intentionally independent from auto-continue.
     if ($gitAutoSnapshot -and $gitSnapshotOnStart) {{
@@ -145,7 +146,7 @@ try {{
         Create-GitSnapshot -Message "git-snapshot"
     }}
 
-    if (-not $settings.enabled) {{
+    if ((-not $settings.enabled) -and (-not $autoApprovePermissionRequests)) {{
         exit 0  # Allow stop if auto-continue is disabled
     }}
 
@@ -180,7 +181,7 @@ try {{
     $hookEvent = if ($isClaude) {{ $hookInput.hook_event_name }} else {{ "Stop" }}
     $agentId = if ($isClaude) {{ $hookInput.agent_id }} else {{ $null }}
 
-    if ([string]::IsNullOrWhiteSpace($lastMessage)) {{
+    if ([string]::IsNullOrWhiteSpace($lastMessage) -and $hookEvent -ne "PermissionRequest") {{
         exit 0  # Allow stop if no message
     }}
 
@@ -243,6 +244,104 @@ try {{
 
         # Get continuation count
         $count = if ($state.ContainsKey($stateKey)) {{ $state[$stateKey] }} else {{ 0 }}
+
+        if ($isClaude -and $hookEvent -eq "PermissionRequest") {{
+            if (-not $autoApprovePermissionRequests) {{
+                exit 0
+            }}
+
+            $toolName = ""
+            if ($hookInput.tool_name) {{ $toolName = [string]$hookInput.tool_name }}
+            elseif ($hookInput.toolName) {{ $toolName = [string]$hookInput.toolName }}
+            elseif ($hookInput.tool) {{ $toolName = [string]$hookInput.tool }}
+            elseif ($hookInput.permission_request -and $hookInput.permission_request.tool_name) {{ $toolName = [string]$hookInput.permission_request.tool_name }}
+            elseif ($hookInput.request -and $hookInput.request.tool_name) {{ $toolName = [string]$hookInput.request.tool_name }}
+
+            if ([string]::IsNullOrWhiteSpace($toolName)) {{
+                exit 0
+            }}
+
+            $allowedTools = @("Edit", "MultiEdit", "Write", "NotebookEdit")
+            if ($settings.auto_approve_tools) {{
+                $allowedTools = @()
+                foreach ($tool in $settings.auto_approve_tools) {{
+                    $toolText = [string]$tool
+                    if (-not [string]::IsNullOrWhiteSpace($toolText)) {{
+                        $allowedTools += $toolText.Trim()
+                    }}
+                }}
+            }}
+
+            $isAllowedTool = $false
+            foreach ($allowed in $allowedTools) {{
+                if ($allowed -eq "*" -or $toolName -ieq $allowed -or $toolName -like $allowed) {{
+                    $isAllowedTool = $true
+                    break
+                }}
+            }}
+            if (-not $isAllowedTool) {{
+                exit 0
+            }}
+
+            $autoApproveMax = 3
+            if ($null -ne $settings.PSObject.Properties["auto_approve_max_per_session"]) {{
+                try {{ $autoApproveMax = [int]$settings.auto_approve_max_per_session }} catch {{ $autoApproveMax = 3 }}
+            }}
+            if ($autoApproveMax -lt 0) {{ $autoApproveMax = 3 }}
+
+            $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
+            if ($autoApproveMax -gt 0 -and $count -ge $autoApproveMax) {{
+                $logEntry = @{{
+                    timestamp = (Get-Date -Format "o")
+                    session_id = $sessionId
+                    hook_event = $hookEvent
+                    agent_id = $agentId
+                    tool_name = $toolName
+                    decision = "ask_user"
+                    reason = "auto_approve_limit_reached"
+                    count = $count
+                }} | ConvertTo-Json -Compress
+                try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
+                exit 0
+            }}
+
+            $count++
+            $state[$stateKey] = $count
+            try {{
+                $tempPath = "$statePath.tmp"
+                $state | ConvertTo-Json | Set-Content $tempPath -ErrorAction Stop
+                Move-Item -Path $tempPath -Destination $statePath -Force -ErrorAction Stop
+            }} catch {{
+                Write-Log "Failed to save permission auto-approve state: $_" "WARN"
+            }}
+
+            $logEntry = @{{
+                timestamp = (Get-Date -Format "o")
+                session_id = $sessionId
+                hook_event = $hookEvent
+                agent_id = $agentId
+                tool_name = $toolName
+                decision = "auto_approve"
+                reason = "configured_permission_request"
+                count = $count
+            }} | ConvertTo-Json -Compress
+            try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
+
+            $output = @{{
+                hookSpecificOutput = @{{
+                    hookEventName = "PermissionRequest"
+                    decision = @{{
+                        behavior = "allow"
+                    }}
+                }}
+            }} | ConvertTo-Json -Depth 5
+            Write-Output $output
+            exit 0
+        }}
+
+        if (-not $settings.enabled) {{
+            exit 0
+        }}
 
         # Check max continuations
         if ($count -ge $settings.max_continuations) {{

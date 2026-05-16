@@ -115,6 +115,15 @@ class AutoContinueControl(ctk.CTkFrame):
                     info_lines.append(f"最大恢复次数: {settings.max_error_recoveries}")
                 if self.provider.lower() == "claude":
                     info_lines.append(f"应用到 Subagent: {'是' if settings.apply_to_subagents else '否'}")
+                    auto_approve_limit = (
+                        "一直"
+                        if settings.auto_approve_max_per_session == 0
+                        else str(settings.auto_approve_max_per_session)
+                    )
+                    info_lines.append(
+                        f"权限自动确认: {'ON' if settings.auto_approve_permission_requests else 'OFF'}"
+                        f" / {auto_approve_limit} 次 / {', '.join(settings.auto_approve_tools[:4])}"
+                    )
 
             self._info_text.configure(state="normal")
             self._info_text.delete("1.0", "end")

@@ -44,10 +44,22 @@ class AutoContinueProvider(ABC):
         """Register the hook, preserving provider-specific settings where needed."""
         import inspect
 
-        if "apply_to_subagents" in inspect.signature(self.register_hook).parameters:
-            self.register_hook(apply_to_subagents=getattr(settings, "apply_to_subagents", False))
-        else:
-            self.register_hook()
+        params = inspect.signature(self.register_hook).parameters
+        kwargs = {}
+        if "apply_to_subagents" in params:
+            kwargs["apply_to_subagents"] = getattr(settings, "apply_to_subagents", False)
+        if "settings" in params:
+            kwargs["settings"] = settings
+        self.register_hook(**kwargs)
+
+    def _settings_require_hook(self, settings: AutoContinueSettings | None) -> bool:
+        if not settings:
+            return False
+        return (
+            bool(settings.enabled)
+            or bool(settings.git_auto_snapshot and settings.git_snapshot_on_start)
+            or bool(self.name == "claude" and settings.auto_approve_permission_requests)
+        )
 
     @abstractmethod
     def unregister_hook(self) -> None:
@@ -153,7 +165,7 @@ class AutoContinueProvider(ABC):
             script_installed = True
 
             # Register hook
-            self.register_hook()
+            self.register_hook_for_settings(settings)
             hook_registered = True
 
             # Save settings (atomic)
@@ -182,7 +194,7 @@ class AutoContinueProvider(ABC):
                 settings.enabled = False
                 self.save_settings(settings)
 
-            if settings and settings.git_auto_snapshot and settings.git_snapshot_on_start:
+            if self._settings_require_hook(settings):
                 self.install_hook_script()
                 self.register_hook_for_settings(settings)
             else:
@@ -242,7 +254,7 @@ class AutoContinueProvider(ABC):
         self.save_settings(settings)
 
         # Re-install/register the stop hook for either auto-continue or standalone Git snapshots.
-        if settings.enabled or (settings.git_auto_snapshot and settings.git_snapshot_on_start):
+        if self._settings_require_hook(settings):
             try:
                 self.install_hook_script()
                 self.register_hook_for_settings(settings)
