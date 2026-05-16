@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 import logging
+from core.atomic_io import atomic_write_text
 from models.auto_continue import AutoContinueSettings, ProviderStatus
 
 logger = logging.getLogger(__name__)
@@ -115,8 +116,6 @@ class AutoContinueProvider(ABC):
     def save_settings(self, settings: AutoContinueSettings) -> None:
         """Save settings to disk with atomic write."""
         import json
-        import tempfile
-        import shutil
 
         # Validate settings before saving
         is_valid, error = settings.validate()
@@ -124,26 +123,13 @@ class AutoContinueProvider(ABC):
             raise ValueError(f"Invalid settings: {error}")
 
         settings_path = self.get_settings_path()
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Atomic write: write to temp file, then move
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=settings_path.parent,
-            prefix='.tmp_',
-            suffix='.json'
-        )
         try:
-            with open(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(settings.to_dict(), f, indent=2, ensure_ascii=False)
-            # Move temp file to target (atomic on most filesystems)
-            shutil.move(temp_path, settings_path)
+            atomic_write_text(
+                settings_path,
+                json.dumps(settings.to_dict(), indent=2, ensure_ascii=False),
+            )
             self._settings = settings
         except Exception as e:
-            # Clean up temp file on error
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except OSError:
-                pass
             raise RuntimeError(f"Failed to save settings: {e}") from e
 
     def enable(self, settings: Optional[AutoContinueSettings] = None) -> None:

@@ -4,12 +4,11 @@ import logging
 import re
 import shutil
 import base64
-import time
-import uuid
 from datetime import datetime
 from urllib.parse import urlparse
 
 from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
+from core.atomic_io import atomic_write_text
 from models.profile import (
     ClaudeProfile,
     CodexProfile,
@@ -38,18 +37,6 @@ ACTIVE_PROFILE_KEYS = (
     "active_ssh_profile",
     "active_browser_profile",
 )
-
-
-def _replace_with_retry(source, target, attempts: int = 5) -> None:
-    """Replace a file, tolerating short-lived Windows file locks."""
-    for attempt in range(attempts):
-        try:
-            source.replace(target)
-            return
-        except PermissionError:
-            if attempt >= attempts - 1:
-                raise
-            time.sleep(0.05 * (attempt + 1))
 
 
 def _get_default_store() -> dict:
@@ -289,15 +276,10 @@ def _save_store(store: dict) -> None:
             except Exception as e:
                 logger.warning(f"Failed to create backup: {e}")
 
-        # Atomic write: write to temp file, then replace
-        tmp = PROFILES_FILE.with_name(f"{PROFILES_FILE.stem}.{uuid.uuid4().hex}.tmp")
         try:
-            tmp.write_text(content, encoding="utf-8")
-            _replace_with_retry(tmp, PROFILES_FILE)
+            atomic_write_text(PROFILES_FILE, content)
             logger.debug(f"Successfully saved profiles to {PROFILES_FILE}")
         except Exception as e:
-            # Clean up temp file on error
-            tmp.unlink(missing_ok=True)
             raise RuntimeError(f"Failed to save profiles: {e}") from e
 
     except Exception as e:

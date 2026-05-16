@@ -644,11 +644,33 @@ def load_state(path):
         return {}
 
 
-def save_state(path, data):
-    tmp_path = f"{path}.tmp.{os.getpid()}"
+def replace_file(source, target):
+    for attempt in range(5):
+        try:
+            os.replace(source, target)
+            return
+        except OSError:
+            if attempt >= 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def write_text_atomic(path, content):
+    tmp_path = f"{path}.tmp.{os.getpid()}.{int(time.time() * 1000000)}"
     with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
+        handle.write(content)
+    try:
+        replace_file(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def save_state(path, data):
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def write_jsonl(path, data):
@@ -664,8 +686,7 @@ def ensure_gitignore():
     if os.path.exists(path):
         return
     try:
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(DEFAULT_GITIGNORE_LINES) + "\n")
+        write_text_atomic(path, "\n".join(DEFAULT_GITIGNORE_LINES) + "\n")
         log("Created local .gitignore for Git snapshots")
     except Exception as exc:
         log(f"Failed to create local .gitignore: {exc}", "WARN")

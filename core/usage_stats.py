@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from config.paths import STORAGE_DIR
+from core.atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -450,10 +451,8 @@ class UsageStatsManager:
                 for key, value in self.stats.items()
             }
 
-            tmp = STATS_FILE.with_suffix(STATS_FILE.suffix + ".tmp")
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            tmp.replace(STATS_FILE)
+            content = json.dumps(data, indent=2, ensure_ascii=False)
+            atomic_write_text(STATS_FILE, content)
 
         except Exception as e:
             logger.error(f"Failed to save usage stats: {e}", exc_info=True)

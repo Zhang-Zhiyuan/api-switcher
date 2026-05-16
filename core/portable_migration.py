@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from core import profile_manager, security
+from core.atomic_io import atomic_write_text
 
 
 BUNDLE_FORMAT = "api-switcher-portable-profiles"
@@ -565,13 +566,7 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
     if path.exists() and path.is_dir():
         raise ValueError("导出路径不能是目录")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    try:
-        temp_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(path)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, json.dumps(bundle, ensure_ascii=False, indent=2))
 
     return PortableExportResult(
         path=path,

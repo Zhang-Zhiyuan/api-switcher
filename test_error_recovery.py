@@ -348,6 +348,10 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "[System.IO.FileMode]::CreateNew" in local_script
     assert "New-Item -Path $lockPath -ItemType File -Force" not in local_script
     assert "os.O_CREAT | os.O_EXCL | os.O_WRONLY" in remote_script
+    assert "def replace_file(source, target):" in remote_script
+    assert "def write_text_atomic(path, content):" in remote_script
+    assert "write_text_atomic(path, json.dumps(data" in remote_script
+    assert 'write_text_atomic(path, "\\n".join(DEFAULT_GITIGNORE_LINES) + "\\n")' in remote_script
 
 
 def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):

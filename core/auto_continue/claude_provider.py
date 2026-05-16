@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+from core.atomic_io import atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
 from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_error_recovery_script
@@ -92,8 +93,7 @@ class ClaudeProvider(AutoContinueProvider):
             self._register_hook_event(settings, "SubagentStop", subagent_hook)
 
         # Write settings.json
-        with open(settings_path, 'w', encoding='utf-8') as f:
-            json.dump(settings, f, indent=2)
+        atomic_write_text(settings_path, json.dumps(settings, indent=2))
 
     def _register_hook_event(self, settings: dict, event_name: str, hook_def: dict) -> None:
         """Register a hook for a specific event."""
@@ -138,8 +138,7 @@ class ClaudeProvider(AutoContinueProvider):
                     hooks[event_name] = filtered
 
             # Write back
-            with open(settings_path, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, indent=2)
+            atomic_write_text(settings_path, json.dumps(settings, indent=2))
         except Exception as e:
             logger.error(f"Failed to unregister hook: {e}")
 
@@ -162,8 +161,7 @@ class ClaudeProvider(AutoContinueProvider):
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
         script_content = generate_hook_script(settings_path, enable_git)
 
-        with open(script_path, 'w', encoding='utf-8-sig') as f:
-            f.write(script_content)
+        atomic_write_text(script_path, script_content, encoding='utf-8-sig')
 
         logger.info(f"Installed hook script: {script_path}")
 
@@ -203,13 +201,14 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             import re
             pattern = r'<!-- BEGIN AUTO CONTINUE GUIDANCE -->.*?<!-- END AUTO CONTINUE GUIDANCE -->'
             new_content = re.sub(pattern, guidance.strip(), existing, flags=re.DOTALL)
-            claude_md.write_text(new_content, encoding='utf-8')
+            atomic_write_text(claude_md, new_content)
         else:
             # Append new block
-            with open(claude_md, 'a', encoding='utf-8') as f:
-                if existing and not existing.endswith('\n'):
-                    f.write('\n\n')
-                f.write(guidance)
+            content = existing
+            if content and not content.endswith('\n'):
+                content += '\n\n'
+            content += guidance
+            atomic_write_text(claude_md, content)
 
     def uninstall_guidance(self) -> None:
         """Remove guidance from CLAUDE.md."""
@@ -225,7 +224,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         new_content = re.sub(pattern, '', content, flags=re.DOTALL)
 
         if new_content.strip():
-            claude_md.write_text(new_content, encoding='utf-8')
+            atomic_write_text(claude_md, new_content)
         else:
             # Delete file if empty
             claude_md.unlink()
@@ -260,8 +259,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
         script_content = generate_error_recovery_script(settings_path, enable_git)
 
-        with open(script_path, 'w', encoding='utf-8-sig') as f:
-            f.write(script_content)
+        atomic_write_text(script_path, script_content, encoding='utf-8-sig')
 
         logger.info(f"Installed error recovery script: {script_path}")
 
@@ -297,8 +295,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         self._register_hook_event(settings, "ResponseError", hook_def)
 
         # 写入配置
-        with open(settings_path, 'w', encoding='utf-8') as f:
-            json.dump(settings, f, indent=2)
+        atomic_write_text(settings_path, json.dumps(settings, indent=2))
 
         logger.info("Registered error recovery hook to ResponseError event")
 
@@ -329,8 +326,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
                         filtered.append(hook_group)
                 hooks["ResponseError"] = filtered
 
-            with open(settings_path, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, indent=2)
+            atomic_write_text(settings_path, json.dumps(settings, indent=2))
 
             logger.info("Uninstalled error recovery hook")
         except Exception as e:

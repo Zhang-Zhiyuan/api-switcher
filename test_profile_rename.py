@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from core import profile_manager, security
+from core import atomic_io, profile_manager, security
 from models.profile import BrowserProfile, ClaudeProfile, CodexProfile
 
 
@@ -45,9 +45,9 @@ def test_profile_store_replace_retries_transient_permission_error(tmp_path, monk
         return original_replace(self, destination)
 
     monkeypatch.setattr(type(source), "replace", flaky_replace)
-    monkeypatch.setattr(profile_manager.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(atomic_io.time, "sleep", lambda _seconds: None)
 
-    profile_manager._replace_with_retry(source, target, attempts=3)
+    atomic_io.replace_with_retry(source, target, attempts=3)
 
     assert attempts["count"] == 2
     assert target.read_text(encoding="utf-8") == "new"

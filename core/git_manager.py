@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple
 
+from core.atomic_io import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -211,7 +213,7 @@ class GitManager:
                     "!.env.example",
                     "!.env.sample",
                 ]
-                gitignore_path.write_text("\n".join(default_ignores), encoding="utf-8")
+                atomic_write_text(gitignore_path, "\n".join(default_ignores) + "\n")
 
             logger.info(f"Git仓库初始化成功: {self.project_path}")
             return True, "Git仓库初始化成功"

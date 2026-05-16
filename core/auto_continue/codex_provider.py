@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+from core.atomic_io import atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
 from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
@@ -133,8 +134,7 @@ class CodexProvider(AutoContinueProvider):
         }, "auto_continue_stop.ps1")
 
         # Write hooks.json
-        with open(hooks_path, 'w', encoding='utf-8') as f:
-            json.dump(hooks, f, indent=2)
+        atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
 
         # Enable codex_hooks in config.toml
         self._enable_codex_hooks()
@@ -153,8 +153,7 @@ class CodexProvider(AutoContinueProvider):
             changed = _remove_codex_event_hook(hooks, "Stop", "auto_continue_stop.ps1")
 
             # Write back
-            with open(hooks_path, 'w', encoding='utf-8') as f:
-                json.dump(hooks, f, indent=2)
+            atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
 
             if changed and not _codex_hooks_has_entries(hooks):
                 self._set_codex_hooks_enabled(False)
@@ -176,8 +175,7 @@ class CodexProvider(AutoContinueProvider):
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
         script_content = generate_hook_script(settings_path, enable_git)
 
-        with open(script_path, 'w', encoding='utf-8-sig') as f:
-            f.write(script_content)
+        atomic_write_text(script_path, script_content, encoding='utf-8-sig')
 
         logger.info(f"Installed hook script: {script_path}")
 
@@ -211,11 +209,7 @@ class CodexProvider(AutoContinueProvider):
             config["codex_hooks"] = bool(enabled)
 
             import tomli_w
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-            with open(tmp_path, 'wb') as f:
-                tomli_w.dump(config, f)
-            tmp_path.replace(config_path)
+            atomic_write_text(config_path, tomli_w.dumps(config))
         except Exception as e:
             logger.error(f"Failed to update codex_hooks: {e}")
 
@@ -244,8 +238,11 @@ Only stop when you encounter a genuine blocker that requires user input or decis
 
         # Check if guidance already exists
         if "Auto-Continue Guidance" not in existing:
-            with open(agents_md, 'a', encoding='utf-8') as f:
-                f.write(guidance)
+            content = existing
+            if content and not content.endswith('\n'):
+                content += '\n\n'
+            content += guidance
+            atomic_write_text(agents_md, content)
 
     def uninstall_guidance(self) -> None:
         """Remove guidance from AGENTS.md."""
@@ -266,7 +263,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             if not skip:
                 filtered.append(line)
 
-        agents_md.write_text('\n'.join(filtered), encoding='utf-8')
+        atomic_write_text(agents_md, '\n'.join(filtered))
 
     def install_error_recovery(self) -> None:
         """安装错误恢复 Hook"""
@@ -283,8 +280,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
         script_content = generate_codex_error_recovery_script(settings_path, enable_git)
 
-        with open(script_path, 'w', encoding='utf-8-sig') as f:
-            f.write(script_content)
+        atomic_write_text(script_path, script_content, encoding='utf-8-sig')
 
         logger.info(f"Installed Codex error recovery script: {script_path}")
 
@@ -313,8 +309,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         }, "error_recovery.ps1")
 
         # 写入 hooks.json
-        with open(hooks_path, 'w', encoding='utf-8') as f:
-            json.dump(hooks, f, indent=2)
+        atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
 
         self._enable_codex_hooks()
 
@@ -338,8 +333,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
 
             changed = _remove_codex_event_hook(hooks, "Error", "error_recovery.ps1")
 
-            with open(hooks_path, 'w', encoding='utf-8') as f:
-                json.dump(hooks, f, indent=2)
+            atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
 
             if changed and not _codex_hooks_has_entries(hooks):
                 self._set_codex_hooks_enabled(False)
