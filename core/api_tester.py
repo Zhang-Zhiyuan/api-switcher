@@ -1,10 +1,12 @@
 """API connection and model-list utilities."""
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -426,6 +428,61 @@ class APITester:
         )
 
     @staticmethod
+    def _is_timeout_error(error: object) -> bool:
+        if isinstance(error, (TimeoutError, socket.timeout)):
+            return True
+        text = f"{type(error).__name__}: {error}".lower()
+        return "timed out" in text or "timeout" in text
+
+    @staticmethod
+    def _is_stream_disconnect_error(error: object) -> bool:
+        if isinstance(
+            error,
+            (
+                http.client.IncompleteRead,
+                http.client.RemoteDisconnected,
+                ConnectionResetError,
+                ConnectionAbortedError,
+                BrokenPipeError,
+                ssl.SSLError,
+            ),
+        ):
+            return True
+        text = f"{type(error).__name__}: {error}".lower()
+        return any(
+            marker in text
+            for marker in (
+                "incomplete read",
+                "connection reset",
+                "connection aborted",
+                "broken pipe",
+                "remote end closed",
+                "server disconnected",
+                "stream disconnected",
+            )
+        )
+
+    @staticmethod
+    def _is_network_transport_error(error: object) -> bool:
+        return isinstance(
+            error,
+            (
+                ConnectionError,
+                OSError,
+                ssl.SSLError,
+                http.client.HTTPException,
+            ),
+        )
+
+    @staticmethod
+    def _network_error_result(error: object, message: str = "网络错误，无法连接到服务器") -> TestResult:
+        return TestResult(
+            success=False,
+            message=message,
+            error_details=str(error)[:400],
+        )
+
+    @staticmethod
     def _http_error_message(code: int, model_hint: bool = False) -> str:
         if code in (401, 403):
             return "认证失败或权限不足"
@@ -489,7 +546,7 @@ class APITester:
             return False, None, APITester._timeout_result(timeout)
         except urllib.error.URLError as e:
             reason = e.reason
-            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+            if APITester._is_timeout_error(reason):
                 return False, None, APITester._timeout_result(timeout)
             return False, None, TestResult(
                 success=False,
@@ -497,6 +554,10 @@ class APITester:
                 error_details=str(e.reason)[:400],
             )
         except Exception as e:
+            if APITester._is_timeout_error(e):
+                return False, None, APITester._timeout_result(timeout)
+            if APITester._is_network_transport_error(e):
+                return False, None, APITester._network_error_result(e)
             logger.error("API request failed: %s", e, exc_info=True)
             return False, None, TestResult(
                 success=False,
@@ -609,7 +670,7 @@ class APITester:
             return APITester._timeout_result(timeout)
         except urllib.error.URLError as e:
             reason = e.reason
-            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+            if APITester._is_timeout_error(reason):
                 return APITester._timeout_result(timeout)
             return TestResult(
                 success=False,
@@ -617,6 +678,14 @@ class APITester:
                 error_details=str(e.reason)[:400],
             )
         except Exception as e:
+            if APITester._is_timeout_error(e):
+                return APITester._timeout_result(timeout)
+            if APITester._is_stream_disconnect_error(e):
+                return TestResult(
+                    success=False,
+                    message="Streaming response disconnected before completion",
+                    error_details=str(e)[:400],
+                )
             logger.error("API stream request failed: %s", e, exc_info=True)
             return TestResult(
                 success=False,
@@ -1020,7 +1089,7 @@ class APITester:
         except (TimeoutError, socket.timeout):
             return APITester._timeout_result(timeout)
         except urllib.error.URLError as e:
-            if isinstance(e.reason, (TimeoutError, socket.timeout)) or "timed out" in str(e.reason).lower():
+            if APITester._is_timeout_error(e.reason):
                 return APITester._timeout_result(timeout)
             return TestResult(
                 success=False,
@@ -1028,6 +1097,10 @@ class APITester:
                 error_details=str(e.reason)[:400],
             )
         except Exception as e:
+            if APITester._is_timeout_error(e):
+                return APITester._timeout_result(timeout)
+            if APITester._is_network_transport_error(e):
+                return APITester._network_error_result(e, message="无法访问")
             return TestResult(
                 success=False,
                 message="测试失败",

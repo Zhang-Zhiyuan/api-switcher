@@ -41,6 +41,27 @@ import urllib.parse
 import urllib.request
 
 
+def classify_transport_error(error, streaming=False):
+    text = (type(error).__name__ + ": " + str(error))[:180]
+    lowered = text.lower()
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout before completion: " + text[:140]
+    if streaming and any(
+        marker in lowered
+        for marker in (
+            "incomplete read",
+            "connection reset",
+            "connection aborted",
+            "broken pipe",
+            "remote end closed",
+            "server disconnected",
+            "stream disconnected",
+        )
+    ):
+        return "stream disconnected before completion: " + text[:140]
+    return text[:160]
+
+
 def openai_url(base_url, resource):
     base_url = (base_url or "https://api.openai.com/v1").strip().rstrip("/")
     if "://" not in base_url:
@@ -155,7 +176,7 @@ def call(api_key, base_url, model, wire_api, timeout):
             "ok": False,
             "status": None,
             "ms": round((time.time() - start) * 1000),
-            "error": type(error).__name__ + ": " + str(error)[:140],
+            "error": classify_transport_error(error, streaming=(wire_api == "responses")),
         }
 
 

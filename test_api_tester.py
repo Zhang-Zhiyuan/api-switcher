@@ -1,4 +1,5 @@
 """Regression checks for API tester URL handling and model parsing."""
+import http.client
 import io
 import json
 import urllib.error
@@ -92,6 +93,22 @@ class _EndlessDeltaStream(_FakeStreamResponse):
         return b"event: response.output_text.delta\ndata: {\"delta\":\"x\"}\n\n"
 
 
+class _ReadTimeoutStream(_FakeStreamResponse):
+    def __init__(self):
+        super().__init__("")
+
+    def readline(self):
+        raise OSError("The read operation timed out")
+
+
+class _DisconnectingStream(_FakeStreamResponse):
+    def __init__(self):
+        super().__init__("")
+
+    def readline(self):
+        raise http.client.IncompleteRead(b"event: response.output_text.delta\n")
+
+
 def test_request_json_rejects_html_success_response(monkeypatch):
     def fake_urlopen(_request, timeout):
         return _FakeHTMLResponse()
@@ -125,6 +142,23 @@ def test_request_json_reports_wrapped_timeout_as_timeout(monkeypatch):
     assert ok is False
     assert data is None
     assert result.message == "连接超时，超过 30 秒"
+
+
+def test_request_json_classifies_connection_reset_as_network_error(monkeypatch):
+    def fake_urlopen(_request, timeout):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    ok, data, result = APITester._request_json(
+        "https://relay.example.com/v1/models",
+        headers={"Accept": "application/json"},
+    )
+
+    assert ok is False
+    assert data is None
+    assert "网络错误" in result.message
+    assert "connection reset" in result.error_details
 
 
 def test_openai_blank_model_uses_latest_from_models(monkeypatch):
@@ -234,6 +268,34 @@ def test_openai_responses_probe_stops_runaway_stream(monkeypatch):
 
     assert result.success is False
     assert "event limit" in result.message
+
+
+def test_openai_responses_probe_classifies_read_timeout(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        return _ReadTimeoutStream()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is False
+    assert "超时" in result.message
+
+
+def test_openai_responses_probe_classifies_stream_disconnect(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        return _DisconnectingStream()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is False
+    assert "disconnected before completion" in result.message
 
 
 def test_benchmark_openai_wire_apis_recommends_stable_chat(monkeypatch):
