@@ -32,7 +32,7 @@ def write_vscode_settings(data: dict) -> None:
 def apply_permissions(settings: dict, bypass: bool, skip_dangerous: bool) -> dict:
     """Apply permission-related settings to VS Code settings.json."""
     settings = dict(settings)
-    settings["claudeCode.allowDangerouslySkipPermissions"] = bypass
+    settings["claudeCode.allowDangerouslySkipPermissions"] = skip_dangerous
     settings["claudeCode.initialPermissionMode"] = "bypassPermissions" if bypass else "default"
     return settings
 

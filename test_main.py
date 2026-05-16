@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from types import ModuleType
 
 import main
 from ui.startup_splash import SPLASH_ARG, StartupSplash, splash_process_supported
@@ -45,3 +46,19 @@ def test_startup_splash_is_disabled_for_frozen_executable(monkeypatch):
     assert splash_process_supported() is False
     assert splash.visible is False
     splash.close()
+
+
+def test_flush_usage_session_ends_active_recorder(monkeypatch):
+    calls = []
+    module = ModuleType("core.usage_recorder")
+
+    class FakeUsageRecorder:
+        def end_session(self):
+            calls.append("ended")
+
+    module.usage_recorder = FakeUsageRecorder()
+    monkeypatch.setitem(sys.modules, "core.usage_recorder", module)
+
+    main.flush_usage_session()
+
+    assert calls == ["ended"]

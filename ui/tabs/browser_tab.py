@@ -331,8 +331,11 @@ class BrowserTab(ctk.CTkScrollableFrame):
             self._toast("未找到 Profile", is_error=True)
             return
 
-        def on_save(new_profile, _old):
-            browser_profile_manager.save_profile(new_profile)
+        def on_save(new_profile, old_profile):
+            browser_profile_manager.save_profile(
+                new_profile,
+                previous_name=old_profile.name if old_profile else None,
+            )
             self._toast(f"已保存: {new_profile.name}")
             self.refresh()
 

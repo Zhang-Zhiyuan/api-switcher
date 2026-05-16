@@ -78,13 +78,13 @@ class BrowserProfileManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def save_profile(self, profile: BrowserProfile) -> None:
+    def save_profile(self, profile: BrowserProfile, previous_name: str | None = None) -> None:
         valid, error = self.validate_profile(profile)
         if not valid:
             raise ValueError(error)
         if profile.profile_mode == "managed":
             self.ensure_managed_profile_dir(profile)
-        profile_manager.save_browser_profile(profile)
+        profile_manager.save_browser_profile(profile, previous_name=previous_name)
 
     def delete_profile(self, name: str) -> None:
         profile_manager.delete_browser_profile(name)

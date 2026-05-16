@@ -383,7 +383,10 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 provider=data.get("provider", "custom"),
                 custom_provider_name=data.get("custom_provider_name") or None,
             )
-            profile_manager.save_claude_profile(new_profile)
+            profile_manager.save_claude_profile(
+                new_profile,
+                previous_name=old_profile.name if old_profile else None,
+            )
             show_toast(self.winfo_toplevel(), f"已保存 Claude API 配置: {data['name']}")
             self.refresh()
             self._refresh_shell_state()

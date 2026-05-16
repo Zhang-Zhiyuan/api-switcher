@@ -538,14 +538,31 @@ def _pick_claude_import_name(settings: dict, config: dict) -> str:
     return _unique_profile_name({profile.name for profile in profiles}, base_name)
 
 
-def save_claude_profile(profile: ClaudeProfile) -> None:
+def save_claude_profile(profile: ClaudeProfile, previous_name: str | None = None) -> None:
     store = _load_store()
     profiles = store.get("claude_profiles", [])
-    # Replace if same name exists, otherwise append
-    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+    replaced_names = {profile.name}
+    if previous_name:
+        replaced_names.add(previous_name)
+
+    replaced_refs: set[str] = set()
+    for existing in profiles:
+        if isinstance(existing, dict) and existing.get("name") in replaced_names:
+            replaced_refs.update(_profile_secret_refs(existing))
+
+    new_refs = _profile_secret_refs(profile)
+    profiles = [
+        p for p in profiles
+        if isinstance(p, dict) and p.get("name") not in replaced_names
+    ]
     profiles.append(profile.to_dict())
     store["claude_profiles"] = profiles
+    if previous_name and store.get("active_claude_profile") == previous_name:
+        store["active_claude_profile"] = profile.name
     _save_store(store)
+
+    for ref in replaced_refs - new_refs:
+        security.delete_secret(ref)
 
 
 def clone_claude_profile(name: str) -> ClaudeProfile:
@@ -1327,13 +1344,31 @@ def _pick_codex_import_name(config: dict, auth: dict) -> str:
     return _unique_profile_name({profile.name for profile in profiles}, base_name)
 
 
-def save_codex_profile(profile: CodexProfile) -> None:
+def save_codex_profile(profile: CodexProfile, previous_name: str | None = None) -> None:
     store = _load_store()
     profiles = store.get("codex_profiles", [])
-    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+    replaced_names = {profile.name}
+    if previous_name:
+        replaced_names.add(previous_name)
+
+    replaced_refs: set[str] = set()
+    for existing in profiles:
+        if isinstance(existing, dict) and existing.get("name") in replaced_names:
+            replaced_refs.update(_profile_secret_refs(existing))
+
+    new_refs = _profile_secret_refs(profile)
+    profiles = [
+        p for p in profiles
+        if isinstance(p, dict) and p.get("name") not in replaced_names
+    ]
     profiles.append(profile.to_dict())
     store["codex_profiles"] = profiles
+    if previous_name and store.get("active_codex_profile") == previous_name:
+        store["active_codex_profile"] = profile.name
     _save_store(store)
+
+    for ref in replaced_refs - new_refs:
+        security.delete_secret(ref)
 
 
 def clone_codex_profile(name: str) -> CodexProfile:
@@ -1648,12 +1683,20 @@ def set_active_browser(name: str) -> None:
     _save_store(store)
 
 
-def save_browser_profile(profile: BrowserProfile) -> None:
+def save_browser_profile(profile: BrowserProfile, previous_name: str | None = None) -> None:
     store = _load_store()
     profiles = store.get("browser_profiles", [])
-    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+    replaced_names = {profile.name}
+    if previous_name:
+        replaced_names.add(previous_name)
+    profiles = [
+        p for p in profiles
+        if isinstance(p, dict) and p.get("name") not in replaced_names
+    ]
     profiles.append(profile.to_dict())
     store["browser_profiles"] = profiles
+    if previous_name and store.get("active_browser_profile") == previous_name:
+        store["active_browser_profile"] = profile.name
     _save_store(store)
 
 

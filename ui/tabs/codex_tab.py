@@ -381,7 +381,10 @@ class CodexTab(ctk.CTkScrollableFrame):
                 approval_policy=data.get("approval_policy", "never"),
                 sandbox_mode=data.get("sandbox_mode", "danger-full-access"),
             )
-            profile_manager.save_codex_profile(new_profile)
+            profile_manager.save_codex_profile(
+                new_profile,
+                previous_name=old_profile.name if old_profile else None,
+            )
             show_toast(self.winfo_toplevel(), f"已保存 Codex API 配置: {data['name']}")
             self.refresh()
             self._refresh_shell_state()

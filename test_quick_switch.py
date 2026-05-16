@@ -147,6 +147,17 @@ def test_usage_stats_load_ignores_unknown_fields(tmp_path, monkeypatch):
     assert stats.daily_history["2026-05-11"].switch_count == 2
 
 
+def test_usage_stats_save_creates_parent_and_cleans_temp_file(tmp_path, monkeypatch):
+    stats_file = tmp_path / "nested" / "usage_stats.json"
+    monkeypatch.setattr(usage_stats_module, "STATS_FILE", stats_file)
+
+    manager = usage_stats_module.UsageStatsManager()
+    manager.record_switch("Atomic Profile", "claude")
+
+    assert stats_file.exists()
+    assert not stats_file.with_suffix(stats_file.suffix + ".tmp").exists()
+
+
 def _matches_incomplete(text: str, settings: AutoContinueSettings | None = None) -> bool:
     settings = settings or AutoContinueSettings()
     return any(re.search(pattern, text) for pattern in settings.incomplete_patterns)

@@ -1,0 +1,13 @@
+from core import vscode_parser
+
+
+def test_apply_permissions_keeps_mode_and_prompt_skip_separate():
+    settings = vscode_parser.apply_permissions({}, bypass=False, skip_dangerous=True)
+
+    assert settings["claudeCode.initialPermissionMode"] == "default"
+    assert settings["claudeCode.allowDangerouslySkipPermissions"] is True
+
+    settings = vscode_parser.apply_permissions(settings, bypass=True, skip_dangerous=False)
+
+    assert settings["claudeCode.initialPermissionMode"] == "bypassPermissions"
+    assert settings["claudeCode.allowDangerouslySkipPermissions"] is False

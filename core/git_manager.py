@@ -23,10 +23,10 @@ class GitManager:
         self.project_path = project_path or Path.cwd()
 
     def is_git_repo(self) -> bool:
-        """检查是否是git仓库"""
+        """检查项目目录本身是否是git仓库根目录"""
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "--git-dir"],
+                ["git", "rev-parse", "--show-toplevel"],
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
@@ -34,7 +34,10 @@ class GitManager:
                 errors="replace",
                 timeout=5
             )
-            return result.returncode == 0
+            if result.returncode != 0:
+                return False
+            repo_root = Path(result.stdout.strip()).resolve()
+            return repo_root == self.project_path.resolve()
         except Exception as e:
             logger.debug(f"检查git仓库失败: {e}")
             return False

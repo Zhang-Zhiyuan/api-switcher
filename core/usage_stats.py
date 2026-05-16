@@ -443,15 +443,17 @@ class UsageStatsManager:
     def save(self):
         """Save statistics to file."""
         try:
-            STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+            STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
             data = {
                 key: value.to_dict()
                 for key, value in self.stats.items()
             }
 
-            with open(STATS_FILE, 'w', encoding='utf-8') as f:
+            tmp = STATS_FILE.with_suffix(STATS_FILE.suffix + ".tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            tmp.replace(STATS_FILE)
 
         except Exception as e:
             logger.error(f"Failed to save usage stats: {e}", exc_info=True)

@@ -63,6 +63,15 @@ def configure_logging():
     return log_manager
 
 
+def flush_usage_session() -> None:
+    try:
+        from core.usage_recorder import usage_recorder
+
+        usage_recorder.end_session()
+    except Exception:
+        logger.exception("Failed to flush usage session")
+
+
 def main(argv: list[str] | None = None):
     args = parse_args(argv)
     if args.splash_child:
@@ -116,6 +125,7 @@ def main(argv: list[str] | None = None):
     finally:
         if splash:
             splash.close()
+        flush_usage_session()
         logger.info("Application shutting down...")
         if log_manager:
             log_manager.shutdown()
