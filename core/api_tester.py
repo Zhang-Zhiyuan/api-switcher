@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import time
 import urllib.error
@@ -516,39 +517,57 @@ class APITester:
 
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
-                response_time = (time.time() - start_time) * 1000
-                body = response.read().decode("utf-8", errors="replace")
                 status_code = response.getcode()
                 content_type = response.headers.get("Content-Type", "") or response.headers.get("content-type", "")
-                snippet = body.strip()[:400]
-                lowered = body.lower()
+                snippet_parts: list[str] = []
+                snippet_len = 0
+                rolling_text = ""
 
-                if not body.strip():
+                while True:
+                    raw_line = response.readline()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", errors="replace")
+                    if snippet_len < 400:
+                        snippet_parts.append(line)
+                        snippet_len += len(line)
+                    rolling_text = (rolling_text + line)[-2000:]
+                    lowered = rolling_text.lower()
+
+                    if (
+                        "event: error" in lowered
+                        or "response.failed" in lowered
+                        or "response.incomplete" in lowered
+                        or re.search(r'"type"\s*:\s*"error"', lowered)
+                    ):
+                        response_time = (time.time() - start_time) * 1000
+                        return TestResult(
+                            success=False,
+                            message="Streaming response returned an error",
+                            response_time=response_time,
+                            status_code=status_code,
+                            error_details="".join(snippet_parts).strip()[:400],
+                        )
+
+                    if (
+                        "response.completed" in lowered
+                        or "[done]" in lowered
+                        or "event: done" in lowered
+                    ):
+                        response_time = (time.time() - start_time) * 1000
+                        return TestResult(
+                            success=True,
+                            message="Streaming response completed",
+                            response_time=response_time,
+                            status_code=status_code,
+                        )
+
+                response_time = (time.time() - start_time) * 1000
+                snippet = "".join(snippet_parts).strip()[:400]
+                if not snippet:
                     return TestResult(
                         success=False,
                         message="Streaming response was empty",
-                        response_time=response_time,
-                        status_code=status_code,
-                    )
-
-                if "event: error" in lowered or "response.failed" in lowered or '"type":"error"' in lowered:
-                    return TestResult(
-                        success=False,
-                        message="Streaming response returned an error",
-                        response_time=response_time,
-                        status_code=status_code,
-                        error_details=snippet,
-                    )
-
-                completed = (
-                    "response.completed" in lowered
-                    or "[done]" in lowered
-                    or "event: done" in lowered
-                )
-                if completed:
-                    return TestResult(
-                        success=True,
-                        message="Streaming response completed",
                         response_time=response_time,
                         status_code=status_code,
                     )

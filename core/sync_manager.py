@@ -33,6 +33,7 @@ CODEX_WIRE_API_MODES = CODEX_WIRE_API_VALUES | {CODEX_WIRE_API_AUTO, CODEX_WIRE_
 
 _REMOTE_CODEX_WIRE_BENCHMARK_SCRIPT = r"""
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -82,21 +83,47 @@ def call(api_key, base_url, model, wire_api, timeout):
     start = time.time()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
             if wire_api == "responses":
-                lowered = body.lower()
-                ok = (
-                    200 <= response.status < 300
-                    and ("response.completed" in lowered or "[done]" in lowered or "event: done" in lowered)
-                    and "response.failed" not in lowered
-                    and "event: error" not in lowered
-                )
+                snippet_parts = []
+                snippet_len = 0
+                rolling_text = ""
+                while True:
+                    raw_line = response.readline()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", errors="replace")
+                    if snippet_len < 160:
+                        snippet_parts.append(line)
+                        snippet_len += len(line)
+                    rolling_text = (rolling_text + line)[-2000:]
+                    lowered = rolling_text.lower()
+                    if (
+                        "event: error" in lowered
+                        or "response.failed" in lowered
+                        or "response.incomplete" in lowered
+                        or re.search(r'"type"\s*:\s*"error"', lowered)
+                    ):
+                        return {
+                            "ok": False,
+                            "status": response.status,
+                            "ms": round((time.time() - start) * 1000),
+                            "error": "stream error: " + "".join(snippet_parts).strip()[:160],
+                        }
+                    if "response.completed" in lowered or "[done]" in lowered or "event: done" in lowered:
+                        return {
+                            "ok": 200 <= response.status < 300,
+                            "status": response.status,
+                            "ms": round((time.time() - start) * 1000),
+                            "error": "" if 200 <= response.status < 300 else "HTTP " + str(response.status),
+                        }
+                body = "".join(snippet_parts).strip()
                 return {
-                    "ok": ok,
+                    "ok": False,
                     "status": response.status,
                     "ms": round((time.time() - start) * 1000),
-                    "error": "" if ok else ("stream did not complete: " + body[:160]),
+                    "error": "stream did not complete: " + body[:160],
                 }
+            body = response.read().decode("utf-8", errors="replace")
             body = body[:300]
             return {
                 "ok": 200 <= response.status < 300 and body.lstrip().startswith(("{", "[")),

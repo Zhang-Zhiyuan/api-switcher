@@ -54,6 +54,7 @@ class _FakeStreamResponse:
     def __init__(self, body: str, status=200):
         self.body = body
         self.status = status
+        self._lines = iter(body.encode("utf-8").splitlines(keepends=True))
 
     def __enter__(self):
         return self
@@ -64,8 +65,23 @@ class _FakeStreamResponse:
     def read(self):
         return self.body.encode("utf-8")
 
+    def readline(self):
+        return next(self._lines, b"")
+
     def getcode(self):
         return self.status
+
+
+class _CompletionThenBlockingStream(_FakeStreamResponse):
+    def __init__(self):
+        super().__init__("event: response.completed\n")
+        self._read_count = 0
+
+    def readline(self):
+        self._read_count += 1
+        if self._read_count > 1:
+            raise AssertionError("stream reader should return as soon as completion is seen")
+        return b"event: response.completed\n"
 
 
 def test_request_json_rejects_html_success_response(monkeypatch):
@@ -168,6 +184,33 @@ def test_openai_responses_probe_flags_incomplete_stream(monkeypatch):
     assert result.success is False
     assert "before completion" in result.message
     assert "text/event-stream" in result.error_details
+
+
+def test_openai_responses_probe_returns_on_completion_without_waiting_for_eof(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        return _CompletionThenBlockingStream()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is True
+
+
+def test_openai_responses_probe_flags_spaced_error_type(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        return _FakeStreamResponse('event: response.failed\ndata: {"type": "error", "message": "boom"}\n\n')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is False
+    assert "returned an error" in result.message
 
 
 def test_benchmark_openai_wire_apis_recommends_stable_chat(monkeypatch):
