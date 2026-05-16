@@ -24,6 +24,12 @@ class RemoteWireBenchmarkResult:
     error: str = ""
 
 
+CODEX_WIRE_API_AUTO = "auto"
+CODEX_WIRE_API_PROFILE = "profile"
+CODEX_WIRE_API_VALUES = {"chat", "responses"}
+CODEX_WIRE_API_MODES = CODEX_WIRE_API_VALUES | {CODEX_WIRE_API_AUTO, CODEX_WIRE_API_PROFILE}
+
+
 _REMOTE_CODEX_WIRE_BENCHMARK_SCRIPT = r"""
 import json
 import sys
@@ -132,6 +138,22 @@ def main():
 
 main()
 """
+
+
+def normalize_codex_wire_api_mode(mode: str | None) -> str:
+    value = str(mode or CODEX_WIRE_API_AUTO).strip().lower()
+    aliases = {
+        "": CODEX_WIRE_API_AUTO,
+        "default": CODEX_WIRE_API_AUTO,
+        "remote_auto": CODEX_WIRE_API_AUTO,
+        "benchmark": CODEX_WIRE_API_AUTO,
+        "local": CODEX_WIRE_API_PROFILE,
+        "use_profile": CODEX_WIRE_API_PROFILE,
+    }
+    value = aliases.get(value, value)
+    if value not in CODEX_WIRE_API_MODES:
+        raise ValueError(f"不支持的 Codex wire_api 策略: {mode}")
+    return value
 
 
 def _find_profile(profiles: list, name: str, label: str):
@@ -266,6 +288,24 @@ def _set_remote_codex_wire_api(config: dict, profile, wire_api: str) -> bool:
     return True
 
 
+def _remote_codex_current_wire_api(config: dict, profile) -> str:
+    provider_id = str(config.get("model_provider") or getattr(profile, "model_provider", "") or "custom").strip()
+    model_providers = config.get("model_providers")
+    table = {}
+    if isinstance(model_providers, dict):
+        maybe_table = model_providers.get(provider_id)
+        if isinstance(maybe_table, dict):
+            table = maybe_table
+
+    wire_api = str(table.get("wire_api") or "").strip().lower()
+    if wire_api in CODEX_WIRE_API_VALUES:
+        return wire_api
+
+    provider = ProviderRegistry.get_provider(provider_id)
+    fallback = str(provider.wire_api if provider else "responses").strip().lower()
+    return fallback if fallback in CODEX_WIRE_API_VALUES else "responses"
+
+
 def _format_remote_wire_summary(summaries: list[dict]) -> str:
     parts = []
     for item in summaries:
@@ -373,8 +413,9 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
     return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted or vscode_root_adjusted else message
 
 
-def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
+def sync_codex_to_server(ssh_name: str, codex_name: str, wire_api_mode: str | None = CODEX_WIRE_API_AUTO) -> str:
     """Sync Codex profile to remote server. Returns status message."""
+    wire_api_mode = normalize_codex_wire_api_mode(wire_api_mode)
     codex_profile = _find_profile(profile_manager.list_switchable_codex_profiles(), codex_name, "Codex API Profile")
     if not profile_manager.is_third_party_codex_profile(codex_profile):
         raise ValueError("只能同步第三方 Codex API Profile")
@@ -386,27 +427,36 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
 
     config = remote_config.read_remote_codex_config(client, ssh_profile) or {}
     config = toml_parser.apply_codex_profile(config, codex_profile)
+    if wire_api_mode in CODEX_WIRE_API_VALUES:
+        _set_remote_codex_wire_api(config, codex_profile, wire_api_mode)
     remote_config.write_remote_codex_config(client, config, ssh_profile)
 
     auth = remote_config.read_remote_codex_auth(client, ssh_profile) or {}
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth, ssh_profile)
     env_keys = _persist_remote_codex_env(client, codex_profile, api_key)
-    benchmark = _remote_benchmark_codex_wire_api(client, codex_profile, config, api_key)
-    if benchmark.success and benchmark.recommended_wire_api:
-        if _set_remote_codex_wire_api(config, codex_profile, benchmark.recommended_wire_api):
-            remote_config.write_remote_codex_config(client, config, ssh_profile)
+    benchmark = None
+    if wire_api_mode == CODEX_WIRE_API_AUTO:
+        benchmark = _remote_benchmark_codex_wire_api(client, codex_profile, config, api_key)
+        if benchmark.success and benchmark.recommended_wire_api:
+            if _set_remote_codex_wire_api(config, codex_profile, benchmark.recommended_wire_api):
+                remote_config.write_remote_codex_config(client, config, ssh_profile)
 
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
     message = f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
-    if benchmark.success and benchmark.recommended_wire_api:
-        detail = f" | 远端自测推荐 wire_api={benchmark.recommended_wire_api}"
+    current_wire_api = _remote_codex_current_wire_api(config, codex_profile)
+    if benchmark and benchmark.success and benchmark.recommended_wire_api:
+        detail = f" | 远端自测已选择 wire_api={benchmark.recommended_wire_api}"
+        if benchmark.selected_model:
+            detail += f"，模型={benchmark.selected_model}"
         if benchmark.summary:
             detail += f"（{benchmark.summary}）"
         return message + detail
-    if benchmark.error:
-        return message + f" | 远端 wire_api 自测跳过: {benchmark.error}"
-    return message
+    if benchmark and benchmark.error:
+        return message + f" | 远端 wire_api 自测跳过: {benchmark.error}；当前使用 wire_api={current_wire_api}"
+    if wire_api_mode in CODEX_WIRE_API_VALUES:
+        return message + f" | 已手动选择 wire_api={current_wire_api}"
+    return message + f" | 使用本地配置 wire_api={current_wire_api}"
 
 
 def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
@@ -425,12 +475,19 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
     return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}"
 
 
-def sync_selected_to_server(ssh_name: str, target_kind: str, name: str) -> str:
+def sync_selected_to_server(
+    ssh_name: str,
+    target_kind: str,
+    name: str,
+    codex_wire_api_mode: str | None = CODEX_WIRE_API_AUTO,
+) -> str:
     """Sync one explicit local API profile or official account snapshot to the remote server."""
+    if target_kind == "codex_api":
+        return sync_codex_to_server(ssh_name, name, codex_wire_api_mode)
+
     handlers = {
         "claude_api": sync_claude_to_server,
         "claude_account": sync_claude_account_to_server,
-        "codex_api": sync_codex_to_server,
         "codex_account": sync_codex_account_to_server,
     }
     handler = handlers.get(target_kind)
@@ -439,7 +496,7 @@ def sync_selected_to_server(ssh_name: str, target_kind: str, name: str) -> str:
     return handler(ssh_name, name)
 
 
-def sync_all_to_server(ssh_name: str) -> str:
+def sync_all_to_server(ssh_name: str, codex_wire_api_mode: str | None = CODEX_WIRE_API_AUTO) -> str:
     """Sync currently active local Claude + Codex target to remote server."""
     results = []
     failures = []
@@ -465,7 +522,7 @@ def sync_all_to_server(ssh_name: str) -> str:
     active_codex_account = profile_manager.get_current_codex_account_name() or profile_manager.get_active_codex_account_name()
     if active_codex_api in codex_api:
         try:
-            results.append(sync_codex_to_server(ssh_name, active_codex_api))
+            results.append(sync_codex_to_server(ssh_name, active_codex_api, codex_wire_api_mode))
         except Exception as e:
             failures.append(f"Codex: {e}")
     elif active_codex_account in codex_accounts:

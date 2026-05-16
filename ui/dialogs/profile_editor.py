@@ -276,7 +276,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         self._add_field(parent, "自定义端点", "custom_base_url", p.custom_base_url if p else "")
         self._add_field(parent, "自定义名称", "custom_name", p.custom_name if p else "")
-        self._add_field(parent, "Wire API", "custom_wire_api", p.custom_wire_api if p else "responses")
+        wire_api_widget = self._add_field(parent, "Wire API", "custom_wire_api", ["auto", "chat", "responses"], "combo")
+        wire_api_widget.set(self._display_wire_api(p.custom_wire_api if p else None))
         self._add_field(parent, "环境变量名", "custom_env_key", p.custom_env_key if p else "OPENAI_API_KEY")
 
         self._add_field(parent, "审批策略", "approval_policy", ["never", "auto", "manual"], "combo")
@@ -302,8 +303,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._fields["custom_base_url"][0].insert(0, p.custom_base_url or "")
                 self._fields["custom_name"][0].delete(0, "end")
                 self._fields["custom_name"][0].insert(0, p.custom_name or "")
-                self._fields["custom_wire_api"][0].delete(0, "end")
-                self._fields["custom_wire_api"][0].insert(0, p.custom_wire_api or "responses")
+                self._set_wire_api_value(p.custom_wire_api)
                 self._fields["custom_env_key"][0].delete(0, "end")
                 self._fields["custom_env_key"][0].insert(0, p.custom_env_key or ProviderRegistry.get_codex_env_key_for_profile(p))
 
@@ -315,6 +315,21 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             return widget.get()
         else:
             return widget.get()
+
+    def _display_wire_api(self, wire_api: str | None) -> str:
+        wire_api = str(wire_api or "").strip().lower()
+        return wire_api if wire_api in {"chat", "responses"} else "auto"
+
+    def _set_wire_api_value(self, wire_api: str | None) -> None:
+        if "custom_wire_api" not in self._fields:
+            return
+        widget, _ = self._fields["custom_wire_api"]
+        value = self._display_wire_api(wire_api)
+        try:
+            widget.set(value)
+        except Exception:
+            widget.delete(0, "end")
+            widget.insert(0, value)
 
     def _show_error(self, message: str) -> None:
         self._error_label.configure(text=message, text_color=COLORS["danger"])
@@ -430,8 +445,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._fields["custom_name"][0].delete(0, "end")
             self._fields["custom_name"][0].insert(0, provider.display_name)
         if "custom_wire_api" in self._fields:
-            self._fields["custom_wire_api"][0].delete(0, "end")
-            self._fields["custom_wire_api"][0].insert(0, provider.wire_api)
+            self._set_wire_api_value(provider.wire_api)
         if "custom_env_key" in self._fields:
             self._fields["custom_env_key"][0].delete(0, "end")
             self._fields["custom_env_key"][0].insert(0, provider.codex_env_key)
@@ -519,8 +533,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         if getattr(result, "selected_model", None) and "model" in self._fields:
             self._fields["model"][0].set(result.selected_model)
         if getattr(result, "recommended_wire_api", None) and "custom_wire_api" in self._fields:
-            self._fields["custom_wire_api"][0].delete(0, "end")
-            self._fields["custom_wire_api"][0].insert(0, result.recommended_wire_api)
+            self._set_wire_api_value(result.recommended_wire_api)
         self._show_test_result(result, profile_name)
 
     def _show_test_result(self, result, profile_name: str):
@@ -714,6 +727,11 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._show_error("第三方或自定义 Provider 需要 API 端点")
                 return
             api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
+            wire_api = str(data.get("custom_wire_api") or "").strip().lower()
+            data["custom_wire_api"] = "" if wire_api == "auto" else wire_api
+            if data["custom_wire_api"] and data["custom_wire_api"] not in {"chat", "responses"}:
+                self._show_error("Wire API 只能选择 auto、chat 或 responses")
+                return
             if not data.get("model"):
                 self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
                 self.update_idletasks()

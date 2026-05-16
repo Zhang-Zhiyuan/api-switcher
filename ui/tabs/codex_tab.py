@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import customtkinter as ctk
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
@@ -253,7 +255,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 auth_identity = profile_manager.describe_codex_profile_identity(p)
                 auth_desc = f"API Key ({auth_identity})"
                 info = [
-                    f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}",
+                    f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}  |  Wire API: {p.custom_wire_api or 'auto'}",
                     f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
                 ]
 
@@ -352,7 +354,12 @@ class CodexTab(ctk.CTkScrollableFrame):
 
             def show_result():
                 if self.winfo_exists():
-                    APITestResultDialog(self.winfo_toplevel(), result, name)
+                    APITestResultDialog(
+                        self.winfo_toplevel(),
+                        result,
+                        name,
+                        on_apply_wire_api=lambda wire_api: self._apply_profile_wire_api(name, wire_api),
+                    )
 
             try:
                 self.after(0, show_result)
@@ -361,6 +368,30 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         import threading
         threading.Thread(target=run_test, daemon=True).start()
+
+    def _apply_profile_wire_api(self, name: str, wire_api: str) -> None:
+        wire_api = str(wire_api or "").strip().lower()
+        if wire_api not in {"chat", "responses"}:
+            show_toast(self.winfo_toplevel(), f"不支持的 Wire API: {wire_api}", is_error=True)
+            return
+
+        try:
+            profiles = profile_manager.list_switchable_codex_profiles()
+            profile = next((p for p in profiles if p.name == name), None)
+            if not profile:
+                show_toast(self.winfo_toplevel(), f"未找到 API 配置: {name}", is_error=True)
+                return
+
+            was_active = profile_manager.get_active_codex_name() == name or profile_manager.get_current_codex_name() == name
+            profile_manager.save_codex_profile(replace(profile, custom_wire_api=wire_api), previous_name=profile.name)
+            if was_active:
+                switcher.switch_codex_profile(name)
+
+            show_toast(self.winfo_toplevel(), f"已切换 {name} 的 Wire API 为 {wire_api}")
+            self.refresh()
+            self._refresh_shell_state()
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"Wire API 切换失败: {e}", is_error=True)
 
     def _edit_profile(self, name):
         profiles = profile_manager.list_switchable_codex_profiles()

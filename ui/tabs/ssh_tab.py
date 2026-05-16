@@ -18,6 +18,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
+        self._codex_wire_api_combo = None
         self._sync_status_label = None
         self._ssh_busy = False
         self._remote_auto_provider_combo = None
@@ -34,6 +35,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             "Claude": "claude",
             "Codex": "codex",
             "Claude + Codex": "all",
+        }
+        self._codex_wire_api_options = {
+            "远端自测选择": "auto",
+            "使用本地配置": "profile",
+            "强制 chat": "chat",
+            "强制 responses": "responses",
         }
         self._build_ui()
 
@@ -152,6 +159,32 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("primary"),
         ).grid(row=1, column=3, sticky="e", pady=(10, 0))
 
+        ctk.CTkLabel(
+            sync_controls,
+            text="Codex Wire API",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self._codex_wire_api_combo = ctk.CTkComboBox(
+            sync_controls,
+            values=list(self._codex_wire_api_options.keys()),
+            width=160,
+            **combo_style(),
+        )
+        self._codex_wire_api_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._codex_wire_api_combo.set("远端自测选择")
+        wire_hint = ctk.CTkLabel(
+            sync_controls,
+            text="推送 Codex API 时生效；远端自测会在服务器上各跑 3 次并回写最稳选项",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        wire_hint.grid(row=2, column=2, columnspan=2, sticky="ew", pady=(10, 0))
+        bind_wraplength(sync_controls, wire_hint, padding=20)
+
         self._sync_status_label = ctk.CTkLabel(
             sync_controls,
             text="就绪",
@@ -160,7 +193,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._sync_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._sync_status_label.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -492,15 +525,21 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
 
+        wire_api_mode = self._selected_codex_wire_api_mode()
         self._run_ssh_task(
             f"正在推送当前生效配置到 {server_name}...",
-            lambda: sync_manager.sync_all_to_server(server_name),
+            lambda: sync_manager.sync_all_to_server(server_name, codex_wire_api_mode=wire_api_mode),
         )
 
     def _selected_sync_kind(self) -> str:
         if not self._sync_kind_combo:
             return "claude_api"
         return self._sync_kind_options.get(self._sync_kind_combo.get(), "claude_api")
+
+    def _selected_codex_wire_api_mode(self) -> str:
+        if not self._codex_wire_api_combo:
+            return "auto"
+        return self._codex_wire_api_options.get(self._codex_wire_api_combo.get(), "auto")
 
     def _profile_names_for_kind(self, kind: str) -> list[str]:
         if kind == "claude_api":
@@ -536,11 +575,17 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         kind = self._selected_sync_kind()
+        wire_api_mode = self._selected_codex_wire_api_mode()
 
         def do_sync():
             self._run_ssh_task(
                 f"正在推送 {profile_name} 到 {server_name}...",
-                lambda: sync_manager.sync_selected_to_server(server_name, kind, profile_name),
+                lambda: sync_manager.sync_selected_to_server(
+                    server_name,
+                    kind,
+                    profile_name,
+                    codex_wire_api_mode=wire_api_mode,
+                ),
             )
 
         if kind in {"claude_account", "codex_account"}:
