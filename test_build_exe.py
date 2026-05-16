@@ -28,10 +28,17 @@ def test_build_exe_main_propagates_build_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(build_exe, "check_pyinstaller", lambda: True)
     calls = []
     monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onefile": calls.append(("spec", bundle_mode)))
-    monkeypatch.setattr(build_exe, "build_exe", lambda bundle_mode="onefile": calls.append(("build", bundle_mode)) or False)
+    monkeypatch.setattr(
+        build_exe,
+        "build_exe",
+        lambda bundle_mode="onefile", clean_intermediates=True: calls.append(
+            ("build", bundle_mode, clean_intermediates)
+        )
+        or False,
+    )
 
     assert build_exe.main([]) == 1
-    assert calls == [("spec", "onefile"), ("build", "onefile")]
+    assert calls == [("spec", "onefile"), ("build", "onefile", True)]
 
 
 def test_build_exe_main_accepts_onedir_override(monkeypatch, tmp_path):
@@ -40,10 +47,36 @@ def test_build_exe_main_accepts_onedir_override(monkeypatch, tmp_path):
     monkeypatch.setattr(build_exe, "check_pyinstaller", lambda: True)
     calls = []
     monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onefile": calls.append(("spec", bundle_mode)))
-    monkeypatch.setattr(build_exe, "build_exe", lambda bundle_mode="onefile": calls.append(("build", bundle_mode)) or True)
+    monkeypatch.setattr(
+        build_exe,
+        "build_exe",
+        lambda bundle_mode="onefile", clean_intermediates=True: calls.append(
+            ("build", bundle_mode, clean_intermediates)
+        )
+        or True,
+    )
 
     assert build_exe.main(["--onedir"]) == 0
-    assert calls == [("spec", "onedir"), ("build", "onedir")]
+    assert calls == [("spec", "onedir"), ("build", "onedir", True)]
+
+
+def test_build_exe_main_can_keep_intermediates(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "main.py").write_text("print('ok')", encoding="utf-8")
+    monkeypatch.setattr(build_exe, "check_pyinstaller", lambda: True)
+    calls = []
+    monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onefile": calls.append(("spec", bundle_mode)))
+    monkeypatch.setattr(
+        build_exe,
+        "build_exe",
+        lambda bundle_mode="onefile", clean_intermediates=True: calls.append(
+            ("build", bundle_mode, clean_intermediates)
+        )
+        or True,
+    )
+
+    assert build_exe.main(["--keep-intermediates"]) == 0
+    assert calls == [("spec", "onefile"), ("build", "onefile", False)]
 
 
 def test_create_spec_file_includes_lazy_tab_hidden_imports(monkeypatch, tmp_path):
@@ -95,3 +128,19 @@ def test_build_exe_onefile_removes_stale_onedir_artifact(monkeypatch, tmp_path):
 
     assert build_exe.build_exe("onefile") is True
     assert not stale_onedir.exists()
+
+
+def test_build_exe_cleans_intermediate_files(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
+    monkeypatch.setattr(build_exe, "SPEC_PATH", tmp_path / "ApiSwitcher.spec")
+    monkeypatch.setattr(build_exe.subprocess, "check_call", lambda *args, **kwargs: 0)
+    onefile_exe = tmp_path / "dist" / "ApiSwitcher.exe"
+    onefile_exe.parent.mkdir(parents=True)
+    onefile_exe.write_bytes(b"exe")
+    (tmp_path / "build" / "ApiSwitcher").mkdir(parents=True)
+    build_exe.SPEC_PATH.write_text("# generated", encoding="utf-8")
+
+    assert build_exe.build_exe("onefile") is True
+    assert not (tmp_path / "build").exists()
+    assert not build_exe.SPEC_PATH.exists()

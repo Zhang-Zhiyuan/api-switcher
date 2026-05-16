@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -217,7 +218,44 @@ def _remove_stale_artifact(bundle_mode: str) -> bool:
     return True
 
 
-def build_exe(bundle_mode: str = DEFAULT_BUNDLE_MODE) -> bool:
+def _is_safe_workspace_path(path: Path) -> bool:
+    workspace = Path.cwd().resolve()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return resolved != workspace and workspace in resolved.parents
+
+
+def clean_intermediate_files() -> bool:
+    """Remove generated build files that are not release artifacts."""
+    paths = [Path("build"), SPEC_PATH]
+    ok = True
+    for path in paths:
+        if not path.exists():
+            continue
+        if not _is_safe_workspace_path(path):
+            print(f"Refusing to remove unexpected intermediate path: {path}", flush=True)
+            ok = False
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, onexc=_make_writable_and_retry)
+            else:
+                path.unlink()
+            print(f"Removed intermediate: {path}", flush=True)
+        except Exception as exc:
+            print(f"Failed to remove intermediate {path}: {exc}", flush=True)
+            ok = False
+    return ok
+
+
+def _make_writable_and_retry(function, path, _exc_info) -> None:
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
+
+
+def build_exe(bundle_mode: str = DEFAULT_BUNDLE_MODE, clean_intermediates: bool = True) -> bool:
     print("\nStarting PyInstaller build...\n", flush=True)
     try:
         subprocess.check_call(
@@ -246,12 +284,20 @@ def build_exe(bundle_mode: str = DEFAULT_BUNDLE_MODE) -> bool:
     if not _remove_stale_artifact(bundle_mode):
         return False
 
+    if clean_intermediates and not clean_intermediate_files():
+        return False
+
     print(f"\nBuild complete: {exe_path.resolve()}", flush=True)
     return True
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build API Switcher with PyInstaller.")
+    parser.add_argument(
+        "--keep-intermediates",
+        action="store_true",
+        help="Keep PyInstaller build/ and the generated spec file for debugging.",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--onedir",
@@ -288,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     create_spec_file(bundle_mode)
-    return 0 if build_exe(bundle_mode) else 1
+    return 0 if build_exe(bundle_mode, clean_intermediates=not args.keep_intermediates) else 1
 
 
 if __name__ == "__main__":

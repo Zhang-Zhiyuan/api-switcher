@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import importlib
 import os
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +46,7 @@ CHECKS = [
 
 TEXT_EXTENSIONS = {".py", ".md", ".bat", ".txt", ".json", ".toml", ".ps1"}
 SKIPPED_TEXT_DIRS = {"build", "dist", ".git", ".pytest_cache", ".ruff_cache", "__pycache__"}
+SKIPPED_CLEAN_DIRS = {".git", "dist", "storage"}
 MOJIBAKE_SOURCE_PHRASES = (
     "正在",
     "配置",
@@ -91,6 +94,56 @@ def _command_env(label: str) -> dict[str, str]:
         env["TEMP"] = str(temp_dir)
         env["GIT_CEILING_DIRECTORIES"] = str(temp_dir)
     return env
+
+
+def _is_safe_workspace_path(path: Path) -> bool:
+    workspace = Path.cwd().resolve()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return resolved != workspace and workspace in resolved.parents
+
+
+def _remove_path(path: Path) -> bool:
+    if not path.exists():
+        return True
+    if not _is_safe_workspace_path(path):
+        print(f"cleanup: skipped unexpected path {path}", flush=True)
+        return False
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, onexc=_make_writable_and_retry)
+        else:
+            path.unlink()
+        print(f"cleanup: removed {path}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"cleanup: failed to remove {path}: {exc}", flush=True)
+        return False
+
+
+def _make_writable_and_retry(function, path, _exc_info) -> None:
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
+
+
+def cleanup_intermediate_files() -> bool:
+    paths = [
+        Path("build"),
+        Path(".pytest_cache"),
+        Path(".ruff_cache"),
+        Path(f"{APP_NAME}.spec"),
+    ]
+    paths.extend(
+        path
+        for path in Path(".").rglob("__pycache__")
+        if not any(part in SKIPPED_CLEAN_DIRS for part in path.parts)
+    )
+    ok = True
+    for path in paths:
+        ok = _remove_path(path) and ok
+    return ok
 
 
 def _to_common_mojibake(text: str) -> str:
@@ -244,6 +297,9 @@ def main() -> int:
         return 1
 
     if not check_artifacts():
+        return 1
+
+    if not cleanup_intermediate_files():
         return 1
 
     print("\nRelease check passed.", flush=True)

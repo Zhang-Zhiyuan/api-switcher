@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import stat
+
 import release_check
 
 
@@ -21,6 +23,35 @@ def test_release_check_pytest_env_stops_git_parent_discovery(monkeypatch, tmp_pa
     assert env["TMP"] == expected
     assert env["TEMP"] == expected
     assert env["GIT_CEILING_DIRECTORIES"] == expected
+
+
+def test_cleanup_intermediate_files_keeps_dist_and_storage(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    for path in [
+        tmp_path / "build" / "work.txt",
+        tmp_path / ".pytest_cache" / "cache.txt",
+        tmp_path / ".ruff_cache" / "cache.txt",
+        tmp_path / "pkg" / "__pycache__" / "module.pyc",
+        tmp_path / "ApiSwitcher.spec",
+        tmp_path / "dist" / "ApiSwitcher.exe",
+        tmp_path / "storage" / "profiles.json",
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    readonly = tmp_path / "build" / "readonly.txt"
+    readonly.write_text("x", encoding="utf-8")
+    readonly.chmod(stat.S_IREAD)
+    monkeypatch.setattr(release_check, "APP_NAME", "ApiSwitcher")
+
+    assert release_check.cleanup_intermediate_files() is True
+
+    assert not (tmp_path / "build").exists()
+    assert not (tmp_path / ".pytest_cache").exists()
+    assert not (tmp_path / ".ruff_cache").exists()
+    assert not (tmp_path / "pkg" / "__pycache__").exists()
+    assert not (tmp_path / "ApiSwitcher.spec").exists()
+    assert (tmp_path / "dist" / "ApiSwitcher.exe").exists()
+    assert (tmp_path / "storage" / "profiles.json").exists()
 
 
 def test_check_artifacts_passes_with_only_onefile_exe(monkeypatch, tmp_path):
