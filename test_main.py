@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import io
 import sys
 from types import ModuleType
 
 import main
-from ui.startup_splash import SPLASH_ARG, StartupSplash, splash_process_supported
+from ui.startup_splash import (
+    SPLASH_ARG,
+    StartupSplash,
+    _iter_stdin_lines_utf8,
+    _splash_subprocess_env,
+    splash_process_supported,
+)
 
 
 def test_parse_args_defaults_to_splash_enabled():
@@ -46,6 +53,20 @@ def test_startup_splash_is_disabled_for_frozen_executable(monkeypatch):
     assert splash_process_supported() is False
     assert splash.visible is False
     splash.close()
+
+
+def test_startup_splash_reads_status_pipe_as_utf8():
+    stdin = ModuleType("stdin")
+    stdin.buffer = io.BytesIO("STATUS\t正在准备配置...\nCLOSE\n".encode("utf-8"))
+
+    assert list(_iter_stdin_lines_utf8(stdin)) == ["STATUS\t正在准备配置...", "CLOSE"]
+
+
+def test_startup_splash_child_forces_utf8_environment():
+    env = _splash_subprocess_env()
+
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
 
 
 def test_flush_usage_session_ends_active_recorder(monkeypatch):

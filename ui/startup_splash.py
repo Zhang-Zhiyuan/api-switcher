@@ -72,6 +72,7 @@ class StartupSplash:
                 encoding="utf-8",
                 errors="replace",
                 creationflags=creationflags,
+                env=_splash_subprocess_env(),
             )
         except Exception:
             self._process = None
@@ -104,6 +105,23 @@ def splash_process_supported() -> bool:
     return not getattr(sys, "frozen", False)
 
 
+def _splash_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _iter_stdin_lines_utf8(stdin):
+    stream = getattr(stdin, "buffer", None)
+    if stream is not None:
+        for raw in stream:
+            yield raw.decode("utf-8", errors="replace").rstrip("\n")
+        return
+    for line in stdin:
+        yield line.rstrip("\n")
+
+
 def run_splash_process() -> int:
     """Run the splash window. Intended for the short-lived child process."""
 
@@ -111,8 +129,8 @@ def run_splash_process() -> int:
 
     def read_stdin() -> None:
         try:
-            for line in sys.stdin:
-                messages.put(line.rstrip("\n"))
+            for line in _iter_stdin_lines_utf8(sys.stdin):
+                messages.put(line)
         finally:
             messages.put("CLOSE")
 
