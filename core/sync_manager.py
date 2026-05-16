@@ -5,6 +5,13 @@ from core.ssh_manager import ssh_manager
 logger = logging.getLogger(__name__)
 
 
+ROOT_BYPASS_WARNING = (
+    "提示：目标 SSH 用户是 root，而 Claude Code 禁止 root/sudo 使用 "
+    "bypassPermissions（--dangerously-skip-permissions）。API 已同步；"
+    "请在远端 VS Code 将权限模式改为默认/确认模式，或改用非 root 用户运行 Claude Code。"
+)
+
+
 def _find_profile(profiles: list, name: str, label: str):
     profile = next((p for p in profiles if p.name == name), None)
     if not profile:
@@ -15,6 +22,14 @@ def _find_profile(profiles: list, name: str, label: str):
 def _connect_ssh(ssh_name: str):
     ssh_profile = _find_profile(profile_manager.list_ssh_profiles(), ssh_name, "SSH 服务器")
     return ssh_profile, ssh_manager.connect(ssh_profile)
+
+
+def _claude_root_bypass_warning(ssh_profile, claude_profile) -> str:
+    username = str(getattr(ssh_profile, "username", "") or "").strip().lower()
+    permission_mode = str(getattr(claude_profile, "permissions_mode", "") or "").strip()
+    if username == "root" and permission_mode == "bypassPermissions":
+        return ROOT_BYPASS_WARNING
+    return ""
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -36,7 +51,9 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
     remote_config.write_remote_claude_config(client, config, ssh_profile)
 
     logger.info(f"Synced Claude API profile '{claude_name}' to {ssh_profile.host}")
-    return f"已同步 Claude API '{claude_name}' 到 {ssh_profile.host}"
+    message = f"已同步 Claude API '{claude_name}' 到 {ssh_profile.host}"
+    warning = _claude_root_bypass_warning(ssh_profile, claude_profile)
+    return f"{message} | {warning}" if warning else message
 
 
 def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:

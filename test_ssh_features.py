@@ -181,6 +181,44 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
     assert "ssh.example.com" in message
 
 
+def test_sync_claude_to_root_warns_bypass_permissions_incompatibility(isolated_ssh, monkeypatch):
+    security.set_secret("claude:relay:auth_token", "sk-relay")
+    ssh_profile = SSHProfile(name="remote", host="ssh.example.com", username="root")
+    profile_manager.save_ssh_profile(ssh_profile)
+    profile_manager.save_claude_profile(
+        ClaudeProfile(
+            name="relay",
+            auth_token_ref="claude:relay:auth_token",
+            base_url="https://relay.example.com/anthropic",
+            provider="deepseek",
+            permissions_mode="bypassPermissions",
+        )
+    )
+
+    fake_client = object()
+    written = {}
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(remote_config, "read_remote_claude_settings", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
+    monkeypatch.setattr(
+        remote_config,
+        "write_remote_claude_settings",
+        lambda client, data, profile=None: written.setdefault("settings", data),
+    )
+    monkeypatch.setattr(
+        remote_config,
+        "write_remote_claude_config",
+        lambda client, data, profile=None: written.setdefault("config", data),
+    )
+
+    message = sync_manager.sync_claude_to_server("remote", "relay")
+
+    assert written["settings"]["permissions"]["defaultMode"] == "bypassPermissions"
+    assert "API 已同步" in message
+    assert "root" in message
+    assert "--dangerously-skip-permissions" in message
+
+
 def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrides(isolated_ssh, monkeypatch):
     credentials = {"claudeAiOauth": {"accessToken": "claude-token"}}
     security.set_secret_json("claude-account:work:credentials", credentials)
