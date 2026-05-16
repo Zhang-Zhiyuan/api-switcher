@@ -63,17 +63,19 @@ def switch_codex_profile(name: str) -> None:
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 
-    env_key = ProviderRegistry.get_codex_env_key_for_profile(target)
-    os.environ[env_key] = api_key
+    env_keys = ProviderRegistry.get_codex_runtime_env_keys_for_profile(target)
+    env_updates = {key: api_key for key in env_keys}
+    for key, value in env_updates.items():
+        os.environ[key] = value
     if os.name == "nt":
         from core import persistent_env
 
         try:
-            persistent_env.set_local_user_env({env_key: api_key})
+            persistent_env.set_local_user_env(env_updates)
         except Exception as e:
-            raise RuntimeError(f"写入 Codex API 环境变量 {env_key} 失败: {e}") from e
+            raise RuntimeError(f"写入 Codex API 环境变量 {', '.join(env_keys)} 失败: {e}") from e
     else:
-        logger.warning("Local persistent env write skipped on non-Windows platform for %s", env_key)
+        logger.warning("Local persistent env write skipped on non-Windows platform for %s", ", ".join(env_keys))
 
     # Update config.toml
     config = toml_parser.read_codex_config()

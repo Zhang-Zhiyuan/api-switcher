@@ -44,6 +44,18 @@ def check_codex_provider(provider_id, model, base_url, wire_api, writes_effort):
     assert_equal(has_effort, writes_effort, f"{provider_id} reasoning effort presence")
 
 
+def test_codex_runtime_env_keys_include_openai_fallback():
+    profile = CodexProfile(name="deepseek", model_provider="deepseek")
+
+    assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(profile) == [
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+    ]
+
+    openai_profile = CodexProfile(name="openai", model_provider="openai")
+    assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(openai_profile) == ["OPENAI_API_KEY"]
+
+
 def check_claude_provider(provider_id, model, base_url, writes_effort):
     profile = ClaudeProfile(
         name=provider_id,

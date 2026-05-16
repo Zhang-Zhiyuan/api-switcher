@@ -184,6 +184,38 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
     assert "ssh.example.com" in message
 
 
+def test_sync_codex_to_server_writes_openai_key_fallback_for_provider_env(isolated_ssh, monkeypatch):
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+        )
+    )
+
+    written = {}
+    fake_client = object()
+
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data, profile=None: None)
+    monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data, profile=None: None)
+    monkeypatch.setattr(persistent_env, "set_remote_user_env", lambda client, data: written.setdefault("env", data))
+
+    message = sync_manager.sync_codex_to_server("remote", "deepseek")
+
+    assert written["env"] == {
+        "DEEPSEEK_API_KEY": "sk-deepseek",
+        "OPENAI_API_KEY": "sk-deepseek",
+    }
+    assert "DEEPSEEK_API_KEY" in message
+    assert "OPENAI_API_KEY" in message
+
+
 def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeypatch):
     security.set_secret("claude:relay:auth_token", "sk-relay")
     ssh_profile = SSHProfile(name="remote", host="ssh.example.com", username="root")

@@ -52,16 +52,16 @@ def _codex_profile_api_key(profile) -> str:
     return security.get_secret(getattr(profile, "api_key_ref", None)) or ""
 
 
-def _codex_profile_env_key(profile) -> str:
-    return ProviderRegistry.get_codex_env_key_for_profile(profile)
+def _codex_profile_runtime_env_keys(profile) -> list[str]:
+    return ProviderRegistry.get_codex_runtime_env_keys_for_profile(profile)
 
 
-def _persist_remote_codex_env(client, profile, api_key: str) -> str:
+def _persist_remote_codex_env(client, profile, api_key: str) -> list[str]:
     from core import persistent_env
 
-    env_key = _codex_profile_env_key(profile)
-    persistent_env.set_remote_user_env(client, {env_key: api_key})
-    return env_key
+    env_keys = _codex_profile_runtime_env_keys(profile)
+    persistent_env.set_remote_user_env(client, {key: api_key for key in env_keys})
+    return env_keys
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -128,10 +128,10 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
     auth = remote_config.read_remote_codex_auth(client, ssh_profile) or {}
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth, ssh_profile)
-    env_key = _persist_remote_codex_env(client, codex_profile, api_key)
+    env_keys = _persist_remote_codex_env(client, codex_profile, api_key)
 
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
-    return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {env_key}"
+    return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
 
 
 def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:

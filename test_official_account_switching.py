@@ -174,8 +174,12 @@ def test_switch_codex_profile_writes_matching_environment_key(isolated_accounts,
     assert config["model_providers"]["deepseek"]["env_key"] == "DEEPSEEK_API_KEY"
     assert auth["OPENAI_API_KEY"] == "sk-deepseek"
     if os.name == "nt":
-        assert written_env == {"DEEPSEEK_API_KEY": "sk-deepseek"}
+        assert written_env == {
+            "DEEPSEEK_API_KEY": "sk-deepseek",
+            "OPENAI_API_KEY": "sk-deepseek",
+        }
     assert os.environ["DEEPSEEK_API_KEY"] == "sk-deepseek"
+    assert os.environ["OPENAI_API_KEY"] == "sk-deepseek"
 
 
 def test_import_current_codex_can_read_key_from_config_env_key(isolated_accounts, monkeypatch):
