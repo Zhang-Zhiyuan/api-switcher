@@ -55,6 +55,7 @@ class APITester:
 
     MAX_REQUEST_TIMEOUT = 30
     MAX_BENCHMARK_REPEAT = 5
+    MAX_STREAM_EVENTS = 1200
 
     _NON_CHAT_MODEL_MARKERS = (
         "embedding",
@@ -522,11 +523,13 @@ class APITester:
                 snippet_parts: list[str] = []
                 snippet_len = 0
                 rolling_text = ""
+                event_count = 0
 
                 while True:
                     raw_line = response.readline()
                     if not raw_line:
                         break
+                    event_count += 1
                     line = raw_line.decode("utf-8", errors="replace")
                     if snippet_len < 400:
                         snippet_parts.append(line)
@@ -560,6 +563,19 @@ class APITester:
                             message="Streaming response completed",
                             response_time=response_time,
                             status_code=status_code,
+                        )
+
+                    if time.time() - start_time >= timeout:
+                        return APITester._timeout_result(timeout)
+
+                    if event_count >= APITester.MAX_STREAM_EVENTS:
+                        response_time = (time.time() - start_time) * 1000
+                        return TestResult(
+                            success=False,
+                            message="Streaming response exceeded event limit before completion",
+                            response_time=response_time,
+                            status_code=status_code,
+                            error_details="".join(snippet_parts).strip()[:400],
                         )
 
                 response_time = (time.time() - start_time) * 1000

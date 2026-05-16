@@ -87,10 +87,13 @@ def call(api_key, base_url, model, wire_api, timeout):
                 snippet_parts = []
                 snippet_len = 0
                 rolling_text = ""
+                event_count = 0
+                max_events = 1200
                 while True:
                     raw_line = response.readline()
                     if not raw_line:
                         break
+                    event_count += 1
                     line = raw_line.decode("utf-8", errors="replace")
                     if snippet_len < 160:
                         snippet_parts.append(line)
@@ -115,6 +118,20 @@ def call(api_key, base_url, model, wire_api, timeout):
                             "status": response.status,
                             "ms": round((time.time() - start) * 1000),
                             "error": "" if 200 <= response.status < 300 else "HTTP " + str(response.status),
+                        }
+                    if time.time() - start >= timeout:
+                        return {
+                            "ok": False,
+                            "status": response.status,
+                            "ms": round((time.time() - start) * 1000),
+                            "error": "stream timed out before completion",
+                        }
+                    if event_count >= max_events:
+                        return {
+                            "ok": False,
+                            "status": response.status,
+                            "ms": round((time.time() - start) * 1000),
+                            "error": "stream exceeded event limit before completion",
                         }
                 body = "".join(snippet_parts).strip()
                 return {

@@ -84,6 +84,14 @@ class _CompletionThenBlockingStream(_FakeStreamResponse):
         return b"event: response.completed\n"
 
 
+class _EndlessDeltaStream(_FakeStreamResponse):
+    def __init__(self):
+        super().__init__("")
+
+    def readline(self):
+        return b"event: response.output_text.delta\ndata: {\"delta\":\"x\"}\n\n"
+
+
 def test_request_json_rejects_html_success_response(monkeypatch):
     def fake_urlopen(_request, timeout):
         return _FakeHTMLResponse()
@@ -211,6 +219,21 @@ def test_openai_responses_probe_flags_spaced_error_type(monkeypatch):
 
     assert result.success is False
     assert "returned an error" in result.message
+
+
+def test_openai_responses_probe_stops_runaway_stream(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        return _EndlessDeltaStream()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(APITester, "MAX_STREAM_EVENTS", 3)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is False
+    assert "event limit" in result.message
 
 
 def test_benchmark_openai_wire_apis_recommends_stable_chat(monkeypatch):
