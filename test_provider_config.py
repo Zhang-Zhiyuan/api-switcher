@@ -73,7 +73,7 @@ def test_layer4_codex_preset_uses_chat_wire_api():
     config = apply_codex_profile({}, profile)
     layer4 = config["model_providers"]["layer4"]
 
-    assert config["model"] == "gpt-5.3-codex"
+    assert config["model"] == "gpt-5.5"
     assert layer4["base_url"] == "https://layer4.cc/v1"
     assert layer4["wire_api"] == "chat"
     assert layer4["env_key"] == "OPENAI_API_KEY"
@@ -261,7 +261,7 @@ def main():
     check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "chat", True)
     check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "chat", False)
     check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "chat", False)
-    check_codex_provider("layer4", "gpt-5.3-codex", "https://layer4.cc/v1", "chat", True)
+    check_codex_provider("layer4", "gpt-5.5", "https://layer4.cc/v1", "chat", True)
 
     check_claude_provider("deepseek", "deepseek-v4-pro", "https://api.deepseek.com/anthropic", True)
     check_claude_provider("glm", "GLM-5.1", "", False)

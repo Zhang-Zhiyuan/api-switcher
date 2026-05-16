@@ -466,7 +466,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             provider = self._current_claude_provider()
             api_key = self._get_secret_value("auth_token", getattr(self._profile, "auth_token_ref", None))
             base_url = data.get("base_url") or (provider.base_url_for_claude() if provider else "https://api.anthropic.com")
-            model = data.get("model") or (provider.default_model if provider else "claude-sonnet-4")
+            model = data.get("model") or ""
 
             if not api_key:
                 self._show_error("请先输入 Auth Token，或保存过带密钥的 API 配置")
@@ -484,10 +484,10 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             provider = self._current_codex_provider()
             if provider:
                 base_url = data.get("custom_base_url") or provider.base_url_for_codex()
-                model = data.get("model") or provider.default_model
+                model = data.get("model") or ""
             else:
                 base_url = data.get("custom_base_url")
-                model = data.get("model")
+                model = data.get("model") or ""
             if not base_url:
                 self._show_error("请先填写 API 端点")
                 return
@@ -500,13 +500,28 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             if self._profile_type == "claude":
                 result = APITester.test_claude_api(api_key, base_url, model)
             else:
-                result = APITester.test_openai_api(api_key, base_url, model)
+                result = APITester.benchmark_openai_wire_apis(
+                    api_key,
+                    base_url,
+                    model,
+                    repeat_count=3,
+                )
 
             # Show result dialog in main thread
-            self._safe_after(lambda: self._show_test_result(result, data.get("name", "")))
+            self._safe_after(lambda: self._apply_test_result(result, data.get("name", "")))
 
         thread = threading.Thread(target=run_test, daemon=True)
         thread.start()
+
+    def _apply_test_result(self, result, profile_name: str):
+        if not self.winfo_exists():
+            return
+        if getattr(result, "selected_model", None) and "model" in self._fields:
+            self._fields["model"][0].set(result.selected_model)
+        if getattr(result, "recommended_wire_api", None) and "custom_wire_api" in self._fields:
+            self._fields["custom_wire_api"][0].delete(0, "end")
+            self._fields["custom_wire_api"][0].insert(0, result.recommended_wire_api)
+        self._show_test_result(result, profile_name)
 
     def _show_test_result(self, result, profile_name: str):
         """Show test result dialog."""
@@ -619,14 +634,43 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             details = f": {result.error_details}" if result.error_details else ""
             self._show_error(f"刷新模型失败。{result.message}{details}")
 
+    def _resolve_latest_model_for_save(self, api_key: str, base_url: str, provider, is_codex: bool) -> str:
+        from core.api_tester import APITester
+
+        try:
+            result = (
+                APITester.fetch_openai_models(api_key, base_url, timeout=12)
+                if is_codex
+                else APITester.fetch_claude_models(api_key, base_url, timeout=12)
+            )
+            if result.success:
+                return result.latest_model or result.recommended_model or ""
+        except Exception:
+            pass
+        return (provider.default_model if provider else "") or ("gpt-5.5" if is_codex else "claude-sonnet-4")
+
+    def _recommend_wire_api_for_save(self, api_key: str, base_url: str, model: str, provider) -> str:
+        from core.api_tester import APITester
+
+        try:
+            result = APITester.benchmark_openai_wire_apis(
+                api_key,
+                base_url,
+                model,
+                timeout=8,
+                repeat_count=3,
+            )
+            if result.recommended_wire_api:
+                return result.recommended_wire_api
+        except Exception:
+            pass
+        return (provider.wire_api if provider else "") or "chat"
+
     def _save(self):
         data = self._collect_data()
 
         if not data.get("name"):
             self._show_error("请输入 API 配置名称")
-            return
-        if not data.get("model"):
-            self._show_error("请输入模型名称")
             return
         if self._profile_type == "claude" and not self._get_secret_value("auth_token", getattr(self._profile, "auth_token_ref", None)):
             self._show_error("请先输入 Auth Token")
@@ -641,6 +685,15 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
             if provider:
                 data["provider"] = provider.name
+            api_key = self._get_secret_value("auth_token", getattr(self._profile, "auth_token_ref", None))
+            base_url = data.get("base_url") or (provider.base_url_for_claude() if provider else "")
+            if not data.get("model"):
+                self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
+                self.update_idletasks()
+                data["model"] = self._resolve_latest_model_for_save(api_key, base_url, provider, is_codex=False)
+            if not data.get("model"):
+                self._show_error("无法自动选择模型，请手动填写模型名称")
+                return
 
         # 处理 Codex API 配置的 provider 字段
         if self._profile_type == "codex" and "codex_provider" in data:
@@ -650,7 +703,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 data["model_provider"] = provider.name
                 data["custom_base_url"] = data.get("custom_base_url") or provider.base_url_for_codex()
                 data["custom_name"] = data.get("custom_name") or provider.display_name
-                data["custom_wire_api"] = data.get("custom_wire_api") or provider.wire_api
                 data["custom_env_key"] = data.get("custom_env_key") or provider.codex_env_key
                 data["custom_requires_openai_auth"] = provider.requires_openai_auth
             else:
@@ -661,6 +713,28 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             if not data.get("custom_base_url"):
                 self._show_error("第三方或自定义 Provider 需要 API 端点")
                 return
+            api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
+            if not data.get("model"):
+                self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
+                self.update_idletasks()
+                data["model"] = self._resolve_latest_model_for_save(
+                    api_key,
+                    data["custom_base_url"],
+                    provider,
+                    is_codex=True,
+                )
+            if not data.get("model"):
+                self._show_error("无法自动选择模型，请手动填写模型名称")
+                return
+            if not data.get("custom_wire_api"):
+                self._show_status("Wire API 为空，正在三轮测试 chat/responses 并选择最稳配置...", "warning")
+                self.update_idletasks()
+                data["custom_wire_api"] = self._recommend_wire_api_for_save(
+                    api_key,
+                    data["custom_base_url"],
+                    data["model"],
+                    provider,
+                )
 
         if self._on_save:
             self._on_save(data, self._profile)

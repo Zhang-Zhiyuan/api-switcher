@@ -155,8 +155,9 @@ PROVIDERS = {
         name="layer4",
         display_name="Layer4",
         default_base_url="https://layer4.cc/v1",
-        default_model="gpt-5.3-codex",
+        default_model="gpt-5.5",
         supported_models=[
+            "gpt-5.5",
             "gpt-5.3-codex",
             "gpt-5.4-mini",
             "gpt-5.4",

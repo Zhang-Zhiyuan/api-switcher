@@ -22,6 +22,8 @@ class TestResult:
     response_time: Optional[float] = None
     status_code: Optional[int] = None
     error_details: Optional[str] = None
+    selected_model: Optional[str] = None
+    recommended_wire_api: Optional[str] = None
 
 
 @dataclass
@@ -39,6 +41,7 @@ class ModelListResult:
     message: str
     models: list[str] = field(default_factory=list)
     recommended_model: Optional[str] = None
+    latest_model: Optional[str] = None
     model_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     response_time: Optional[float] = None
     status_code: Optional[int] = None
@@ -215,6 +218,18 @@ class APITester:
         )
 
     @staticmethod
+    def recommend_latest_model(models: list[str],
+                               model_metadata: Optional[dict[str, dict[str, Any]]] = None) -> Optional[str]:
+        """Pick the newest chat-capable model from a provider model list."""
+        candidates = [str(model).strip() for model in models if str(model).strip()]
+        if not candidates:
+            return None
+        return max(
+            dict.fromkeys(candidates),
+            key=lambda model: APITester._model_latest_score(model, model_metadata),
+        )
+
+    @staticmethod
     def sort_models_by_preference(models: list[str],
                                   model_metadata: Optional[dict[str, dict[str, Any]]] = None) -> list[str]:
         """Return models in recommended order with duplicates removed."""
@@ -275,6 +290,46 @@ class APITester:
         return (score, APITester._metadata_created_score(metadata), name)
 
     @staticmethod
+    def _model_latest_score(model: str,
+                            model_metadata: Optional[dict[str, dict[str, Any]]] = None) -> tuple[int, int, int, int, str]:
+        name = model.lower()
+        metadata = APITester._metadata_for_model(model, model_metadata)
+        display_name = str(metadata.get("display_name") or metadata.get("displayName") or "")
+        search_text = f"{name} {display_name.lower()}".strip()
+        if any(marker in search_text for marker in APITester._NON_CHAT_MODEL_MARKERS):
+            return (-1_000_000, 0, 0, 0, name)
+
+        family = 0
+        if "opus" in search_text:
+            family = 60
+        elif "sonnet" in search_text:
+            family = 55
+        elif "gpt-" in search_text:
+            family = 50
+        elif name.startswith("o") and len(name) > 1 and name[1].isdigit():
+            family = 48
+        elif "glm" in search_text:
+            family = 45
+        elif "kimi" in search_text or "moonshot" in search_text:
+            family = 43
+        elif "deepseek" in search_text:
+            family = 41
+
+        size_adjust = 0
+        if any(token in search_text for token in ("mini", "nano", "flash", "lite", "air")):
+            size_adjust -= 1
+        if any(token in search_text for token in ("pro", "max", "ultra", "opus")):
+            size_adjust += 1
+
+        return (
+            APITester._version_score(search_text),
+            APITester._metadata_created_score(metadata),
+            APITester._date_score(search_text),
+            family + size_adjust,
+            name,
+        )
+
+    @staticmethod
     def _metadata_for_model(model: str,
                             model_metadata: Optional[dict[str, dict[str, Any]]]) -> dict[str, Any]:
         if not model_metadata:
@@ -301,7 +356,7 @@ class APITester:
     def _version_score(name: str) -> int:
         import re
 
-        clean_name = re.sub(r"20\d{6}", "", name)
+        clean_name = re.sub(r"20\d{2}[-.]?\d{2}[-.]?\d{2}", "", name)
         best = 0
         for match in re.finditer(r"(?<!\d)(\d{1,2}(?:[.-]\d{1,3}){0,3})(?!\d)", clean_name):
             token = match.group(1).replace("-", ".")
@@ -444,12 +499,14 @@ class APITester:
         model_infos = APITester._extract_model_infos(data)
         models = [model.id for model in model_infos]
         model_metadata = APITester._model_metadata_from_infos(model_infos)
-        recommended_model = APITester.recommend_best_model(models, model_metadata)
+        latest_model = APITester.recommend_latest_model(models, model_metadata)
+        recommended_model = latest_model or APITester.recommend_best_model(models, model_metadata)
         return ModelListResult(
             success=bool(models),
             message=f"获取到 {len(models)} 个模型" if models else "接口返回中没有模型列表",
             models=models,
             recommended_model=recommended_model,
+            latest_model=latest_model,
             model_metadata=model_metadata,
             response_time=result.response_time,
             status_code=result.status_code,
@@ -484,12 +541,14 @@ class APITester:
         model_infos = APITester._extract_model_infos(data)
         models = [model.id for model in model_infos]
         model_metadata = APITester._model_metadata_from_infos(model_infos)
-        recommended_model = APITester.recommend_best_model(models, model_metadata)
+        latest_model = APITester.recommend_latest_model(models, model_metadata)
+        recommended_model = latest_model or APITester.recommend_best_model(models, model_metadata)
         return ModelListResult(
             success=bool(models),
             message=f"获取到 {len(models)} 个模型" if models else "接口返回中没有模型列表",
             models=models,
             recommended_model=recommended_model,
+            latest_model=latest_model,
             model_metadata=model_metadata,
             response_time=result.response_time,
             status_code=result.status_code,
@@ -539,31 +598,166 @@ class APITester:
         return result
 
     @staticmethod
+    def _probe_openai_responses(api_key: str, base_url: str, model: str, timeout: int) -> TestResult:
+        url = APITester._openai_url(base_url, "responses")
+        payload = {
+            "model": model,
+            "max_output_tokens": 1,
+            "input": "Hi",
+        }
+        ok, _data, result = APITester._request_json(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+            payload=payload,
+            timeout=timeout,
+        )
+        result.message = "连接成功，模型可用" if ok else result.message
+        return result
+
+    @staticmethod
+    def _probe_openai_wire_api(api_key: str, base_url: str, model: str, wire_api: str, timeout: int) -> TestResult:
+        wire_api = (wire_api or "chat").strip().lower()
+        if wire_api == "responses":
+            return APITester._probe_openai_responses(api_key, base_url, model, timeout)
+        return APITester._probe_openai_chat(api_key, base_url, model, timeout)
+
+    @staticmethod
+    def _resolve_openai_model(api_key: str, base_url: str, model: str, timeout: int) -> tuple[str, ModelListResult]:
+        model = (model or "").strip()
+        model_list = APITester.fetch_openai_models(api_key, base_url, timeout=timeout)
+        if model:
+            return model, model_list
+        if model_list.success:
+            return (model_list.latest_model or model_list.recommended_model or ""), model_list
+        return "", model_list
+
+    @staticmethod
+    def _resolve_claude_model(api_key: str, base_url: str, model: str, timeout: int) -> tuple[str, ModelListResult]:
+        model = (model or "").strip()
+        model_list = APITester.fetch_claude_models(api_key, base_url, timeout=timeout)
+        if model:
+            return model, model_list
+        if model_list.success:
+            return (model_list.latest_model or model_list.recommended_model or ""), model_list
+        return "", model_list
+
+    @staticmethod
+    def benchmark_openai_wire_apis(
+        api_key: str,
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "",
+        timeout: int = 10,
+        repeat_count: int = 3,
+        wire_apis: tuple[str, ...] = ("chat", "responses"),
+    ) -> TestResult:
+        """Probe multiple OpenAI-compatible wire APIs and recommend the most stable one."""
+        if not api_key or not api_key.strip():
+            return TestResult(success=False, message="API Key 为空")
+
+        selected_model, model_list = APITester._resolve_openai_model(api_key, base_url, model, timeout=timeout)
+        if not selected_model:
+            return TestResult(
+                success=False,
+                message="无法自动选择模型",
+                status_code=model_list.status_code,
+                error_details=model_list.error_details or model_list.message,
+            )
+
+        repeat_count = max(1, int(repeat_count or 1))
+        summaries = []
+        best_wire = None
+        best_score = (-1, -1.0)
+        best_avg = None
+        best_status = None
+
+        for wire_api in wire_apis:
+            wire_api = (wire_api or "").strip().lower()
+            if not wire_api:
+                continue
+            successes = 0
+            durations = []
+            errors = []
+            statuses = []
+            for _index in range(repeat_count):
+                result = APITester._probe_openai_wire_api(api_key, base_url, selected_model, wire_api, timeout)
+                if result.status_code is not None:
+                    statuses.append(str(result.status_code))
+                if result.success:
+                    successes += 1
+                    if result.response_time is not None:
+                        durations.append(result.response_time)
+                else:
+                    errors.append(result.error_details or result.message)
+
+            avg_ms = sum(durations) / len(durations) if durations else None
+            avg_for_score = avg_ms if avg_ms is not None else timeout * 1000
+            score = (successes, -avg_for_score)
+            if score > best_score:
+                best_score = score
+                best_wire = wire_api
+                best_avg = avg_ms
+                best_status = int(statuses[-1]) if statuses and statuses[-1].isdigit() else None
+
+            status_text = ",".join(statuses) if statuses else "-"
+            avg_text = f"{avg_ms:.0f} ms" if avg_ms is not None else "-"
+            error_text = f"；最近错误: {errors[-1][:160]}" if errors else ""
+            summaries.append(f"{wire_api}: {successes}/{repeat_count} 成功，平均 {avg_text}，HTTP {status_text}{error_text}")
+
+        if not best_wire or best_score[0] <= 0:
+            return TestResult(
+                success=False,
+                message="所有 wire_api 测试均失败",
+                response_time=best_avg,
+                status_code=best_status,
+                error_details="\n".join(summaries),
+                selected_model=selected_model,
+            )
+
+        return TestResult(
+            success=True,
+            message=f"推荐 wire_api: {best_wire}（{best_score[0]}/{repeat_count} 成功）",
+            response_time=best_avg,
+            status_code=best_status or 200,
+            error_details="\n".join(summaries),
+            selected_model=selected_model,
+            recommended_wire_api=best_wire,
+        )
+
+    @staticmethod
     def test_claude_api(api_key: str, base_url: str = "https://api.anthropic.com",
-                        model: str = "claude-sonnet-4", timeout: int = 10) -> TestResult:
+                        model: str = "", timeout: int = 10) -> TestResult:
         """Test an Anthropic-compatible API by checking /v1/models, then fallback to /v1/messages."""
         if not api_key or not api_key.strip():
             return TestResult(success=False, message="API Key 为空")
 
-        model = (model or "").strip()
-        model_list = APITester.fetch_claude_models(api_key, base_url, timeout=timeout)
+        requested_model = (model or "").strip()
+        model, model_list = APITester._resolve_claude_model(api_key, base_url, requested_model, timeout=timeout)
         if model_list.success:
-            if model and model not in model_list.models:
-                probe = APITester._probe_claude_message(api_key, base_url, model, timeout)
-                if probe.success:
-                    probe.message = "连接成功，模型别名可用"
-                    return probe
-                if probe.error_details:
-                    probe.error_details = f"{probe.error_details}\n可用模型: {', '.join(model_list.models[:20])}"
-                else:
-                    probe.error_details = "可用模型: " + ", ".join(model_list.models[:20])
+            if not model:
+                return TestResult(
+                    success=False,
+                    message="无法自动选择模型",
+                    response_time=model_list.response_time,
+                    status_code=model_list.status_code,
+                )
+            probe = APITester._probe_claude_message(api_key, base_url, model, timeout)
+            probe.selected_model = model
+            if probe.success:
+                probe.message = (
+                    f"连接成功，已自动选择最新模型: {model}"
+                    if not requested_model
+                    else ("连接成功，模型别名可用" if model not in model_list.models else "连接成功，模型可用")
+                )
                 return probe
-            return TestResult(
-                success=True,
-                message="连接成功，模型可用" if model else "连接成功",
-                response_time=model_list.response_time,
-                status_code=model_list.status_code,
-            )
+            if probe.error_details:
+                probe.error_details = f"{probe.error_details}\n可用模型: {', '.join(model_list.models[:20])}"
+            else:
+                probe.error_details = "可用模型: " + ", ".join(model_list.models[:20])
+            return probe
 
         if model_list.status_code not in (404, 405):
             return TestResult(
@@ -574,34 +768,51 @@ class APITester:
                 error_details=model_list.error_details,
             )
 
-        return APITester._probe_claude_message(api_key, base_url, model, timeout)
+        if not model:
+            return TestResult(
+                success=False,
+                message="无法自动选择模型",
+                response_time=model_list.response_time,
+                status_code=model_list.status_code,
+                error_details=model_list.error_details or model_list.message,
+            )
+        result = APITester._probe_claude_message(api_key, base_url, model, timeout)
+        result.selected_model = model
+        return result
 
     @staticmethod
     def test_openai_api(api_key: str, base_url: str = "https://api.openai.com/v1",
-                        model: str = "gpt-5.5", timeout: int = 10) -> TestResult:
+                        model: str = "", timeout: int = 10, wire_api: str = "chat") -> TestResult:
         """Test an OpenAI-compatible API by checking /models, then fallback to /chat/completions."""
         if not api_key or not api_key.strip():
             return TestResult(success=False, message="API Key 为空")
 
-        model = (model or "").strip()
-        model_list = APITester.fetch_openai_models(api_key, base_url, timeout=timeout)
+        requested_model = (model or "").strip()
+        model, model_list = APITester._resolve_openai_model(api_key, base_url, requested_model, timeout=timeout)
         if model_list.success:
-            if model and model not in model_list.models:
-                probe = APITester._probe_openai_chat(api_key, base_url, model, timeout)
-                if probe.success:
-                    probe.message = "连接成功，模型别名可用"
-                    return probe
-                if probe.error_details:
-                    probe.error_details = f"{probe.error_details}\n可用模型: {', '.join(model_list.models[:20])}"
-                else:
-                    probe.error_details = "可用模型: " + ", ".join(model_list.models[:20])
+            if not model:
+                return TestResult(
+                    success=False,
+                    message="无法自动选择模型",
+                    response_time=model_list.response_time,
+                    status_code=model_list.status_code,
+                )
+            selected_wire_api = "responses" if (wire_api or "").strip().lower() == "responses" else "chat"
+            probe = APITester._probe_openai_wire_api(api_key, base_url, model, selected_wire_api, timeout)
+            probe.selected_model = model
+            probe.recommended_wire_api = selected_wire_api
+            if probe.success:
+                probe.message = (
+                    f"连接成功，已自动选择最新模型: {model}"
+                    if not requested_model
+                    else ("连接成功，模型别名可用" if model not in model_list.models else "连接成功，模型可用")
+                )
                 return probe
-            return TestResult(
-                success=True,
-                message="连接成功，模型可用" if model else "连接成功",
-                response_time=model_list.response_time,
-                status_code=model_list.status_code,
-            )
+            if probe.error_details:
+                probe.error_details = f"{probe.error_details}\n可用模型: {', '.join(model_list.models[:20])}"
+            else:
+                probe.error_details = "可用模型: " + ", ".join(model_list.models[:20])
+            return probe
 
         if model_list.status_code not in (404, 405):
             return TestResult(
@@ -612,7 +823,19 @@ class APITester:
                 error_details=model_list.error_details,
             )
 
-        return APITester._probe_openai_chat(api_key, base_url, model, timeout)
+        if not model:
+            return TestResult(
+                success=False,
+                message="无法自动选择模型",
+                response_time=model_list.response_time,
+                status_code=model_list.status_code,
+                error_details=model_list.error_details or model_list.message,
+            )
+        selected_wire_api = "responses" if (wire_api or "").strip().lower() == "responses" else "chat"
+        result = APITester._probe_openai_wire_api(api_key, base_url, model, selected_wire_api, timeout)
+        result.selected_model = model
+        result.recommended_wire_api = selected_wire_api
+        return result
 
     @staticmethod
     def test_url_reachable(url: str, timeout: int = 5) -> TestResult:

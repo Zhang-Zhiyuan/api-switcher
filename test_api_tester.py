@@ -1,4 +1,7 @@
 """Regression checks for API tester URL handling and model parsing."""
+import io
+import json
+import urllib.error
 import urllib.request
 
 from core.api_tester import APITester
@@ -25,6 +28,26 @@ class _FakeHTMLResponse:
         return 200
 
 
+class _FakeJSONResponse:
+    headers = {"Content-Type": "application/json"}
+
+    def __init__(self, payload, status=200):
+        self.payload = payload
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+    def getcode(self):
+        return self.status
+
+
 def test_request_json_rejects_html_success_response(monkeypatch):
     def fake_urlopen(_request, timeout):
         return _FakeHTMLResponse()
@@ -41,6 +64,60 @@ def test_request_json_rejects_html_success_response(monkeypatch):
     assert result.status_code == 200
     assert "JSON" in result.message
     assert "text/html" in result.error_details
+
+
+def test_openai_blank_model_uses_latest_from_models(monkeypatch):
+    seen_payloads = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({
+                "data": [
+                    {"id": "gpt-5.2-pro-2025-12-11"},
+                    {"id": "gpt-5.4"},
+                    {"id": "gpt-5.5"},
+                ]
+            })
+        seen_payloads.append(json.loads(request.data.decode("utf-8")))
+        return _FakeJSONResponse({"ok": True})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="chat")
+
+    assert result.success is True
+    assert result.selected_model == "gpt-5.5"
+    assert seen_payloads[-1]["model"] == "gpt-5.5"
+
+
+def test_benchmark_openai_wire_apis_recommends_stable_chat(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        if request.full_url.endswith("/responses"):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                500,
+                "bad gateway",
+                hdrs={},
+                fp=io.BytesIO(b'{"error":{"message":"bad_response_body"}}'),
+            )
+        return _FakeJSONResponse({"ok": True})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.benchmark_openai_wire_apis(
+        "sk-test",
+        "https://relay.example.com/v1",
+        "",
+        repeat_count=3,
+    )
+
+    assert result.success is True
+    assert result.selected_model == "gpt-5.5"
+    assert result.recommended_wire_api == "chat"
+    assert "chat: 3/3" in result.error_details
+    assert "responses: 0/3" in result.error_details
 
 
 def main():

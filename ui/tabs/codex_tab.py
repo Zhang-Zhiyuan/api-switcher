@@ -343,7 +343,12 @@ class CodexTab(ctk.CTkScrollableFrame):
 
             provider = ProviderRegistry.get_provider(profile.model_provider)
             base_url = profile.custom_base_url or (provider.base_url_for_codex() if provider else "")
-            result = APITester.test_openai_api(api_key, base_url, profile.model)
+            result = APITester.benchmark_openai_wire_apis(
+                api_key,
+                base_url,
+                profile.model,
+                repeat_count=3,
+            )
 
             def show_result():
                 if self.winfo_exists():

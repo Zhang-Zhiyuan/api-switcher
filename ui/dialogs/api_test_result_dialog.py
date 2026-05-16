@@ -98,6 +98,14 @@ class APITestResultDialog(ctk.CTkToplevel):
             code_color = COLORS["success"] if result.status_code == 200 else COLORS["warning"]
             self._add_detail_row(scroll_frame, "HTTP 状态码", str(result.status_code), code_color)
 
+        selected_model = getattr(result, "selected_model", None)
+        if selected_model:
+            self._add_detail_row(scroll_frame, "选用模型", selected_model, COLORS["text"])
+
+        recommended_wire_api = getattr(result, "recommended_wire_api", None)
+        if recommended_wire_api:
+            self._add_detail_row(scroll_frame, "推荐 Wire API", recommended_wire_api, COLORS["success"])
+
         # Error details
         if result.error_details:
             self._add_detail_row(scroll_frame, "错误详情", result.error_details, COLORS["muted"])
