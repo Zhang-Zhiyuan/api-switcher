@@ -104,11 +104,11 @@ def main():
     base_url = str(payload.get("base_url") or "")
     model = str(payload.get("model") or "")
     try:
-        timeout = max(1, int(payload.get("timeout") or 10))
+        timeout = min(30, max(1, int(payload.get("timeout") or 10)))
     except (TypeError, ValueError):
         timeout = 10
     try:
-        repeat_count = max(1, int(payload.get("repeat_count") or 3))
+        repeat_count = min(5, max(1, int(payload.get("repeat_count") or 3)))
     except (TypeError, ValueError):
         repeat_count = 3
     wire_apis = payload.get("wire_apis") or ["chat", "responses"]

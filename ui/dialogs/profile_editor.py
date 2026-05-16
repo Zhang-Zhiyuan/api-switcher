@@ -21,6 +21,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._profile = profile
         self._profile_type = profile_type
         self._provider_note_label = None
+        self._test_busy = False
+        self._refresh_busy = False
+        self._refresh_buttons = []
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -58,13 +61,14 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         btn_frame.pack(fill="x", padx=18, pady=(0, 16))
 
         # Test connection button (left side)
-        ctk.CTkButton(
+        self._test_btn = ctk.CTkButton(
             btn_frame,
             text="测试连接",
             width=100,
             command=self._test_connection,
             **button_style("accent"),
-        ).pack(side="left")
+        )
+        self._test_btn.pack(side="left")
 
         # Save and Cancel buttons (right side)
         ctk.CTkButton(
@@ -74,13 +78,14 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             command=self.destroy,
             **button_style("secondary"),
         ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
+        self._save_btn = ctk.CTkButton(
             btn_frame,
             text="保存",
             width=84,
             command=self._save,
             **button_style("primary"),
-        ).pack(side="right")
+        )
+        self._save_btn.pack(side="right")
 
         center_window(self, master)
 
@@ -147,13 +152,15 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _attach_refresh_button(self, key: str) -> None:
         widget, _ = self._fields[key]
-        ctk.CTkButton(
+        button = ctk.CTkButton(
             widget.master,
             text="刷新最佳",
             width=78,
             command=self._refresh_models,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(8, 0))
+        )
+        button.pack(side="left", padx=(8, 0))
+        self._refresh_buttons.append(button)
 
     def _build_claude_fields(self, parent):
         p = self._profile
@@ -473,6 +480,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         from core.api_tester import APITester
         import threading
 
+        if self._test_busy:
+            return
+
         data = self._collect_data()
 
         # Validate required fields
@@ -506,30 +516,46 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._show_error("请先填写 API 端点")
                 return
 
-        # Show testing message
+        self._set_test_busy(True)
         self._show_status("正在测试连接...", "warning")
 
         # Run test in background thread
         def run_test():
-            if self._profile_type == "claude":
-                result = APITester.test_claude_api(api_key, base_url, model)
-            else:
-                result = APITester.benchmark_openai_wire_apis(
-                    api_key,
-                    base_url,
-                    model,
-                    repeat_count=3,
-                )
+            try:
+                if self._profile_type == "claude":
+                    result = APITester.test_claude_api(api_key, base_url, model)
+                else:
+                    result = APITester.benchmark_openai_wire_apis(
+                        api_key,
+                        base_url,
+                        model,
+                        repeat_count=3,
+                    )
+            except Exception as exc:
+                from core.api_tester import TestResult
+
+                result = TestResult(False, f"测试失败: {type(exc).__name__}", error_details=str(exc)[:400])
 
             # Show result dialog in main thread
             self._safe_after(lambda: self._apply_test_result(result, data.get("name", "")))
 
-        thread = threading.Thread(target=run_test, daemon=True)
+        thread = threading.Thread(target=run_test, name="api-profile-test", daemon=True)
         thread.start()
+
+    def _set_test_busy(self, busy: bool) -> None:
+        self._test_busy = busy
+        try:
+            self._test_btn.configure(
+                state="disabled" if busy else "normal",
+                text="测试中..." if busy else "测试连接",
+            )
+        except Exception:
+            pass
 
     def _apply_test_result(self, result, profile_name: str):
         if not self.winfo_exists():
             return
+        self._set_test_busy(False)
         if getattr(result, "selected_model", None) and "model" in self._fields:
             self._fields["model"][0].set(result.selected_model)
         if getattr(result, "recommended_wire_api", None) and "custom_wire_api" in self._fields:
@@ -556,6 +582,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         """Refresh model list from provider API, falling back to bundled presets."""
         from core.api_tester import APITester
         import threading
+
+        if self._refresh_busy:
+            return
 
         data = self._collect_data()
 
@@ -587,13 +616,33 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._show_error("刷新远程模型列表需要先输入 API Key")
             return
 
+        self._set_refresh_busy(True)
         self._show_status("正在刷新模型列表...", "warning")
 
         def run_refresh():
-            result = fetcher()
+            try:
+                result = fetcher()
+            except Exception as exc:
+                from core.api_tester import ModelListResult
+
+                result = ModelListResult(
+                    success=False,
+                    message=f"刷新失败: {type(exc).__name__}",
+                    error_details=str(exc)[:400],
+                )
             self._safe_after(lambda: self._handle_model_refresh_result(result, fallback_models, provider))
 
-        threading.Thread(target=run_refresh, daemon=True).start()
+        threading.Thread(target=run_refresh, name="api-model-refresh", daemon=True).start()
+
+    def _set_refresh_busy(self, busy: bool) -> None:
+        self._refresh_busy = busy
+        state = "disabled" if busy else "normal"
+        text = "刷新中..." if busy else "刷新最佳"
+        for button in self._refresh_buttons:
+            try:
+                button.configure(state=state, text=text)
+            except Exception:
+                pass
 
     def _remote_models_for_selection(self, remote_models: list[str], fallback_models: list[str], provider) -> list[str]:
         if provider and getattr(provider, "name", "") == "anthropic":
@@ -626,6 +675,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
     def _handle_model_refresh_result(self, result, fallback_models: list[str], provider):
         if not self.winfo_exists():
             return
+        self._set_refresh_busy(False)
         if result.success and result.models:
             models = self._remote_models_for_selection(result.models, fallback_models, provider)
             preferred = result.recommended_model

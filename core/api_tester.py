@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -50,6 +51,9 @@ class ModelListResult:
 
 class APITester:
     """Test API connections and refresh model lists."""
+
+    MAX_REQUEST_TIMEOUT = 30
+    MAX_BENCHMARK_REPEAT = 5
 
     _NON_CHAT_MODEL_MARKERS = (
         "embedding",
@@ -396,6 +400,30 @@ class APITester:
         return error_body[:400]
 
     @staticmethod
+    def _coerce_timeout(timeout: object, default: int = 10, maximum: int | None = None) -> int:
+        try:
+            seconds = int(timeout or default)
+        except (TypeError, ValueError):
+            seconds = default
+        return min(max(seconds, 1), maximum or APITester.MAX_REQUEST_TIMEOUT)
+
+    @staticmethod
+    def _coerce_repeat_count(repeat_count: object, default: int = 3) -> int:
+        try:
+            count = int(repeat_count or default)
+        except (TypeError, ValueError):
+            count = default
+        return min(max(count, 1), APITester.MAX_BENCHMARK_REPEAT)
+
+    @staticmethod
+    def _timeout_result(timeout: int) -> TestResult:
+        return TestResult(
+            success=False,
+            message=f"连接超时，超过 {timeout} 秒",
+            error_details="请检查网络连接或稍后重试",
+        )
+
+    @staticmethod
     def _http_error_message(code: int, model_hint: bool = False) -> str:
         if code in (401, 403):
             return "认证失败或权限不足"
@@ -415,6 +443,7 @@ class APITester:
         payload: Optional[dict[str, Any]] = None,
         timeout: int = 10,
     ) -> tuple[bool, Optional[Any], TestResult]:
+        timeout = APITester._coerce_timeout(timeout)
         start_time = time.time()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -454,17 +483,16 @@ class APITester:
                 status_code=e.code,
                 error_details=APITester._parse_error_body(error_body),
             )
+        except (TimeoutError, socket.timeout):
+            return False, None, APITester._timeout_result(timeout)
         except urllib.error.URLError as e:
+            reason = e.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+                return False, None, APITester._timeout_result(timeout)
             return False, None, TestResult(
                 success=False,
                 message="网络错误，无法连接到服务器",
                 error_details=str(e.reason)[:400],
-            )
-        except TimeoutError:
-            return False, None, TestResult(
-                success=False,
-                message=f"连接超时，超过 {timeout} 秒",
-                error_details="请检查网络连接或稍后重试",
             )
         except Exception as e:
             logger.error("API request failed: %s", e, exc_info=True)
@@ -660,6 +688,7 @@ class APITester:
         if not api_key or not api_key.strip():
             return TestResult(success=False, message="API Key 为空")
 
+        timeout = APITester._coerce_timeout(timeout)
         selected_model, model_list = APITester._resolve_openai_model(api_key, base_url, model, timeout=timeout)
         if not selected_model:
             return TestResult(
@@ -669,10 +698,7 @@ class APITester:
                 error_details=model_list.error_details or model_list.message,
             )
 
-        try:
-            repeat_count = max(1, int(repeat_count or 1))
-        except (TypeError, ValueError):
-            repeat_count = 3
+        repeat_count = APITester._coerce_repeat_count(repeat_count)
         summaries = []
         best_wire = None
         best_score = (-1, -1.0)
@@ -849,6 +875,7 @@ class APITester:
     @staticmethod
     def test_url_reachable(url: str, timeout: int = 5) -> TestResult:
         """Test if a URL is reachable."""
+        timeout = APITester._coerce_timeout(timeout, default=5)
         start_time = time.time()
         try:
             req = urllib.request.Request(url, method="HEAD")
@@ -866,7 +893,11 @@ class APITester:
                 response_time=(time.time() - start_time) * 1000,
                 status_code=e.code,
             )
+        except (TimeoutError, socket.timeout):
+            return APITester._timeout_result(timeout)
         except urllib.error.URLError as e:
+            if isinstance(e.reason, (TimeoutError, socket.timeout)) or "timed out" in str(e.reason).lower():
+                return APITester._timeout_result(timeout)
             return TestResult(
                 success=False,
                 message="无法访问",

@@ -66,6 +66,23 @@ def test_request_json_rejects_html_success_response(monkeypatch):
     assert "text/html" in result.error_details
 
 
+def test_request_json_reports_wrapped_timeout_as_timeout(monkeypatch):
+    def fake_urlopen(_request, timeout):
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    ok, data, result = APITester._request_json(
+        "https://relay.example.com/v1/models",
+        headers={"Accept": "application/json"},
+        timeout=99,
+    )
+
+    assert ok is False
+    assert data is None
+    assert result.message == "连接超时，超过 30 秒"
+
+
 def test_openai_blank_model_uses_latest_from_models(monkeypatch):
     seen_payloads = []
 
@@ -139,6 +156,31 @@ def test_benchmark_openai_wire_apis_skips_invalid_candidates(monkeypatch):
     assert result.success is False
     assert result.message == "没有可测试的 wire_api"
     assert "bad: 已跳过" in result.error_details
+
+
+def test_benchmark_openai_wire_apis_clamps_repeat_count(monkeypatch):
+    probe_count = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal probe_count
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        probe_count += 1
+        return _FakeJSONResponse({"ok": True})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.benchmark_openai_wire_apis(
+        "sk-test",
+        "https://relay.example.com/v1",
+        "gpt-5.5",
+        repeat_count=99,
+        wire_apis=("chat",),
+    )
+
+    assert result.success is True
+    assert probe_count == APITester.MAX_BENCHMARK_REPEAT
+    assert "chat: 5/5" in result.error_details
 
 
 def main():
