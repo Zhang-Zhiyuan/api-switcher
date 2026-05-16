@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from models.profile import BrowserProfile
+from core.atomic_io import atomic_write_bytes, temp_path_for
 from core.browser_profile_manager import MANAGED_BROWSER_PROFILES_DIR
 
 logger = logging.getLogger(__name__)
@@ -295,8 +296,8 @@ class BrowserDataManager:
         if not cookies_path.is_file():
             raise ValueError(f"Cookies path is not a file: {cookies_path}")
 
-        temp_copy = cookies_path.with_suffix(".tmpcopy")
-        backup_path = cookies_path.with_suffix(".backup")
+        temp_copy = temp_path_for(cookies_path)
+        backup_path = temp_path_for(cookies_path).with_suffix(".backup")
 
         try:
             # Create backup
@@ -306,8 +307,10 @@ class BrowserDataManager:
             # Create working copy
             shutil.copy2(cookies_path, temp_copy)
 
-            # Modify working copy
-            with sqlite3.connect(temp_copy, timeout=10.0) as conn:
+            # Modify working copy. The sqlite3 context manager does not close
+            # the connection, so close it explicitly before replacing files.
+            conn = sqlite3.connect(temp_copy, timeout=10.0)
+            try:
                 cur = conn.cursor()
                 deleted_count = 0
                 for domain in domains:
@@ -315,9 +318,11 @@ class BrowserDataManager:
                     deleted_count += cur.rowcount
                 conn.commit()
                 logger.info(f"Deleted {deleted_count} cookies for domains: {domains}")
+            finally:
+                conn.close()
 
             # Replace original with modified copy
-            shutil.copy2(temp_copy, cookies_path)
+            atomic_write_bytes(cookies_path, temp_copy.read_bytes())
 
             # Remove backup on success
             backup_path.unlink(missing_ok=True)
@@ -327,7 +332,7 @@ class BrowserDataManager:
             # Restore from backup if available
             if backup_path.exists():
                 try:
-                    shutil.copy2(backup_path, cookies_path)
+                    atomic_write_bytes(cookies_path, backup_path.read_bytes())
                     logger.info("Restored cookies from backup")
                 except Exception as restore_error:
                     logger.error(f"Failed to restore backup: {restore_error}")

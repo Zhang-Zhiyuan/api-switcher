@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from core.atomic_io import atomic_write_bytes, atomic_write_text, replace_with_retry, temp_path_for
+
 
 PACKAGE_FORMAT = "api-switcher-session-migration"
 PACKAGE_VERSION = 1
@@ -120,42 +122,48 @@ def export_sessions(
     file_count = 0
     total_bytes = 0
 
-    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        for index, record in enumerate(selected):
-            home = _provider_home(record.provider, claude_home, codex_home)
-            entry = record.to_manifest()
-            entry["files"] = []
+    tmp_output = temp_path_for(output_path)
+    try:
+        with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for index, record in enumerate(selected):
+                home = _provider_home(record.provider, claude_home, codex_home)
+                entry = record.to_manifest()
+                entry["files"] = []
 
-            for file_path in _record_files(record):
-                if not file_path.is_file():
-                    continue
-                try:
-                    relative_path = _relative_to_home(file_path, home)
-                except ValueError:
-                    continue
+                for file_path in _record_files(record):
+                    if not file_path.is_file():
+                        continue
+                    try:
+                        relative_path = _relative_to_home(file_path, home)
+                    except ValueError:
+                        continue
 
-                archive_path = f"files/{index}/{relative_path}"
-                size = file_path.stat().st_size
-                bundle.write(file_path, archive_path)
-                entry["files"].append({
-                    "relative_path": relative_path,
-                    "archive_path": archive_path,
-                    "size": size,
-                    "main": file_path == record.source_path,
-                })
-                file_count += 1
-                total_bytes += size
+                    archive_path = f"files/{index}/{relative_path}"
+                    size = file_path.stat().st_size
+                    bundle.write(file_path, archive_path)
+                    entry["files"].append({
+                        "relative_path": relative_path,
+                        "archive_path": archive_path,
+                        "size": size,
+                        "main": file_path == record.source_path,
+                    })
+                    file_count += 1
+                    total_bytes += size
 
-            if entry["files"]:
-                manifest_entries.append(entry)
+                if entry["files"]:
+                    manifest_entries.append(entry)
 
-        manifest = {
-            "format": PACKAGE_FORMAT,
-            "version": PACKAGE_VERSION,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "sessions": manifest_entries,
-        }
-        bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            manifest = {
+                "format": PACKAGE_FORMAT,
+                "version": PACKAGE_VERSION,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "sessions": manifest_entries,
+            }
+            bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        replace_with_retry(tmp_output, output_path)
+    except Exception:
+        tmp_output.unlink(missing_ok=True)
+        raise
 
     return SessionExportResult(
         path=output_path,
@@ -221,13 +229,11 @@ def import_sessions(
                     skipped_invalid += 1
                     continue
 
-                destination.parent.mkdir(parents=True, exist_ok=True)
                 if target_project_text and destination.suffix.lower() == ".jsonl":
                     data = bundle.read(info)
-                    destination.write_bytes(_rewrite_jsonl_cwd(data, target_project_text))
+                    atomic_write_bytes(destination, _rewrite_jsonl_cwd(data, target_project_text))
                 else:
-                    with bundle.open(info, "r") as source, destination.open("wb") as target:
-                        shutil.copyfileobj(source, target)
+                    _copy_package_file_atomic(bundle, info, destination)
                 imported_bytes += info.file_size
                 file_count += 1
                 imported_main = imported_main or bool(file_entry.get("main"))
@@ -600,6 +606,18 @@ def _package_file_info(bundle: zipfile.ZipFile, archive_path: str) -> zipfile.Zi
     return info
 
 
+def _copy_package_file_atomic(bundle: zipfile.ZipFile, info: zipfile.ZipInfo, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = temp_path_for(destination)
+    try:
+        with bundle.open(info, "r") as source, tmp_path.open("wb") as target:
+            shutil.copyfileobj(source, target)
+        replace_with_retry(tmp_path, destination)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _read_manifest(bundle: zipfile.ZipFile) -> dict[str, Any]:
     try:
         manifest = json.loads(bundle.read("manifest.json").decode("utf-8"))
@@ -646,9 +664,8 @@ def _update_codex_index(codex_home: Path, sessions: list[dict[str, Any]]) -> Non
         }
     if not existing:
         return
-    index_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         json.dumps(item, ensure_ascii=False, separators=(",", ":"))
         for item in sorted(existing.values(), key=lambda value: str(value.get("updated_at") or ""))
     ]
-    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(index_path, "\n".join(lines) + "\n")
