@@ -149,6 +149,7 @@ class ErrorParser:
         r"connection[_\s]?(reset|aborted)",
         r"stream.*disconnect(?:ed)?",
         r"stream disconnected before completion",
+        r"reconnecting\.\.\.\s*\d+/\d+",
         r"upstream connect error",
         r"disconnect/reset before headers",
         r"reset reason:\s*connection termination",

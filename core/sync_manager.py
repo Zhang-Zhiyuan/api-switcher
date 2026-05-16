@@ -59,7 +59,12 @@ def openai_url(base_url, resource):
 def call(api_key, base_url, model, wire_api, timeout):
     if wire_api == "responses":
         url = openai_url(base_url, "responses")
-        payload = {"model": model, "input": "Reply OK only.", "max_output_tokens": 8}
+        payload = {
+            "model": model,
+            "input": "Write 40 short words about reliable coding workflows, then write DONE.",
+            "max_output_tokens": 96,
+            "stream": True,
+        }
     else:
         url = openai_url(base_url, "chat/completions")
         payload = {"model": model, "messages": [{"role": "user", "content": "Reply OK only."}], "max_tokens": 8}
@@ -70,14 +75,29 @@ def call(api_key, base_url, model, wire_api, timeout):
         headers={
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "text/event-stream" if wire_api == "responses" else "application/json",
         },
         method="POST",
     )
     start = time.time()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read(300).decode("utf-8", errors="replace")
+            body = response.read().decode("utf-8", errors="replace")
+            if wire_api == "responses":
+                lowered = body.lower()
+                ok = (
+                    200 <= response.status < 300
+                    and ("response.completed" in lowered or "[done]" in lowered or "event: done" in lowered)
+                    and "response.failed" not in lowered
+                    and "event: error" not in lowered
+                )
+                return {
+                    "ok": ok,
+                    "status": response.status,
+                    "ms": round((time.time() - start) * 1000),
+                    "error": "" if ok else ("stream did not complete: " + body[:160]),
+                }
+            body = body[:300]
             return {
                 "ok": 200 <= response.status < 300 and body.lstrip().startswith(("{", "[")),
                 "status": response.status,

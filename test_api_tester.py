@@ -48,6 +48,26 @@ class _FakeJSONResponse:
         return self.status
 
 
+class _FakeStreamResponse:
+    headers = {"Content-Type": "text/event-stream"}
+
+    def __init__(self, body: str, status=200):
+        self.body = body
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self.body.encode("utf-8")
+
+    def getcode(self):
+        return self.status
+
+
 def test_request_json_rejects_html_success_response(monkeypatch):
     def fake_urlopen(_request, timeout):
         return _FakeHTMLResponse()
@@ -105,6 +125,49 @@ def test_openai_blank_model_uses_latest_from_models(monkeypatch):
     assert result.success is True
     assert result.selected_model == "gpt-5.5"
     assert seen_payloads[-1]["model"] == "gpt-5.5"
+
+
+def test_openai_responses_probe_uses_stream_and_requires_completion(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        seen["url"] = request.full_url
+        seen["payload"] = json.loads(request.data.decode("utf-8"))
+        seen["accept"] = request.headers.get("Accept")
+        return _FakeStreamResponse(
+            "event: response.output_text.delta\n"
+            'data: {"delta":"OK"}\n\n'
+            "event: response.completed\n"
+            'data: {"type":"response.completed"}\n\n'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is True
+    assert result.selected_model == "gpt-5.5"
+    assert seen["url"] == "https://relay.example.com/v1/responses"
+    assert seen["payload"]["stream"] is True
+    assert seen["payload"]["max_output_tokens"] == 96
+    assert seen["accept"] == "text/event-stream"
+
+
+def test_openai_responses_probe_flags_incomplete_stream(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        return _FakeStreamResponse("event: response.output_text.delta\ndata: {\"delta\":\"OK\"}\n\n")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.test_openai_api("sk-test", "https://relay.example.com/v1", "", wire_api="responses")
+
+    assert result.success is False
+    assert "before completion" in result.message
+    assert "text/event-stream" in result.error_details
 
 
 def test_benchmark_openai_wire_apis_recommends_stable_chat(monkeypatch):

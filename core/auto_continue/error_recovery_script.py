@@ -223,7 +223,7 @@ function Get-ErrorType {{
     }}
 
     # 网络错误
-    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
+    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|reconnecting\\.\\.\\.\\s*\\d+/\\d+|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
         return $ErrorTypes.NETWORK_ERROR
     }}
 
@@ -720,7 +720,7 @@ function Get-ErrorType {{
     if ($combined -match "timeout|超时") {{
         return "timeout"
     }}
-    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
+    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|reconnecting\\.\\.\\.\\s*\\d+/\\d+|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
         return "network"
     }}
     if ($combined -match "overload|繁忙|503") {{

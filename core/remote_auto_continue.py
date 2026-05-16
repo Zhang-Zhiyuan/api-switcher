@@ -615,6 +615,7 @@ def any_pattern(patterns, text):
 RECOVERABLE_API_ERROR_PATTERNS = [
     r"error running remote compact task",
     r"stream disconnected before completion",
+    r"reconnecting\.\.\.\s*\d+/\d+",
     r"upstream connect error",
     r"disconnect/reset before headers",
     r"reset reason.*connection termination",

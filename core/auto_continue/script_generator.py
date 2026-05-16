@@ -382,6 +382,7 @@ try {{
         $recoverableApiErrorPatterns = @(
             "error running remote compact task",
             "stream disconnected before completion",
+            "reconnecting\\.\\.\\.\\s*\\d+/\\d+",
             "upstream connect error",
             "disconnect/reset before headers",
             "reset reason.*connection termination",

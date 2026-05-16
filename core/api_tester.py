@@ -503,6 +503,93 @@ class APITester:
             )
 
     @staticmethod
+    def _request_event_stream(
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout: int = 10,
+    ) -> TestResult:
+        timeout = APITester._coerce_timeout(timeout)
+        start_time = time.time()
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                response_time = (time.time() - start_time) * 1000
+                body = response.read().decode("utf-8", errors="replace")
+                status_code = response.getcode()
+                content_type = response.headers.get("Content-Type", "") or response.headers.get("content-type", "")
+                snippet = body.strip()[:400]
+                lowered = body.lower()
+
+                if not body.strip():
+                    return TestResult(
+                        success=False,
+                        message="Streaming response was empty",
+                        response_time=response_time,
+                        status_code=status_code,
+                    )
+
+                if "event: error" in lowered or "response.failed" in lowered or '"type":"error"' in lowered:
+                    return TestResult(
+                        success=False,
+                        message="Streaming response returned an error",
+                        response_time=response_time,
+                        status_code=status_code,
+                        error_details=snippet,
+                    )
+
+                completed = (
+                    "response.completed" in lowered
+                    or "[done]" in lowered
+                    or "event: done" in lowered
+                )
+                if completed:
+                    return TestResult(
+                        success=True,
+                        message="Streaming response completed",
+                        response_time=response_time,
+                        status_code=status_code,
+                    )
+
+                return TestResult(
+                    success=False,
+                    message="Streaming response ended before completion",
+                    response_time=response_time,
+                    status_code=status_code,
+                    error_details=f"Content-Type: {content_type or 'unknown'}\nBody: {snippet}",
+                )
+        except urllib.error.HTTPError as e:
+            response_time = (time.time() - start_time) * 1000
+            error_body = e.read().decode("utf-8", errors="replace")
+            return TestResult(
+                success=False,
+                message=APITester._http_error_message(e.code, model_hint=True),
+                response_time=response_time,
+                status_code=e.code,
+                error_details=APITester._parse_error_body(error_body),
+            )
+        except (TimeoutError, socket.timeout):
+            return APITester._timeout_result(timeout)
+        except urllib.error.URLError as e:
+            reason = e.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+                return APITester._timeout_result(timeout)
+            return TestResult(
+                success=False,
+                message="Network error: unable to connect to the server",
+                error_details=str(e.reason)[:400],
+            )
+        except Exception as e:
+            logger.error("API stream request failed: %s", e, exc_info=True)
+            return TestResult(
+                success=False,
+                message=f"Streaming test failed: {type(e).__name__}",
+                error_details=str(e)[:400],
+            )
+
+    @staticmethod
     def fetch_openai_models(api_key: str, base_url: str = "https://api.openai.com/v1",
                             timeout: int = 10) -> ModelListResult:
         """Fetch models from an OpenAI-compatible /models endpoint."""
@@ -630,19 +717,21 @@ class APITester:
         url = APITester._openai_url(base_url, "responses")
         payload = {
             "model": model,
-            "max_output_tokens": 1,
-            "input": "Hi",
+            "max_output_tokens": 96,
+            "input": "Write 40 short words about reliable coding workflows, then write DONE.",
+            "stream": True,
         }
-        ok, _data, result = APITester._request_json(
+        result = APITester._request_event_stream(
             url,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "Accept": "text/event-stream",
             },
-            method="POST",
             payload=payload,
             timeout=timeout,
         )
+        ok = result.success
         result.message = "连接成功，模型可用" if ok else result.message
         return result
 

@@ -130,6 +130,18 @@ def test_error_parser():
             "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
         },
         {
+            "name": "Codex responses reconnect exhausted",
+            "data": {
+                "error_message": (
+                    "Reconnecting... 1/5\nReconnecting... 5/5\n"
+                    "stream disconnected before completion: error sending request for url "
+                    "(https://layer4.cc/v1/responses)"
+                )
+            },
+            "expected_type": ErrorType.NETWORK_ERROR,
+            "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
+        },
+        {
             "name": "配额超限",
             "data": {
                 "error_message": "quota exceeded, insufficient balance",
@@ -276,6 +288,7 @@ def test_script_generation():
     assert '"message", "error", "errorMessage"' in claude_script
     assert '"body", "data", "errors"' in claude_script
     assert "stream.*disconnect" in claude_script
+    assert "reconnecting\\.\\.\\.\\s*\\d+/\\d+" in claude_script
     assert "upstream connect error" in claude_script
     assert "disconnect/reset before headers" in claude_script
     assert "connection termination" in claude_script
@@ -301,6 +314,7 @@ def test_script_generation():
     assert 'return "network"' in codex_script
     assert '"timeout", "overload", "network"' in codex_script
     assert "stream.*disconnect" in codex_script
+    assert "reconnecting\\.\\.\\.\\s*\\d+/\\d+" in codex_script
     assert "upstream connect error" in codex_script
     assert "disconnect/reset before headers" in codex_script
     assert "connection termination" in codex_script
@@ -331,6 +345,7 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
         assert "auto_approve_bash" in script
         assert '"allow"' in script
         assert "stream disconnected before completion" in script
+        assert "reconnecting\\.\\.\\.\\s*\\d+/\\d+" in script
         assert "upstream connect error" in script
         assert "disconnect/reset before headers" in script
         assert "connection termination" in script
