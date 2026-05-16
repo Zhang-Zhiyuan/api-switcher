@@ -146,7 +146,7 @@ def test_ssh_builder_accepts_custom_remote_config_dirs(isolated_ssh):
 
 def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatch):
     security.set_secret("codex:relay:api_key", "sk-relay")
-    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
             name="relay",
@@ -245,11 +245,22 @@ def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeyp
         "write_remote_claude_config",
         lambda client, data, profile=None: written.setdefault("config", data),
     )
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_vscode_settings",
+        lambda client: {
+            "claudeCode.initialPermissionMode": "bypassPermissions",
+            "claudeCode.allowDangerouslySkipPermissions": True,
+        },
+    )
+    monkeypatch.setattr(remote_config, "write_remote_vscode_settings", lambda client, data: written.setdefault("vscode", data))
 
     message = sync_manager.sync_claude_to_server("remote", "relay")
 
     assert written["settings"]["permissions"]["defaultMode"] == "default"
     assert written["settings"]["skipDangerousModePermissionPrompt"] is False
+    assert written["vscode"]["claudeCode.initialPermissionMode"] == "default"
+    assert written["vscode"]["claudeCode.allowDangerouslySkipPermissions"] is False
     assert "已兼容 root 登录" in message
     assert "root" in message
     assert "--dangerously-skip-permissions" in message
@@ -275,6 +286,8 @@ def test_sync_claude_to_non_root_preserves_bypass_permissions(isolated_ssh, monk
     monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
     monkeypatch.setattr(remote_config, "write_remote_claude_settings", lambda client, data, profile=None: written.setdefault("settings", data))
     monkeypatch.setattr(remote_config, "write_remote_claude_config", lambda client, data, profile=None: written.setdefault("config", data))
+    monkeypatch.setattr(remote_config, "read_remote_vscode_settings", lambda client: (_ for _ in ()).throw(AssertionError("non-root should not read VS Code settings")))
+    monkeypatch.setattr(remote_config, "write_remote_vscode_settings", lambda client, data: (_ for _ in ()).throw(AssertionError("non-root should not write VS Code settings")))
 
     message = sync_manager.sync_claude_to_server("remote", "relay")
 
@@ -285,7 +298,7 @@ def test_sync_claude_to_non_root_preserves_bypass_permissions(isolated_ssh, monk
 def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrides(isolated_ssh, monkeypatch):
     credentials = {"claudeAiOauth": {"accessToken": "claude-token"}}
     security.set_secret_json("claude-account:work:credentials", credentials)
-    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_claude_account_profile(
         ClaudeAccountProfile(
             name="work",
@@ -359,11 +372,15 @@ def test_sync_claude_account_to_root_downgrades_existing_bypass_permissions(isol
     monkeypatch.setattr(remote_config, "write_remote_claude_credentials", lambda client, data, profile=None: written.setdefault("credentials", data))
     monkeypatch.setattr(remote_config, "write_remote_claude_settings", lambda client, data, profile=None: written.setdefault("settings", data))
     monkeypatch.setattr(remote_config, "write_remote_claude_config", lambda client, data, profile=None: written.setdefault("config", data))
+    monkeypatch.setattr(remote_config, "read_remote_vscode_settings", lambda client: {"claudeCode.initialPermissionMode": "bypassPermissions"})
+    monkeypatch.setattr(remote_config, "write_remote_vscode_settings", lambda client, data: written.setdefault("vscode", data))
 
     message = sync_manager.sync_claude_account_to_server("remote", "work")
 
     assert written["settings"]["permissions"]["defaultMode"] == "default"
     assert written["settings"]["skipDangerousModePermissionPrompt"] is False
+    assert written["vscode"]["claudeCode.initialPermissionMode"] == "default"
+    assert written["vscode"]["claudeCode.allowDangerouslySkipPermissions"] is False
     assert "已兼容 root 登录" in message
 
 
@@ -613,6 +630,29 @@ def test_remote_config_uses_sftp_home_fallback_when_home_env_is_empty():
     remote_config.write_remote_claude_settings(client, {"model": "claude-sonnet-4"})
 
     assert "/home/fallback/.claude/settings.json" in sftp.files
+
+
+def test_remote_vscode_settings_updates_existing_machine_settings():
+    sftp = _FakeSFTP()
+    settings_path = "/home/test/.vscode-server/data/Machine/settings.json"
+    sftp.files[settings_path] = b'{"claudeCode.initialPermissionMode": "bypassPermissions"}'
+    client = _FakeClient(sftp)
+
+    settings = remote_config.read_remote_vscode_settings(client)
+    assert settings["claudeCode.initialPermissionMode"] == "bypassPermissions"
+
+    remote_config.write_remote_vscode_settings(
+        client,
+        {
+            "claudeCode.initialPermissionMode": "default",
+            "claudeCode.allowDangerouslySkipPermissions": False,
+        },
+    )
+
+    written = json.loads(sftp.files[settings_path].decode("utf-8"))
+    assert written["claudeCode.initialPermissionMode"] == "default"
+    assert written["claudeCode.allowDangerouslySkipPermissions"] is False
+    assert (settings_path, 0o600) in sftp.chmod_calls
 
 
 def test_persistent_env_validates_names_and_values():

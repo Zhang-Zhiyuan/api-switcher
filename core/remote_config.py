@@ -18,6 +18,12 @@ REMOTE_FILENAMES = {
     "codex_auth": ("codex", "auth.json"),
 }
 
+REMOTE_VSCODE_SETTINGS_PATHS = (
+    "~/.vscode-server/data/Machine/settings.json",
+    "~/.vscode-server-insiders/data/Machine/settings.json",
+    "~/.cursor-server/data/Machine/settings.json",
+)
+
 
 def _decode_remote_output(raw: bytes | str) -> str:
     if isinstance(raw, bytes):
@@ -120,6 +126,18 @@ def write_remote_json(client: paramiko.SSHClient, remote_path: str, data: dict, 
     ssh_manager.write_remote_file(client, expanded, content, file_mode=file_mode)
 
 
+def _existing_remote_paths(client: paramiko.SSHClient, paths: tuple[str, ...]) -> list[str]:
+    """Return expanded candidate paths that already exist on the remote host."""
+    from core.ssh_manager import ssh_manager
+
+    existing = []
+    for path in paths:
+        expanded = _expand_remote_path(client, path)
+        if ssh_manager.read_remote_file(client, expanded) is not None:
+            existing.append(expanded)
+    return existing
+
+
 def read_remote_toml(client: paramiko.SSHClient, remote_path: str) -> dict | None:
     """Read a TOML file from remote server."""
     from core.ssh_manager import ssh_manager
@@ -169,6 +187,30 @@ def read_remote_claude_credentials(client: paramiko.SSHClient, profile: object |
 
 def write_remote_claude_credentials(client: paramiko.SSHClient, data: dict, profile: object | None = None):
     write_remote_json(client, _remote_path("claude_credentials", profile), data, file_mode=0o600)
+
+
+def read_remote_vscode_settings(client: paramiko.SSHClient) -> dict | None:
+    """Read the first available remote VS Code Server Machine settings file."""
+    for path in REMOTE_VSCODE_SETTINGS_PATHS:
+        settings = read_remote_json(client, path)
+        if settings is not None:
+            return settings
+    return None
+
+
+def write_remote_vscode_settings(client: paramiko.SSHClient, data: dict):
+    """Write VS Code Server Machine settings.
+
+    Update every known existing server settings file so Stable/Insiders/Cursor
+    stay consistent. If no file exists yet, create the regular VS Code Server
+    path because that is where the remote extension reads Machine settings.
+    """
+    targets = _existing_remote_paths(client, REMOTE_VSCODE_SETTINGS_PATHS)
+    if not targets:
+        targets = [_expand_remote_path(client, REMOTE_VSCODE_SETTINGS_PATHS[0])]
+
+    for path in targets:
+        write_remote_json(client, path, data, file_mode=0o600)
 
 
 def read_remote_codex_config(client: paramiko.SSHClient, profile: object | None = None) -> dict | None:

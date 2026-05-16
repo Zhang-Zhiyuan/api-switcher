@@ -24,13 +24,21 @@ def _connect_ssh(ssh_name: str):
     return ssh_profile, ssh_manager.connect(ssh_profile)
 
 
-def _is_root_ssh_user(ssh_profile) -> bool:
+def _is_root_ssh_user(ssh_profile, client=None) -> bool:
     username = str(getattr(ssh_profile, "username", "") or "").strip().lower()
-    return username == "root"
+    if username == "root":
+        return True
+    if client is None:
+        return False
+    try:
+        _stdin, stdout, _stderr = client.exec_command("id -u 2>/dev/null || true", timeout=5)
+        return stdout.read().decode("utf-8", errors="replace").strip() == "0"
+    except Exception:
+        return False
 
 
-def _make_claude_settings_root_safe(settings: dict, ssh_profile) -> tuple[dict, bool]:
-    if not _is_root_ssh_user(ssh_profile):
+def _make_claude_settings_root_safe(settings: dict, ssh_profile, client=None) -> tuple[dict, bool]:
+    if not _is_root_ssh_user(ssh_profile, client):
         return settings, False
 
     settings = dict(settings)
@@ -46,6 +54,32 @@ def _make_claude_settings_root_safe(settings: dict, ssh_profile) -> tuple[dict, 
     settings["permissions"] = permissions
     settings["skipDangerousModePermissionPrompt"] = False
     return settings, True
+
+
+def _make_vscode_settings_root_safe(settings: dict, ssh_profile, client=None) -> tuple[dict, bool]:
+    if not _is_root_ssh_user(ssh_profile, client):
+        return settings, False
+
+    settings = dict(settings)
+    changed = False
+    if settings.get("claudeCode.initialPermissionMode") != "default":
+        settings["claudeCode.initialPermissionMode"] = "default"
+        changed = True
+    if settings.get("claudeCode.allowDangerouslySkipPermissions") is not False:
+        settings["claudeCode.allowDangerouslySkipPermissions"] = False
+        changed = True
+    return settings, changed
+
+
+def _sync_remote_vscode_root_safety(client, ssh_profile) -> bool:
+    if not _is_root_ssh_user(ssh_profile, client):
+        return False
+
+    vscode = remote_config.read_remote_vscode_settings(client) or {}
+    vscode, changed = _make_vscode_settings_root_safe(vscode, ssh_profile, client)
+    if changed:
+        remote_config.write_remote_vscode_settings(client, vscode)
+    return changed
 
 
 def _codex_profile_api_key(profile) -> str:
@@ -76,7 +110,8 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
     settings = remote_config.read_remote_claude_settings(client, ssh_profile) or {}
     settings = parser.apply_claude_profile(settings, claude_profile)
-    settings, root_adjusted = _make_claude_settings_root_safe(settings, ssh_profile)
+    settings, root_adjusted = _make_claude_settings_root_safe(settings, ssh_profile, client)
+    vscode_root_adjusted = _sync_remote_vscode_root_safety(client, ssh_profile)
     config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     config = parser.apply_claude_config(config, claude_profile)
 
@@ -85,7 +120,7 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
     logger.info(f"Synced Claude API profile '{claude_name}' to {ssh_profile.host}")
     message = f"已同步 Claude API '{claude_name}' 到 {ssh_profile.host}"
-    return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted else message
+    return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted or vscode_root_adjusted else message
 
 
 def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
@@ -99,7 +134,8 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
 
     settings = remote_config.read_remote_claude_settings(client, ssh_profile) or {}
     settings = parser.clear_claude_api_overrides(settings)
-    settings, root_adjusted = _make_claude_settings_root_safe(settings, ssh_profile)
+    settings, root_adjusted = _make_claude_settings_root_safe(settings, ssh_profile, client)
+    vscode_root_adjusted = _sync_remote_vscode_root_safety(client, ssh_profile)
     remote_config.write_remote_claude_settings(client, settings, ssh_profile)
 
     config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
@@ -107,7 +143,7 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
 
     logger.info(f"Synced Claude account '{account_name}' to {ssh_profile.host}")
     message = f"已同步 Claude 账号 '{account_name}' 到 {ssh_profile.host}"
-    return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted else message
+    return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted or vscode_root_adjusted else message
 
 
 def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
