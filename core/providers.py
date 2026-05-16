@@ -32,6 +32,7 @@ class ProviderConfig:
 
 CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"]
 CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh"]
+CODEX_WIRE_APIS = {"chat", "responses"}
 CLAUDE_CODE_MODEL_ALIASES = [
     "default",
     "best",
@@ -280,6 +281,33 @@ class ProviderRegistry:
         return ProviderRegistry.get_codex_env_key(
             getattr(profile, "model_provider", "openai"),
             getattr(profile, "custom_env_key", None),
+            getattr(profile, "custom_name", None),
+        )
+
+    @staticmethod
+    def normalize_codex_wire_api(wire_api: str | None) -> str | None:
+        value = str(wire_api or "").strip().lower()
+        return value if value in CODEX_WIRE_APIS else None
+
+    @staticmethod
+    def get_codex_wire_api(
+        provider_name: str,
+        custom_wire_api: str | None = None,
+        custom_name: str | None = None,
+    ) -> str:
+        custom = ProviderRegistry.normalize_codex_wire_api(custom_wire_api)
+        if custom:
+            return custom
+        provider = PROVIDERS.get(provider_name)
+        if not provider and custom_name:
+            provider = ProviderRegistry.get_provider_by_display_name(custom_name)
+        return ProviderRegistry.normalize_codex_wire_api(provider.wire_api if provider else None) or "responses"
+
+    @staticmethod
+    def get_codex_wire_api_for_profile(profile) -> str:
+        return ProviderRegistry.get_codex_wire_api(
+            getattr(profile, "model_provider", "openai"),
+            getattr(profile, "custom_wire_api", None),
             getattr(profile, "custom_name", None),
         )
 

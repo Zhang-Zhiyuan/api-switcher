@@ -9,6 +9,7 @@ from ui.dialogs.profile_editor import ProfileEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from models.profile import CodexProfile
 from core import profile_manager, switcher, security
+from core.providers import ProviderRegistry
 from ui.theme import COLORS, bind_wraplength, button_style, font
 
 
@@ -254,8 +255,10 @@ class CodexTab(ctk.CTkScrollableFrame):
                 is_active = p.name == active
                 auth_identity = profile_manager.describe_codex_profile_identity(p)
                 auth_desc = f"API Key ({auth_identity})"
+                wire_api = ProviderRegistry.get_codex_wire_api_for_profile(p)
+                wire_api_text = p.custom_wire_api or f"auto -> {wire_api}"
                 info = [
-                    f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}  |  Wire API: {p.custom_wire_api or 'auto'}",
+                    f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}  |  Wire API: {wire_api_text}",
                     f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
                 ]
 

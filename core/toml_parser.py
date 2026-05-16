@@ -85,9 +85,7 @@ def apply_codex_profile(config: dict, profile) -> dict:
             custom["env_key"] = ProviderRegistry.get_codex_env_key_for_profile(profile)
             custom["requires_openai_auth"] = profile.custom_requires_openai_auth
 
-            wire_api = profile.custom_wire_api or (provider.wire_api if provider else "responses")
-            if wire_api:
-                custom["wire_api"] = wire_api
+            custom["wire_api"] = ProviderRegistry.get_codex_wire_api_for_profile(profile)
 
     return config
 

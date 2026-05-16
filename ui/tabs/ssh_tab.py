@@ -19,6 +19,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_kind_combo = None
         self._profile_combo = None
         self._codex_wire_api_combo = None
+        self._codex_wire_api_hint = None
         self._sync_status_label = None
         self._ssh_busy = False
         self._remote_auto_provider_combo = None
@@ -137,7 +138,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             sync_controls,
             values=list(self._sync_kind_options.keys()),
             width=132,
-            command=lambda _value: self._refresh_sync_profile_combo(),
+            command=lambda _value: self._on_sync_kind_change(),
             **combo_style(),
         )
         self._sync_kind_combo.grid(row=1, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
@@ -174,7 +175,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._codex_wire_api_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._codex_wire_api_combo.set("远端自测选择")
-        wire_hint = ctk.CTkLabel(
+        self._codex_wire_api_hint = ctk.CTkLabel(
             sync_controls,
             text="推送 Codex API 时生效；远端自测会在服务器上各跑 3 次并回写最稳选项",
             text_color=COLORS["muted"],
@@ -182,8 +183,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        wire_hint.grid(row=2, column=2, columnspan=2, sticky="ew", pady=(10, 0))
-        bind_wraplength(sync_controls, wire_hint, padding=20)
+        self._codex_wire_api_hint.grid(row=2, column=2, columnspan=2, sticky="ew", pady=(10, 0))
+        bind_wraplength(sync_controls, self._codex_wire_api_hint, padding=20)
 
         self._sync_status_label = ctk.CTkLabel(
             sync_controls,
@@ -536,10 +537,23 @@ class SSHTab(ctk.CTkScrollableFrame):
             return "claude_api"
         return self._sync_kind_options.get(self._sync_kind_combo.get(), "claude_api")
 
+    def _on_sync_kind_change(self):
+        self._refresh_sync_profile_combo()
+        self._update_codex_wire_hint()
+
     def _selected_codex_wire_api_mode(self) -> str:
         if not self._codex_wire_api_combo:
             return "auto"
         return self._codex_wire_api_options.get(self._codex_wire_api_combo.get(), "auto")
+
+    def _update_codex_wire_hint(self):
+        if not self._codex_wire_api_hint:
+            return
+        if self._selected_sync_kind() == "codex_api":
+            text = "影响“推送所选”和“推送当前生效”里的 Codex API；远端自测会在服务器上各跑 3 次并回写最稳选项。"
+        else:
+            text = "仅影响“推送当前生效”里的 Codex API；推送 Claude 或账号快照时会自动忽略。"
+        self._codex_wire_api_hint.configure(text=text)
 
     def _profile_names_for_kind(self, kind: str) -> list[str]:
         if kind == "claude_api":
@@ -562,6 +576,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._profile_combo.set(current_profile if current_profile in profile_names else profile_names[0])
         else:
             self._profile_combo.set("(无)")
+        self._update_codex_wire_hint()
 
     def _sync_selected(self):
         server_name = self._server_combo.get()

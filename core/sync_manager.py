@@ -301,9 +301,7 @@ def _remote_codex_current_wire_api(config: dict, profile) -> str:
     if wire_api in CODEX_WIRE_API_VALUES:
         return wire_api
 
-    provider = ProviderRegistry.get_provider(provider_id)
-    fallback = str(provider.wire_api if provider else "responses").strip().lower()
-    return fallback if fallback in CODEX_WIRE_API_VALUES else "responses"
+    return ProviderRegistry.get_codex_wire_api(provider_id, custom_name=table.get("name"))
 
 
 def _format_remote_wire_summary(summaries: list[dict]) -> str:

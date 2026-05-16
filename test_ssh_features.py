@@ -293,6 +293,41 @@ def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh,
     assert "已手动选择 wire_api=chat" in message
 
 
+def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolated_ssh, monkeypatch):
+    security.set_secret("codex:layer4:api_key", "sk-layer4")
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="layer4",
+            api_key_ref="codex:layer4:api_key",
+            model="gpt-5.5",
+            model_provider="layer4",
+            custom_base_url="https://layer4.example.com/v1",
+            custom_wire_api=None,
+        )
+    )
+
+    fake_client = object()
+    writes = []
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data, profile=None: writes.append(json.loads(json.dumps(data))))
+    monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data, profile=None: None)
+    monkeypatch.setattr(persistent_env, "set_remote_user_env", lambda client, data: None)
+    monkeypatch.setattr(
+        sync_manager,
+        "_remote_benchmark_codex_wire_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("profile mode must not benchmark")),
+    )
+
+    message = sync_manager.sync_codex_to_server("remote", "layer4", wire_api_mode="profile")
+
+    assert len(writes) == 1
+    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "chat"
+    assert "使用本地配置 wire_api=chat" in message
+
+
 def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeypatch):
     security.set_secret("claude:relay:auth_token", "sk-relay")
     ssh_profile = SSHProfile(name="remote", host="ssh.example.com", username="root")

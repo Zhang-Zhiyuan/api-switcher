@@ -172,6 +172,7 @@ def test_switch_codex_profile_writes_matching_environment_key(isolated_accounts,
     config = toml_parser.read_codex_config()
     auth = auth_parser.read_codex_auth()
     assert config["model_providers"]["deepseek"]["env_key"] == "DEEPSEEK_API_KEY"
+    assert profile_manager.get_current_codex_name() == "deepseek"
     assert auth["OPENAI_API_KEY"] == "sk-deepseek"
     if os.name == "nt":
         assert written_env == {
@@ -180,6 +181,46 @@ def test_switch_codex_profile_writes_matching_environment_key(isolated_accounts,
         }
     assert os.environ["DEEPSEEK_API_KEY"] == "sk-deepseek"
     assert os.environ["OPENAI_API_KEY"] == "sk-deepseek"
+
+
+def test_current_codex_rejects_invalid_wire_api_until_repaired(isolated_accounts, monkeypatch):
+    from models.profile import CodexProfile
+
+    monkeypatch.setattr(persistent_env, "set_local_user_env", lambda data: None)
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+        )
+    )
+    auth_parser.write_codex_auth({"auth_mode": "api_key", "OPENAI_API_KEY": "sk-deepseek"})
+    toml_parser.write_codex_config({
+        "model": "deepseek-v4-flash",
+        "model_provider": "deepseek",
+        "model_reasoning_effort": "high",
+        "approval_policy": "never",
+        "sandbox_mode": "danger-full-access",
+        "disable_response_storage": True,
+        "model_providers": {
+            "deepseek": {
+                "base_url": "https://api.deepseek.com",
+                "name": "DeepSeek",
+                "wire_api": "bad-value",
+                "env_key": "DEEPSEEK_API_KEY",
+                "requires_openai_auth": False,
+            }
+        },
+    })
+
+    assert profile_manager.get_current_codex_name() is None
+
+    switcher.switch_codex_profile("deepseek")
+
+    assert toml_parser.read_codex_config()["model_providers"]["deepseek"]["wire_api"] == "chat"
+    assert profile_manager.get_current_codex_name() == "deepseek"
 
 
 def test_import_current_codex_can_read_key_from_config_env_key(isolated_accounts, monkeypatch):

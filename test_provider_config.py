@@ -79,6 +79,28 @@ def test_layer4_codex_preset_uses_chat_wire_api():
     assert layer4["env_key"] == "OPENAI_API_KEY"
 
 
+def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
+    provider = ProviderRegistry.get_provider("layer4")
+    assert provider is not None
+
+    assert ProviderRegistry.get_codex_wire_api("layer4") == "chat"
+    assert ProviderRegistry.get_codex_wire_api("layer4", "auto") == "chat"
+    assert ProviderRegistry.get_codex_wire_api("layer4", "invalid") == "chat"
+    assert ProviderRegistry.get_codex_wire_api("custom", "") == "responses"
+
+    config = apply_codex_profile(
+        {},
+        CodexProfile(
+            name="layer4",
+            model="gpt-5.5",
+            model_provider="layer4",
+            custom_wire_api="invalid",
+        ),
+    )
+
+    assert config["model_providers"]["layer4"]["wire_api"] == "chat"
+
+
 def check_claude_provider(provider_id, model, base_url, writes_effort):
     profile = ClaudeProfile(
         name=provider_id,

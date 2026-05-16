@@ -1260,6 +1260,32 @@ def _same_optional(left: object, right: object) -> bool:
     return (left or "") == (right or "")
 
 
+def _codex_expected_wire_api(profile: CodexProfile) -> str:
+    try:
+        from core.providers import ProviderRegistry
+
+        return ProviderRegistry.get_codex_wire_api_for_profile(profile)
+    except Exception:
+        return str(profile.custom_wire_api or "responses")
+
+
+def _codex_current_wire_api(config: dict, profile: CodexProfile, custom: dict) -> str:
+    try:
+        from core.providers import ProviderRegistry
+
+        raw_wire_api = custom.get("wire_api")
+        if raw_wire_api:
+            normalized = ProviderRegistry.normalize_codex_wire_api(str(raw_wire_api))
+            return normalized or f"invalid:{raw_wire_api}"
+        return ProviderRegistry.get_codex_wire_api(
+            profile.model_provider,
+            None,
+            custom.get("name"),
+        )
+    except Exception:
+        return str(custom.get("wire_api") or profile.custom_wire_api or "responses")
+
+
 def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
     if not is_third_party_codex_profile(profile):
         return False
@@ -1284,9 +1310,8 @@ def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
     if expected_base_url or current_base_url:
         if not _same_optional(expected_base_url, current_base_url):
             return False
-    if profile.custom_wire_api or custom.get("wire_api"):
-        if not _same_optional(profile.custom_wire_api, custom.get("wire_api")):
-            return False
+    if _codex_expected_wire_api(profile) != _codex_current_wire_api(config, profile, custom):
+        return False
     try:
         from core.providers import ProviderRegistry
 
