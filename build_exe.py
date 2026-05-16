@@ -27,6 +27,16 @@ UI_TAB_HIDDEN_IMPORTS = [
     "ui.tabs.backup_tab",
     "ui.tabs.log_viewer_tab",
 ]
+EXCLUDED_MODULES = [
+    "IPython",
+    "jupyter",
+    "matplotlib",
+    "notebook",
+    "numpy",
+    "pandas",
+    "pygame",
+    "scipy",
+]
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -162,7 +172,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes=[],
+    excludes={EXCLUDED_MODULES!r},
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -207,9 +217,9 @@ def _remove_stale_artifact(bundle_mode: str) -> bool:
 
     try:
         if stale_path.is_dir():
-            shutil.rmtree(stale_path)
+            _rmtree_with_retry(stale_path)
         else:
-            stale_path.unlink()
+            _unlink_with_retry(stale_path)
     except Exception as exc:
         print(f"Build cleanup failed: could not remove stale artifact {resolved}: {exc}", flush=True)
         return False
@@ -240,14 +250,26 @@ def clean_intermediate_files() -> bool:
             continue
         try:
             if path.is_dir():
-                shutil.rmtree(path, onexc=_make_writable_and_retry)
+                _rmtree_with_retry(path)
             else:
-                path.unlink()
+                _unlink_with_retry(path)
             print(f"Removed intermediate: {path}", flush=True)
         except Exception as exc:
             print(f"Failed to remove intermediate {path}: {exc}", flush=True)
             ok = False
     return ok
+
+
+def _rmtree_with_retry(path: Path) -> None:
+    shutil.rmtree(path, onexc=_make_writable_and_retry)
+
+
+def _unlink_with_retry(path: Path) -> None:
+    try:
+        path.unlink()
+    except PermissionError:
+        os.chmod(path, stat.S_IWRITE)
+        path.unlink()
 
 
 def _make_writable_and_retry(function, path, _exc_info) -> None:

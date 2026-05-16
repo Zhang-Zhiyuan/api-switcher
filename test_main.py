@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sys
+
 import main
-from ui.startup_splash import SPLASH_ARG, StartupSplash
+from ui.startup_splash import SPLASH_ARG, StartupSplash, splash_process_supported
 
 
 def test_parse_args_defaults_to_splash_enabled():
@@ -33,3 +35,13 @@ def test_disabled_startup_splash_is_noop():
     splash.keep_visible_for(0)
     splash.close()
     assert splash.visible is False
+
+
+def test_startup_splash_is_disabled_for_frozen_executable(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    splash = StartupSplash()
+
+    assert splash_process_supported() is False
+    assert splash.visible is False
+    splash.close()

@@ -22,7 +22,7 @@ class StartupSplash:
         self._started_at = time.perf_counter()
         self._process: subprocess.Popen[str] | None = None
 
-        if enabled:
+        if enabled and splash_process_supported():
             self._start_process()
 
     @property
@@ -96,6 +96,12 @@ def _splash_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, SPLASH_ARG]
     return [sys.executable, str(Path(__file__).resolve().parents[1] / "main.py"), SPLASH_ARG]
+
+
+def splash_process_supported() -> bool:
+    """Avoid launching a second copy of the bundled executable during startup."""
+
+    return not getattr(sys, "frozen", False)
 
 
 def run_splash_process() -> int:

@@ -90,6 +90,17 @@ def test_create_spec_file_includes_lazy_tab_hidden_imports(monkeypatch, tmp_path
         assert module_name in spec_text
 
 
+def test_create_spec_file_excludes_heavy_optional_modules(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(build_exe, "SPEC_PATH", tmp_path / "ApiSwitcher.spec")
+
+    build_exe.create_spec_file()
+
+    spec_text = build_exe.SPEC_PATH.read_text(encoding="utf-8")
+    for module_name in build_exe.EXCLUDED_MODULES:
+        assert module_name in spec_text
+
+
 def test_build_exe_onedir_checks_folder_artifact(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
