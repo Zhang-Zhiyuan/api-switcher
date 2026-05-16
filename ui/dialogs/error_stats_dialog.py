@@ -179,13 +179,24 @@ class ErrorStatsDialog(ctk.CTkToplevel):
             self.stats = stats
 
             # 在主线程更新 UI
-            self.after(0, self._display_stats, stats)
+            self._safe_after(lambda: self._display_stats(stats))
 
         except Exception as e:
-            self.after(0, self._display_error, str(e))
+            error_message = str(e)
+            self._safe_after(lambda: self._display_error(error_message))
+
+    def _safe_after(self, callback) -> None:
+        """Schedule UI work from a background thread if the dialog still exists."""
+        try:
+            if self.winfo_exists():
+                self.after(0, callback)
+        except Exception:
+            pass
 
     def _display_stats(self, stats):
         """显示统计数据"""
+        if not self.winfo_exists():
+            return
         # 更新卡片
         self.total_card.value_label.configure(text=str(stats.total_errors))
         self.recovery_card.value_label.configure(text=str(stats.total_recoveries))
@@ -285,6 +296,8 @@ class ErrorStatsDialog(ctk.CTkToplevel):
 
     def _display_error(self, error_message: str):
         """显示错误信息"""
+        if not self.winfo_exists():
+            return
         self.status_label.configure(text="加载失败")
         self.detail_text.configure(state="normal")
         self.detail_text.delete("1.0", "end")

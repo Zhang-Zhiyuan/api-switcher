@@ -95,12 +95,22 @@ def call(api_key, base_url, model, wire_api, timeout):
 
 
 def main():
-    payload = json.loads(sys.stdin.read() or "{}")
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except Exception as error:
+        print(json.dumps({"success": False, "error": "invalid payload: " + str(error)[:160]}, ensure_ascii=False))
+        return
     api_key = str(payload.get("api_key") or "")
     base_url = str(payload.get("base_url") or "")
     model = str(payload.get("model") or "")
-    timeout = int(payload.get("timeout") or 10)
-    repeat_count = max(1, int(payload.get("repeat_count") or 3))
+    try:
+        timeout = max(1, int(payload.get("timeout") or 10))
+    except (TypeError, ValueError):
+        timeout = 10
+    try:
+        repeat_count = max(1, int(payload.get("repeat_count") or 3))
+    except (TypeError, ValueError):
+        repeat_count = 3
     wire_apis = payload.get("wire_apis") or ["chat", "responses"]
 
     summaries = []
@@ -349,14 +359,19 @@ def _remote_benchmark_codex_wire_api(client, profile, config: dict, api_key: str
         if status != 0:
             return RemoteWireBenchmarkResult(False, selected_model=model, error=(stderr or stdout or f"exit {status}")[:300])
 
-        data = json.loads(stdout.strip().splitlines()[-1])
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if not lines:
+            return RemoteWireBenchmarkResult(False, selected_model=model, error="远端 wire_api 自测没有输出")
+        data = json.loads(lines[-1])
+        if not isinstance(data, dict):
+            return RemoteWireBenchmarkResult(False, selected_model=model, error="远端 wire_api 自测输出格式无效")
         summaries = data.get("summaries") if isinstance(data.get("summaries"), list) else []
         return RemoteWireBenchmarkResult(
             success=bool(data.get("success")),
             recommended_wire_api=data.get("recommended_wire_api"),
             selected_model=str(data.get("selected_model") or model),
             summary=_format_remote_wire_summary(summaries),
-            error="" if data.get("success") else "所有 wire_api 远端测试均失败",
+            error="" if data.get("success") else str(data.get("error") or "所有 wire_api 远端测试均失败"),
         )
     except Exception as e:
         logger.warning("Remote Codex wire_api benchmark skipped: %s", e)

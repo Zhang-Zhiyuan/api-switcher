@@ -328,6 +328,50 @@ def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolate
     assert "使用本地配置 wire_api=chat" in message
 
 
+def test_remote_codex_wire_api_benchmark_handles_empty_output(monkeypatch):
+    profile = CodexProfile(
+        name="layer4",
+        model="gpt-5.5",
+        model_provider="layer4",
+        custom_base_url="https://layer4.example.com/v1",
+    )
+
+    monkeypatch.setattr(sync_manager, "_remote_codex_base_url", lambda config, p: "https://layer4.example.com/v1")
+    monkeypatch.setattr(sync_manager, "_remote_codex_model", lambda config, p: "gpt-5.5")
+    monkeypatch.setattr(
+        sync_manager.ssh_manager,
+        "execute_command_with_status",
+        lambda *args, **kwargs: (0, "", ""),
+    )
+
+    result = sync_manager._remote_benchmark_codex_wire_api(object(), profile, {}, "sk-test")
+
+    assert result.success is False
+    assert result.error == "远端 wire_api 自测没有输出"
+
+
+def test_remote_codex_wire_api_benchmark_uses_remote_error(monkeypatch):
+    profile = CodexProfile(
+        name="layer4",
+        model="gpt-5.5",
+        model_provider="layer4",
+        custom_base_url="https://layer4.example.com/v1",
+    )
+
+    monkeypatch.setattr(sync_manager, "_remote_codex_base_url", lambda config, p: "https://layer4.example.com/v1")
+    monkeypatch.setattr(sync_manager, "_remote_codex_model", lambda config, p: "gpt-5.5")
+    monkeypatch.setattr(
+        sync_manager.ssh_manager,
+        "execute_command_with_status",
+        lambda *args, **kwargs: (0, '{"success": false, "error": "invalid payload"}\n', ""),
+    )
+
+    result = sync_manager._remote_benchmark_codex_wire_api(object(), profile, {}, "sk-test")
+
+    assert result.success is False
+    assert result.error == "invalid payload"
+
+
 def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeypatch):
     security.set_secret("claude:relay:auth_token", "sk-relay")
     ssh_profile = SSHProfile(name="remote", host="ssh.example.com", username="root")

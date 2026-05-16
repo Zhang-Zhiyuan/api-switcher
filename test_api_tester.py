@@ -120,6 +120,27 @@ def test_benchmark_openai_wire_apis_recommends_stable_chat(monkeypatch):
     assert "responses: 0/3" in result.error_details
 
 
+def test_benchmark_openai_wire_apis_skips_invalid_candidates(monkeypatch):
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/models"):
+            return _FakeJSONResponse({"data": [{"id": "gpt-5.5"}]})
+        raise AssertionError("invalid wire_api candidates should not be probed")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = APITester.benchmark_openai_wire_apis(
+        "sk-test",
+        "https://relay.example.com/v1",
+        "gpt-5.5",
+        repeat_count="bad",
+        wire_apis=("bad", ""),
+    )
+
+    assert result.success is False
+    assert result.message == "没有可测试的 wire_api"
+    assert "bad: 已跳过" in result.error_details
+
+
 def main():
     assert_equal(
         APITester._openai_url("https://api.openai.com", "models"),

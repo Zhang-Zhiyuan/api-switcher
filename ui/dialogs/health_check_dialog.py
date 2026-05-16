@@ -131,19 +131,35 @@ class HealthCheckDialog(ctk.CTkToplevel):
             self.results = results
 
             # 在主线程更新 UI
-            self.after(0, self._display_results, results)
+            self._safe_after(lambda: self._display_results(results))
 
         except Exception as e:
+            error_message = str(e)
             logger.error(f"Health check failed: {e}", exc_info=True)
-            self.after(0, self._display_error, str(e))
+            self._safe_after(lambda: self._display_error(error_message))
 
         finally:
             self.is_checking = False
-            self.after(0, lambda: self.check_button.configure(state="normal", text="重新检查"))
-            self.after(0, lambda: self.export_button.configure(state="normal"))
+            self._safe_after(self._finish_check)
+
+    def _safe_after(self, callback) -> None:
+        """Schedule UI work from a background thread if the dialog still exists."""
+        try:
+            if self.winfo_exists():
+                self.after(0, callback)
+        except Exception:
+            pass
+
+    def _finish_check(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.check_button.configure(state="normal", text="重新检查")
+        self.export_button.configure(state="normal")
 
     def _display_results(self, results):
         """显示检查结果"""
+        if not self.winfo_exists():
+            return
         from core.validator import config_validator
 
         # 清空文本框
@@ -230,6 +246,8 @@ class HealthCheckDialog(ctk.CTkToplevel):
 
     def _display_error(self, error_message: str):
         """显示错误信息"""
+        if not self.winfo_exists():
+            return
         self.status_label.configure(text="检查失败")
         self.result_text.delete("1.0", "end")
         self._insert_text("健康检查失败\n\n", "bold")

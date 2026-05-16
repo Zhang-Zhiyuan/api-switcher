@@ -623,6 +623,8 @@ class APITester:
         wire_api = (wire_api or "chat").strip().lower()
         if wire_api == "responses":
             return APITester._probe_openai_responses(api_key, base_url, model, timeout)
+        if wire_api != "chat":
+            return TestResult(success=False, message=f"不支持的 wire_api: {wire_api}")
         return APITester._probe_openai_chat(api_key, base_url, model, timeout)
 
     @staticmethod
@@ -667,7 +669,10 @@ class APITester:
                 error_details=model_list.error_details or model_list.message,
             )
 
-        repeat_count = max(1, int(repeat_count or 1))
+        try:
+            repeat_count = max(1, int(repeat_count or 1))
+        except (TypeError, ValueError):
+            repeat_count = 3
         summaries = []
         best_wire = None
         best_score = (-1, -1.0)
@@ -677,6 +682,9 @@ class APITester:
         for wire_api in wire_apis:
             wire_api = (wire_api or "").strip().lower()
             if not wire_api:
+                continue
+            if wire_api not in {"chat", "responses"}:
+                summaries.append(f"{wire_api}: 已跳过，不支持的 wire_api")
                 continue
             successes = 0
             durations = []
@@ -708,9 +716,10 @@ class APITester:
             summaries.append(f"{wire_api}: {successes}/{repeat_count} 成功，平均 {avg_text}，HTTP {status_text}{error_text}")
 
         if not best_wire or best_score[0] <= 0:
+            message = "没有可测试的 wire_api" if summaries and all("已跳过" in item for item in summaries) else "所有 wire_api 测试均失败"
             return TestResult(
                 success=False,
-                message="所有 wire_api 测试均失败",
+                message=message,
                 response_time=best_avg,
                 status_code=best_status,
                 error_details="\n".join(summaries),
