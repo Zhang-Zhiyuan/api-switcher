@@ -216,6 +216,48 @@ def test_sync_codex_to_server_writes_openai_key_fallback_for_provider_env(isolat
     assert "OPENAI_API_KEY" in message
 
 
+def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, monkeypatch):
+    security.set_secret("codex:layer4:api_key", "sk-layer4")
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="layer4",
+            api_key_ref="codex:layer4:api_key",
+            model="gpt-5.5",
+            model_provider="layer4",
+            custom_base_url="https://layer4.example.com/v1",
+            custom_wire_api="responses",
+        )
+    )
+
+    fake_client = object()
+    writes = []
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "write_remote_codex_config", lambda client, data, profile=None: writes.append(json.loads(json.dumps(data))))
+    monkeypatch.setattr(remote_config, "write_remote_codex_auth", lambda client, data, profile=None: None)
+    monkeypatch.setattr(persistent_env, "set_remote_user_env", lambda client, data: None)
+    monkeypatch.setattr(
+        sync_manager,
+        "_remote_benchmark_codex_wire_api",
+        lambda client, profile, config, api_key: sync_manager.RemoteWireBenchmarkResult(
+            True,
+            recommended_wire_api="chat",
+            selected_model="gpt-5.5",
+            summary="chat 3/3 avg 1000ms; responses 1/3 avg 3000ms",
+        ),
+    )
+
+    message = sync_manager.sync_codex_to_server("remote", "layer4")
+
+    assert len(writes) == 2
+    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert writes[1]["model_providers"]["layer4"]["wire_api"] == "chat"
+    assert "wire_api=chat" in message
+    assert "chat 3/3" in message
+
+
 def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeypatch):
     security.set_secret("claude:relay:auth_token", "sk-relay")
     ssh_profile = SSHProfile(name="remote", host="ssh.example.com", username="root")

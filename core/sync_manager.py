@@ -1,4 +1,7 @@
+import json
 import logging
+import shlex
+from dataclasses import dataclass
 from core import remote_config, parser, toml_parser, auth_parser, profile_manager, security
 from core.providers import ProviderRegistry
 from core.ssh_manager import ssh_manager
@@ -10,6 +13,125 @@ ROOT_BYPASS_ADJUSTED_MESSAGE = (
     "已兼容 root 登录：Claude Code 禁止 root/sudo 使用 "
     "bypassPermissions（--dangerously-skip-permissions），已自动将远端权限模式改为 default。"
 )
+
+
+@dataclass(frozen=True)
+class RemoteWireBenchmarkResult:
+    success: bool
+    recommended_wire_api: str | None = None
+    selected_model: str = ""
+    summary: str = ""
+    error: str = ""
+
+
+_REMOTE_CODEX_WIRE_BENCHMARK_SCRIPT = r"""
+import json
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def openai_url(base_url, resource):
+    base_url = (base_url or "https://api.openai.com/v1").strip().rstrip("/")
+    if "://" not in base_url:
+        base_url = "https://" + base_url
+    parsed = urllib.parse.urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    resource = resource.strip("/")
+    if path.endswith(("/v1", "/v4")):
+        new_path = path + "/" + resource
+    elif parsed.netloc.lower() == "api.openai.com":
+        new_path = (path + "/v1/" + resource) if path else ("/v1/" + resource)
+    else:
+        new_path = (path + "/" + resource) if path else ("/" + resource)
+    return urllib.parse.urlunparse(parsed._replace(path=new_path))
+
+
+def call(api_key, base_url, model, wire_api, timeout):
+    if wire_api == "responses":
+        url = openai_url(base_url, "responses")
+        payload = {"model": model, "input": "Reply OK only.", "max_output_tokens": 8}
+    else:
+        url = openai_url(base_url, "chat/completions")
+        payload = {"model": model, "messages": [{"role": "user", "content": "Reply OK only."}], "max_tokens": 8}
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    start = time.time()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(300).decode("utf-8", errors="replace")
+            return {
+                "ok": 200 <= response.status < 300 and body.lstrip().startswith(("{", "[")),
+                "status": response.status,
+                "ms": round((time.time() - start) * 1000),
+            }
+    except urllib.error.HTTPError as error:
+        body = error.read(300).decode("utf-8", errors="replace").replace(api_key, "[redacted]")
+        return {"ok": False, "status": error.code, "ms": round((time.time() - start) * 1000), "error": body[:160]}
+    except Exception as error:
+        return {
+            "ok": False,
+            "status": None,
+            "ms": round((time.time() - start) * 1000),
+            "error": type(error).__name__ + ": " + str(error)[:140],
+        }
+
+
+def main():
+    payload = json.loads(sys.stdin.read() or "{}")
+    api_key = str(payload.get("api_key") or "")
+    base_url = str(payload.get("base_url") or "")
+    model = str(payload.get("model") or "")
+    timeout = int(payload.get("timeout") or 10)
+    repeat_count = max(1, int(payload.get("repeat_count") or 3))
+    wire_apis = payload.get("wire_apis") or ["chat", "responses"]
+
+    summaries = []
+    best = None
+    for wire_api in wire_apis:
+        wire_api = str(wire_api or "").strip().lower()
+        if wire_api not in {"chat", "responses"}:
+            continue
+        results = [call(api_key, base_url, model, wire_api, timeout) for _ in range(repeat_count)]
+        successes = [item for item in results if item.get("ok")]
+        avg_ms = round(sum(item["ms"] for item in successes) / len(successes)) if successes else None
+        statuses = ",".join(str(item.get("status") or "-") for item in results)
+        errors = [item.get("error") for item in results if item.get("error")]
+        summary = {
+            "wire_api": wire_api,
+            "successes": len(successes),
+            "repeat_count": repeat_count,
+            "avg_ms": avg_ms,
+            "statuses": statuses,
+            "error": (errors[-1] if errors else ""),
+        }
+        summaries.append(summary)
+        score = (summary["successes"], -(avg_ms if avg_ms is not None else timeout * 1000))
+        if best is None or score > best[0]:
+            best = (score, summary)
+
+    recommended = best[1]["wire_api"] if best and best[1]["successes"] > 0 else None
+    print(json.dumps({
+        "success": recommended is not None,
+        "recommended_wire_api": recommended,
+        "selected_model": model,
+        "summaries": summaries,
+    }, ensure_ascii=False))
+
+
+main()
+"""
 
 
 def _find_profile(profiles: list, name: str, label: str):
@@ -98,6 +220,111 @@ def _persist_remote_codex_env(client, profile, api_key: str) -> list[str]:
     return env_keys
 
 
+def _codex_provider_table(config: dict, provider_id: str) -> dict:
+    model_providers = config.get("model_providers")
+    if not isinstance(model_providers, dict):
+        model_providers = {}
+        config["model_providers"] = model_providers
+
+    table = model_providers.get(provider_id)
+    if not isinstance(table, dict):
+        table = {}
+        model_providers[provider_id] = table
+    return table
+
+
+def _remote_codex_base_url(config: dict, profile) -> str:
+    provider_id = str(config.get("model_provider") or getattr(profile, "model_provider", "") or "").strip()
+    table = _codex_provider_table(config, provider_id) if provider_id else {}
+    base_url = str(table.get("base_url") or getattr(profile, "custom_base_url", "") or "").strip()
+    if base_url:
+        return base_url
+
+    provider = ProviderRegistry.get_provider(provider_id)
+    return provider.base_url_for_codex() if provider else ""
+
+
+def _remote_codex_model(config: dict, profile) -> str:
+    model = str(config.get("model") or getattr(profile, "model", "") or "").strip()
+    if model:
+        return model
+
+    provider = ProviderRegistry.get_provider(str(config.get("model_provider") or getattr(profile, "model_provider", "")))
+    return (provider.default_model if provider else "") or "gpt-5.5"
+
+
+def _set_remote_codex_wire_api(config: dict, profile, wire_api: str) -> bool:
+    wire_api = str(wire_api or "").strip().lower()
+    if wire_api not in {"chat", "responses"}:
+        return False
+
+    provider_id = str(config.get("model_provider") or getattr(profile, "model_provider", "") or "custom").strip()
+    table = _codex_provider_table(config, provider_id)
+    if table.get("wire_api") == wire_api:
+        return False
+    table["wire_api"] = wire_api
+    return True
+
+
+def _format_remote_wire_summary(summaries: list[dict]) -> str:
+    parts = []
+    for item in summaries:
+        wire_api = item.get("wire_api", "?")
+        successes = item.get("successes", 0)
+        repeat_count = item.get("repeat_count", 0)
+        avg_ms = item.get("avg_ms")
+        avg_text = f"{avg_ms}ms" if avg_ms is not None else "-"
+        parts.append(f"{wire_api} {successes}/{repeat_count} avg {avg_text}")
+    return "; ".join(parts)
+
+
+def _remote_benchmark_codex_wire_api(client, profile, config: dict, api_key: str) -> RemoteWireBenchmarkResult:
+    base_url = _remote_codex_base_url(config, profile)
+    model = _remote_codex_model(config, profile)
+    if not base_url:
+        return RemoteWireBenchmarkResult(False, error="缺少 Codex Base URL")
+    if not model:
+        return RemoteWireBenchmarkResult(False, error="缺少 Codex 模型")
+
+    payload = {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "timeout": 10,
+        "repeat_count": 3,
+        "wire_apis": ["chat", "responses"],
+    }
+    command = (
+        'PYTHON_BIN="$(command -v python3 || command -v python || true)"; '
+        '[ -n "$PYTHON_BIN" ] || exit 127; '
+        f'"$PYTHON_BIN" -c {shlex.quote(_REMOTE_CODEX_WIRE_BENCHMARK_SCRIPT)}'
+    )
+
+    try:
+        status, stdout, stderr = ssh_manager.execute_command_with_status(
+            client,
+            command,
+            timeout=140,
+            input_data=json.dumps(payload),
+            log_command=False,
+        )
+        if status != 0:
+            return RemoteWireBenchmarkResult(False, selected_model=model, error=(stderr or stdout or f"exit {status}")[:300])
+
+        data = json.loads(stdout.strip().splitlines()[-1])
+        summaries = data.get("summaries") if isinstance(data.get("summaries"), list) else []
+        return RemoteWireBenchmarkResult(
+            success=bool(data.get("success")),
+            recommended_wire_api=data.get("recommended_wire_api"),
+            selected_model=str(data.get("selected_model") or model),
+            summary=_format_remote_wire_summary(summaries),
+            error="" if data.get("success") else "所有 wire_api 远端测试均失败",
+        )
+    except Exception as e:
+        logger.warning("Remote Codex wire_api benchmark skipped: %s", e)
+        return RemoteWireBenchmarkResult(False, selected_model=model, error=str(e)[:300])
+
+
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
     """Sync Claude profile to remote server. Returns status message."""
     claude_profile = _find_profile(profile_manager.list_switchable_claude_profiles(), claude_name, "Claude API Profile")
@@ -165,9 +392,21 @@ def sync_codex_to_server(ssh_name: str, codex_name: str) -> str:
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     remote_config.write_remote_codex_auth(client, auth, ssh_profile)
     env_keys = _persist_remote_codex_env(client, codex_profile, api_key)
+    benchmark = _remote_benchmark_codex_wire_api(client, codex_profile, config, api_key)
+    if benchmark.success and benchmark.recommended_wire_api:
+        if _set_remote_codex_wire_api(config, codex_profile, benchmark.recommended_wire_api):
+            remote_config.write_remote_codex_config(client, config, ssh_profile)
 
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
-    return f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
+    message = f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
+    if benchmark.success and benchmark.recommended_wire_api:
+        detail = f" | 远端自测推荐 wire_api={benchmark.recommended_wire_api}"
+        if benchmark.summary:
+            detail += f"（{benchmark.summary}）"
+        return message + detail
+    if benchmark.error:
+        return message + f" | 远端 wire_api 自测跳过: {benchmark.error}"
+    return message
 
 
 def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
