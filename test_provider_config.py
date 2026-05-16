@@ -277,6 +277,46 @@ def test_codex_import_names_and_runtime_detection():
                     security.delete_secret(ref)
 
 
+def test_health_check_codex_uses_provider_base_url_and_wire_api(monkeypatch):
+    from core.api_tester import APITester, TestResult
+    from core.validator import ConfigValidator
+
+    profile = CodexProfile(
+        name="layer4",
+        api_key_ref="codex:layer4:api_key",
+        model="gpt-5.5",
+        model_provider="layer4",
+    )
+    captured = {}
+
+    monkeypatch.setattr(profile_manager, "get_current_claude_name", lambda: None)
+    monkeypatch.setattr(profile_manager, "get_current_codex_name", lambda: "layer4")
+    monkeypatch.setattr(profile_manager, "list_switchable_codex_profiles", lambda: [profile])
+    monkeypatch.setattr(security, "get_secret", lambda ref: "sk-test" if ref == "codex:layer4:api_key" else None)
+
+    def fake_test_openai_api(api_key, base_url, model, timeout=10, wire_api="chat"):
+        captured.update(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            wire_api=wire_api,
+        )
+        return TestResult(True, "ok", response_time=12)
+
+    monkeypatch.setattr(APITester, "test_openai_api", staticmethod(fake_test_openai_api))
+
+    ConfigValidator()._validate_api_connections()
+
+    assert captured == {
+        "api_key": "sk-test",
+        "base_url": "https://layer4.cc/v1",
+        "model": "gpt-5.5",
+        "timeout": 10,
+        "wire_api": "responses",
+    }
+
+
 def main():
     check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "responses", True)
     check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "responses", False)

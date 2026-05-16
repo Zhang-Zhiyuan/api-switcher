@@ -112,7 +112,7 @@ def main():
         repeat_count = min(5, max(1, int(payload.get("repeat_count") or 3)))
     except (TypeError, ValueError):
         repeat_count = 3
-    wire_apis = payload.get("wire_apis") or ["chat", "responses"]
+    wire_apis = payload.get("wire_apis") or ["responses"]
 
     summaries = []
     best = None

@@ -476,11 +476,17 @@ class ConfigValidator:
 
                     if api_key:
                         # 测试连接
+                        from core.providers import ProviderRegistry
+
+                        provider = ProviderRegistry.get_provider(profile.model_provider)
+                        base_url = profile.custom_base_url or (provider.base_url_for_codex() if provider else "")
+                        wire_api = ProviderRegistry.get_codex_wire_api_for_profile(profile)
                         result = APITester.test_openai_api(
                             api_key,
-                            profile.custom_base_url or "https://api.openai.com/v1",
+                            base_url or "https://api.openai.com/v1",
                             profile.model or "gpt-5.5",
-                            timeout=10
+                            timeout=10,
+                            wire_api=wire_api,
                         )
 
                         if result.success:
