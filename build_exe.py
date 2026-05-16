@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "API切换器"
 SPEC_PATH = Path(f"{APP_NAME}.spec")
-DEFAULT_BUNDLE_MODE = "onedir"
+DEFAULT_BUNDLE_MODE = "onefile"
 SUPPORTED_BUNDLE_MODES = {"onefile", "onedir"}
 UI_TAB_HIDDEN_IMPORTS = [
     "ui.tabs.claude_tab",
@@ -256,15 +256,15 @@ def main(argv: list[str] | None = None) -> int:
     mode_group.add_argument(
         "--onedir",
         action="store_true",
-        help="Build the default dist/API切换器 folder.",
+        help="Build a dist/API切换器 folder instead of the default single EXE.",
     )
     mode_group.add_argument(
         "--onefile",
         action="store_true",
-        help="Build a single-file EXE. This starts slower because it self-extracts on launch.",
+        help="Build the default single-file dist/API切换器.exe.",
     )
     args = parser.parse_args(argv)
-    bundle_mode = "onefile" if args.onefile else DEFAULT_BUNDLE_MODE
+    bundle_mode = "onedir" if args.onedir else DEFAULT_BUNDLE_MODE
 
     print("=" * 80, flush=True)
     print("API Switcher build tool", flush=True)

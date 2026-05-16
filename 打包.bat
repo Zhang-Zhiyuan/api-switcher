@@ -27,9 +27,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "dist\API切换器\API切换器.exe" (
+if not exist "dist\API切换器.exe" (
     echo.
-    echo 打包失败：未找到 dist\API切换器\API切换器.exe
+    echo 打包失败：未找到 dist\API切换器.exe
     echo.
     pause
     exit /b 1
@@ -40,6 +40,6 @@ echo ===========================================================================
 echo 打包完成！
 echo ================================================================================
 echo.
-echo EXE 文件位置: dist\API切换器\API切换器.exe
+echo EXE 文件位置: dist\API切换器.exe
 echo.
 pause

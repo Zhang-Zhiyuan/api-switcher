@@ -27,23 +27,23 @@ def test_build_exe_main_propagates_build_failure(monkeypatch, tmp_path):
     (tmp_path / "main.py").write_text("print('ok')", encoding="utf-8")
     monkeypatch.setattr(build_exe, "check_pyinstaller", lambda: True)
     calls = []
-    monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onedir": calls.append(("spec", bundle_mode)))
-    monkeypatch.setattr(build_exe, "build_exe", lambda bundle_mode="onedir": calls.append(("build", bundle_mode)) or False)
+    monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onefile": calls.append(("spec", bundle_mode)))
+    monkeypatch.setattr(build_exe, "build_exe", lambda bundle_mode="onefile": calls.append(("build", bundle_mode)) or False)
 
     assert build_exe.main([]) == 1
-    assert calls == [("spec", "onedir"), ("build", "onedir")]
+    assert calls == [("spec", "onefile"), ("build", "onefile")]
 
 
-def test_build_exe_main_accepts_onefile_override(monkeypatch, tmp_path):
+def test_build_exe_main_accepts_onedir_override(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "main.py").write_text("print('ok')", encoding="utf-8")
     monkeypatch.setattr(build_exe, "check_pyinstaller", lambda: True)
     calls = []
-    monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onedir": calls.append(("spec", bundle_mode)))
-    monkeypatch.setattr(build_exe, "build_exe", lambda bundle_mode="onedir": calls.append(("build", bundle_mode)) or True)
+    monkeypatch.setattr(build_exe, "create_spec_file", lambda bundle_mode="onefile": calls.append(("spec", bundle_mode)))
+    monkeypatch.setattr(build_exe, "build_exe", lambda bundle_mode="onefile": calls.append(("build", bundle_mode)) or True)
 
-    assert build_exe.main(["--onefile"]) == 0
-    assert calls == [("spec", "onefile"), ("build", "onefile")]
+    assert build_exe.main(["--onedir"]) == 0
+    assert calls == [("spec", "onedir"), ("build", "onedir")]
 
 
 def test_create_spec_file_includes_lazy_tab_hidden_imports(monkeypatch, tmp_path):

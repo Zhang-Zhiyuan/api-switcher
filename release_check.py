@@ -193,16 +193,33 @@ def check_artifacts() -> bool:
     for path in exe_files:
         print(f"{path}  {path.stat().st_size} bytes  SHA256 {sha256_file(path)}", flush=True)
 
-    stale_onefile = dist_dir / f"{APP_NAME}.exe"
-    if stale_onefile.exists():
+    onefile_exe = dist_dir / f"{APP_NAME}.exe"
+    if not onefile_exe.exists():
         print(
-            f"artifacts: FAILED - stale single-file artifact still exists: {stale_onefile}",
+            f"artifacts: FAILED - single-file artifact is missing: {onefile_exe}",
+            flush=True,
+        )
+        return False
+
+    stale_onedir = dist_dir / APP_NAME
+    if stale_onedir.exists():
+        print(
+            f"artifacts: FAILED - stale folder artifact still exists: {stale_onedir}",
+            flush=True,
+        )
+        return False
+
+    stale_zip = dist_dir / f"{APP_NAME}.zip"
+    if stale_zip.exists():
+        print(
+            f"artifacts: FAILED - stale folder archive still exists: {stale_zip}",
             flush=True,
         )
         return False
 
     print("artifacts: OK", flush=True)
     return True
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run release checks.")

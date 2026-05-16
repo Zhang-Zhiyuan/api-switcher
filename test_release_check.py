@@ -23,24 +23,36 @@ def test_release_check_pytest_env_stops_git_parent_discovery(monkeypatch, tmp_pa
     assert env["GIT_CEILING_DIRECTORIES"] == expected
 
 
-def test_check_artifacts_passes_with_only_onedir_exe(monkeypatch, tmp_path):
+def test_check_artifacts_passes_with_only_onefile_exe(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(release_check, "APP_NAME", "ApiSwitcher")
-    exe_path = tmp_path / "dist" / "ApiSwitcher" / "ApiSwitcher.exe"
+    exe_path = tmp_path / "dist" / "ApiSwitcher.exe"
     exe_path.parent.mkdir(parents=True)
     exe_path.write_bytes(b"exe")
 
     assert release_check.check_artifacts() is True
 
 
-def test_check_artifacts_fails_when_stale_onefile_exists(monkeypatch, tmp_path):
+def test_check_artifacts_fails_when_stale_onedir_exists(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(release_check, "APP_NAME", "ApiSwitcher")
-    onedir_exe = tmp_path / "dist" / "ApiSwitcher" / "ApiSwitcher.exe"
-    onedir_exe.parent.mkdir(parents=True)
-    onedir_exe.write_bytes(b"exe")
-    stale_onefile = tmp_path / "dist" / "ApiSwitcher.exe"
-    stale_onefile.write_bytes(b"stale")
+    onefile = tmp_path / "dist" / "ApiSwitcher.exe"
+    onefile.parent.mkdir(parents=True)
+    onefile.write_bytes(b"exe")
+    stale_onedir = tmp_path / "dist" / "ApiSwitcher"
+    stale_onedir.mkdir()
+    (stale_onedir / "ApiSwitcher.exe").write_bytes(b"stale")
+
+    assert release_check.check_artifacts() is False
+
+
+def test_check_artifacts_fails_when_stale_zip_exists(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(release_check, "APP_NAME", "ApiSwitcher")
+    onefile = tmp_path / "dist" / "ApiSwitcher.exe"
+    onefile.parent.mkdir(parents=True)
+    onefile.write_bytes(b"exe")
+    (tmp_path / "dist" / "ApiSwitcher.zip").write_bytes(b"stale")
 
     assert release_check.check_artifacts() is False
 
