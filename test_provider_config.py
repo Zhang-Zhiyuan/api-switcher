@@ -171,7 +171,7 @@ def test_stale_codex_auth_is_cleared():
     api_auth = apply_codex_apikey({"OPENAI_API_KEY": "old", "tokens": {"old": True}}, CodexProfile(name="api"))
     assert_equal(api_auth.get("OPENAI_API_KEY"), None, "stale codex api key")
     assert_equal(api_auth.get("tokens"), {}, "codex api mode stale tokens")
-    assert_equal(api_auth.get("auth_mode"), "api_key", "codex api mode")
+    assert_equal(api_auth.get("auth_mode"), "apikey", "codex api mode")
     assert_equal(api_auth.get("last_refresh"), None, "codex api mode stale last_refresh")
 
 
@@ -237,7 +237,7 @@ def _write_codex_identity_files(api_key: str) -> None:
     paths.CODEX_AUTH.write_text(
         json.dumps(
             {
-                "auth_mode": "api_key",
+                "auth_mode": "apikey",
                 "OPENAI_API_KEY": api_key,
                 "tokens": {},
                 "last_refresh": None,

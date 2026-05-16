@@ -34,7 +34,9 @@ def apply_codex_apikey(auth: dict, profile) -> dict:
     # Third-party API profiles must override any official ChatGPT login state
     # currently stored in auth.json. Do not resurrect older auth snapshots here.
     auth = dict(auth)
-    auth["auth_mode"] = "api_key"
+    # Codex CLI expects the auth mode token to be exactly "apikey".
+    # The older internal spelling "api_key" is still accepted when reading.
+    auth["auth_mode"] = "apikey"
 
     api_key = security.get_secret(profile.api_key_ref)
     if api_key:

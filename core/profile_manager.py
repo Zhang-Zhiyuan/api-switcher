@@ -858,8 +858,10 @@ def set_active_codex(name: str | None) -> None:
 
 def _codex_auth_mode(auth: dict) -> str:
     mode = str(auth.get("auth_mode") or "").strip()
-    if mode in {"chatgpt", "api_key"}:
-        return mode
+    if mode == "chatgpt":
+        return "chatgpt"
+    if mode in {"apikey", "api_key"}:
+        return "api_key"
     if auth.get("OPENAI_API_KEY"):
         return "api_key"
     return "chatgpt"
@@ -1589,7 +1591,7 @@ def _codex_account_matches_auth(profile: CodexAccountProfile, auth: dict) -> boo
 def _codex_account_override_active(config: dict, auth: dict) -> bool:
     if not _codex_official_auth_available(auth):
         return True
-    if str(auth.get("auth_mode") or "").strip() == "api_key":
+    if _codex_auth_mode(auth) == "api_key":
         return True
     return config.get("model_provider", "openai") != "openai"
 
@@ -1723,7 +1725,7 @@ def import_current_codex() -> CodexProfile | None:
         return None
 
     auth_for_import = dict(auth)
-    auth_for_import["auth_mode"] = "api_key"
+    auth_for_import["auth_mode"] = "apikey"
     auth_for_import["OPENAI_API_KEY"] = api_key
     name = _pick_codex_import_name(config, auth_for_import)
     profile_kwargs = _codex_profile_kwargs_from_current(name, config, auth_for_import)

@@ -176,7 +176,7 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
 
     assert connected["profile"].name == "remote"
     assert written["config"][0] is fake_client
-    assert written["auth"][1]["auth_mode"] == "api_key"
+    assert written["auth"][1]["auth_mode"] == "apikey"
     assert written["auth"][1]["OPENAI_API_KEY"] == "sk-relay"
     assert written["auth"][2].name == "remote"
     assert written["env"] == (fake_client, {"OPENAI_API_KEY": "sk-relay"})
