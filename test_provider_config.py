@@ -56,6 +56,29 @@ def test_codex_runtime_env_keys_include_openai_fallback():
     assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(openai_profile) == ["OPENAI_API_KEY"]
 
 
+def test_layer4_codex_preset_uses_chat_wire_api():
+    provider = ProviderRegistry.get_provider("layer4")
+    assert provider is not None
+    assert provider.codex_supported is True
+    assert provider.claude_supported is False
+    assert provider.base_url_for_codex() == "https://layer4.cc/v1"
+    assert provider.wire_api == "chat"
+    assert provider.codex_env_key == "OPENAI_API_KEY"
+
+    profile = CodexProfile(
+        name="layer4",
+        model=provider.default_model,
+        model_provider="layer4",
+    )
+    config = apply_codex_profile({}, profile)
+    layer4 = config["model_providers"]["layer4"]
+
+    assert config["model"] == "gpt-5.3-codex"
+    assert layer4["base_url"] == "https://layer4.cc/v1"
+    assert layer4["wire_api"] == "chat"
+    assert layer4["env_key"] == "OPENAI_API_KEY"
+
+
 def check_claude_provider(provider_id, model, base_url, writes_effort):
     profile = ClaudeProfile(
         name=provider_id,
@@ -238,6 +261,7 @@ def main():
     check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "chat", True)
     check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "chat", False)
     check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "chat", False)
+    check_codex_provider("layer4", "gpt-5.3-codex", "https://layer4.cc/v1", "chat", True)
 
     check_claude_provider("deepseek", "deepseek-v4-pro", "https://api.deepseek.com/anthropic", True)
     check_claude_provider("glm", "GLM-5.1", "", False)

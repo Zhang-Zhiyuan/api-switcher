@@ -151,6 +151,32 @@ PROVIDERS = {
         },
         notes="GLM Coding Plan exposes OpenAI-compatible chat APIs for coding agents.",
     ),
+    "layer4": ProviderConfig(
+        name="layer4",
+        display_name="Layer4",
+        default_base_url="https://layer4.cc/v1",
+        default_model="gpt-5.3-codex",
+        supported_models=[
+            "gpt-5.3-codex",
+            "gpt-5.4-mini",
+            "gpt-5.4",
+            "gpt-5.2",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "codex-auto-review",
+        ],
+        reasoning_efforts=CODEX_REASONING_EFFORTS,
+        requires_auth=True,
+        auth_header="Authorization",
+        wire_api="chat",
+        requires_openai_auth=False,
+        codex_env_key="OPENAI_API_KEY",
+        claude_supported=False,
+        notes=(
+            "Layer4 exposes OpenAI-compatible chat/completions for Codex. "
+            "Use wire_api=chat; responses can intermittently return upstream bad_response_body errors."
+        ),
+    ),
     "custom": ProviderConfig(
         name="custom",
         display_name="Custom",
