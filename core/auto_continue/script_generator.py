@@ -261,6 +261,11 @@ try {{
                 exit 0
             }}
 
+            $autoApproveBash = if ($null -eq $settings.PSObject.Properties["auto_approve_bash"]) {{ $true }} else {{ [bool]$settings.auto_approve_bash }}
+            if ($toolName -ieq "Bash" -and -not $autoApproveBash) {{
+                exit 0
+            }}
+
             $allowedTools = @("Edit", "MultiEdit", "Write", "NotebookEdit")
             if ($settings.auto_approve_tools) {{
                 $allowedTools = @()
@@ -273,10 +278,14 @@ try {{
             }}
 
             $isAllowedTool = $false
-            foreach ($allowed in $allowedTools) {{
-                if ($allowed -eq "*" -or $toolName -ieq $allowed -or $toolName -like $allowed) {{
-                    $isAllowedTool = $true
-                    break
+            if ($toolName -ieq "Bash" -and $autoApproveBash) {{
+                $isAllowedTool = $true
+            }} else {{
+                foreach ($allowed in $allowedTools) {{
+                    if ($allowed -eq "*" -or $toolName -ieq $allowed -or $toolName -like $allowed) {{
+                        $isAllowedTool = $true
+                        break
+                    }}
                 }}
             }}
             if (-not $isAllowedTool) {{

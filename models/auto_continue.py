@@ -81,6 +81,7 @@ class AutoContinueSettings:
 
     auto_approve_permission_requests: bool = False
     auto_approve_max_per_session: int = 3  # 0 means unlimited
+    auto_approve_bash: bool = True
     auto_approve_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS))
     # Incomplete patterns (regex)
     incomplete_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_INCOMPLETE_PATTERNS))
@@ -113,6 +114,9 @@ class AutoContinueSettings:
 
         if self.auto_approve_max_per_session > 100:
             return False, "auto_approve_max_per_session too large (max: 100)"
+
+        if not isinstance(self.auto_approve_bash, bool):
+            return False, "auto_approve_bash must be a boolean"
 
         if not isinstance(self.auto_approve_tools, list):
             return False, "auto_approve_tools must be a list"

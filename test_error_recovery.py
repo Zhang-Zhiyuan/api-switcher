@@ -328,6 +328,7 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     for script in [local_script, remote_script]:
         assert "recoverable_api_error_detected" in script
         assert "PermissionRequest" in script
+        assert "auto_approve_bash" in script
         assert '"allow"' in script
         assert "stream disconnected before completion" in script
         assert "upstream connect error" in script
@@ -362,6 +363,7 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     settings = AutoContinueSettings(
         auto_approve_permission_requests=True,
         auto_approve_max_per_session=0,
+        auto_approve_bash=False,
         auto_approve_tools=["Edit", "MultiEdit", "Write"],
     )
 
@@ -376,6 +378,7 @@ def test_auto_continue_settings_permission_auto_approve_validation():
 
     assert restored.auto_approve_permission_requests is True
     assert restored.auto_approve_max_per_session == 5
+    assert restored.auto_approve_bash is True
     assert restored.auto_approve_tools == ["Edit", "Write"]
 
 
