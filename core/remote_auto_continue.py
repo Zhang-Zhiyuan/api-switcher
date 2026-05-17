@@ -682,7 +682,8 @@ def tool_allowed(tool_name, allowed_tools):
         allowed = str(item or "").strip()
         if not allowed:
             continue
-        if allowed == "*" or allowed.lower() == tool_name.lower():
+        rule_tool = allowed.split("(", 1)[0].strip() if "(" in allowed else allowed
+        if allowed == "*" or allowed.lower() == tool_name.lower() or rule_tool.lower() == tool_name.lower():
             return True
         if "*" in allowed:
             pattern = "^" + re.escape(allowed).replace("\\*", ".*") + "$"
@@ -867,100 +868,108 @@ def main():
         if not auto_approve_enabled:
             return
         permission_request = data.get("permission_request") if isinstance(data.get("permission_request"), dict) else {}
+        permission_request_camel = data.get("permissionRequest") if isinstance(data.get("permissionRequest"), dict) else {}
         request = data.get("request") if isinstance(data.get("request"), dict) else {}
         tool_name = str(
             data.get("tool_name")
             or data.get("toolName")
             or data.get("tool")
             or permission_request.get("tool_name")
+            or permission_request.get("toolName")
+            or permission_request_camel.get("tool_name")
+            or permission_request_camel.get("toolName")
             or request.get("tool_name")
+            or request.get("toolName")
             or ""
         ).strip()
         if not tool_allowed(tool_name, permission_tools(settings)):
             return
 
-        max_auto_approvals = as_int(settings.get("auto_approve_max_per_session"), 0)
-        state_seed = f"{session_id}|PermissionRequest|{agent_id}"
-        state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
         os.makedirs(state_dir, exist_ok=True)
-        state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
         log_path = os.path.join(state_dir, "auto_continue_stop_log.jsonl")
-        lock_path = state_path + ".lock"
+        max_auto_approvals = as_int(settings.get("auto_approve_max_per_session"), 0)
+        count = 0
+        if max_auto_approvals > 0:
+            state_seed = f"{session_id}|PermissionRequest|{agent_id}"
+            state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
+            state_path = os.path.join(state_dir, "auto_continue_permission_state.json")
+            lock_path = state_path + ".lock"
 
-        lock_fd = None
-        for _ in range(20):
-            try:
-                lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                break
-            except FileExistsError:
+            lock_fd = None
+            for _ in range(5):
                 try:
-                    if time.time() - os.path.getmtime(lock_path) > 60:
-                        os.unlink(lock_path)
+                    lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    break
+                except FileExistsError:
+                    try:
+                        if time.time() - os.path.getmtime(lock_path) > 15:
+                            os.unlink(lock_path)
+                            continue
+                    except FileNotFoundError:
                         continue
-                except FileNotFoundError:
-                    continue
-                except Exception:
-                    pass
-                time.sleep(0.1)
-        if lock_fd is None:
-            return
-
-        try:
-            state = load_state(state_path)
-            count = as_int(state.get(state_key), 0)
-            if max_auto_approvals > 0 and count >= max_auto_approvals:
-                write_jsonl(log_path, {
-                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "session_id": str(session_id),
-                    "hook_event": "PermissionRequest",
-                    "agent_id": str(agent_id),
-                    "tool_name": tool_name,
-                    "decision": "ask_user",
-                    "reason": "auto_approve_limit_reached",
-                    "count": count,
-                })
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
+            if lock_fd is None:
                 return
 
-            count += 1
-            state[state_key] = count
-            save_state(state_path, state)
-            write_jsonl(log_path, {
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "session_id": str(session_id),
-                "hook_event": "PermissionRequest",
-                "agent_id": str(agent_id),
-                "tool_name": tool_name,
-                "decision": "auto_approve",
-                "reason": "configured_permission_request",
-                "count": count,
-            })
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "allow",
-                        "updatedPermissions": [
-                            {
-                                "type": "addRules",
-                                "rules": [{"toolName": tool_name}],
-                                "behavior": "allow",
-                                "destination": "session",
-                            }
-                        ],
-                    },
-                }
-            }, ensure_ascii=False))
-        finally:
             try:
-                if lock_fd is not None:
-                    os.close(lock_fd)
+                state = load_state(state_path)
+                count = as_int(state.get(state_key), 0)
+                if count >= max_auto_approvals:
+                    write_jsonl(log_path, {
+                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "session_id": str(session_id),
+                        "hook_event": "PermissionRequest",
+                        "agent_id": str(agent_id),
+                        "tool_name": tool_name,
+                        "decision": "ask_user",
+                        "reason": "auto_approve_limit_reached",
+                        "count": count,
+                    })
+                    return
+
+                count += 1
+                state[state_key] = count
+                save_state(state_path, state)
             finally:
                 try:
-                    os.unlink(lock_path)
-                except FileNotFoundError:
-                    pass
-                except Exception:
-                    pass
+                    if lock_fd is not None:
+                        os.close(lock_fd)
+                finally:
+                    try:
+                        os.unlink(lock_path)
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        pass
+
+        write_jsonl(log_path, {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": str(session_id),
+            "hook_event": "PermissionRequest",
+            "agent_id": str(agent_id),
+            "tool_name": tool_name,
+            "decision": "auto_approve",
+            "reason": "configured_permission_request",
+            "count": count,
+        })
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow",
+                    "updatedPermissions": [
+                        {
+                            "type": "addRules",
+                            "rules": [{"toolName": tool_name}],
+                            "behavior": "allow",
+                            "destination": "session",
+                        }
+                    ],
+                },
+            }
+        }, ensure_ascii=False))
         return
 
     if not as_bool(settings.get("enabled"), False):

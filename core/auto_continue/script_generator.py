@@ -172,6 +172,201 @@ try {{
         Create-GitSnapshot -Message "git-snapshot"
     }}
 
+    if ($isClaude -and $hookEvent -eq "PermissionRequest") {{
+        if (-not $autoApprovePermissionRequests) {{
+            exit 0
+        }}
+
+        $toolName = ""
+        if ($hookInput.tool_name) {{ $toolName = [string]$hookInput.tool_name }}
+        elseif ($hookInput.toolName) {{ $toolName = [string]$hookInput.toolName }}
+        elseif ($hookInput.tool) {{ $toolName = [string]$hookInput.tool }}
+        elseif ($hookInput.permission_request -and $hookInput.permission_request.tool_name) {{ $toolName = [string]$hookInput.permission_request.tool_name }}
+        elseif ($hookInput.permission_request -and $hookInput.permission_request.toolName) {{ $toolName = [string]$hookInput.permission_request.toolName }}
+        elseif ($hookInput.permissionRequest -and $hookInput.permissionRequest.tool_name) {{ $toolName = [string]$hookInput.permissionRequest.tool_name }}
+        elseif ($hookInput.permissionRequest -and $hookInput.permissionRequest.toolName) {{ $toolName = [string]$hookInput.permissionRequest.toolName }}
+        elseif ($hookInput.request -and $hookInput.request.tool_name) {{ $toolName = [string]$hookInput.request.tool_name }}
+        elseif ($hookInput.request -and $hookInput.request.toolName) {{ $toolName = [string]$hookInput.request.toolName }}
+
+        if ([string]::IsNullOrWhiteSpace($toolName)) {{
+            exit 0
+        }}
+
+        $legacyBashAllowed = if ($null -eq $settings.PSObject.Properties["auto_approve_bash"]) {{ $true }} else {{ [bool]$settings.auto_approve_bash }}
+        if ($null -eq $settings.PSObject.Properties["auto_approve_tools"]) {{
+            $allowedTools = if ($legacyBashAllowed) {{
+                @("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")
+            }} else {{
+                @("Edit", "MultiEdit", "Write", "NotebookEdit")
+            }}
+        }} else {{
+            $allowedTools = @()
+            foreach ($tool in $settings.auto_approve_tools) {{
+                $toolText = [string]$tool
+                if (-not [string]::IsNullOrWhiteSpace($toolText)) {{
+                    $allowedTools += $toolText.Trim()
+                }}
+            }}
+            if ($legacyBashAllowed -and $allowedTools.Count -gt 0) {{
+                $hasBash = $false
+                foreach ($allowed in $allowedTools) {{
+                    if ($allowed -ieq "Bash") {{
+                        $hasBash = $true
+                        break
+                    }}
+                }}
+                if (-not $hasBash) {{
+                    $allowedTools = @("Bash") + $allowedTools
+                }}
+            }}
+        }}
+
+        $isAllowedTool = $false
+        foreach ($allowed in $allowedTools) {{
+            $allowedText = [string]$allowed
+            $ruleToolName = $allowedText
+            $parenIndex = $allowedText.IndexOf("(")
+            if ($parenIndex -gt 0) {{
+                $ruleToolName = $allowedText.Substring(0, $parenIndex)
+            }}
+            if ($allowedText -eq "*" -or $toolName -ieq $allowedText -or $toolName -like $allowedText -or $toolName -ieq $ruleToolName) {{
+                $isAllowedTool = $true
+                break
+            }}
+        }}
+        if (-not $isAllowedTool) {{
+            exit 0
+        }}
+
+        $autoApproveMax = 0
+        if ($null -ne $settings.PSObject.Properties["auto_approve_max_per_session"]) {{
+            try {{ $autoApproveMax = [int]$settings.auto_approve_max_per_session }} catch {{ $autoApproveMax = 0 }}
+        }}
+        if ($autoApproveMax -lt 0) {{ $autoApproveMax = 0 }}
+
+        $stateDir = Split-Path $settingsPath
+        $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
+        $count = 0
+
+        if ($autoApproveMax -gt 0) {{
+            $permissionStatePath = Join-Path $stateDir "auto_continue_permission_state.json"
+            $permissionLockPath = "$permissionStatePath.lock"
+            $permissionLockStream = $null
+            $permissionLockWait = 0
+            while ($null -eq $permissionLockStream -and $permissionLockWait -lt 5) {{
+                try {{
+                    $permissionLockStream = [System.IO.File]::Open(
+                        $permissionLockPath,
+                        [System.IO.FileMode]::CreateNew,
+                        [System.IO.FileAccess]::Write,
+                        [System.IO.FileShare]::None
+                    )
+                }} catch [System.IO.IOException] {{
+                    try {{
+                        if ((Test-Path $permissionLockPath) -and ((Get-Date) - (Get-Item $permissionLockPath).LastWriteTime).TotalSeconds -gt 15) {{
+                            Remove-Item -Path $permissionLockPath -Force -ErrorAction SilentlyContinue
+                            continue
+                        }}
+                    }} catch {{
+                        # Ignore stale-lock inspection errors and wait.
+                    }}
+                    Start-Sleep -Milliseconds 50
+                    $permissionLockWait++
+                }} catch {{
+                    Write-Log "Failed to create permission lock file: $_" "WARN"
+                    exit 0
+                }}
+            }}
+
+            if ($null -eq $permissionLockStream) {{
+                Write-Log "Failed to acquire permission state lock" "WARN"
+                exit 0
+            }}
+
+            try {{
+                $permissionState = @{{}}
+                if (Test-Path $permissionStatePath) {{
+                    try {{
+                        $permissionStateContent = Get-Content $permissionStatePath -Raw -ErrorAction Stop
+                        $permissionState = $permissionStateContent | ConvertFrom-Json -ErrorAction Stop -AsHashtable
+                    }} catch {{
+                        Write-Log "Failed to parse permission state JSON, resetting state: $_" "WARN"
+                        $permissionState = @{{}}
+                    }}
+                }}
+
+                $permissionStateKey = "$sessionId-PermissionRequest-$agentId"
+                $count = if ($permissionState.ContainsKey($permissionStateKey)) {{ $permissionState[$permissionStateKey] }} else {{ 0 }}
+                if ($count -ge $autoApproveMax) {{
+                    $logEntry = @{{
+                        timestamp = (Get-Date -Format "o")
+                        session_id = $sessionId
+                        hook_event = $hookEvent
+                        agent_id = $agentId
+                        tool_name = $toolName
+                        decision = "ask_user"
+                        reason = "auto_approve_limit_reached"
+                        count = $count
+                    }} | ConvertTo-Json -Compress
+                    try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
+                    exit 0
+                }}
+
+                $count++
+                $permissionState[$permissionStateKey] = $count
+                try {{
+                    $tempPath = "$permissionStatePath.tmp"
+                    $permissionState | ConvertTo-Json | Set-Content $tempPath -ErrorAction Stop
+                    Move-Item -Path $tempPath -Destination $permissionStatePath -Force -ErrorAction Stop
+                }} catch {{
+                    Write-Log "Failed to save permission auto-approve state: $_" "WARN"
+                }}
+            }} finally {{
+                if ($null -ne $permissionLockStream) {{
+                    try {{ $permissionLockStream.Dispose() }} catch {{ }}
+                }}
+                if (Test-Path $permissionLockPath) {{
+                    try {{ Remove-Item -Path $permissionLockPath -Force -ErrorAction SilentlyContinue }} catch {{ }}
+                }}
+            }}
+        }}
+
+        $logEntry = @{{
+            timestamp = (Get-Date -Format "o")
+            session_id = $sessionId
+            hook_event = $hookEvent
+            agent_id = $agentId
+            tool_name = $toolName
+            decision = "auto_approve"
+            reason = "configured_permission_request"
+            count = $count
+        }} | ConvertTo-Json -Compress
+        try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
+
+        $output = @{{
+            hookSpecificOutput = @{{
+                hookEventName = "PermissionRequest"
+                decision = @{{
+                    behavior = "allow"
+                    updatedPermissions = @(
+                        @{{
+                            type = "addRules"
+                            rules = @(
+                                @{{
+                                    toolName = $toolName
+                                }}
+                            )
+                            behavior = "allow"
+                            destination = "session"
+                        }}
+                    )
+                }}
+            }}
+        }} | ConvertTo-Json -Depth 8
+        Write-Output $output
+        exit 0
+    }}
+
     if ((-not $settings.enabled) -and (-not $autoApprovePermissionRequests)) {{
         exit 0  # Allow stop if auto-continue is disabled
     }}
@@ -245,130 +440,6 @@ try {{
 
         # Get continuation count
         $count = if ($state.ContainsKey($stateKey)) {{ $state[$stateKey] }} else {{ 0 }}
-
-        if ($isClaude -and $hookEvent -eq "PermissionRequest") {{
-            if (-not $autoApprovePermissionRequests) {{
-                exit 0
-            }}
-
-            $toolName = ""
-            if ($hookInput.tool_name) {{ $toolName = [string]$hookInput.tool_name }}
-            elseif ($hookInput.toolName) {{ $toolName = [string]$hookInput.toolName }}
-            elseif ($hookInput.tool) {{ $toolName = [string]$hookInput.tool }}
-            elseif ($hookInput.permission_request -and $hookInput.permission_request.tool_name) {{ $toolName = [string]$hookInput.permission_request.tool_name }}
-            elseif ($hookInput.request -and $hookInput.request.tool_name) {{ $toolName = [string]$hookInput.request.tool_name }}
-
-            if ([string]::IsNullOrWhiteSpace($toolName)) {{
-                exit 0
-            }}
-
-            $legacyBashAllowed = if ($null -eq $settings.PSObject.Properties["auto_approve_bash"]) {{ $true }} else {{ [bool]$settings.auto_approve_bash }}
-            if ($null -eq $settings.PSObject.Properties["auto_approve_tools"]) {{
-                $allowedTools = if ($legacyBashAllowed) {{
-                    @("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")
-                }} else {{
-                    @("Edit", "MultiEdit", "Write", "NotebookEdit")
-                }}
-            }} else {{
-                $allowedTools = @()
-                foreach ($tool in $settings.auto_approve_tools) {{
-                    $toolText = [string]$tool
-                    if (-not [string]::IsNullOrWhiteSpace($toolText)) {{
-                        $allowedTools += $toolText.Trim()
-                    }}
-                }}
-                if ($legacyBashAllowed -and $allowedTools.Count -gt 0) {{
-                    $hasBash = $false
-                    foreach ($allowed in $allowedTools) {{
-                        if ($allowed -ieq "Bash") {{
-                            $hasBash = $true
-                            break
-                        }}
-                    }}
-                    if (-not $hasBash) {{
-                        $allowedTools = @("Bash") + $allowedTools
-                    }}
-                }}
-            }}
-
-            $isAllowedTool = $false
-            foreach ($allowed in $allowedTools) {{
-                if ($allowed -eq "*" -or $toolName -ieq $allowed -or $toolName -like $allowed) {{
-                    $isAllowedTool = $true
-                    break
-                }}
-            }}
-            if (-not $isAllowedTool) {{
-                exit 0
-            }}
-
-            $autoApproveMax = 0
-            if ($null -ne $settings.PSObject.Properties["auto_approve_max_per_session"]) {{
-                try {{ $autoApproveMax = [int]$settings.auto_approve_max_per_session }} catch {{ $autoApproveMax = 0 }}
-            }}
-            if ($autoApproveMax -lt 0) {{ $autoApproveMax = 0 }}
-
-            $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
-            if ($autoApproveMax -gt 0 -and $count -ge $autoApproveMax) {{
-                $logEntry = @{{
-                    timestamp = (Get-Date -Format "o")
-                    session_id = $sessionId
-                    hook_event = $hookEvent
-                    agent_id = $agentId
-                    tool_name = $toolName
-                    decision = "ask_user"
-                    reason = "auto_approve_limit_reached"
-                    count = $count
-                }} | ConvertTo-Json -Compress
-                try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
-                exit 0
-            }}
-
-            $count++
-            $state[$stateKey] = $count
-            try {{
-                $tempPath = "$statePath.tmp"
-                $state | ConvertTo-Json | Set-Content $tempPath -ErrorAction Stop
-                Move-Item -Path $tempPath -Destination $statePath -Force -ErrorAction Stop
-            }} catch {{
-                Write-Log "Failed to save permission auto-approve state: $_" "WARN"
-            }}
-
-            $logEntry = @{{
-                timestamp = (Get-Date -Format "o")
-                session_id = $sessionId
-                hook_event = $hookEvent
-                agent_id = $agentId
-                tool_name = $toolName
-                decision = "auto_approve"
-                reason = "configured_permission_request"
-                count = $count
-            }} | ConvertTo-Json -Compress
-            try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
-
-            $output = @{{
-                hookSpecificOutput = @{{
-                    hookEventName = "PermissionRequest"
-                    decision = @{{
-                        behavior = "allow"
-                        updatedPermissions = @(
-                            @{{
-                                type = "addRules"
-                                rules = @(
-                                    @{{
-                                        toolName = $toolName
-                                    }}
-                                )
-                                behavior = "allow"
-                                destination = "session"
-                            }}
-                        )
-                    }}
-                }}
-            }} | ConvertTo-Json -Depth 5
-            Write-Output $output
-            exit 0
-        }}
 
         if (-not $settings.enabled) {{
             exit 0
