@@ -397,7 +397,7 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert restored.auto_approve_permission_requests is True
     assert restored.auto_approve_max_per_session == 5
     assert restored.auto_approve_bash is True
-    assert restored.auto_approve_tools == ["Edit", "Write", "Bash"]
+    assert restored.auto_approve_tools == ["Bash", "Edit", "Write"]
 
     legacy_disabled = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,

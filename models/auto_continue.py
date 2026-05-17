@@ -170,8 +170,8 @@ class AutoContinueSettings:
             )
             if known_fields.get("auto_approve_bash", True):
                 known_fields["auto_approve_tools"] = _merge_unique_strings(
-                    known_fields["auto_approve_tools"],
                     ["Bash"],
+                    known_fields["auto_approve_tools"],
                 )
 
         # Create instance
