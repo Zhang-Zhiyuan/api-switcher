@@ -11,6 +11,12 @@ from typing import Any
 
 from core import profile_manager, remote_config, security
 from core.auto_continue.manager import auto_continue_manager
+from core.auto_continue.permission_rules import (
+    apply_managed_permission_rules,
+    permission_rules_from_auto_settings,
+    rules_from_payload,
+    rules_payload,
+)
 from core.ssh_manager import ssh_manager
 from models.auto_continue import AutoContinueSettings
 
@@ -44,6 +50,7 @@ class RemoteAutoContinuePaths:
     state_dir: str
     guidance_path: str
     provider_config_path: str
+    permission_rules_path: str
     codex_hooks_path: str | None = None
 
 
@@ -136,6 +143,7 @@ def _paths(client, ssh_profile, provider_name: str) -> RemoteAutoContinuePaths:
     settings_path = posixpath.join(base_dir, "auto_continue_settings.json")
     script_path = posixpath.join(hooks_dir, SCRIPT_NAME)
     state_dir = posixpath.join(base_dir, "tmp")
+    permission_rules_path = posixpath.join(base_dir, "auto_continue_permission_rules.json")
     if provider == "claude":
         guidance_path = posixpath.join(base_dir, "CLAUDE.md")
         provider_config_path = posixpath.join(base_dir, "settings.json")
@@ -153,6 +161,7 @@ def _paths(client, ssh_profile, provider_name: str) -> RemoteAutoContinuePaths:
         state_dir=state_dir,
         guidance_path=guidance_path,
         provider_config_path=provider_config_path,
+        permission_rules_path=permission_rules_path,
         codex_hooks_path=codex_hooks_path,
     )
 
@@ -1097,6 +1106,18 @@ def _iter_claude_hook_commands(settings: dict, event_names: tuple[str, ...] = ("
                     yield str(hook.get("command", ""))
 
 
+def _read_managed_permission_rules(client, path: str) -> list[str]:
+    payload = _read_json(client, path, default={}, strict=False)
+    return rules_from_payload(payload)
+
+
+def _write_managed_permission_rules(client, path: str, rules: list[str]) -> None:
+    if rules:
+        _write_json(client, path, rules_payload(rules), mode=0o600)
+    else:
+        _remove_remote_file(client, path)
+
+
 def _register_claude_hook(
     client,
     paths: RemoteAutoContinuePaths,
@@ -1157,7 +1178,12 @@ def _register_claude_hook(
     else:
         register_event("PermissionRequest", None)
 
+    previous_rules = _read_managed_permission_rules(client, paths.permission_rules_path)
+    desired_rules = permission_rules_from_auto_settings(settings_data)
+    settings, managed_rules = apply_managed_permission_rules(settings, desired_rules, previous_rules)
+
     _write_json(client, paths.provider_config_path, settings)
+    _write_managed_permission_rules(client, paths.permission_rules_path, managed_rules)
 
 
 def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
@@ -1165,33 +1191,41 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
     if not isinstance(settings, dict):
         return
     hooks = settings.get("hooks", {})
-    if not isinstance(hooks, dict):
-        return
 
     changed = False
-    for event_name in ("Stop", "SubagentStop", "PermissionRequest"):
-        groups = hooks.get(event_name, [])
-        if isinstance(groups, dict):
-            groups = [groups]
-        if not isinstance(groups, list):
-            continue
-        filtered_groups = []
-        for group in groups:
-            if not isinstance(group, dict):
+    if isinstance(hooks, dict):
+        for event_name in ("Stop", "SubagentStop", "PermissionRequest"):
+            groups = hooks.get(event_name, [])
+            if isinstance(groups, dict):
+                groups = [groups]
+            if not isinstance(groups, list):
                 continue
-            hook_list = group.get("hooks", [])
-            if isinstance(hook_list, dict):
-                hook_list = [hook_list]
-            if not isinstance(hook_list, list):
-                hook_list = []
-            remaining = [h for h in hook_list if not _is_our_command(h.get("command", "") if isinstance(h, dict) else "")]
-            if len(remaining) != len(hook_list):
-                changed = True
-            if remaining:
-                new_group = dict(group)
-                new_group["hooks"] = remaining
-                filtered_groups.append(new_group)
-        hooks[event_name] = filtered_groups
+            filtered_groups = []
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                hook_list = group.get("hooks", [])
+                if isinstance(hook_list, dict):
+                    hook_list = [hook_list]
+                if not isinstance(hook_list, list):
+                    hook_list = []
+                remaining = [
+                    h for h in hook_list
+                    if not _is_our_command(h.get("command", "") if isinstance(h, dict) else "")
+                ]
+                if len(remaining) != len(hook_list):
+                    changed = True
+                if remaining:
+                    new_group = dict(group)
+                    new_group["hooks"] = remaining
+                    filtered_groups.append(new_group)
+            hooks[event_name] = filtered_groups
+
+    previous_rules = _read_managed_permission_rules(client, paths.permission_rules_path)
+    if previous_rules:
+        settings, _managed_rules = apply_managed_permission_rules(settings, [], previous_rules)
+        _write_managed_permission_rules(client, paths.permission_rules_path, [])
+        changed = True
 
     if changed:
         _write_json(client, paths.provider_config_path, settings)
@@ -1361,6 +1395,7 @@ def install_remote_auto_continue(
         paths.script_path,
         paths.guidance_path,
         paths.provider_config_path,
+        paths.permission_rules_path,
     ]
     if paths.codex_hooks_path:
         snapshot_paths.append(paths.codex_hooks_path)
@@ -1402,6 +1437,7 @@ def install_remote_git_snapshot(
         paths.settings_path,
         paths.script_path,
         paths.provider_config_path,
+        paths.permission_rules_path,
     ]
     if paths.codex_hooks_path:
         snapshot_paths.append(paths.codex_hooks_path)
@@ -1464,6 +1500,7 @@ def uninstall_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     for path in [
         paths.script_path,
         paths.settings_path,
+        paths.permission_rules_path,
         posixpath.join(paths.state_dir, "auto_continue_stop_state.json"),
         posixpath.join(paths.state_dir, "auto_continue_stop_state.json.lock"),
         posixpath.join(paths.state_dir, "auto_continue_stop_log.jsonl"),

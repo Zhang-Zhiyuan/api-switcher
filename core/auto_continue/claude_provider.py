@@ -3,6 +3,12 @@ import logging
 from pathlib import Path
 from core.atomic_io import atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
+from core.auto_continue.permission_rules import (
+    apply_managed_permission_rules,
+    permission_rules_from_auto_settings,
+    rules_from_payload,
+    rules_payload,
+)
 from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_error_recovery_script
 
@@ -34,6 +40,9 @@ class ClaudeProvider(AutoContinueProvider):
 
     def get_claude_md_path(self) -> Path:
         return self.get_config_dir() / "CLAUDE.md"
+
+    def get_permission_rules_state_path(self) -> Path:
+        return self.get_config_dir() / "auto_continue_permission_rules.json"
 
     def is_hook_registered(self) -> bool:
         """Check if hook is registered in settings.json."""
@@ -102,8 +111,17 @@ class ClaudeProvider(AutoContinueProvider):
         else:
             self._register_hook_event(claude_settings, "PermissionRequest", None)
 
+        desired_rules = permission_rules_from_auto_settings(auto_settings)
+        previous_rules = self._load_managed_permission_rules()
+        claude_settings, managed_rules = apply_managed_permission_rules(
+            claude_settings,
+            desired_rules,
+            previous_rules,
+        )
+
         # Write settings.json
         atomic_write_text(settings_path, json.dumps(claude_settings, indent=2))
+        self._save_managed_permission_rules(managed_rules)
 
     def _register_hook_event(self, settings: dict, event_name: str, hook_def: dict | None) -> None:
         """Register a hook for a specific event."""
@@ -148,10 +166,38 @@ class ClaudeProvider(AutoContinueProvider):
                             filtered.append(hook_group)
                     hooks[event_name] = filtered
 
+            previous_rules = self._load_managed_permission_rules()
+            settings, _managed_rules = apply_managed_permission_rules(settings, [], previous_rules)
+
             # Write back
             atomic_write_text(settings_path, json.dumps(settings, indent=2))
+            self._save_managed_permission_rules([])
         except Exception as e:
             logger.error(f"Failed to unregister hook: {e}")
+
+    def _load_managed_permission_rules(self) -> list[str]:
+        state_path = self.get_permission_rules_state_path()
+        if not state_path.exists():
+            return []
+        try:
+            return rules_from_payload(json.loads(state_path.read_text(encoding="utf-8")))
+        except Exception as e:
+            logger.warning(f"Failed to read managed Claude permission rules: {e}")
+            return []
+
+    def _save_managed_permission_rules(self, rules: list[str]) -> None:
+        state_path = self.get_permission_rules_state_path()
+        if not rules:
+            try:
+                state_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to remove managed Claude permission rules state: {e}")
+            return
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(state_path, json.dumps(rules_payload(rules), indent=2))
 
     def install_hook_script(self) -> None:
         """Install the hook script."""

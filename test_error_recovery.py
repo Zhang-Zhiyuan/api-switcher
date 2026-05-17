@@ -540,6 +540,39 @@ def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch)
     assert any("auto_continue_stop.ps1" in command for command in commands)
 
 
+def test_claude_auto_approve_preseeds_permission_allow_rules(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from models.auto_continue import AutoContinueSettings
+
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"permissions": {"allow": ["Read(/tmp/**)", "Edit"]}}),
+        encoding="utf-8",
+    )
+
+    provider.register_hook(
+        settings=AutoContinueSettings(
+            auto_approve_permission_requests=True,
+            auto_approve_tools=["Bash", "Edit", "Write"],
+        )
+    )
+
+    claude_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    allow_rules = claude_settings["permissions"]["allow"]
+    assert allow_rules == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
+
+    state = json.loads((tmp_path / "auto_continue_permission_rules.json").read_text(encoding="utf-8"))
+    assert state["rules"] == ["Bash", "Write"]
+
+    provider.unregister_hook()
+
+    claude_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert claude_settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit"]
+    assert not (tmp_path / "auto_continue_permission_rules.json").exists()
+
+
 def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     """Codex hooks.json install/uninstall should only replace API Switcher hooks."""
     from core.auto_continue.codex_provider import CodexProvider

@@ -965,6 +965,7 @@ def test_remote_codex_hooks_preserve_existing_entries(monkeypatch):
         state_dir="/home/test/.codex/tmp",
         guidance_path="/home/test/.codex/AGENTS.md",
         provider_config_path="/home/test/.codex/config.toml",
+        permission_rules_path="/home/test/.codex/auto_continue_permission_rules.json",
         codex_hooks_path=hooks_path,
     )
     monkeypatch.setattr(remote_auto_continue, "_set_codex_hooks_enabled", lambda *args, **kwargs: None)
@@ -980,6 +981,52 @@ def test_remote_codex_hooks_preserve_existing_entries(monkeypatch):
     hooks = json.loads(sftp.files[hooks_path].decode("utf-8"))
     assert hooks["Stop"]["command"] == "sh /home/test/user_stop.sh"
     assert hooks["Other"]["command"] == "sh /home/test/other.sh"
+
+
+def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    settings_path = "/home/test/.claude/settings.json"
+    permission_rules_path = "/home/test/.claude/auto_continue_permission_rules.json"
+    sftp.files[settings_path] = json.dumps({
+        "permissions": {"allow": ["Read(/tmp/**)", "Edit"]},
+        "hooks": {"Stop": [{"hooks": [{"command": "sh /home/test/user_stop.sh"}]}]},
+    }).encode("utf-8")
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="claude",
+        config_dir="/home/test/.claude",
+        hooks_dir="/home/test/.claude/hooks",
+        settings_path="/home/test/.claude/auto_continue_settings.json",
+        script_path="/home/test/.claude/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.claude/tmp",
+        guidance_path="/home/test/.claude/CLAUDE.md",
+        provider_config_path=settings_path,
+        permission_rules_path=permission_rules_path,
+    )
+
+    remote_auto_continue._register_claude_hook(
+        client,
+        paths,
+        "sh /home/test/.claude/hooks/auto_continue_stop.sh",
+        False,
+        AutoContinueSettings(
+            auto_approve_permission_requests=True,
+            auto_approve_tools=["Bash", "Edit", "Write"],
+        ),
+    )
+
+    settings = json.loads(sftp.files[settings_path].decode("utf-8"))
+    assert settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
+    state = json.loads(sftp.files[permission_rules_path].decode("utf-8"))
+    assert state["rules"] == ["Bash", "Write"]
+
+    remote_auto_continue._unregister_claude_hook(client, paths)
+
+    settings = json.loads(sftp.files[settings_path].decode("utf-8"))
+    assert settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit"]
+    assert permission_rules_path not in sftp.files
 
 
 def test_remote_git_snapshot_status_ready_without_auto_continue():
