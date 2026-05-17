@@ -350,6 +350,18 @@ try {{
                     hookEventName = "PermissionRequest"
                     decision = @{{
                         behavior = "allow"
+                        updatedPermissions = @(
+                            @{{
+                                type = "addRules"
+                                rules = @(
+                                    @{{
+                                        toolName = $toolName
+                                    }}
+                                )
+                                behavior = "allow"
+                                destination = "session"
+                            }}
+                        )
                     }}
                 }}
             }} | ConvertTo-Json -Depth 5

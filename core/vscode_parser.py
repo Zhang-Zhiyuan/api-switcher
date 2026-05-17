@@ -27,12 +27,25 @@ def write_vscode_settings(data: dict) -> None:
     _atomic_write(VSCODE_SETTINGS, content)
 
 
-def apply_permissions(settings: dict, bypass: bool, skip_dangerous: bool) -> dict:
-    """Apply permission-related settings to VS Code settings.json."""
+VSCODE_CLAUDE_INITIAL_PERMISSION_MODES = {"default", "acceptEdits", "plan", "bypassPermissions"}
+
+
+def apply_permission_mode(settings: dict, permission_mode: str, skip_dangerous: bool) -> dict:
+    """Apply Claude Code permission mode to VS Code settings.json."""
     settings = dict(settings)
-    settings["claudeCode.allowDangerouslySkipPermissions"] = skip_dangerous
-    settings["claudeCode.initialPermissionMode"] = "bypassPermissions" if bypass else "default"
+    permission_mode = str(permission_mode or "default").strip() or "default"
+    settings["claudeCode.allowDangerouslySkipPermissions"] = bool(skip_dangerous)
+    if permission_mode in VSCODE_CLAUDE_INITIAL_PERMISSION_MODES:
+        settings["claudeCode.initialPermissionMode"] = permission_mode
+    else:
+        settings.pop("claudeCode.initialPermissionMode", None)
     return settings
+
+
+def apply_permissions(settings: dict, bypass: bool, skip_dangerous: bool) -> dict:
+    """Apply legacy bypass/default permission settings to VS Code settings.json."""
+    mode = "bypassPermissions" if bypass else "default"
+    return apply_permission_mode(settings, mode, skip_dangerous)
 
 
 def apply_model(settings: dict, model: str) -> dict:

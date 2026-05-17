@@ -213,7 +213,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._fields["effort_level"][0].set("high")
 
         self._add_field(parent, "权限模式", "permissions_mode",
-                        ["bypassPermissions", "default"], "combo")
+                        ["acceptEdits", "bypassPermissions", "default", "plan", "auto"], "combo")
         if p:
             self._fields["permissions_mode"][0].set(p.permissions_mode)
         else:

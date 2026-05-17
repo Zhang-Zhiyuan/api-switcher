@@ -33,9 +33,7 @@ def switch_claude_profile(name: str) -> None:
 
     # Sync VS Code settings
     vscode = vscode_parser.read_vscode_settings()
-    vscode = vscode_parser.apply_permissions(
-        vscode, target.permissions_mode == "bypassPermissions", target.skip_dangerous_prompt
-    )
+    vscode = vscode_parser.apply_permission_mode(vscode, target.permissions_mode, target.skip_dangerous_prompt)
     vscode = vscode_parser.apply_model(vscode, target.model)
     vscode_parser.write_vscode_settings(vscode)
 

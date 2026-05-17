@@ -918,7 +918,17 @@ def main():
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PermissionRequest",
-                    "decision": {"behavior": "allow"},
+                    "decision": {
+                        "behavior": "allow",
+                        "updatedPermissions": [
+                            {
+                                "type": "addRules",
+                                "rules": [{"toolName": tool_name}],
+                                "behavior": "allow",
+                                "destination": "session",
+                            }
+                        ],
+                    },
                 }
             }, ensure_ascii=False))
         finally:

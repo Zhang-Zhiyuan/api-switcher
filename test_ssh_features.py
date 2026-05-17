@@ -412,9 +412,9 @@ def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeyp
 
     message = sync_manager.sync_claude_to_server("remote", "relay")
 
-    assert written["settings"]["permissions"]["defaultMode"] == "default"
+    assert written["settings"]["permissions"]["defaultMode"] == "acceptEdits"
     assert written["settings"]["skipDangerousModePermissionPrompt"] is False
-    assert written["vscode"]["claudeCode.initialPermissionMode"] == "default"
+    assert written["vscode"]["claudeCode.initialPermissionMode"] == "acceptEdits"
     assert written["vscode"]["claudeCode.allowDangerouslySkipPermissions"] is False
     assert "已兼容 root 登录" in message
     assert "root" in message
@@ -448,6 +448,27 @@ def test_sync_claude_to_non_root_preserves_bypass_permissions(isolated_ssh, monk
 
     assert written["settings"]["permissions"]["defaultMode"] == "bypassPermissions"
     assert "已兼容 root 登录" not in message
+
+
+def test_root_safety_preserves_edit_automatically_mode():
+    profile = SSHProfile(name="remote", host="ssh.example.com", username="root")
+
+    settings, changed = sync_manager._make_claude_settings_root_safe(
+        {"permissions": {"defaultMode": "acceptEdits"}},
+        profile,
+    )
+    assert changed is False
+    assert settings["permissions"]["defaultMode"] == "acceptEdits"
+
+    vscode, changed = sync_manager._make_vscode_settings_root_safe(
+        {
+            "claudeCode.initialPermissionMode": "acceptEdits",
+            "claudeCode.allowDangerouslySkipPermissions": False,
+        },
+        profile,
+    )
+    assert changed is False
+    assert vscode["claudeCode.initialPermissionMode"] == "acceptEdits"
 
 
 def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrides(isolated_ssh, monkeypatch):
@@ -532,9 +553,9 @@ def test_sync_claude_account_to_root_downgrades_existing_bypass_permissions(isol
 
     message = sync_manager.sync_claude_account_to_server("remote", "work")
 
-    assert written["settings"]["permissions"]["defaultMode"] == "default"
+    assert written["settings"]["permissions"]["defaultMode"] == "acceptEdits"
     assert written["settings"]["skipDangerousModePermissionPrompt"] is False
-    assert written["vscode"]["claudeCode.initialPermissionMode"] == "default"
+    assert written["vscode"]["claudeCode.initialPermissionMode"] == "acceptEdits"
     assert written["vscode"]["claudeCode.allowDangerouslySkipPermissions"] is False
     assert "已兼容 root 登录" in message
 

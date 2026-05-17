@@ -445,9 +445,13 @@ def test_permission_auto_approve_treats_bash_as_regular_tool():
     assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
     assert '$null -eq $settings.PSObject.Properties["auto_approve_tools"]' in local_script
     assert '$legacyBashAllowed -and $allowedTools.Count -gt 0' in local_script
+    assert 'updatedPermissions = @(' in local_script
+    assert 'destination = "session"' in local_script
     assert 'if "auto_approve_tools" in settings:' in remote_script
     assert "tools = allowed_tools if isinstance(allowed_tools, list) else []" in remote_script
     assert 'if legacy_bash_allowed and "auto_approve_tools" in settings and result' in remote_script
+    assert '"updatedPermissions": [' in remote_script
+    assert '"destination": "session"' in remote_script
     assert "else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS" not in remote_script
     assert "$toolName -ieq \"Bash\"" not in local_script
     assert 'tool_name.lower() == "bash"' not in remote_script
@@ -504,6 +508,10 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     edit_allowed = run_hook({"auto_approve_bash": False}, "Edit")
     assert edit_allowed.returncode == 0
     assert '"behavior": "allow"' in edit_allowed.stdout
+    edit_output = json.loads(edit_allowed.stdout)
+    edit_decision = edit_output["hookSpecificOutput"]["decision"]
+    assert edit_decision["updatedPermissions"][0]["destination"] == "session"
+    assert edit_decision["updatedPermissions"][0]["rules"] == [{"toolName": "Edit"}]
 
     default_allowed = run_hook({}, "Bash")
     assert default_allowed.returncode == 0
