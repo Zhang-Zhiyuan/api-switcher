@@ -990,7 +990,10 @@ def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
     settings_path = "/home/test/.claude/settings.json"
     permission_rules_path = "/home/test/.claude/auto_continue_permission_rules.json"
     sftp.files[settings_path] = json.dumps({
-        "permissions": {"allow": ["Read(/tmp/**)", "Edit"]},
+        "permissions": {
+            "allow": ["Read(/tmp/**)", "Edit"],
+            "ask": ["Read", "Bash", "Write"],
+        },
         "hooks": {"Stop": [{"hooks": [{"command": "sh /home/test/user_stop.sh"}]}]},
     }).encode("utf-8")
     client = _FakeClient(sftp)
@@ -1019,13 +1022,16 @@ def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
 
     settings = json.loads(sftp.files[settings_path].decode("utf-8"))
     assert settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
+    assert settings["permissions"]["ask"] == ["Read"]
     state = json.loads(sftp.files[permission_rules_path].decode("utf-8"))
     assert state["rules"] == ["Bash", "Write"]
+    assert state["ask_rules"] == ["Bash", "Write"]
 
     remote_auto_continue._unregister_claude_hook(client, paths)
 
     settings = json.loads(sftp.files[settings_path].decode("utf-8"))
     assert settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit"]
+    assert settings["permissions"]["ask"] == ["Read", "Bash", "Write"]
     assert permission_rules_path not in sftp.files
 
 

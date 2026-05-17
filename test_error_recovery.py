@@ -548,7 +548,12 @@ def test_claude_auto_approve_preseeds_permission_allow_rules(tmp_path, monkeypat
     monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(
-        json.dumps({"permissions": {"allow": ["Read(/tmp/**)", "Edit"]}}),
+        json.dumps({
+            "permissions": {
+                "allow": ["Read(/tmp/**)", "Edit"],
+                "ask": ["Read", "Bash", "Write"],
+            },
+        }),
         encoding="utf-8",
     )
 
@@ -562,15 +567,30 @@ def test_claude_auto_approve_preseeds_permission_allow_rules(tmp_path, monkeypat
     claude_settings = json.loads(settings_path.read_text(encoding="utf-8"))
     allow_rules = claude_settings["permissions"]["allow"]
     assert allow_rules == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
+    assert claude_settings["permissions"]["ask"] == ["Read"]
 
     state = json.loads((tmp_path / "auto_continue_permission_rules.json").read_text(encoding="utf-8"))
     assert state["rules"] == ["Bash", "Write"]
+    assert state["ask_rules"] == ["Bash", "Write"]
 
     provider.unregister_hook()
 
     claude_settings = json.loads(settings_path.read_text(encoding="utf-8"))
     assert claude_settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit"]
+    assert claude_settings["permissions"]["ask"] == ["Read", "Bash", "Write"]
     assert not (tmp_path / "auto_continue_permission_rules.json").exists()
+
+
+def test_permission_rule_helpers_detect_ask_conflicts_and_broad_allows():
+    from core.auto_continue.permission_rules import (
+        conflicting_permission_rules,
+        missing_allow_rules,
+    )
+
+    assert missing_allow_rules(["Bash(git status:*)"], ["Bash"]) == []
+    assert missing_allow_rules(["Bash"], ["Bash(git status:*)"]) == ["Bash"]
+    assert conflicting_permission_rules(["Bash"], ["Bash(git push:*)", "Edit"]) == ["Bash(git push:*)"]
+    assert conflicting_permission_rules(["Bash(git status:*)"], ["Bash"]) == ["Bash"]
 
 
 def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):

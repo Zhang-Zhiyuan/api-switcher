@@ -13,6 +13,9 @@ from core import profile_manager, remote_config, security
 from core.auto_continue.manager import auto_continue_manager
 from core.auto_continue.permission_rules import (
     apply_managed_permission_rules,
+    ask_rules_from_payload,
+    conflicting_permission_rules,
+    missing_allow_rules,
     permission_rules_from_auto_settings,
     rules_from_payload,
     rules_payload,
@@ -1106,14 +1109,14 @@ def _iter_claude_hook_commands(settings: dict, event_names: tuple[str, ...] = ("
                     yield str(hook.get("command", ""))
 
 
-def _read_managed_permission_rules(client, path: str) -> list[str]:
+def _read_managed_permission_state(client, path: str) -> tuple[list[str], list[str]]:
     payload = _read_json(client, path, default={}, strict=False)
-    return rules_from_payload(payload)
+    return rules_from_payload(payload), ask_rules_from_payload(payload)
 
 
-def _write_managed_permission_rules(client, path: str, rules: list[str]) -> None:
-    if rules:
-        _write_json(client, path, rules_payload(rules), mode=0o600)
+def _write_managed_permission_state(client, path: str, rules: list[str], ask_rules: list[str]) -> None:
+    if rules or ask_rules:
+        _write_json(client, path, rules_payload(rules, ask_rules), mode=0o600)
     else:
         _remove_remote_file(client, path)
 
@@ -1178,12 +1181,17 @@ def _register_claude_hook(
     else:
         register_event("PermissionRequest", None)
 
-    previous_rules = _read_managed_permission_rules(client, paths.permission_rules_path)
+    previous_rules, previous_ask_rules = _read_managed_permission_state(client, paths.permission_rules_path)
     desired_rules = permission_rules_from_auto_settings(settings_data)
-    settings, managed_rules = apply_managed_permission_rules(settings, desired_rules, previous_rules)
+    settings, managed_rules, removed_ask_rules = apply_managed_permission_rules(
+        settings,
+        desired_rules,
+        previous_rules,
+        previous_ask_rules,
+    )
 
     _write_json(client, paths.provider_config_path, settings)
-    _write_managed_permission_rules(client, paths.permission_rules_path, managed_rules)
+    _write_managed_permission_state(client, paths.permission_rules_path, managed_rules, removed_ask_rules)
 
 
 def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
@@ -1221,10 +1229,15 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
                     filtered_groups.append(new_group)
             hooks[event_name] = filtered_groups
 
-    previous_rules = _read_managed_permission_rules(client, paths.permission_rules_path)
-    if previous_rules:
-        settings, _managed_rules = apply_managed_permission_rules(settings, [], previous_rules)
-        _write_managed_permission_rules(client, paths.permission_rules_path, [])
+    previous_rules, previous_ask_rules = _read_managed_permission_state(client, paths.permission_rules_path)
+    if previous_rules or previous_ask_rules:
+        settings, _managed_rules, _removed_ask_rules = apply_managed_permission_rules(
+            settings,
+            [],
+            previous_rules,
+            previous_ask_rules,
+        )
+        _write_managed_permission_state(client, paths.permission_rules_path, [], [])
         changed = True
 
     if changed:
@@ -1542,9 +1555,11 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
     except Exception as e:
         settings = None
         status.issues.append(f"设置读取失败: {e}")
+    parsed_settings = None
     if isinstance(settings, dict):
         try:
             parsed = AutoContinueSettings.from_dict(settings)
+            parsed_settings = parsed
             status.settings_valid = True
             status.enabled = parsed.enabled
             status.git_snapshot_enabled = bool(parsed.git_auto_snapshot and parsed.git_snapshot_on_start)
@@ -1573,6 +1588,22 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append(f"Claude settings.json 读取失败: {e}")
         if isinstance(provider_config, dict):
             status.hook_registered = any(_is_our_command(command) for command in _iter_claude_hook_commands(provider_config))
+            if parsed_settings and parsed_settings.auto_approve_permission_requests:
+                desired_rules = permission_rules_from_auto_settings(parsed_settings)
+                permissions = (
+                    provider_config.get("permissions")
+                    if isinstance(provider_config.get("permissions"), dict)
+                    else {}
+                )
+                missing_rules = missing_allow_rules(desired_rules, permissions.get("allow", []))
+                ask_conflicts = conflicting_permission_rules(desired_rules, permissions.get("ask", []))
+                deny_conflicts = conflicting_permission_rules(desired_rules, permissions.get("deny", []))
+                if missing_rules:
+                    status.issues.append("权限 allow 未预授权: " + ", ".join(missing_rules[:5]))
+                if ask_conflicts:
+                    status.issues.append("permissions.ask 仍会强制询问: " + ", ".join(ask_conflicts[:5]))
+                if deny_conflicts:
+                    status.issues.append("permissions.deny 会阻止自动执行: " + ", ".join(deny_conflicts[:5]))
         else:
             status.issues.append("Claude settings.json 无法读取")
     else:
