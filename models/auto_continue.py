@@ -27,7 +27,7 @@ DEFAULT_BLOCKER_PATTERNS = [
 ]
 
 
-DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
 
 
 def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> list[str]:
@@ -168,6 +168,11 @@ class AutoContinueSettings:
                 known_fields.get("auto_approve_tools"),
                 [],
             )
+            if known_fields.get("auto_approve_bash", True):
+                known_fields["auto_approve_tools"] = _merge_unique_strings(
+                    known_fields["auto_approve_tools"],
+                    ["Bash"],
+                )
 
         # Create instance
         instance = cls(**known_fields)

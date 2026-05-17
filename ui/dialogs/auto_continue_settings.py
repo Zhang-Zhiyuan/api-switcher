@@ -90,25 +90,15 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 "auto_approve_max_per_session",
                 str(self.settings.auto_approve_max_per_session),
             )
-            self._auto_approve_bash_var = ctk.BooleanVar(value=self._auto_approve_bash_enabled())
-            bash_checkbox = ctk.CTkCheckBox(
-                scroll,
-                text="自动确认 Bash",
-                variable=self._auto_approve_bash_var,
-                text_color=COLORS["text"],
-                fg_color=COLORS["warning"],
-                hover_color=COLORS["warning_hover"],
-            )
-            bash_checkbox.pack(anchor="w", pady=(8, 2))
             ctk.CTkLabel(
                 scroll,
-                text="自动确认工具（每行一个，支持 * 通配；Bash 使用上面的独立勾选项）",
+                text="自动确认工具（每行一个，支持 * 通配；默认包含 Bash/Edit/MultiEdit/Write/NotebookEdit）",
                 text_color=COLORS["muted"],
                 anchor="w",
                 font=font(12),
             ).pack(fill="x", pady=(10, 2))
             self._auto_approve_tools_text = ctk.CTkTextbox(scroll, height=70, **textbox_style(monospace=True))
-            self._auto_approve_tools_text.insert("1.0", "\n".join(self._auto_approve_tools_without_bash()))
+            self._auto_approve_tools_text.insert("1.0", "\n".join(self.settings.auto_approve_tools))
             self._auto_approve_tools_text.pack(fill="x", pady=(0, 10))
 
         # Error recovery section
@@ -228,19 +218,6 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         entry.pack(side="left", fill="x", expand=True)
         setattr(self, f"_{key}_entry", entry)
 
-    def _auto_approve_bash_enabled(self) -> bool:
-        return bool(self.settings.auto_approve_bash) or any(
-            str(tool).strip().casefold() == "bash"
-            for tool in self.settings.auto_approve_tools
-        )
-
-    def _auto_approve_tools_without_bash(self) -> list[str]:
-        return [
-            str(tool).strip()
-            for tool in self.settings.auto_approve_tools
-            if str(tool).strip() and str(tool).strip().casefold() != "bash"
-        ]
-
     def _save(self):
         try:
             # Collect values
@@ -264,12 +241,12 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             if hasattr(self, "_permission_auto_approve_var"):
                 auto_approve_permission_requests = self._permission_auto_approve_var.get()
                 auto_approve_max = int(self._auto_approve_max_per_session_entry.get())
-                auto_approve_bash = self._auto_approve_bash_var.get()
                 auto_approve_tools = [
                     line.strip()
                     for line in self._auto_approve_tools_text.get("1.0", "end").replace(",", "\n").split("\n")
-                    if line.strip() and line.strip().casefold() != "bash"
+                    if line.strip()
                 ]
+                auto_approve_bash = any(tool.casefold() == "bash" for tool in auto_approve_tools)
 
             incomplete = [line.strip() for line in self._incomplete_text.get("1.0", "end").split("\n") if line.strip()]
             blocker = [line.strip() for line in self._blocker_text.get("1.0", "end").split("\n") if line.strip()]

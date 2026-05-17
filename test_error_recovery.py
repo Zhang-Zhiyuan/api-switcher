@@ -342,7 +342,7 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     for script in [local_script, remote_script]:
         assert "recoverable_api_error_detected" in script
         assert "PermissionRequest" in script
-        assert "auto_approve_bash" in script
+        assert "Bash" in script
         assert '"allow"' in script
         assert "stream disconnected before completion" in script
         assert "reconnecting\\.\\.\\.\\s*\\d+/\\d+" in script
@@ -351,6 +351,9 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
         assert "connection termination" in script
         assert "backend-api/codex/responses/compact" in script
 
+    assert '$toolName -ieq "Bash"' not in local_script
+    assert "tool_name.lower() == \"bash\"" not in remote_script
+    assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
     assert "git config user.email" in local_script
     assert "Ensure-LocalGitIgnore" in local_script
     assert "$initializedRepo = $false" in local_script
@@ -394,7 +397,33 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert restored.auto_approve_permission_requests is True
     assert restored.auto_approve_max_per_session == 5
     assert restored.auto_approve_bash is True
-    assert restored.auto_approve_tools == ["Edit", "Write"]
+    assert restored.auto_approve_tools == ["Edit", "Write", "Bash"]
+
+    legacy_disabled = AutoContinueSettings.from_dict({
+        "auto_approve_permission_requests": True,
+        "auto_approve_bash": False,
+        "auto_approve_tools": ["Edit", "Write"],
+    })
+    assert legacy_disabled.auto_approve_tools == ["Edit", "Write"]
+
+
+def test_permission_auto_approve_treats_bash_as_regular_tool():
+    from core import remote_auto_continue
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings = AutoContinueSettings()
+    assert settings.auto_approve_tools[0] == "Bash"
+
+    local_script = generate_hook_script("C:\\Users\\Test\\.claude\\auto_continue_settings.json")
+    remote_script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.claude/auto_continue_settings.json",
+        "/home/test/.claude/tmp",
+    )
+    assert '@("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")' in local_script
+    assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
+    assert "$toolName -ieq \"Bash\"" not in local_script
+    assert 'tool_name.lower() == "bash"' not in remote_script
 
 
 def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch):

@@ -625,7 +625,7 @@ RECOVERABLE_API_ERROR_PATTERNS = [
 ]
 
 
-DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
 
 
 def is_recoverable_api_error(text):
@@ -638,11 +638,26 @@ def is_recoverable_api_error(text):
     return False
 
 
-def tool_allowed(tool_name, allowed_tools, auto_approve_bash=True):
+def permission_tools(settings):
+    settings = settings if isinstance(settings, dict) else {}
+    allowed_tools = settings.get("auto_approve_tools")
+    tools = allowed_tools if isinstance(allowed_tools, list) and allowed_tools else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
+    result = []
+    seen = set()
+    for item in tools:
+        value = str(item or "").strip()
+        key = value.lower()
+        if value and key not in seen:
+            result.append(value)
+            seen.add(key)
+    if as_bool(settings.get("auto_approve_bash"), True) and "bash" not in seen:
+        result.insert(0, "Bash")
+    return result
+
+
+def tool_allowed(tool_name, allowed_tools):
     if not tool_name:
         return False
-    if tool_name.lower() == "bash":
-        return bool(auto_approve_bash)
     tools = allowed_tools if isinstance(allowed_tools, list) and allowed_tools else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
     for item in tools:
         allowed = str(item or "").strip()
@@ -836,7 +851,7 @@ def main():
             or request.get("tool_name")
             or ""
         ).strip()
-        if not tool_allowed(tool_name, settings.get("auto_approve_tools"), as_bool(settings.get("auto_approve_bash"), True)):
+        if not tool_allowed(tool_name, permission_tools(settings)):
             return
 
         max_auto_approvals = as_int(settings.get("auto_approve_max_per_session"), 3)

@@ -120,9 +120,7 @@ class AutoContinueControl(ctk.CTkFrame):
                         if settings.auto_approve_max_per_session == 0
                         else str(settings.auto_approve_max_per_session)
                     )
-                    auto_approve_tools = list(settings.auto_approve_tools[:4])
-                    if settings.auto_approve_bash:
-                        auto_approve_tools = ["Bash"] + auto_approve_tools
+                    auto_approve_tools = list(settings.auto_approve_tools[:5])
                     info_lines.append(
                         f"权限自动确认: {'ON' if settings.auto_approve_permission_requests else 'OFF'}"
                         f" / {auto_approve_limit} 次 / {', '.join(auto_approve_tools[:5])}"
