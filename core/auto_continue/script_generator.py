@@ -490,6 +490,9 @@ try {{
             "disconnect/reset before headers",
             "reset reason.*connection termination",
             "error sending request for url",
+            "api error:.*context.*window.*limit",
+            "model.*reached.*context.*window.*limit",
+            "context.*window.*limit",
             "backend-api/codex/responses/compact",
             "responses/compact"
         )

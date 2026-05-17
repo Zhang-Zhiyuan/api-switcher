@@ -159,6 +159,8 @@ function Get-ErrorType {{
         "context.*length.*exceeded",
         "maximum context length",
         "maximum[_\\s-]?context[_\\s-]?length",
+        "api error:.*context.*window.*limit",
+        "model.*reached.*context.*window.*limit",
         "context.*window.*(limit|full|exceed|overflow)",
         "(reached|hit|exceed(ed|s)?).*context.*window",
         "context.*limit.*(reached|exceed(ed|s)?)",
@@ -711,7 +713,7 @@ function Get-ErrorType {{
     param([string]$ErrorCode, [string]$ErrorMessage)
     $combined = "$ErrorCode $ErrorMessage".ToLower()
 
-    if ($combined -match "content.*length|context.*length|context.*window.*(limit|full|exceed|overflow)|(reached|hit|exceed(ed|s)?).*context.*window|context.*limit.*(reached|exceed(ed|s)?)|tokens?.*exceed|(input|prompt|request|messages?).*(too\\s*long|too\\s*large|exceed(ed|s)?)|内容.*长|上下文.*超|提示词.*过长|输入.*过长") {{
+    if ($combined -match "content.*length|context.*length|api error:.*context.*window.*limit|model.*reached.*context.*window.*limit|context.*window.*(limit|full|exceed|overflow)|(reached|hit|exceed(ed|s)?).*context.*window|context.*limit.*(reached|exceed(ed|s)?)|tokens?.*exceed|(input|prompt|request|messages?).*(too\\s*long|too\\s*large|exceed(ed|s)?)|内容.*长|上下文.*超|提示词.*过长|输入.*过长") {{
         return "content_length"
     }}
     if ($combined -match "rate.*limit|too.*many|频繁|速率") {{

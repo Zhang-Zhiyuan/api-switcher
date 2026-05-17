@@ -70,6 +70,8 @@ class ErrorParser:
         r"context[_\s]?length[_\s]?exceeded",
         r"maximum context length",
         r"maximum[_\s-]?context[_\s-]?length",
+        r"api error:.*context.*window.*limit",
+        r"model.*reached.*context.*window.*limit",
         r"context.*window.*(limit|full|exceed|overflow)",
         r"(reached|hit|exceed(?:ed|s)?).*context.*window",
         r"context.*limit.*(reached|exceed(?:ed|s)?)",

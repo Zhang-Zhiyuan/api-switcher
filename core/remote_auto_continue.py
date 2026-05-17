@@ -633,6 +633,9 @@ RECOVERABLE_API_ERROR_PATTERNS = [
     r"disconnect/reset before headers",
     r"reset reason.*connection termination",
     r"error sending request for url",
+    r"api error:.*context.*window.*limit",
+    r"model.*reached.*context.*window.*limit",
+    r"context.*window.*limit",
     r"backend-api/codex/responses/compact",
     r"responses/compact",
 ]
