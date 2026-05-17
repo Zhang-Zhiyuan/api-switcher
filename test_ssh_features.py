@@ -1078,6 +1078,68 @@ def test_remote_claude_unregister_cleans_permission_sidecar_without_settings():
     assert permission_rules_path not in sftp.files
 
 
+def test_remote_claude_status_flags_prompting_permission_mode(monkeypatch):
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="claude",
+        config_dir="/home/test/.claude",
+        hooks_dir="/home/test/.claude/hooks",
+        settings_path="/home/test/.claude/auto_continue_settings.json",
+        script_path="/home/test/.claude/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.claude/tmp",
+        guidance_path="/home/test/.claude/CLAUDE.md",
+        provider_config_path="/home/test/.claude/settings.json",
+        permission_rules_path="/home/test/.claude/auto_continue_permission_rules.json",
+    )
+    auto_settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+        auto_approve_permission_requests=True,
+        auto_approve_tools=["Bash"],
+    )
+    sftp.files[paths.script_path] = b"#!/bin/sh\n"
+    sftp.files[paths.settings_path] = json.dumps(auto_settings.to_dict()).encode("utf-8")
+    sftp.files[paths.guidance_path] = b"BEGIN AUTO CONTINUE GUIDANCE\n"
+    sftp.files[paths.provider_config_path] = json.dumps({
+        "permissions": {"defaultMode": "acceptEdits", "allow": ["Bash"]},
+        "hooks": {"PermissionRequest": [{"hooks": [{"command": "sh /home/test/.claude/hooks/auto_continue_stop.sh"}]}]},
+    }).encode("utf-8")
+
+    monkeypatch.setattr(remote_auto_continue, "_connect", lambda ssh_name: (SSHProfile(name="remote", host="host"), client))
+    monkeypatch.setattr(
+        remote_auto_continue,
+        "_probe_remote_environment",
+        lambda _client: {
+            "os": "Linux",
+            "sh": "/bin/sh",
+            "python": "/usr/bin/python3",
+            "git": "/usr/bin/git",
+            "is_posix": True,
+        },
+    )
+    monkeypatch.setattr(remote_auto_continue, "_paths", lambda _client, _profile, _provider: paths)
+
+    status = remote_auto_continue.get_remote_auto_continue_status("remote", "claude")
+
+    assert status.permission_mode == "acceptEdits"
+    assert not status.ready
+    assert any("dontAsk" in issue for issue in status.issues)
+
+    sftp.files[paths.provider_config_path] = json.dumps({
+        "permissions": {"defaultMode": "dontAsk", "allow": ["Bash"]},
+        "hooks": {"PermissionRequest": [{"hooks": [{"command": "sh /home/test/.claude/hooks/auto_continue_stop.sh"}]}]},
+    }).encode("utf-8")
+
+    status = remote_auto_continue.get_remote_auto_continue_status("remote", "claude")
+
+    assert status.permission_mode == "dontAsk"
+    assert status.ready
+
+
 def test_remote_git_snapshot_status_ready_without_auto_continue():
     status = remote_auto_continue.RemoteAutoContinueStatus(
         provider_name="codex",

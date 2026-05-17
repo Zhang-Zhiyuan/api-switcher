@@ -71,6 +71,7 @@ class RemoteAutoContinueStatus:
     settings_valid: bool = False
     git_snapshot_enabled: bool = False
     permission_auto_approve_enabled: bool = False
+    permission_mode: str = ""
     git_available: bool = False
     runtime_ready: bool = False
     codex_hooks_enabled: bool | None = None
@@ -107,6 +108,8 @@ class RemoteAutoContinueStatus:
             f"Hook {'已注册' if self.hook_registered else '未注册'}",
             f"设置 {'有效' if self.settings_valid else '缺失/无效'}",
         ]
+        if self.provider_name == "claude":
+            parts.append(f"权限模式 {self.permission_mode or '(未设置)'}")
         if self.provider_name == "codex":
             parts.append(f"codex_hooks {'已开启' if self.codex_hooks_enabled else '未开启'}")
         if self.issues:
@@ -1673,16 +1676,21 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append(f"Claude settings.json 读取失败: {e}")
         if isinstance(provider_config, dict):
             status.hook_registered = any(_is_our_command(command) for command in _iter_claude_hook_commands(provider_config))
+            permissions = (
+                provider_config.get("permissions")
+                if isinstance(provider_config.get("permissions"), dict)
+                else {}
+            )
+            status.permission_mode = str(permissions.get("defaultMode") or "")
             if parsed_settings and parsed_settings.auto_approve_permission_requests:
                 desired_rules = permission_rules_from_auto_settings(parsed_settings)
-                permissions = (
-                    provider_config.get("permissions")
-                    if isinstance(provider_config.get("permissions"), dict)
-                    else {}
-                )
                 missing_rules = missing_allow_rules(desired_rules, permissions.get("allow", []))
                 ask_conflicts = conflicting_permission_rules(desired_rules, permissions.get("ask", []))
                 deny_conflicts = conflicting_permission_rules(desired_rules, permissions.get("deny", []))
+                if status.permission_mode != "dontAsk":
+                    status.issues.append(
+                        "Claude 权限模式未切到 dontAsk，可能仍会弹 yes；请重新安装/修复远端自动续跑"
+                    )
                 if missing_rules:
                     status.issues.append("权限 allow 未预授权: " + ", ".join(missing_rules[:5]))
                 if ask_conflicts:
