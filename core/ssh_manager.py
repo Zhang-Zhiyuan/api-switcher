@@ -244,7 +244,7 @@ class SSHManager:
 
             with sftp.open(path, "rb") as f:
                 raw = f.read()
-                content = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                content = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else str(raw)
                 logger.debug(f"Read {len(content)} bytes from {path}")
                 return content
 

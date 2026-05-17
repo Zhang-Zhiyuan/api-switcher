@@ -156,14 +156,22 @@ try {{
     }}
 
     # Determine provider based on input structure
-    $isClaude = $null -ne $hookInput.hook_event_name
-    $isCodex = $null -eq $hookInput.hook_event_name
+    $isClaude = $null -ne $hookInput.hook_event_name -or $null -ne $hookInput.hookEventName
+    $isCodex = -not $isClaude
 
     # Get session ID and last message
-    $sessionId = if ($isClaude) {{ $hookInput.session_id }} else {{ $hookInput.session_id }}
-    $lastMessage = if ($isClaude) {{ $hookInput.last_assistant_message }} else {{ $hookInput.last_message }}
-    $hookEvent = if ($isClaude) {{ $hookInput.hook_event_name }} else {{ "Stop" }}
-    $agentId = if ($isClaude) {{ $hookInput.agent_id }} else {{ $null }}
+    $sessionId = if ($hookInput.session_id) {{ $hookInput.session_id }} elseif ($hookInput.sessionId) {{ $hookInput.sessionId }} else {{ "" }}
+    $lastMessage = if ($isClaude) {{
+        if ($hookInput.last_assistant_message) {{ $hookInput.last_assistant_message }}
+        elseif ($hookInput.lastAssistantMessage) {{ $hookInput.lastAssistantMessage }}
+        else {{ "" }}
+    }} else {{
+        if ($hookInput.last_message) {{ $hookInput.last_message }}
+        elseif ($hookInput.lastMessage) {{ $hookInput.lastMessage }}
+        else {{ "" }}
+    }}
+    $hookEvent = if ($isClaude) {{ if ($hookInput.hook_event_name) {{ $hookInput.hook_event_name }} elseif ($hookInput.hookEventName) {{ $hookInput.hookEventName }} else {{ "Stop" }} }} else {{ "Stop" }}
+    $agentId = if ($hookInput.agent_id) {{ $hookInput.agent_id }} elseif ($hookInput.agentId) {{ $hookInput.agentId }} else {{ $null }}
 
     # Permission prompts must be answered quickly. Git snapshots can be slow in
     # large repositories, so only run them for stop/continue events.

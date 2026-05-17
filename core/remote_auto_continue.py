@@ -618,7 +618,7 @@ def any_pattern(patterns, text):
         return False
     for pattern in patterns:
         try:
-            if re.search(str(pattern), text):
+            if re.search(str(pattern), text, re.IGNORECASE):
                 return True
         except re.error as exc:
             log(f"Invalid pattern ignored: {pattern}: {exc}", "WARN")
@@ -850,8 +850,8 @@ def main():
     if not isinstance(data, dict):
         return
 
-    is_claude = data.get("hook_event_name") is not None
-    hook_event = data.get("hook_event_name") or "Stop"
+    is_claude = data.get("hook_event_name") is not None or data.get("hookEventName") is not None
+    hook_event = data.get("hook_event_name") or data.get("hookEventName") or "Stop"
     agent_id = data.get("agent_id") or data.get("agentId") or ""
     session_id = (
         data.get("session_id")
@@ -990,7 +990,17 @@ def main():
 
     last_message = pick_text(
         data,
-        ["last_assistant_message", "last_message", "assistant_message", "message", "content", "text"],
+        [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "last_message",
+            "lastMessage",
+            "assistant_message",
+            "assistantMessage",
+            "message",
+            "content",
+            "text",
+        ],
     )
     if not last_message:
         transcript_path = data.get("transcript_path") or data.get("transcriptPath")

@@ -766,9 +766,13 @@ class _FakeClient:
 def test_ssh_remote_file_io_uses_binary_sftp_modes():
     manager = SSHManager()
     sftp = _FakeSFTP()
+    sftp.files["/bom.json"] = b'\xef\xbb\xbf{"ok": true}'
+    sftp.files["/invalid.txt"] = b"ok\xff"
     client = _FakeClient(sftp)
 
     assert manager.read_remote_file(client, "/remote.json") == '{"ok": true}'
+    assert manager.read_remote_file(client, "/bom.json") == '{"ok": true}'
+    assert manager.read_remote_file(client, "/invalid.txt") == "ok\ufffd"
     manager.write_remote_file(client, "/written.json", '{"saved": true}')
 
     assert "rb" in sftp.open_modes
@@ -777,6 +781,14 @@ def test_ssh_remote_file_io_uses_binary_sftp_modes():
     assert sftp.posix_rename_calls
     assert not sftp.rename_calls
     assert all("\\" not in path for path in sftp.mkdir_calls)
+
+
+def test_remote_config_reads_json_with_utf8_bom():
+    sftp = _FakeSFTP()
+    sftp.files["/bom.json"] = b'\xef\xbb\xbf{"ok": true}'
+    client = _FakeClient(sftp)
+
+    assert remote_config.read_remote_json(client, "/bom.json") == {"ok": True}
 
 
 def test_remote_config_expands_home_and_custom_profile_dirs():

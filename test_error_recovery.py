@@ -407,7 +407,7 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
             "enabled": True,
             "git_auto_snapshot": False,
             "max_continuations": 2,
-            "blocker_patterns": ["(?i)api error"],
+            "blocker_patterns": ["api error"],
             "incomplete_patterns": [],
             "continuation_prompt": "compact and continue",
         }),
@@ -534,7 +534,7 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
 
-    def run_hook(settings: dict, tool_name: str, input_extra: dict | None = None, event_name: str = "PermissionRequest"):
+    def run_hook(settings: dict, tool_name: str, input_extra: dict | None = None, event_name: str | None = "PermissionRequest"):
         settings_path = tmp_path / f"settings_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
         input_path = tmp_path / f"input_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
         state_dir = tmp_path / "state"
@@ -546,10 +546,11 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
         }
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         payload = {
-            "hook_event_name": event_name,
             "session_id": f"session-{tool_name}-{len(list(tmp_path.iterdir()))}",
             "tool_name": tool_name,
         }
+        if event_name is not None:
+            payload["hook_event_name"] = event_name
         if input_extra:
             payload.update(input_extra)
         input_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -597,6 +598,12 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     pre_tool_specific = pre_tool_output["hookSpecificOutput"]
     assert pre_tool_specific["hookEventName"] == "PreToolUse"
     assert pre_tool_specific["permissionDecision"] == "allow"
+
+    pre_tool_camel_allowed = run_hook({}, "Bash", {"hookEventName": "PreToolUse", "toolName": "Bash"}, event_name=None)
+    assert pre_tool_camel_allowed.returncode == 0
+    pre_tool_camel_output = json.loads(pre_tool_camel_allowed.stdout)
+    assert pre_tool_camel_output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert pre_tool_camel_output["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, monkeypatch):
@@ -692,14 +699,23 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
         encoding="utf-8-sig",
     )
 
-    def run_hook(event_name: str):
-        return subprocess.run(
-            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-            input=json.dumps({
+    def run_hook(event_name: str, camel_case: bool = False):
+        payload = {
+            "permissionRequest": {"toolName": "Bash"},
+        }
+        if camel_case:
+            payload.update({
+                "hookEventName": event_name,
+                "sessionId": "session-local-fast",
+            })
+        else:
+            payload.update({
                 "hook_event_name": event_name,
                 "session_id": "session-local-fast",
-                "permissionRequest": {"toolName": "Bash"},
-            }),
+            })
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            input=json.dumps(payload),
             cwd=tmp_path,
             text=True,
             stdout=subprocess.PIPE,
@@ -724,6 +740,13 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
     pre_tool_specific = pre_tool_output["hookSpecificOutput"]
     assert pre_tool_specific["hookEventName"] == "PreToolUse"
     assert pre_tool_specific["permissionDecision"] == "allow"
+
+    pre_tool_camel_result = run_hook("PreToolUse", camel_case=True)
+    assert pre_tool_camel_result.returncode == 0, pre_tool_camel_result.stderr
+    pre_tool_camel_output = json.loads(pre_tool_camel_result.stdout)
+    pre_tool_camel_specific = pre_tool_camel_output["hookSpecificOutput"]
+    assert pre_tool_camel_specific["hookEventName"] == "PreToolUse"
+    assert pre_tool_camel_specific["permissionDecision"] == "allow"
 
 
 def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch):
