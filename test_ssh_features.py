@@ -1035,6 +1035,28 @@ def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
     assert permission_rules_path not in sftp.files
 
 
+def test_remote_claude_unregister_cleans_permission_sidecar_without_settings():
+    sftp = _FakeSFTP()
+    permission_rules_path = "/home/test/.claude/auto_continue_permission_rules.json"
+    sftp.files[permission_rules_path] = json.dumps({"rules": ["Bash"], "ask_rules": ["Bash"]}).encode("utf-8")
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="claude",
+        config_dir="/home/test/.claude",
+        hooks_dir="/home/test/.claude/hooks",
+        settings_path="/home/test/.claude/auto_continue_settings.json",
+        script_path="/home/test/.claude/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.claude/tmp",
+        guidance_path="/home/test/.claude/CLAUDE.md",
+        provider_config_path="/home/test/.claude/settings.json",
+        permission_rules_path=permission_rules_path,
+    )
+
+    remote_auto_continue._unregister_claude_hook(client, paths)
+
+    assert permission_rules_path not in sftp.files
+
+
 def test_remote_git_snapshot_status_ready_without_auto_continue():
     status = remote_auto_continue.RemoteAutoContinueStatus(
         provider_name="codex",
@@ -1049,6 +1071,20 @@ def test_remote_git_snapshot_status_ready_without_auto_continue():
     )
 
     assert status.ready
+
+
+def test_remote_status_with_diagnostics_is_not_ready():
+    status = remote_auto_continue.RemoteAutoContinueStatus(
+        provider_name="claude",
+        enabled=True,
+        hook_script_exists=True,
+        hook_registered=True,
+        settings_valid=True,
+        runtime_ready=True,
+        issues=["permissions.ask 仍会强制询问: Bash"],
+    )
+
+    assert not status.ready
 
 
 def test_remote_git_snapshot_status_requires_git():

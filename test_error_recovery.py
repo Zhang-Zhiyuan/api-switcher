@@ -581,6 +581,42 @@ def test_claude_auto_approve_preseeds_permission_allow_rules(tmp_path, monkeypat
     assert not (tmp_path / "auto_continue_permission_rules.json").exists()
 
 
+def test_claude_unregister_cleans_permission_sidecar_without_settings(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    state_path = tmp_path / "auto_continue_permission_rules.json"
+    state_path.write_text(json.dumps({"rules": ["Bash"], "ask_rules": ["Bash"]}), encoding="utf-8")
+
+    provider.unregister_hook()
+
+    assert not state_path.exists()
+
+
+def test_auto_continue_manager_enable_uses_provider_enable_with_guidance(monkeypatch):
+    from core.auto_continue.manager import AutoContinueManager
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+
+    class FakeProvider:
+        def enable(self, settings):
+            calls.append(("enable", settings.enabled, settings.apply_to_subagents))
+
+        def install_guidance(self):
+            calls.append(("guidance",))
+
+    manager = AutoContinueManager()
+    fake_provider = FakeProvider()
+    monkeypatch.setattr(manager, "get_provider", lambda _name: fake_provider)
+
+    settings = AutoContinueSettings()
+    manager.enable("claude", settings, apply_to_subagents=True)
+
+    assert calls == [("enable", True, True), ("guidance",)]
+
+
 def test_permission_rule_helpers_detect_ask_conflicts_and_broad_allows():
     from core.auto_continue.permission_rules import (
         conflicting_permission_rules,

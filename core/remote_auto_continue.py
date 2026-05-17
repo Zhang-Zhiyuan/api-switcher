@@ -85,6 +85,7 @@ class RemoteAutoContinueStatus:
         hook_required = self.enabled or self.git_snapshot_enabled or self.permission_auto_approve_enabled
         return (
             hook_required
+            and not self.issues
             and self.hook_script_exists
             and self.hook_registered
             and self.settings_valid
@@ -1197,6 +1198,7 @@ def _register_claude_hook(
 def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
     settings = _read_json(client, paths.provider_config_path, default={}, strict=False)
     if not isinstance(settings, dict):
+        _write_managed_permission_state(client, paths.permission_rules_path, [], [])
         return
     hooks = settings.get("hooks", {})
 

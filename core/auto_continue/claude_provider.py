@@ -148,6 +148,7 @@ class ClaudeProvider(AutoContinueProvider):
         """Unregister hook from settings.json."""
         settings_path = self.get_claude_settings_path()
         if not settings_path.exists():
+            self._save_managed_permission_state([], [])
             return
 
         try:

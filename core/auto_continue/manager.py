@@ -45,18 +45,11 @@ class AutoContinueManager:
         if provider_name.lower() == "claude":
             settings.apply_to_subagents = apply_to_subagents
 
-        # Install hook script
-        provider.install_hook_script()
-
-        # Register hook
-        provider.register_hook_for_settings(settings)
+        provider.enable(settings)
 
         # Install guidance
         if hasattr(provider, 'install_guidance'):
             provider.install_guidance()
-
-        # Save settings
-        provider.save_settings(settings)
 
     def pause(self, provider_name: str) -> None:
         """Pause auto-continue for a provider."""
