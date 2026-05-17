@@ -406,6 +406,27 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     })
     assert legacy_disabled.auto_approve_tools == ["Edit", "Write"]
 
+    legacy_disabled_without_tools = AutoContinueSettings.from_dict({
+        "auto_approve_permission_requests": True,
+        "auto_approve_bash": False,
+    })
+    assert "Bash" not in legacy_disabled_without_tools.auto_approve_tools
+    assert "Edit" in legacy_disabled_without_tools.auto_approve_tools
+
+    explicit_empty = AutoContinueSettings.from_dict({
+        "auto_approve_permission_requests": True,
+        "auto_approve_bash": False,
+        "auto_approve_tools": [],
+    })
+    assert explicit_empty.auto_approve_tools == []
+
+    explicit_empty_legacy_true = AutoContinueSettings.from_dict({
+        "auto_approve_permission_requests": True,
+        "auto_approve_bash": True,
+        "auto_approve_tools": [],
+    })
+    assert explicit_empty_legacy_true.auto_approve_tools == []
+
 
 def test_permission_auto_approve_treats_bash_as_regular_tool():
     from core import remote_auto_continue
@@ -422,8 +443,71 @@ def test_permission_auto_approve_treats_bash_as_regular_tool():
     )
     assert '@("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")' in local_script
     assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
+    assert '$null -eq $settings.PSObject.Properties["auto_approve_tools"]' in local_script
+    assert '$legacyBashAllowed -and $allowedTools.Count -gt 0' in local_script
+    assert 'if "auto_approve_tools" in settings:' in remote_script
+    assert "tools = allowed_tools if isinstance(allowed_tools, list) else []" in remote_script
+    assert 'if legacy_bash_allowed and "auto_approve_tools" in settings and result' in remote_script
+    assert "else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS" not in remote_script
     assert "$toolName -ieq \"Bash\"" not in local_script
     assert 'tool_name.lower() == "bash"' not in remote_script
+
+
+def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.claude/auto_continue_settings.json",
+        "/home/test/.claude/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    def run_hook(settings: dict, tool_name: str):
+        settings_path = tmp_path / f"settings_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
+        input_path = tmp_path / f"input_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
+        state_dir = tmp_path / "state"
+        settings = {
+            "enabled": False,
+            "git_auto_snapshot": False,
+            "auto_approve_permission_requests": True,
+            **settings,
+        }
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        input_path.write_text(
+            json.dumps({
+                "hook_event_name": "PermissionRequest",
+                "session_id": f"session-{tool_name}-{len(list(tmp_path.iterdir()))}",
+                "tool_name": tool_name,
+            }),
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+            cwd=tmp_path,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    empty_denied = run_hook({"auto_approve_tools": [], "auto_approve_bash": False}, "Edit")
+    assert empty_denied.returncode == 0
+    assert empty_denied.stdout.strip() == ""
+
+    bash_disabled = run_hook({"auto_approve_bash": False}, "Bash")
+    assert bash_disabled.returncode == 0
+    assert bash_disabled.stdout.strip() == ""
+
+    edit_allowed = run_hook({"auto_approve_bash": False}, "Edit")
+    assert edit_allowed.returncode == 0
+    assert '"behavior": "allow"' in edit_allowed.stdout
+
+    default_allowed = run_hook({}, "Bash")
+    assert default_allowed.returncode == 0
+    assert '"behavior": "allow"' in default_allowed.stdout
 
 
 def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch):

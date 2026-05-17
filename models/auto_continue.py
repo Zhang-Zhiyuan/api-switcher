@@ -168,11 +168,16 @@ class AutoContinueSettings:
                 known_fields.get("auto_approve_tools"),
                 [],
             )
-            if known_fields.get("auto_approve_bash", True):
+            if known_fields.get("auto_approve_bash", True) and known_fields["auto_approve_tools"]:
                 known_fields["auto_approve_tools"] = _merge_unique_strings(
                     ["Bash"],
                     known_fields["auto_approve_tools"],
                 )
+        elif known_fields.get("auto_approve_bash") is False:
+            known_fields["auto_approve_tools"] = [
+                tool for tool in DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
+                if tool.casefold() != "bash"
+            ]
 
         # Create instance
         instance = cls(**known_fields)

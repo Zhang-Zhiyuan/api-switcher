@@ -261,8 +261,14 @@ try {{
                 exit 0
             }}
 
-            $allowedTools = @("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")
-            if ($settings.auto_approve_tools) {{
+            $legacyBashAllowed = if ($null -eq $settings.PSObject.Properties["auto_approve_bash"]) {{ $true }} else {{ [bool]$settings.auto_approve_bash }}
+            if ($null -eq $settings.PSObject.Properties["auto_approve_tools"]) {{
+                $allowedTools = if ($legacyBashAllowed) {{
+                    @("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")
+                }} else {{
+                    @("Edit", "MultiEdit", "Write", "NotebookEdit")
+                }}
+            }} else {{
                 $allowedTools = @()
                 foreach ($tool in $settings.auto_approve_tools) {{
                     $toolText = [string]$tool
@@ -270,18 +276,17 @@ try {{
                         $allowedTools += $toolText.Trim()
                     }}
                 }}
-            }}
-            $legacyBashAllowed = if ($null -eq $settings.PSObject.Properties["auto_approve_bash"]) {{ $true }} else {{ [bool]$settings.auto_approve_bash }}
-            if ($legacyBashAllowed) {{
-                $hasBash = $false
-                foreach ($allowed in $allowedTools) {{
-                    if ($allowed -ieq "Bash") {{
-                        $hasBash = $true
-                        break
+                if ($legacyBashAllowed -and $allowedTools.Count -gt 0) {{
+                    $hasBash = $false
+                    foreach ($allowed in $allowedTools) {{
+                        if ($allowed -ieq "Bash") {{
+                            $hasBash = $true
+                            break
+                        }}
                     }}
-                }}
-                if (-not $hasBash) {{
-                    $allowedTools = @("Bash") + $allowedTools
+                    if (-not $hasBash) {{
+                        $allowedTools = @("Bash") + $allowedTools
+                    }}
                 }}
             }}
 

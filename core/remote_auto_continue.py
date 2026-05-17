@@ -640,8 +640,14 @@ def is_recoverable_api_error(text):
 
 def permission_tools(settings):
     settings = settings if isinstance(settings, dict) else {}
-    allowed_tools = settings.get("auto_approve_tools")
-    tools = allowed_tools if isinstance(allowed_tools, list) and allowed_tools else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
+    legacy_bash_allowed = as_bool(settings.get("auto_approve_bash"), True)
+    if "auto_approve_tools" in settings:
+        allowed_tools = settings.get("auto_approve_tools")
+        tools = allowed_tools if isinstance(allowed_tools, list) else []
+    elif legacy_bash_allowed:
+        tools = DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
+    else:
+        tools = [tool for tool in DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS if tool.lower() != "bash"]
     result = []
     seen = set()
     for item in tools:
@@ -650,7 +656,7 @@ def permission_tools(settings):
         if value and key not in seen:
             result.append(value)
             seen.add(key)
-    if as_bool(settings.get("auto_approve_bash"), True) and "bash" not in seen:
+    if legacy_bash_allowed and "auto_approve_tools" in settings and result and "bash" not in seen:
         result.insert(0, "Bash")
     return result
 
@@ -658,7 +664,7 @@ def permission_tools(settings):
 def tool_allowed(tool_name, allowed_tools):
     if not tool_name:
         return False
-    tools = allowed_tools if isinstance(allowed_tools, list) and allowed_tools else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS
+    tools = allowed_tools if isinstance(allowed_tools, list) else []
     for item in tools:
         allowed = str(item or "").strip()
         if not allowed:
