@@ -820,11 +820,12 @@ def main():
         return
 
     auto_approve_enabled = as_bool(settings.get("auto_approve_permission_requests"), False)
+    git_snapshot_enabled = as_bool(settings.get("git_auto_snapshot"), True) and as_bool(
+        settings.get("git_snapshot_on_start"),
+        True,
+    )
 
-    if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_start"), True):
-        run_git_snapshot()
-
-    if not as_bool(settings.get("enabled"), False) and not auto_approve_enabled:
+    if not as_bool(settings.get("enabled"), False) and not auto_approve_enabled and not git_snapshot_enabled:
         return
 
     raw_input = ""
@@ -857,6 +858,11 @@ def main():
         or os.getcwd()
     )
 
+    # Permission prompts must be answered quickly. Git snapshots can be slow in
+    # large repositories, so only run them for stop/continue events.
+    if hook_event != "PermissionRequest" and git_snapshot_enabled:
+        run_git_snapshot()
+
     if is_claude and hook_event == "PermissionRequest":
         if not auto_approve_enabled:
             return
@@ -873,7 +879,7 @@ def main():
         if not tool_allowed(tool_name, permission_tools(settings)):
             return
 
-        max_auto_approvals = as_int(settings.get("auto_approve_max_per_session"), 3)
+        max_auto_approvals = as_int(settings.get("auto_approve_max_per_session"), 0)
         state_seed = f"{session_id}|PermissionRequest|{agent_id}"
         state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
         os.makedirs(state_dir, exist_ok=True)

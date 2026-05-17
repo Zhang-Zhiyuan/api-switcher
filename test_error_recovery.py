@@ -358,12 +358,14 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "Ensure-LocalGitIgnore" in local_script
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
+    assert '$hookEvent -ne "PermissionRequest" -and $gitAutoSnapshot' in local_script
     assert "node_modules/" in local_script
     assert ".env.*" in local_script
     assert '["git", "config", "user.email"]' in remote_script
     assert "DEFAULT_GITIGNORE_LINES" in remote_script
     assert "initialized_repo = False" in remote_script
     assert "if initialized_repo:" in remote_script
+    assert 'if hook_event != "PermissionRequest" and git_snapshot_enabled:' in remote_script
     assert "node_modules/" in remote_script
     assert ".env.*" in remote_script
     assert "[System.IO.FileMode]::CreateNew" in local_script
@@ -377,6 +379,8 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
 
 def test_auto_continue_settings_permission_auto_approve_validation():
     from models.auto_continue import AutoContinueSettings
+
+    assert AutoContinueSettings().auto_approve_max_per_session == 0
 
     settings = AutoContinueSettings(
         auto_approve_permission_requests=True,
@@ -445,6 +449,7 @@ def test_permission_auto_approve_treats_bash_as_regular_tool():
     assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
     assert '$null -eq $settings.PSObject.Properties["auto_approve_tools"]' in local_script
     assert '$legacyBashAllowed -and $allowedTools.Count -gt 0' in local_script
+    assert "$autoApproveMax = 0" in local_script
     assert 'updatedPermissions = @(' in local_script
     assert 'destination = "session"' in local_script
     assert 'if "auto_approve_tools" in settings:' in remote_script
@@ -516,6 +521,70 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     default_allowed = run_hook({}, "Bash")
     assert default_allowed.returncode == 0
     assert '"behavior": "allow"' in default_allowed.stdout
+
+
+def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, monkeypatch):
+    import os
+    import stat
+    import subprocess
+
+    from core import remote_auto_continue
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.claude/auto_continue_settings.json",
+        "/home/test/.claude/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    marker = tmp_path / "git_was_called"
+    fake_git = tmp_path / ("git.cmd" if os.name == "nt" else "git")
+    fake_git.write_text(
+        f"@echo off\r\necho called>{marker}\r\nexit /b 0\r\n"
+        if os.name == "nt"
+        else f"#!/bin/sh\necho called > {marker}\nexit 0\n",
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        fake_git.chmod(fake_git.stat().st_mode | stat.S_IXUSR)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings_path.write_text(
+        json.dumps({
+            "enabled": False,
+            "git_auto_snapshot": True,
+            "git_snapshot_on_start": True,
+            "auto_approve_permission_requests": True,
+            "auto_approve_tools": ["Bash"],
+        }),
+        encoding="utf-8",
+    )
+    input_path.write_text(
+        json.dumps({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "session-permission-fast",
+            "tool_name": "Bash",
+        }),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
+
+    result = subprocess.run(
+        [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert '"behavior": "allow"' in result.stdout
+    assert not marker.exists()
 
 
 def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch):

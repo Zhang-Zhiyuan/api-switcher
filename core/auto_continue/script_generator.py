@@ -140,22 +140,6 @@ try {{
     $gitSnapshotOnStart = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_start"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_start }}
     $autoApprovePermissionRequests = if ($null -eq $settings.PSObject.Properties["auto_approve_permission_requests"]) {{ $false }} else {{ [bool]$settings.auto_approve_permission_requests }}
 
-    # Git snapshots are intentionally independent from auto-continue.
-    if ($gitAutoSnapshot -and $gitSnapshotOnStart) {{
-        Write-Log "Creating git snapshot on stop hook..." "INFO"
-        Create-GitSnapshot -Message "git-snapshot"
-    }}
-
-    if ((-not $settings.enabled) -and (-not $autoApprovePermissionRequests)) {{
-        exit 0  # Allow stop if auto-continue is disabled
-    }}
-
-    # Validate settings
-    if ($null -eq $settings.max_continuations -or $settings.max_continuations -lt 0) {{
-        Write-Log "Invalid max_continuations value" "ERROR"
-        exit 0
-    }}
-
     # Read stdin (hook input)
     $stdin = [Console]::In.ReadToEnd()
 
@@ -180,6 +164,23 @@ try {{
     $lastMessage = if ($isClaude) {{ $hookInput.last_assistant_message }} else {{ $hookInput.last_message }}
     $hookEvent = if ($isClaude) {{ $hookInput.hook_event_name }} else {{ "Stop" }}
     $agentId = if ($isClaude) {{ $hookInput.agent_id }} else {{ $null }}
+
+    # Permission prompts must be answered quickly. Git snapshots can be slow in
+    # large repositories, so only run them for stop/continue events.
+    if ($hookEvent -ne "PermissionRequest" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
+        Write-Log "Creating git snapshot on stop hook..." "INFO"
+        Create-GitSnapshot -Message "git-snapshot"
+    }}
+
+    if ((-not $settings.enabled) -and (-not $autoApprovePermissionRequests)) {{
+        exit 0  # Allow stop if auto-continue is disabled
+    }}
+
+    # Validate settings
+    if ($null -eq $settings.max_continuations -or $settings.max_continuations -lt 0) {{
+        Write-Log "Invalid max_continuations value" "ERROR"
+        exit 0
+    }}
 
     if ([string]::IsNullOrWhiteSpace($lastMessage) -and $hookEvent -ne "PermissionRequest") {{
         exit 0  # Allow stop if no message
@@ -301,11 +302,11 @@ try {{
                 exit 0
             }}
 
-            $autoApproveMax = 3
+            $autoApproveMax = 0
             if ($null -ne $settings.PSObject.Properties["auto_approve_max_per_session"]) {{
-                try {{ $autoApproveMax = [int]$settings.auto_approve_max_per_session }} catch {{ $autoApproveMax = 3 }}
+                try {{ $autoApproveMax = [int]$settings.auto_approve_max_per_session }} catch {{ $autoApproveMax = 0 }}
             }}
-            if ($autoApproveMax -lt 0) {{ $autoApproveMax = 3 }}
+            if ($autoApproveMax -lt 0) {{ $autoApproveMax = 0 }}
 
             $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
             if ($autoApproveMax -gt 0 -and $count -ge $autoApproveMax) {{

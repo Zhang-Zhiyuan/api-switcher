@@ -86,7 +86,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             permission_switch.pack(anchor="w", pady=5)
             self._add_field(
                 scroll,
-                "自动确认最大次数 (0=一直)",
+                "自动确认最大次数 (0=一直，推荐)",
                 "auto_approve_max_per_session",
                 str(self.settings.auto_approve_max_per_session),
             )

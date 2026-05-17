@@ -80,7 +80,7 @@ class AutoContinueSettings:
     git_snapshot_on_recovery: bool = True  # 错误恢复前创建快照
 
     auto_approve_permission_requests: bool = False
-    auto_approve_max_per_session: int = 3  # 0 means unlimited
+    auto_approve_max_per_session: int = 0  # 0 means unlimited
     auto_approve_bash: bool = True
     auto_approve_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS))
     # Incomplete patterns (regex)
