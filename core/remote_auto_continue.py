@@ -861,10 +861,10 @@ def main():
 
     # Permission prompts must be answered quickly. Git snapshots can be slow in
     # large repositories, so only run them for stop/continue events.
-    if hook_event != "PermissionRequest" and git_snapshot_enabled:
+    if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled:
         run_git_snapshot()
 
-    if is_claude and hook_event == "PermissionRequest":
+    if is_claude and hook_event in {"PermissionRequest", "PreToolUse"}:
         if not auto_approve_enabled:
             return
         permission_request = data.get("permission_request") if isinstance(data.get("permission_request"), dict) else {}
@@ -954,22 +954,32 @@ def main():
             "reason": "configured_permission_request",
             "count": count,
         })
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "allow",
-                    "updatedPermissions": [
-                        {
-                            "type": "addRules",
-                            "rules": [{"toolName": tool_name}],
-                            "behavior": "allow",
-                            "destination": "session",
-                        }
-                    ],
-                },
+        if hook_event == "PreToolUse":
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Auto-approved by API Switcher",
+                }
             }
-        }, ensure_ascii=False))
+        else:
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "allow",
+                        "updatedPermissions": [
+                            {
+                                "type": "addRules",
+                                "rules": [{"toolName": tool_name}],
+                                "behavior": "allow",
+                                "destination": "session",
+                            }
+                        ],
+                    },
+                }
+            }
+        print(json.dumps(output, ensure_ascii=False))
         return
 
     if not as_bool(settings.get("enabled"), False):
@@ -1102,7 +1112,10 @@ def _is_our_command(command: str) -> bool:
     return any(marker in str(command or "") for marker in SCRIPT_MARKERS)
 
 
-def _iter_claude_hook_commands(settings: dict, event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PermissionRequest")):
+def _iter_claude_hook_commands(
+    settings: dict,
+    event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest"),
+):
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
         return
@@ -1191,10 +1204,14 @@ def _register_claude_hook(
     else:
         register_event("SubagentStop", None)
     if settings_data and settings_data.auto_approve_permission_requests:
+        pre_tool_hook = dict(hook_def)
+        pre_tool_hook["statusMessage"] = "Auto-allowing configured Claude tool call if allowed"
+        register_event("PreToolUse", pre_tool_hook)
         permission_hook = dict(hook_def)
         permission_hook["statusMessage"] = "Auto-approving configured Claude permission request if allowed"
         register_event("PermissionRequest", permission_hook)
     else:
+        register_event("PreToolUse", None)
         register_event("PermissionRequest", None)
 
     previous_rules, previous_ask_rules = _read_managed_permission_state(client, paths.permission_rules_path)
@@ -1219,7 +1236,7 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
 
     changed = False
     if isinstance(hooks, dict):
-        for event_name in ("Stop", "SubagentStop", "PermissionRequest"):
+        for event_name in ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest"):
             groups = hooks.get(event_name, [])
             if isinstance(groups, dict):
                 groups = [groups]

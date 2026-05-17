@@ -1021,6 +1021,8 @@ def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
     )
 
     settings = json.loads(sftp.files[settings_path].decode("utf-8"))
+    assert "PreToolUse" in settings["hooks"]
+    assert "PermissionRequest" in settings["hooks"]
     assert settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
     assert settings["permissions"]["ask"] == ["Read"]
     state = json.loads(sftp.files[permission_rules_path].decode("utf-8"))

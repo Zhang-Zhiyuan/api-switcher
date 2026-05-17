@@ -106,10 +106,14 @@ class ClaudeProvider(AutoContinueProvider):
             self._register_hook_event(claude_settings, "SubagentStop", None)
 
         if getattr(auto_settings, "auto_approve_permission_requests", False):
+            pre_tool_hook = dict(hook_def)
+            pre_tool_hook["statusMessage"] = "Auto-allowing configured Claude tool call if allowed"
+            self._register_hook_event(claude_settings, "PreToolUse", pre_tool_hook)
             approval_hook = dict(hook_def)
             approval_hook["statusMessage"] = "Auto-approving configured Claude permission request if allowed"
             self._register_hook_event(claude_settings, "PermissionRequest", approval_hook)
         else:
+            self._register_hook_event(claude_settings, "PreToolUse", None)
             self._register_hook_event(claude_settings, "PermissionRequest", None)
 
         desired_rules = permission_rules_from_auto_settings(auto_settings)
@@ -157,8 +161,8 @@ class ClaudeProvider(AutoContinueProvider):
 
             hooks = settings.get("hooks", {})
 
-            # Remove from Stop/SubagentStop/PermissionRequest
-            for event_name in ["Stop", "SubagentStop", "PermissionRequest"]:
+            # Remove from Stop/SubagentStop/PreToolUse/PermissionRequest
+            for event_name in ["Stop", "SubagentStop", "PreToolUse", "PermissionRequest"]:
                 if event_name in hooks:
                     filtered = []
                     for hook_group in hooks[event_name]:

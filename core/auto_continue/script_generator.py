@@ -167,12 +167,12 @@ try {{
 
     # Permission prompts must be answered quickly. Git snapshots can be slow in
     # large repositories, so only run them for stop/continue events.
-    if ($hookEvent -ne "PermissionRequest" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
+    if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
         Write-Log "Creating git snapshot on stop hook..." "INFO"
         Create-GitSnapshot -Message "git-snapshot"
     }}
 
-    if ($isClaude -and $hookEvent -eq "PermissionRequest") {{
+    if ($isClaude -and ($hookEvent -eq "PermissionRequest" -or $hookEvent -eq "PreToolUse")) {{
         if (-not $autoApprovePermissionRequests) {{
             exit 0
         }}
@@ -343,26 +343,36 @@ try {{
         }} | ConvertTo-Json -Compress
         try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
 
-        $output = @{{
-            hookSpecificOutput = @{{
-                hookEventName = "PermissionRequest"
-                decision = @{{
-                    behavior = "allow"
-                    updatedPermissions = @(
-                        @{{
-                            type = "addRules"
-                            rules = @(
-                                @{{
-                                    toolName = $toolName
-                                }}
-                            )
-                            behavior = "allow"
-                            destination = "session"
-                        }}
-                    )
+        if ($hookEvent -eq "PreToolUse") {{
+            $output = @{{
+                hookSpecificOutput = @{{
+                    hookEventName = "PreToolUse"
+                    permissionDecision = "allow"
+                    permissionDecisionReason = "Auto-approved by API Switcher"
+                }}
+            }} | ConvertTo-Json -Depth 8
+        }} else {{
+            $output = @{{
+                hookSpecificOutput = @{{
+                    hookEventName = "PermissionRequest"
+                    decision = @{{
+                        behavior = "allow"
+                        updatedPermissions = @(
+                            @{{
+                                type = "addRules"
+                                rules = @(
+                                    @{{
+                                        toolName = $toolName
+                                    }}
+                                )
+                                behavior = "allow"
+                                destination = "session"
+                            }}
+                        )
                 }}
             }}
-        }} | ConvertTo-Json -Depth 8
+            }} | ConvertTo-Json -Depth 8
+        }}
         Write-Output $output
         exit 0
     }}

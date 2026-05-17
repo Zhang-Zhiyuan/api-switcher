@@ -344,6 +344,7 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     for script in [local_script, remote_script]:
         assert "recoverable_api_error_detected" in script
         assert "PermissionRequest" in script
+        assert "PreToolUse" in script
         assert "Bash" in script
         assert '"allow"' in script
         assert "stream disconnected before completion" in script
@@ -360,8 +361,8 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "Ensure-LocalGitIgnore" in local_script
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
-    assert '$hookEvent -ne "PermissionRequest" -and $gitAutoSnapshot' in local_script
-    assert local_script.count('$hookEvent -eq "PermissionRequest"') == 1
+    assert '$hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse"' in local_script
+    assert 'permissionDecision = "allow"' in local_script
     assert "auto_continue_permission_state.json" in local_script
     assert "node_modules/" in local_script
     assert ".env.*" in local_script
@@ -369,7 +370,8 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "DEFAULT_GITIGNORE_LINES" in remote_script
     assert "initialized_repo = False" in remote_script
     assert "if initialized_repo:" in remote_script
-    assert 'if hook_event != "PermissionRequest" and git_snapshot_enabled:' in remote_script
+    assert 'if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled:' in remote_script
+    assert '"permissionDecision": "allow"' in remote_script
     assert "auto_continue_permission_state.json" in remote_script
     assert "node_modules/" in remote_script
     assert ".env.*" in remote_script
@@ -478,7 +480,7 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
 
-    def run_hook(settings: dict, tool_name: str, input_extra: dict | None = None):
+    def run_hook(settings: dict, tool_name: str, input_extra: dict | None = None, event_name: str = "PermissionRequest"):
         settings_path = tmp_path / f"settings_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
         input_path = tmp_path / f"input_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
         state_dir = tmp_path / "state"
@@ -490,7 +492,7 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
         }
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         payload = {
-            "hook_event_name": "PermissionRequest",
+            "hook_event_name": event_name,
             "session_id": f"session-{tool_name}-{len(list(tmp_path.iterdir()))}",
             "tool_name": tool_name,
         }
@@ -535,6 +537,13 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     assert nested_allowed.returncode == 0
     assert '"behavior": "allow"' in nested_allowed.stdout
 
+    pre_tool_allowed = run_hook({}, "Bash", event_name="PreToolUse")
+    assert pre_tool_allowed.returncode == 0
+    pre_tool_output = json.loads(pre_tool_allowed.stdout)
+    pre_tool_specific = pre_tool_output["hookSpecificOutput"]
+    assert pre_tool_specific["hookEventName"] == "PreToolUse"
+    assert pre_tool_specific["permissionDecision"] == "allow"
+
 
 def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, monkeypatch):
     import os
@@ -575,7 +584,7 @@ def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, m
     )
     input_path.write_text(
         json.dumps({
-            "hook_event_name": "PermissionRequest",
+            "hook_event_name": "PreToolUse",
             "session_id": "session-permission-fast",
             "tool_name": "Bash",
         }),
@@ -596,7 +605,7 @@ def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, m
     )
 
     assert result.returncode == 0
-    assert '"behavior": "allow"' in result.stdout
+    assert '"permissionDecision": "allow"' in result.stdout
     assert not marker.exists()
     assert not (state_dir / "auto_continue_permission_state.json").exists()
     assert not (state_dir / "auto_continue_stop_state.json").exists()
@@ -629,20 +638,23 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
         encoding="utf-8-sig",
     )
 
-    result = subprocess.run(
-        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-        input=json.dumps({
-            "hook_event_name": "PermissionRequest",
-            "session_id": "session-local-fast",
-            "permissionRequest": {"toolName": "Bash"},
-        }),
-        cwd=tmp_path,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=10,
-        check=False,
-    )
+    def run_hook(event_name: str):
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            input=json.dumps({
+                "hook_event_name": event_name,
+                "session_id": "session-local-fast",
+                "permissionRequest": {"toolName": "Bash"},
+            }),
+            cwd=tmp_path,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    result = run_hook("PermissionRequest")
 
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
@@ -651,6 +663,13 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
     assert decision["updatedPermissions"][0]["rules"] == [{"toolName": "Bash"}]
     assert not (tmp_path / "auto_continue_permission_state.json").exists()
     assert not (tmp_path / "auto_continue_stop_state.json").exists()
+
+    pre_tool_result = run_hook("PreToolUse")
+    assert pre_tool_result.returncode == 0, pre_tool_result.stderr
+    pre_tool_output = json.loads(pre_tool_result.stdout)
+    pre_tool_specific = pre_tool_output["hookSpecificOutput"]
+    assert pre_tool_specific["hookEventName"] == "PreToolUse"
+    assert pre_tool_specific["permissionDecision"] == "allow"
 
 
 def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch):
@@ -667,12 +686,19 @@ def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch)
 
     hooks = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))["hooks"]
     assert "PermissionRequest" in hooks
+    assert "PreToolUse" in hooks
     commands = [
         hook["command"]
         for group in hooks["PermissionRequest"]
         for hook in group.get("hooks", [])
     ]
     assert any("auto_continue_stop.ps1" in command for command in commands)
+    pre_tool_commands = [
+        hook["command"]
+        for group in hooks["PreToolUse"]
+        for hook in group.get("hooks", [])
+    ]
+    assert any("auto_continue_stop.ps1" in command for command in pre_tool_commands)
 
 
 def test_claude_auto_approve_preseeds_permission_allow_rules(tmp_path, monkeypatch):
