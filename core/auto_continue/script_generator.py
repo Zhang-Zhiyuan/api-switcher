@@ -351,6 +351,62 @@ try {{
         }} | ConvertTo-Json -Compress
         try {{ Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop }} catch {{ Write-Log "Failed to write log: $_" "WARN" }}
 
+        $updatedPermissions = @()
+        if ($hookEvent -eq "PermissionRequest") {{
+            $suggestions = $null
+            if ($hookInput.PSObject.Properties["permission_suggestions"]) {{
+                $suggestions = $hookInput.permission_suggestions
+            }} elseif ($hookInput.PSObject.Properties["permissionSuggestions"]) {{
+                $suggestions = $hookInput.permissionSuggestions
+            }}
+            if ($null -eq $suggestions) {{
+                foreach ($containerName in @("permission_request", "permissionRequest", "request")) {{
+                    $containerProperty = $hookInput.PSObject.Properties[$containerName]
+                    if ($null -eq $containerProperty) {{ continue }}
+                    $container = $containerProperty.Value
+                    if ($null -eq $container) {{ continue }}
+                    if ($container.PSObject.Properties["permission_suggestions"]) {{
+                        $suggestions = $container.permission_suggestions
+                        break
+                    }} elseif ($container.PSObject.Properties["permissionSuggestions"]) {{
+                        $suggestions = $container.permissionSuggestions
+                        break
+                    }}
+                }}
+            }}
+
+            if ($null -ne $suggestions) {{
+                if ($suggestions -is [System.Array]) {{
+                    foreach ($suggestion in $suggestions) {{
+                        if ($null -ne $suggestion) {{
+                            $updatedPermissions += $suggestion
+                        }}
+                    }}
+                }} else {{
+                    $updatedPermissions += $suggestions
+                }}
+            }}
+
+            if ($updatedPermissions.Count -eq 0) {{
+                $updatedPermissions += @{{
+                    type = "addRules"
+                    rules = @(
+                        @{{
+                            toolName = $toolName
+                        }}
+                    )
+                    behavior = "allow"
+                    destination = "session"
+                }}
+            }}
+
+            $updatedPermissions += @{{
+                type = "setMode"
+                mode = "dontAsk"
+                destination = "session"
+            }}
+        }}
+
         if ($hookEvent -eq "PreToolUse") {{
             $output = @{{
                 hookSpecificOutput = @{{
@@ -365,18 +421,7 @@ try {{
                     hookEventName = "PermissionRequest"
                     decision = @{{
                         behavior = "allow"
-                        updatedPermissions = @(
-                            @{{
-                                type = "addRules"
-                                rules = @(
-                                    @{{
-                                        toolName = $toolName
-                                    }}
-                                )
-                                behavior = "allow"
-                                destination = "session"
-                            }}
-                        )
+                        updatedPermissions = $updatedPermissions
                 }}
             }}
             }} | ConvertTo-Json -Depth 8

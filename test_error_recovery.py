@@ -511,13 +511,17 @@ def test_permission_auto_approve_treats_bash_as_regular_tool():
     assert '$null -eq $settings.PSObject.Properties["auto_approve_tools"]' in local_script
     assert '$legacyBashAllowed -and $allowedTools.Count -gt 0' in local_script
     assert "$autoApproveMax = 0" in local_script
-    assert 'updatedPermissions = @(' in local_script
+    assert '$updatedPermissions += @{' in local_script
     assert 'destination = "session"' in local_script
+    assert 'mode = "dontAsk"' in local_script
+    assert 'permission_suggestions' in local_script
     assert 'if "auto_approve_tools" in settings:' in remote_script
     assert "tools = allowed_tools if isinstance(allowed_tools, list) else []" in remote_script
     assert 'if legacy_bash_allowed and "auto_approve_tools" in settings and result' in remote_script
-    assert '"updatedPermissions": [' in remote_script
+    assert '"updatedPermissions": permission_decision_updates(data, tool_name)' in remote_script
     assert '"destination": "session"' in remote_script
+    assert '"mode": "dontAsk"' in remote_script
+    assert 'permission_suggestions_from_input' in remote_script
     assert "else DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS" not in remote_script
     assert "$toolName -ieq \"Bash\"" not in local_script
     assert 'tool_name.lower() == "bash"' not in remote_script
@@ -579,6 +583,58 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     edit_decision = edit_output["hookSpecificOutput"]["decision"]
     assert edit_decision["updatedPermissions"][0]["destination"] == "session"
     assert edit_decision["updatedPermissions"][0]["rules"] == [{"toolName": "Edit"}]
+    assert edit_decision["updatedPermissions"][-1] == {
+        "type": "setMode",
+        "mode": "dontAsk",
+        "destination": "session",
+    }
+
+    suggestion_allowed = run_hook(
+        {},
+        "Bash",
+        {
+            "permission_suggestions": [
+                {
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "git status:*"}],
+                    "behavior": "allow",
+                    "destination": "localSettings",
+                }
+            ],
+        },
+    )
+    assert suggestion_allowed.returncode == 0
+    suggestion_output = json.loads(suggestion_allowed.stdout)
+    suggestion_updates = suggestion_output["hookSpecificOutput"]["decision"]["updatedPermissions"]
+    assert suggestion_updates[0]["rules"] == [{"toolName": "Bash", "ruleContent": "git status:*"}]
+    assert suggestion_updates[0]["destination"] == "localSettings"
+    assert suggestion_updates[-1] == {
+        "type": "setMode",
+        "mode": "dontAsk",
+        "destination": "session",
+    }
+
+    nested_suggestion_allowed = run_hook(
+        {},
+        "Bash",
+        {
+            "permissionRequest": {
+                "toolName": "Bash",
+                "permissionSuggestions": [
+                    {
+                        "type": "addRules",
+                        "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
+                        "behavior": "allow",
+                        "destination": "session",
+                    }
+                ],
+            },
+        },
+    )
+    assert nested_suggestion_allowed.returncode == 0
+    nested_output = json.loads(nested_suggestion_allowed.stdout)
+    nested_updates = nested_output["hookSpecificOutput"]["decision"]["updatedPermissions"]
+    assert nested_updates[0]["rules"] == [{"toolName": "Bash", "ruleContent": "npm test:*"}]
 
     default_allowed = run_hook({}, "Bash")
     assert default_allowed.returncode == 0
@@ -699,7 +755,7 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
         encoding="utf-8-sig",
     )
 
-    def run_hook(event_name: str, camel_case: bool = False):
+    def run_hook(event_name: str, camel_case: bool = False, extra: dict | None = None):
         payload = {
             "permissionRequest": {"toolName": "Bash"},
         }
@@ -713,6 +769,8 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
                 "hook_event_name": event_name,
                 "session_id": "session-local-fast",
             })
+        if extra:
+            payload.update(extra)
         return subprocess.run(
             [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
             input=json.dumps(payload),
@@ -731,8 +789,55 @@ def test_local_permission_hook_outputs_structured_updated_permissions(tmp_path):
     decision = output["hookSpecificOutput"]["decision"]
     assert decision["behavior"] == "allow"
     assert decision["updatedPermissions"][0]["rules"] == [{"toolName": "Bash"}]
+    assert decision["updatedPermissions"][-1] == {
+        "type": "setMode",
+        "mode": "dontAsk",
+        "destination": "session",
+    }
     assert not (tmp_path / "auto_continue_permission_state.json").exists()
     assert not (tmp_path / "auto_continue_stop_state.json").exists()
+
+    suggested_result = run_hook(
+        "PermissionRequest",
+        extra={
+            "permissionSuggestions": [
+                {
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "git status:*"}],
+                    "behavior": "allow",
+                    "destination": "localSettings",
+                }
+            ],
+        },
+    )
+    assert suggested_result.returncode == 0, suggested_result.stderr
+    suggested_output = json.loads(suggested_result.stdout)
+    suggested_updates = suggested_output["hookSpecificOutput"]["decision"]["updatedPermissions"]
+    assert suggested_updates[0]["rules"] == [{"toolName": "Bash", "ruleContent": "git status:*"}]
+    assert suggested_updates[0]["destination"] == "localSettings"
+    assert suggested_updates[-1]["type"] == "setMode"
+    assert suggested_updates[-1]["mode"] == "dontAsk"
+
+    nested_suggested_result = run_hook(
+        "PermissionRequest",
+        extra={
+            "permissionRequest": {
+                "toolName": "Bash",
+                "permission_suggestions": [
+                    {
+                        "type": "addRules",
+                        "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
+                        "behavior": "allow",
+                        "destination": "session",
+                    }
+                ],
+            },
+        },
+    )
+    assert nested_suggested_result.returncode == 0, nested_suggested_result.stderr
+    nested_suggested_output = json.loads(nested_suggested_result.stdout)
+    nested_updates = nested_suggested_output["hookSpecificOutput"]["decision"]["updatedPermissions"]
+    assert nested_updates[0]["rules"] == [{"toolName": "Bash", "ruleContent": "npm test:*"}]
 
     pre_tool_result = run_hook("PreToolUse")
     assert pre_tool_result.returncode == 0, pre_tool_result.stderr
@@ -761,7 +866,10 @@ def test_claude_permission_request_hook_can_be_registered(tmp_path, monkeypatch)
     provider.install_hook_script()
     provider.register_hook_for_settings(settings)
 
-    hooks = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))["hooks"]
+    claude_settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    hooks = claude_settings["hooks"]
+    assert claude_settings["permissions"]["defaultMode"] == "dontAsk"
+    assert claude_settings["skipDangerousModePermissionPrompt"] is False
     assert "PermissionRequest" in hooks
     assert "PreToolUse" in hooks
     commands = [
@@ -804,6 +912,7 @@ def test_claude_auto_approve_preseeds_permission_allow_rules(tmp_path, monkeypat
 
     claude_settings = json.loads(settings_path.read_text(encoding="utf-8"))
     allow_rules = claude_settings["permissions"]["allow"]
+    assert claude_settings["permissions"]["defaultMode"] == "dontAsk"
     assert allow_rules == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
     assert claude_settings["permissions"]["ask"] == ["Read"]
 

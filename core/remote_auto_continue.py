@@ -747,6 +747,45 @@ def write_jsonl(path, data):
         log(f"Failed to write log: {exc}", "WARN")
 
 
+def permission_suggestions_from_input(data):
+    raw = data.get("permission_suggestions")
+    if raw is None:
+        raw = data.get("permissionSuggestions")
+    if raw is None:
+        for key in ("permission_request", "permissionRequest", "request"):
+            container = data.get(key)
+            if not isinstance(container, dict):
+                continue
+            raw = container.get("permission_suggestions")
+            if raw is None:
+                raw = container.get("permissionSuggestions")
+            if raw is not None:
+                break
+    if isinstance(raw, list):
+        candidates = raw
+    elif isinstance(raw, dict):
+        candidates = [raw]
+    else:
+        candidates = []
+    return [item for item in candidates if isinstance(item, dict)]
+
+
+def permission_decision_updates(data, tool_name):
+    updates = permission_suggestions_from_input(data)
+    if not updates:
+        updates = [
+            {
+                "type": "addRules",
+                "rules": [{"toolName": tool_name}],
+                "behavior": "allow",
+                "destination": "session",
+            }
+        ]
+    updates = list(updates)
+    updates.append({"type": "setMode", "mode": "dontAsk", "destination": "session"})
+    return updates
+
+
 def ensure_gitignore():
     path = os.path.join(os.getcwd(), ".gitignore")
     if os.path.exists(path):
@@ -971,14 +1010,7 @@ def main():
                     "hookEventName": "PermissionRequest",
                     "decision": {
                         "behavior": "allow",
-                        "updatedPermissions": [
-                            {
-                                "type": "addRules",
-                                "rules": [{"toolName": tool_name}],
-                                "behavior": "allow",
-                                "destination": "session",
-                            }
-                        ],
+                        "updatedPermissions": permission_decision_updates(data, tool_name),
                     },
                 }
             }
@@ -1217,6 +1249,12 @@ def _register_claude_hook(
     else:
         register_event("SubagentStop", None)
     if settings_data and settings_data.auto_approve_permission_requests:
+        permissions = settings.get("permissions")
+        permissions = dict(permissions) if isinstance(permissions, dict) else {}
+        permissions["defaultMode"] = "dontAsk"
+        settings["permissions"] = permissions
+        settings["skipDangerousModePermissionPrompt"] = False
+
         pre_tool_hook = dict(hook_def)
         pre_tool_hook["statusMessage"] = "Auto-allowing configured Claude tool call if allowed"
         register_event("PreToolUse", pre_tool_hook)

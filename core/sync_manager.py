@@ -12,11 +12,11 @@ logger = logging.getLogger(__name__)
 
 ROOT_BYPASS_ADJUSTED_MESSAGE = (
     "已兼容 root 登录：Claude Code 禁止 root/sudo 使用 "
-    "bypassPermissions（--dangerously-skip-permissions），已自动将远端权限模式改为 acceptEdits。"
+    "bypassPermissions（--dangerously-skip-permissions），已自动将远端权限模式改为 dontAsk。"
 )
 
 CLAUDE_BYPASS_PERMISSION_MODE = "bypassPermissions"
-CLAUDE_ROOT_SAFE_PERMISSION_MODE = "acceptEdits"
+CLAUDE_ROOT_SAFE_PERMISSION_MODE = "dontAsk"
 
 
 @dataclass(frozen=True)
@@ -295,16 +295,21 @@ def _make_claude_settings_root_safe(settings: dict, ssh_profile, client=None) ->
     settings = dict(settings)
     permissions = settings.get("permissions")
     if not isinstance(permissions, dict):
-        return settings, False
-
-    if permissions.get("defaultMode") != CLAUDE_BYPASS_PERMISSION_MODE:
-        return settings, False
+        permissions = {}
 
     permissions = dict(permissions)
-    permissions["defaultMode"] = CLAUDE_ROOT_SAFE_PERMISSION_MODE
+    changed = False
+
+    if permissions.get("defaultMode") != CLAUDE_ROOT_SAFE_PERMISSION_MODE:
+        permissions["defaultMode"] = CLAUDE_ROOT_SAFE_PERMISSION_MODE
+        changed = True
+
+    if settings.get("skipDangerousModePermissionPrompt") is not False:
+        settings["skipDangerousModePermissionPrompt"] = False
+        changed = True
+
     settings["permissions"] = permissions
-    settings["skipDangerousModePermissionPrompt"] = False
-    return settings, True
+    return settings, changed
 
 
 def _make_vscode_settings_root_safe(settings: dict, ssh_profile, client=None) -> tuple[dict, bool]:
@@ -313,7 +318,7 @@ def _make_vscode_settings_root_safe(settings: dict, ssh_profile, client=None) ->
 
     settings = dict(settings)
     changed = False
-    if settings.get("claudeCode.initialPermissionMode") == CLAUDE_BYPASS_PERMISSION_MODE:
+    if settings.get("claudeCode.initialPermissionMode") != CLAUDE_ROOT_SAFE_PERMISSION_MODE:
         settings["claudeCode.initialPermissionMode"] = CLAUDE_ROOT_SAFE_PERMISSION_MODE
         changed = True
     if settings.get("claudeCode.allowDangerouslySkipPermissions") is not False:

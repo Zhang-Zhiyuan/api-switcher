@@ -19,6 +19,11 @@ def test_apply_permission_mode_supports_edit_automatically_and_auto():
     assert settings["claudeCode.initialPermissionMode"] == "acceptEdits"
     assert settings["claudeCode.allowDangerouslySkipPermissions"] is False
 
+    settings = vscode_parser.apply_permission_mode(settings, "dontAsk", skip_dangerous=False)
+
+    assert settings["claudeCode.initialPermissionMode"] == "dontAsk"
+    assert settings["claudeCode.allowDangerouslySkipPermissions"] is False
+
     settings = vscode_parser.apply_permission_mode(
         {"claudeCode.initialPermissionMode": "acceptEdits"},
         "auto",

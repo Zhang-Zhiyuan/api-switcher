@@ -27,7 +27,7 @@ def write_vscode_settings(data: dict) -> None:
     _atomic_write(VSCODE_SETTINGS, content)
 
 
-VSCODE_CLAUDE_INITIAL_PERMISSION_MODES = {"default", "acceptEdits", "plan", "bypassPermissions"}
+VSCODE_CLAUDE_INITIAL_PERMISSION_MODES = {"default", "acceptEdits", "dontAsk", "plan", "bypassPermissions"}
 
 
 def apply_permission_mode(settings: dict, permission_mode: str, skip_dangerous: bool) -> dict:

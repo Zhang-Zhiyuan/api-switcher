@@ -412,9 +412,9 @@ def test_sync_claude_to_root_downgrades_bypass_permissions(isolated_ssh, monkeyp
 
     message = sync_manager.sync_claude_to_server("remote", "relay")
 
-    assert written["settings"]["permissions"]["defaultMode"] == "acceptEdits"
+    assert written["settings"]["permissions"]["defaultMode"] == "dontAsk"
     assert written["settings"]["skipDangerousModePermissionPrompt"] is False
-    assert written["vscode"]["claudeCode.initialPermissionMode"] == "acceptEdits"
+    assert written["vscode"]["claudeCode.initialPermissionMode"] == "dontAsk"
     assert written["vscode"]["claudeCode.allowDangerouslySkipPermissions"] is False
     assert "已兼容 root 登录" in message
     assert "root" in message
@@ -450,15 +450,20 @@ def test_sync_claude_to_non_root_preserves_bypass_permissions(isolated_ssh, monk
     assert "已兼容 root 登录" not in message
 
 
-def test_root_safety_preserves_edit_automatically_mode():
+def test_root_safety_forces_no_prompt_mode():
     profile = SSHProfile(name="remote", host="ssh.example.com", username="root")
 
     settings, changed = sync_manager._make_claude_settings_root_safe(
         {"permissions": {"defaultMode": "acceptEdits"}},
         profile,
     )
-    assert changed is False
-    assert settings["permissions"]["defaultMode"] == "acceptEdits"
+    assert changed is True
+    assert settings["permissions"]["defaultMode"] == "dontAsk"
+
+    missing_permissions, changed = sync_manager._make_claude_settings_root_safe({}, profile)
+    assert changed is True
+    assert missing_permissions["permissions"]["defaultMode"] == "dontAsk"
+    assert missing_permissions["skipDangerousModePermissionPrompt"] is False
 
     vscode, changed = sync_manager._make_vscode_settings_root_safe(
         {
@@ -467,8 +472,8 @@ def test_root_safety_preserves_edit_automatically_mode():
         },
         profile,
     )
-    assert changed is False
-    assert vscode["claudeCode.initialPermissionMode"] == "acceptEdits"
+    assert changed is True
+    assert vscode["claudeCode.initialPermissionMode"] == "dontAsk"
 
 
 def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrides(isolated_ssh, monkeypatch):
@@ -553,9 +558,9 @@ def test_sync_claude_account_to_root_downgrades_existing_bypass_permissions(isol
 
     message = sync_manager.sync_claude_account_to_server("remote", "work")
 
-    assert written["settings"]["permissions"]["defaultMode"] == "acceptEdits"
+    assert written["settings"]["permissions"]["defaultMode"] == "dontAsk"
     assert written["settings"]["skipDangerousModePermissionPrompt"] is False
-    assert written["vscode"]["claudeCode.initialPermissionMode"] == "acceptEdits"
+    assert written["vscode"]["claudeCode.initialPermissionMode"] == "dontAsk"
     assert written["vscode"]["claudeCode.allowDangerouslySkipPermissions"] is False
     assert "已兼容 root 登录" in message
 
@@ -1035,6 +1040,8 @@ def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
     settings = json.loads(sftp.files[settings_path].decode("utf-8"))
     assert "PreToolUse" in settings["hooks"]
     assert "PermissionRequest" in settings["hooks"]
+    assert settings["permissions"]["defaultMode"] == "dontAsk"
+    assert settings["skipDangerousModePermissionPrompt"] is False
     assert settings["permissions"]["allow"] == ["Read(/tmp/**)", "Edit", "Bash", "Write"]
     assert settings["permissions"]["ask"] == ["Read"]
     state = json.loads(sftp.files[permission_rules_path].decode("utf-8"))

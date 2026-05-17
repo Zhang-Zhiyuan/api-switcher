@@ -106,6 +106,15 @@ class ClaudeProvider(AutoContinueProvider):
             self._register_hook_event(claude_settings, "SubagentStop", None)
 
         if getattr(auto_settings, "auto_approve_permission_requests", False):
+            permissions = claude_settings.get("permissions")
+            if not isinstance(permissions, dict):
+                permissions = {}
+            else:
+                permissions = dict(permissions)
+            permissions["defaultMode"] = "dontAsk"
+            claude_settings["permissions"] = permissions
+            claude_settings["skipDangerousModePermissionPrompt"] = False
+
             pre_tool_hook = dict(hook_def)
             pre_tool_hook["statusMessage"] = "Auto-allowing configured Claude tool call if allowed"
             self._register_hook_event(claude_settings, "PreToolUse", pre_tool_hook)
