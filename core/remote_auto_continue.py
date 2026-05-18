@@ -1160,6 +1160,10 @@ def _is_our_command(command: str) -> bool:
     return any(marker in str(command or "") for marker in SCRIPT_MARKERS)
 
 
+def _claude_event_has_our_command(settings: dict, event_name: str) -> bool:
+    return any(_is_our_command(command) for command in _iter_claude_hook_commands(settings, (event_name,)))
+
+
 def _iter_claude_hook_commands(
     settings: dict,
     event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest"),
@@ -1675,7 +1679,35 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             provider_config = None
             status.issues.append(f"Claude settings.json 读取失败: {e}")
         if isinstance(provider_config, dict):
-            status.hook_registered = any(_is_our_command(command) for command in _iter_claude_hook_commands(provider_config))
+            stop_hook_registered = _claude_event_has_our_command(provider_config, "Stop")
+            pre_tool_hook_registered = _claude_event_has_our_command(provider_config, "PreToolUse")
+            permission_hook_registered = _claude_event_has_our_command(provider_config, "PermissionRequest")
+            needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
+            needs_permission_hooks = bool(status.permission_auto_approve_enabled)
+            if needs_stop_hook or needs_permission_hooks:
+                status.hook_registered = (
+                    (not needs_stop_hook or stop_hook_registered)
+                    and (not needs_permission_hooks or (pre_tool_hook_registered and permission_hook_registered))
+                )
+            else:
+                status.hook_registered = any(
+                    _is_our_command(command)
+                    for command in _iter_claude_hook_commands(provider_config)
+                )
+            if needs_stop_hook and not stop_hook_registered:
+                status.issues.append("Stop Hook 未注册；请重新安装/修复远端自动续跑")
+            if needs_permission_hooks:
+                missing_permission_hooks = []
+                if not pre_tool_hook_registered:
+                    missing_permission_hooks.append("PreToolUse")
+                if not permission_hook_registered:
+                    missing_permission_hooks.append("PermissionRequest")
+                if missing_permission_hooks:
+                    status.issues.append(
+                        "权限自动确认 Hook 未注册: "
+                        + ", ".join(missing_permission_hooks)
+                        + "；可能仍会弹 yes，请重新安装/修复远端自动续跑"
+                    )
             permissions = (
                 provider_config.get("permissions")
                 if isinstance(provider_config.get("permissions"), dict)
@@ -1687,6 +1719,18 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                 missing_rules = missing_allow_rules(desired_rules, permissions.get("allow", []))
                 ask_conflicts = conflicting_permission_rules(desired_rules, permissions.get("ask", []))
                 deny_conflicts = conflicting_permission_rules(desired_rules, permissions.get("deny", []))
+                auto_approves_everything = any(
+                    str(tool or "").strip() == "*"
+                    for tool in parsed_settings.auto_approve_tools
+                )
+                broad_deny_rules = []
+                if auto_approves_everything:
+                    deny_conflict_keys = {rule.casefold() for rule in deny_conflicts}
+                    broad_deny_rules = [
+                        rule
+                        for rule in rules_from_payload(permissions.get("deny", []))
+                        if rule.casefold() not in deny_conflict_keys
+                    ]
                 if status.permission_mode != "dontAsk":
                     status.issues.append(
                         "Claude 权限模式未切到 dontAsk，可能仍会弹 yes；请重新安装/修复远端自动续跑"
@@ -1697,6 +1741,8 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                     status.issues.append("permissions.ask 仍会强制询问: " + ", ".join(ask_conflicts[:5]))
                 if deny_conflicts:
                     status.issues.append("permissions.deny 会阻止自动执行: " + ", ".join(deny_conflicts[:5]))
+                if broad_deny_rules:
+                    status.issues.append("permissions.deny 会阻止通配自动执行: " + ", ".join(broad_deny_rules[:5]))
         else:
             status.issues.append("Claude settings.json 无法读取")
     else:
