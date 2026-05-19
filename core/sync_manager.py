@@ -32,6 +32,23 @@ CODEX_WIRE_API_AUTO = "auto"
 CODEX_WIRE_API_PROFILE = "profile"
 CODEX_WIRE_API_VALUES = {"responses"}
 CODEX_WIRE_API_MODES = CODEX_WIRE_API_VALUES | {CODEX_WIRE_API_AUTO, CODEX_WIRE_API_PROFILE}
+REMOTE_API_CLEAR_TARGETS = {"claude", "codex", "all"}
+REMOTE_CLAUDE_API_ENV_NAMES = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+)
+REMOTE_CODEX_API_ENV_NAMES = (
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "KIMI_API_KEY",
+    "MOONSHOT_API_KEY",
+    "ZHIPUAI_API_KEY",
+)
 
 
 _REMOTE_CODEX_WIRE_BENCHMARK_SCRIPT = r"""
@@ -684,6 +701,99 @@ def sync_all_to_server(ssh_name: str, codex_wire_api_mode: str | None = CODEX_WI
     if failures:
         raise RuntimeError("；".join(failures))
     return "没有当前生效的 API 或账号可同步"
+
+
+def _clear_remote_claude_api_info(client, ssh_profile) -> str:
+    settings = remote_config.read_remote_claude_settings(client, ssh_profile)
+    config = remote_config.read_remote_claude_config(client, ssh_profile)
+    changed = False
+    touched = False
+
+    if settings is not None:
+        touched = True
+        cleaned_settings = parser.clear_claude_api_overrides(settings)
+        if cleaned_settings != settings:
+            changed = True
+        remote_config.write_remote_claude_settings(client, cleaned_settings, ssh_profile)
+
+    if config is not None:
+        touched = True
+        cleaned_config = parser.clear_claude_config_auth(config)
+        if cleaned_config != config:
+            changed = True
+        remote_config.write_remote_claude_config(client, cleaned_config, ssh_profile)
+
+    from core import persistent_env
+
+    persistent_env.delete_remote_user_env(client, REMOTE_CLAUDE_API_ENV_NAMES)
+
+    if changed:
+        return "Claude API 信息已清除"
+    if touched:
+        return "Claude 未发现可清除的 API 覆盖"
+    return "Claude 配置文件不存在，已清理相关环境变量"
+
+
+def _remote_codex_api_env_names(config: dict | None) -> tuple[str, ...]:
+    names = set(REMOTE_CODEX_API_ENV_NAMES)
+    if isinstance(config, dict):
+        provider_id = str(config.get("model_provider") or "").strip()
+        model_providers = config.get("model_providers")
+        if provider_id and isinstance(model_providers, dict):
+            provider_table = model_providers.get(provider_id)
+            if isinstance(provider_table, dict):
+                env_key = str(provider_table.get("env_key") or "").strip()
+                if env_key:
+                    names.add(env_key)
+    return tuple(sorted(names))
+
+
+def _clear_remote_codex_api_info(client, ssh_profile) -> str:
+    config = remote_config.read_remote_codex_config(client, ssh_profile)
+    auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+    changed = False
+    touched = False
+
+    if config is not None:
+        touched = True
+        cleaned_config = toml_parser.clear_codex_api_overrides(config)
+        if cleaned_config != config:
+            changed = True
+        remote_config.write_remote_codex_config(client, cleaned_config, ssh_profile)
+
+    if auth is not None:
+        touched = True
+        cleaned_auth = auth_parser.clear_codex_api_auth(auth)
+        if cleaned_auth != auth:
+            changed = True
+        remote_config.write_remote_codex_auth(client, cleaned_auth, ssh_profile)
+
+    from core import persistent_env
+
+    persistent_env.delete_remote_user_env(client, _remote_codex_api_env_names(config))
+
+    if changed:
+        return "Codex API 信息已清除"
+    if touched:
+        return "Codex 未发现可清除的 API 覆盖"
+    return "Codex 配置文件不存在，已清理相关环境变量"
+
+
+def clear_remote_api_info(ssh_name: str, target: str = "all") -> str:
+    """Clear current Claude/Codex API runtime information from an SSH server."""
+    target = str(target or "all").strip().lower()
+    if target not in REMOTE_API_CLEAR_TARGETS:
+        raise ValueError(f"不支持的远端 API 清理目标: {target}")
+
+    ssh_profile, client = _connect_ssh(ssh_name)
+    results = []
+    if target in {"claude", "all"}:
+        results.append(_clear_remote_claude_api_info(client, ssh_profile))
+    if target in {"codex", "all"}:
+        results.append(_clear_remote_codex_api_info(client, ssh_profile))
+
+    logger.info("Cleared remote API info on %s for target=%s", ssh_profile.host, target)
+    return f"已清理 {ssh_profile.host}： " + "；".join(results)
 
 
 def pull_claude_from_server(ssh_name: str) -> str:

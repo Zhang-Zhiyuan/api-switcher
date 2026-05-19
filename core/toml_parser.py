@@ -113,3 +113,25 @@ def apply_codex_official_account(config: dict) -> dict:
     if previous_provider != "openai" or not config.get("model"):
         config["model"] = "gpt-5.5"
     return sanitize_codex_config(config)
+
+
+def clear_codex_api_overrides(config: dict) -> dict:
+    """Remove the active third-party Codex API provider from config.toml."""
+    config = sanitize_codex_config(config)
+    previous_provider = str(config.get("model_provider") or "openai").strip() or "openai"
+
+    if previous_provider != "openai":
+        model_providers = config.get("model_providers")
+        if isinstance(model_providers, dict):
+            model_providers = dict(model_providers)
+            model_providers.pop(previous_provider, None)
+            if model_providers:
+                config["model_providers"] = model_providers
+            else:
+                config.pop("model_providers", None)
+
+    config["model_provider"] = "openai"
+    config["cli_auth_credentials_store"] = "file"
+    if previous_provider != "openai" or not config.get("model"):
+        config["model"] = "gpt-5.5"
+    return sanitize_codex_config(config)

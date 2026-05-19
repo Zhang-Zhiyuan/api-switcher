@@ -20,6 +20,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._profile_combo = None
         self._codex_wire_api_combo = None
         self._codex_wire_api_hint = None
+        self._clear_api_combo = None
         self._sync_status_label = None
         self._ssh_busy = False
         self._remote_auto_provider_combo = None
@@ -41,6 +42,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             "远端自测选择": "auto",
             "使用本地配置": "profile",
             "强制 responses": "responses",
+        }
+        self._clear_api_options = {
+            "Claude + Codex": "all",
+            "Claude API": "claude",
+            "Codex API": "codex",
         }
         self._build_ui()
 
@@ -185,6 +191,39 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._codex_wire_api_hint.grid(row=2, column=2, columnspan=2, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._codex_wire_api_hint, padding=20)
 
+        ctk.CTkLabel(
+            sync_controls,
+            text="远端清理",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        self._clear_api_combo = ctk.CTkComboBox(
+            sync_controls,
+            values=list(self._clear_api_options.keys()),
+            width=160,
+            **combo_style(),
+        )
+        self._clear_api_combo.grid(row=3, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._clear_api_combo.set("Claude + Codex")
+        clear_hint = ctk.CTkLabel(
+            sync_controls,
+            text="移除服务器当前 API Key/Token、Base URL 覆盖和本工具写入的相关远端环境变量。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        clear_hint.grid(row=3, column=2, sticky="ew", pady=(10, 0))
+        bind_wraplength(sync_controls, clear_hint, padding=20)
+        ctk.CTkButton(
+            sync_controls,
+            text="清除远端 API",
+            width=126,
+            command=self._clear_remote_api_info,
+            **button_style("danger"),
+        ).grid(row=3, column=3, sticky="e", pady=(10, 0))
+
         self._sync_status_label = ctk.CTkLabel(
             sync_controls,
             text="就绪",
@@ -193,7 +232,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._sync_status_label.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._sync_status_label.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -545,6 +584,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             return "auto"
         return self._codex_wire_api_options.get(self._codex_wire_api_combo.get(), "auto")
 
+    def _selected_clear_api_target(self) -> str:
+        if not self._clear_api_combo:
+            return "all"
+        return self._clear_api_options.get(self._clear_api_combo.get(), "all")
+
     def _update_codex_wire_hint(self):
         if not self._codex_wire_api_hint:
             return
@@ -612,6 +656,32 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         do_sync()
+
+    def _clear_remote_api_info(self):
+        server_name = self._server_combo.get()
+        if server_name == "(无)":
+            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+            return
+
+        target = self._selected_clear_api_target()
+        target_label = self._clear_api_combo.get() if self._clear_api_combo else "Claude + Codex"
+
+        def do_clear():
+            self._run_ssh_task(
+                f"正在清除 {server_name} 上的 {target_label} 信息...",
+                lambda: sync_manager.clear_remote_api_info(server_name, target),
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="清除远端 API 信息",
+            message=(
+                f"将清除服务器 \"{server_name}\" 上当前 {target_label} 的 API Key/Token、"
+                "Base URL 覆盖和相关远端环境变量。\n"
+                "此操作不会删除本机保存的 Profile。确定继续吗？"
+            ),
+            on_confirm=do_clear,
+        )
 
     def _selected_remote_auto_targets(self) -> list[str]:
         if not self._remote_auto_provider_combo:

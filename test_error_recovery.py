@@ -33,6 +33,20 @@ def test_error_parser():
             "expected_strategy": RecoveryStrategy.COMPACT_AND_CONTINUE
         },
         {
+            "name": "上游 JSON 内容长度超限错误",
+            "data": {
+                "error_message": (
+                    'API Error: 400 {"code":"CONTENT_LENGTH_EXCEEDS_THRESHOLD",'
+                    '"error":"对话内容超出长度限制啦",'
+                    '"hint":"老板您好～当前会话积累的内容太长了，'
+                    '已超出上游服务的处理能力。建议您新建一个会话或者使用/compact命令压缩再继续。"}'
+                ),
+                "status": 400
+            },
+            "expected_type": ErrorType.CONTENT_LENGTH_EXCEEDED,
+            "expected_strategy": RecoveryStrategy.COMPACT_AND_CONTINUE
+        },
+        {
             "name": "context window limit 错误",
             "data": {
                 "error_message": "API Error: The model has reached its context window limit.",
@@ -286,6 +300,9 @@ def test_script_generation():
     print(f"  包含压缩命令: {'compact' in claude_script}")
     assert "context.*window.*(limit|full|exceed|overflow)" in claude_script
     assert "model.*reached.*context.*window.*limit" in claude_script
+    assert "content_length_exceeds_threshold" in claude_script
+    assert "内容.*超出.*长度" in claude_script
+    assert "上游服务.*处理能力" in claude_script
     assert "prompt|request|messages?" in claude_script
     assert "Get-FirstTextField" in claude_script
     assert '"message", "error", "errorMessage"' in claude_script
@@ -311,6 +328,9 @@ def test_script_generation():
     print(f"  包含压缩命令: {'compress' in codex_script}")
     assert "context.*window.*(limit|full|exceed|overflow)" in codex_script
     assert "model.*reached.*context.*window.*limit" in codex_script
+    assert "content_length_exceeds_threshold" in codex_script
+    assert "内容.*超出.*长度" in codex_script
+    assert "上游服务.*处理能力" in codex_script
     assert "prompt|request|messages?" in codex_script
     assert "Get-FirstTextField" in codex_script
     assert '"message", "error", "errorMessage"' in codex_script
@@ -356,6 +376,9 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
         assert "connection termination" in script
         assert "api error:.*context.*window.*limit" in script
         assert "model.*reached.*context.*window.*limit" in script
+        assert "content_length_exceeds_threshold" in script
+        assert "对话内容超出长度限制" in script
+        assert "上游服务.*处理能力" in script
         assert "backend-api/codex/responses/compact" in script
 
     assert '$toolName -ieq "Bash"' not in local_script
@@ -418,6 +441,61 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
             "session_id": "session-context-window",
             "last_message": "API Error: The model has reached its context window limit.",
         }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    output = json.loads(result.stdout)
+    assert output == {"continue": True, "message": "compact and continue"}
+    log_path = state_dir / "auto_continue_stop_log.jsonl"
+    assert "recoverable_api_error_detected" in log_path.read_text(encoding="utf-8")
+
+
+def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings_path.write_text(
+        json.dumps({
+            "enabled": True,
+            "git_auto_snapshot": False,
+            "max_continuations": 2,
+            "blocker_patterns": ["api error"],
+            "incomplete_patterns": [],
+            "continuation_prompt": "compact and continue",
+        }),
+        encoding="utf-8",
+    )
+    input_path.write_text(
+        json.dumps({
+            "session_id": "session-content-length-json",
+            "last_message": (
+                'API Error: 400 {"code":"CONTENT_LENGTH_EXCEEDS_THRESHOLD",'
+                '"error":"对话内容超出长度限制啦",'
+                '"hint":"当前会话积累的内容太长了，已超出上游服务的处理能力。'
+                '建议您新建一个会话或者使用/compact命令压缩再继续。"}'
+            ),
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
 

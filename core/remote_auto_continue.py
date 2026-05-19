@@ -10,6 +10,7 @@ import shlex
 from typing import Any
 
 from core import profile_manager, remote_config, security
+from core.auto_continue.error_patterns import RECOVERABLE_API_ERROR_PATTERNS
 from core.auto_continue.manager import auto_continue_manager
 from core.auto_continue.permission_rules import (
     apply_managed_permission_rules,
@@ -464,6 +465,18 @@ def _load_git_snapshot_settings(provider_name: str, settings: AutoContinueSettin
     return copied
 
 
+def _python_literal_list(values: list[str]) -> str:
+    lines = ["["]
+    for value in values:
+        if '"' not in value and not value.endswith("\\"):
+            literal = f'r"{value}"'
+        else:
+            literal = repr(value)
+        lines.append(f"    {literal},")
+    lines.append("]")
+    return "\n".join(lines)
+
+
 def _generate_remote_hook_script(settings_path: str, state_dir: str) -> str:
     header = "\n".join(
         [
@@ -628,20 +641,7 @@ def any_pattern(patterns, text):
     return False
 
 
-RECOVERABLE_API_ERROR_PATTERNS = [
-    r"error running remote compact task",
-    r"stream disconnected before completion",
-    r"reconnecting\.\.\.\s*\d+/\d+",
-    r"upstream connect error",
-    r"disconnect/reset before headers",
-    r"reset reason.*connection termination",
-    r"error sending request for url",
-    r"api error:.*context.*window.*limit",
-    r"model.*reached.*context.*window.*limit",
-    r"context.*window.*limit",
-    r"backend-api/codex/responses/compact",
-    r"responses/compact",
-]
+RECOVERABLE_API_ERROR_PATTERNS = __RECOVERABLE_API_ERROR_PATTERNS__
 
 
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
@@ -1153,6 +1153,10 @@ fi
 rm -f "$INPUT_PATH" 2>/dev/null || true
 exit 0
 '''
+    body = body.replace(
+        "__RECOVERABLE_API_ERROR_PATTERNS__",
+        _python_literal_list(RECOVERABLE_API_ERROR_PATTERNS),
+    )
     return header + body
 
 

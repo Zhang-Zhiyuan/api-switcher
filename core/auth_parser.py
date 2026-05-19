@@ -46,3 +46,19 @@ def apply_codex_apikey(auth: dict, profile) -> dict:
         auth["OPENAI_API_KEY"] = ""
 
     return auth
+
+
+def clear_codex_api_auth(auth: dict) -> dict:
+    """Remove Codex API-key auth while preserving official ChatGPT tokens."""
+    auth = dict(auth or {})
+    auth.pop("OPENAI_API_KEY", None)
+
+    mode = str(auth.get("auth_mode") or "").strip().lower()
+    if mode in {"apikey", "api_key"}:
+        tokens = auth.get("tokens")
+        if isinstance(tokens, dict) and any(bool(value) for value in tokens.values()):
+            auth["auth_mode"] = "chatgpt"
+        else:
+            auth.pop("auth_mode", None)
+
+    return auth

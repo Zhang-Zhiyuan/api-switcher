@@ -3,6 +3,21 @@
 用于检测各种 API 错误并采取相应的恢复策略
 """
 
+from core.auto_continue.error_patterns import CONTENT_LENGTH_PATTERNS
+
+
+def _powershell_single_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _powershell_array(values: list[str], indent: int = 8) -> str:
+    prefix = " " * indent
+    return ",\n".join(prefix + _powershell_single_quoted(value) for value in values)
+
+
+def _powershell_regex_union(values: list[str]) -> str:
+    return _powershell_single_quoted("|".join(values))
+
 
 def generate_error_recovery_script(settings_path: str, enable_git: bool = True) -> str:
     """生成错误恢复 Hook 脚本（增强版）"""
@@ -155,22 +170,7 @@ function Get-ErrorType {{
 
     # 内容超长
     $contentPatterns = @(
-        "content_length_exceeds_threshold",
-        "context.*length.*exceeded",
-        "maximum context length",
-        "maximum[_\\s-]?context[_\\s-]?length",
-        "api error:.*context.*window.*limit",
-        "model.*reached.*context.*window.*limit",
-        "context.*window.*(limit|full|exceed|overflow)",
-        "(reached|hit|exceed(ed|s)?).*context.*window",
-        "context.*limit.*(reached|exceed(ed|s)?)",
-        "对话内容超出长度限制",
-        "内容太长",
-        "tokens?.*exceed",
-        "(input|prompt|request|messages?).*(too\\s*long|too\\s*large|exceed(ed|s)?)",
-        "提示词.*过长",
-        "输入.*过长",
-        "上下文.*超出"
+{_powershell_array(CONTENT_LENGTH_PATTERNS, 8)}
     )
     foreach ($pattern in $contentPatterns) {{
         if ($combined -match $pattern) {{
@@ -713,7 +713,7 @@ function Get-ErrorType {{
     param([string]$ErrorCode, [string]$ErrorMessage)
     $combined = "$ErrorCode $ErrorMessage".ToLower()
 
-    if ($combined -match "content.*length|context.*length|api error:.*context.*window.*limit|model.*reached.*context.*window.*limit|context.*window.*(limit|full|exceed|overflow)|(reached|hit|exceed(ed|s)?).*context.*window|context.*limit.*(reached|exceed(ed|s)?)|tokens?.*exceed|(input|prompt|request|messages?).*(too\\s*long|too\\s*large|exceed(ed|s)?)|内容.*长|上下文.*超|提示词.*过长|输入.*过长") {{
+    if ($combined -match {_powershell_regex_union(CONTENT_LENGTH_PATTERNS)}) {{
         return "content_length"
     }}
     if ($combined -match "rate.*limit|too.*many|频繁|速率") {{

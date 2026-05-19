@@ -2,6 +2,14 @@
 Enhanced PowerShell hook script generator with robust error handling.
 """
 
+from core.auto_continue.error_patterns import RECOVERABLE_API_ERROR_PATTERNS
+
+
+def _powershell_array(values: list[str], indent: int = 12) -> str:
+    prefix = " " * indent
+    lines = [prefix + "'" + value.replace("'", "''") + "'" for value in values]
+    return ",\n".join(lines)
+
 
 def generate_hook_script(settings_path: str, enable_git: bool = True) -> str:
     """Generate the PowerShell hook script with enhanced error handling."""
@@ -536,18 +544,7 @@ try {{
 
         # Transient API transport failures should continue even if "error" matches a blocker.
         $recoverableApiErrorPatterns = @(
-            "error running remote compact task",
-            "stream disconnected before completion",
-            "reconnecting\\.\\.\\.\\s*\\d+/\\d+",
-            "upstream connect error",
-            "disconnect/reset before headers",
-            "reset reason.*connection termination",
-            "error sending request for url",
-            "api error:.*context.*window.*limit",
-            "model.*reached.*context.*window.*limit",
-            "context.*window.*limit",
-            "backend-api/codex/responses/compact",
-            "responses/compact"
+{_powershell_array(RECOVERABLE_API_ERROR_PATTERNS, 12)}
         )
         $isRecoverableApiError = $false
         foreach ($pattern in $recoverableApiErrorPatterns) {{

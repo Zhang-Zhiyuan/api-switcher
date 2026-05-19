@@ -603,6 +603,112 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
     assert "ssh.example.com" in message
 
 
+def test_clear_remote_claude_api_info_removes_overrides_and_env(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    fake_client = object()
+    written = {}
+    deleted = {}
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_claude_settings",
+        lambda client, profile=None: {
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-old",
+                "ANTHROPIC_API_KEY": "sk-old",
+                "ANTHROPIC_BASE_URL": "https://relay.example.com",
+                "KEEP_ME": "yes",
+            },
+            "model": "deepseek-chat",
+            "effortLevel": "unsupported",
+        },
+    )
+    monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {"primaryApiKey": "sk-old"})
+    monkeypatch.setattr(
+        remote_config,
+        "write_remote_claude_settings",
+        lambda client, data, profile=None: written.setdefault("settings", (client, data, profile)),
+    )
+    monkeypatch.setattr(
+        remote_config,
+        "write_remote_claude_config",
+        lambda client, data, profile=None: written.setdefault("config", (client, data, profile)),
+    )
+    monkeypatch.setattr(
+        persistent_env,
+        "delete_remote_user_env",
+        lambda client, names: deleted.setdefault("names", tuple(names)),
+    )
+
+    message = sync_manager.clear_remote_api_info("remote", "claude")
+
+    assert written["settings"][0] is fake_client
+    assert written["settings"][1]["env"] == {"KEEP_ME": "yes"}
+    assert written["settings"][1]["model"] == "claude-sonnet-4"
+    assert written["settings"][1]["effortLevel"] == "high"
+    assert "primaryApiKey" not in written["config"][1]
+    assert set(deleted["names"]).issuperset({"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"})
+    assert "Claude API 信息已清除" in message
+
+
+def test_clear_remote_codex_api_info_removes_active_provider_auth_and_env(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    fake_client = object()
+    written = {}
+    deleted = {}
+    remote_config_data = {
+        "model": "layer4-model",
+        "model_provider": "layer4",
+        "model_providers": {
+            "layer4": {
+                "base_url": "https://layer4.example.com/v1",
+                "env_key": "LAYER4_API_KEY",
+                "wire_api": "responses",
+            },
+            "other": {"base_url": "https://other.example.com/v1", "env_key": "OTHER_KEY"},
+        },
+    }
+    remote_auth = {
+        "auth_mode": "apikey",
+        "OPENAI_API_KEY": "sk-old",
+        "tokens": {"id_token": "chatgpt-token"},
+    }
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(remote_config, "read_remote_codex_config", lambda client, profile=None: remote_config_data)
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: remote_auth)
+    monkeypatch.setattr(
+        remote_config,
+        "write_remote_codex_config",
+        lambda client, data, profile=None: written.setdefault("config", (client, data, profile)),
+    )
+    monkeypatch.setattr(
+        remote_config,
+        "write_remote_codex_auth",
+        lambda client, data, profile=None: written.setdefault("auth", (client, data, profile)),
+    )
+    monkeypatch.setattr(
+        persistent_env,
+        "delete_remote_user_env",
+        lambda client, names: deleted.setdefault("names", tuple(names)),
+    )
+
+    message = sync_manager.clear_remote_api_info("remote", "codex")
+
+    cleaned_config = written["config"][1]
+    assert cleaned_config["model_provider"] == "openai"
+    assert cleaned_config["model"] == "gpt-5.5"
+    assert cleaned_config["cli_auth_credentials_store"] == "file"
+    assert "layer4" not in cleaned_config["model_providers"]
+    assert cleaned_config["model_providers"]["other"]["env_key"] == "OTHER_KEY"
+    assert written["auth"][1]["auth_mode"] == "chatgpt"
+    assert "OPENAI_API_KEY" not in written["auth"][1]
+    assert set(deleted["names"]).issuperset({"OPENAI_API_KEY", "LAYER4_API_KEY"})
+    assert "OTHER_KEY" not in deleted["names"]
+    assert "Codex API 信息已清除" in message
+
+
 def test_ssh_connect_reconnects_when_cached_profile_details_change(isolated_ssh, monkeypatch):
     import core.ssh_manager as ssh_core
 

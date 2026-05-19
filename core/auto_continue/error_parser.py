@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from enum import Enum
 
+from core.auto_continue.error_patterns import CONTENT_LENGTH_PATTERNS as DEFAULT_CONTENT_LENGTH_PATTERNS
+
 
 class ErrorType(Enum):
     """错误类型枚举"""
@@ -65,26 +67,7 @@ class ErrorParser:
     """API 错误解析器"""
 
     # 内容超长错误模式
-    CONTENT_LENGTH_PATTERNS = [
-        r"CONTENT_LENGTH_EXCEEDS_THRESHOLD",
-        r"context[_\s]?length[_\s]?exceeded",
-        r"maximum context length",
-        r"maximum[_\s-]?context[_\s-]?length",
-        r"api error:.*context.*window.*limit",
-        r"model.*reached.*context.*window.*limit",
-        r"context.*window.*(limit|full|exceed|overflow)",
-        r"(reached|hit|exceed(?:ed|s)?).*context.*window",
-        r"context.*limit.*(reached|exceed(?:ed|s)?)",
-        r"对话内容超出长度限制",
-        r"内容太长",
-        r"tokens?.*exceed",
-        r"context.*too.*long",
-        r"(input|prompt|request|messages?).*(too\s*long|too\s*large|exceed(?:ed|s)?)",
-        r"请求.*过长",
-        r"上下文.*超出",
-        r"提示词.*过长",
-        r"输入.*过长",
-    ]
+    CONTENT_LENGTH_PATTERNS = list(DEFAULT_CONTENT_LENGTH_PATTERNS)
 
     # 速率限制错误模式
     RATE_LIMIT_PATTERNS = [
