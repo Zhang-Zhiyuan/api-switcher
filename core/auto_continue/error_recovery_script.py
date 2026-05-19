@@ -38,6 +38,34 @@ function Write-Log {{
     [Console]::Error.WriteLine($logMessage)
 }}
 
+function Initialize-Utf8Console {{
+    try {{
+        $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+        [Console]::InputEncoding = $utf8NoBom
+        [Console]::OutputEncoding = $utf8NoBom
+        $script:OutputEncoding = $utf8NoBom
+        $global:OutputEncoding = $utf8NoBom
+    }} catch {{
+        Write-Log "Failed to configure UTF-8 console encoding: $_" "WARN"
+    }}
+}}
+
+Initialize-Utf8Console
+
+function ConvertTo-Hashtable {{
+    param($Value)
+
+    $result = @{{}}
+    if ($null -eq $Value) {{ return $result }}
+    if ($Value -is [System.Collections.IDictionary]) {{ return $Value }}
+    if ($Value.PSObject -and $Value.PSObject.Properties) {{
+        foreach ($prop in $Value.PSObject.Properties) {{
+            $result[$prop.Name] = $prop.Value
+        }}
+    }}
+    return $result
+}}
+
 # Git快照函数
 function Ensure-LocalGitIgnore {{
     try {{
@@ -341,7 +369,7 @@ try {{
     }}
 
     try {{
-        $settings = Get-Content $settingsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $settings = Get-Content $settingsPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }} catch {{
         Write-Log "Failed to parse settings JSON: $_" "ERROR"
         exit 0
@@ -418,8 +446,8 @@ try {{
     $state = @{{}}
     if (Test-Path $statePath) {{
         try {{
-            $stateContent = Get-Content $statePath -Raw -ErrorAction Stop
-            $state = $stateContent | ConvertFrom-Json -ErrorAction Stop -AsHashtable
+            $stateContent = Get-Content $statePath -Raw -Encoding UTF8 -ErrorAction Stop
+            $state = ConvertTo-Hashtable ($stateContent | ConvertFrom-Json -ErrorAction Stop)
         }} catch {{
             $state = @{{}}
         }}
@@ -464,7 +492,7 @@ try {{
     # 创建Git快照（如果启用）
     if ($gitAutoSnapshot -and $gitSnapshotOnRecovery) {{
         Write-Log "Creating git snapshot before recovery..." "INFO"
-        Create-GitSnapshot -Message "error-recovery"
+        Create-GitSnapshot -Message "error-recovery" | Out-Null
     }}
 
     # 记录恢复尝试
@@ -614,6 +642,34 @@ function Write-Log {{
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp [$Level] $Message"
     [Console]::Error.WriteLine($logMessage)
+}}
+
+function Initialize-Utf8Console {{
+    try {{
+        $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+        [Console]::InputEncoding = $utf8NoBom
+        [Console]::OutputEncoding = $utf8NoBom
+        $script:OutputEncoding = $utf8NoBom
+        $global:OutputEncoding = $utf8NoBom
+    }} catch {{
+        Write-Log "Failed to configure UTF-8 console encoding: $_" "WARN"
+    }}
+}}
+
+Initialize-Utf8Console
+
+function ConvertTo-Hashtable {{
+    param($Value)
+
+    $result = @{{}}
+    if ($null -eq $Value) {{ return $result }}
+    if ($Value -is [System.Collections.IDictionary]) {{ return $Value }}
+    if ($Value.PSObject -and $Value.PSObject.Properties) {{
+        foreach ($prop in $Value.PSObject.Properties) {{
+            $result[$prop.Name] = $prop.Value
+        }}
+    }}
+    return $result
 }}
 
 # Git快照函数
@@ -792,7 +848,7 @@ try {{
         exit 0
     }}
 
-    $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    $settings = Get-Content $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $settings.error_recovery_enabled) {{
         exit 0
     }}
@@ -836,7 +892,8 @@ try {{
     $state = @{{}}
     if (Test-Path $statePath) {{
         try {{
-            $state = Get-Content $statePath -Raw | ConvertFrom-Json -AsHashtable
+            $stateContent = Get-Content $statePath -Raw -Encoding UTF8
+            $state = ConvertTo-Hashtable ($stateContent | ConvertFrom-Json)
         }} catch {{
             $state = @{{}}
         }}
@@ -879,7 +936,7 @@ try {{
     # 创建Git快照（如果启用）
     if ($gitAutoSnapshot -and $gitSnapshotOnRecovery) {{
         Write-Log "Creating git snapshot before recovery..." "INFO"
-        Create-GitSnapshot -Message "codex-error-recovery"
+        Create-GitSnapshot -Message "codex-error-recovery" | Out-Null
     }}
 
     # 记录恢复尝试

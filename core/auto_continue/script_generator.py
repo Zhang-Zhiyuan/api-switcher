@@ -30,6 +30,34 @@ function Write-Log {{
     [Console]::Error.WriteLine($logMessage)
 }}
 
+function Initialize-Utf8Console {{
+    try {{
+        $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+        [Console]::InputEncoding = $utf8NoBom
+        [Console]::OutputEncoding = $utf8NoBom
+        $script:OutputEncoding = $utf8NoBom
+        $global:OutputEncoding = $utf8NoBom
+    }} catch {{
+        Write-Log "Failed to configure UTF-8 console encoding: $_" "WARN"
+    }}
+}}
+
+Initialize-Utf8Console
+
+function ConvertTo-Hashtable {{
+    param($Value)
+
+    $result = @{{}}
+    if ($null -eq $Value) {{ return $result }}
+    if ($Value -is [System.Collections.IDictionary]) {{ return $Value }}
+    if ($Value.PSObject -and $Value.PSObject.Properties) {{
+        foreach ($prop in $Value.PSObject.Properties) {{
+            $result[$prop.Name] = $prop.Value
+        }}
+    }}
+    return $result
+}}
+
 # Git快照函数
 function Ensure-LocalGitIgnore {{
     try {{
@@ -138,7 +166,7 @@ try {{
     }}
 
     try {{
-        $settings = Get-Content $settingsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $settings = Get-Content $settingsPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }} catch {{
         Write-Log "Failed to parse settings JSON: $_" "ERROR"
         exit 0  # Allow stop if settings invalid
@@ -185,7 +213,7 @@ try {{
     # large repositories, so only run them for stop/continue events.
     if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
         Write-Log "Creating git snapshot on stop hook..." "INFO"
-        Create-GitSnapshot -Message "git-snapshot"
+        Create-GitSnapshot -Message "git-snapshot" | Out-Null
     }}
 
     if ($isClaude -and ($hookEvent -eq "PermissionRequest" -or $hookEvent -eq "PreToolUse")) {{
@@ -303,8 +331,8 @@ try {{
                 $permissionState = @{{}}
                 if (Test-Path $permissionStatePath) {{
                     try {{
-                        $permissionStateContent = Get-Content $permissionStatePath -Raw -ErrorAction Stop
-                        $permissionState = $permissionStateContent | ConvertFrom-Json -ErrorAction Stop -AsHashtable
+                        $permissionStateContent = Get-Content $permissionStatePath -Raw -Encoding UTF8 -ErrorAction Stop
+                        $permissionState = ConvertTo-Hashtable ($permissionStateContent | ConvertFrom-Json -ErrorAction Stop)
                     }} catch {{
                         Write-Log "Failed to parse permission state JSON, resetting state: $_" "WARN"
                         $permissionState = @{{}}
@@ -501,8 +529,8 @@ try {{
         $state = @{{}}
         if (Test-Path $statePath) {{
             try {{
-                $stateContent = Get-Content $statePath -Raw -ErrorAction Stop
-                $state = $stateContent | ConvertFrom-Json -ErrorAction Stop -AsHashtable
+                $stateContent = Get-Content $statePath -Raw -Encoding UTF8 -ErrorAction Stop
+                $state = ConvertTo-Hashtable ($stateContent | ConvertFrom-Json -ErrorAction Stop)
             }} catch {{
                 Write-Log "Failed to parse state JSON, resetting state: $_" "WARN"
                 $state = @{{}}

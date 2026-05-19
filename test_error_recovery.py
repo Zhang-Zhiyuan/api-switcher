@@ -448,6 +448,8 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
         [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
         cwd=tmp_path,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=10,
@@ -503,6 +505,8 @@ def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tm
         [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
         cwd=tmp_path,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=10,
@@ -514,6 +518,146 @@ def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tm
     assert output == {"continue": True, "message": "compact and continue"}
     log_path = state_dir / "auto_continue_stop_log.jsonl"
     assert "recoverable_api_error_detected" in log_path.read_text(encoding="utf-8")
+
+
+def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=True,
+        max_continuations=1,
+        continuation_prompt="continue cleanly",
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-clean-json",
+        "last_message": (
+            'API Error: 400 {"code":"CONTENT_LENGTH_EXCEEDS_THRESHOLD",'
+            '"error":"对话内容超出长度限制啦",'
+            '"hint":"当前会话积累的内容太长了，已超出上游服务的处理能力。"}'
+        ),
+    }
+
+    first = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert not first.stdout.lstrip().startswith(("False", "True"))
+    assert "Invalid incomplete pattern" not in first.stderr
+    assert json.loads(first.stdout) == {"continue": True, "message": "continue cleanly"}
+
+    second = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip() == ""
+    assert "AsHashtable" not in second.stderr
+
+
+def test_local_codex_error_hook_outputs_clean_json_with_git_snapshot(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "error_recovery.ps1"
+    settings = AutoContinueSettings(
+        error_recovery_enabled=True,
+        max_error_recoveries=1,
+        git_auto_snapshot=True,
+        git_snapshot_on_recovery=True,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_codex_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-clean-error-json",
+        "error_message": (
+            'API Error: 400 {"code":"CONTENT_LENGTH_EXCEEDS_THRESHOLD",'
+            '"error":"对话内容超出长度限制啦"}'
+        ),
+        "status": 400,
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not result.stdout.lstrip().startswith(("False", "True"))
+    output = json.loads(result.stdout)
+    assert output["recover"] is True
+    assert output["commands"] == ["/compress", "继续"]
+    assert "AsHashtable" not in result.stderr
+
+    second = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip() == ""
+    assert "AsHashtable" not in second.stderr
 
 
 def test_auto_continue_settings_permission_auto_approve_validation():
