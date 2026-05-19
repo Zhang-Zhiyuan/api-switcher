@@ -226,15 +226,28 @@ class AutoContinueProvider(ABC):
         except Exception as e:
             errors.append(f"Failed to remove settings: {e}")
 
-        # Remove state files
+        # Remove state/log files from both legacy roots and the current tmp dir.
         try:
             config_dir = self.get_config_dir()
-            state_path = config_dir / "auto_continue_stop_state.json"
-            if state_path.exists():
-                state_path.unlink()
-            lock_path = Path(str(state_path) + ".lock")
-            if lock_path.exists():
-                lock_path.unlink()
+            cleanup_dirs = [config_dir, config_dir / "tmp"]
+            cleanup_names = [
+                "auto_continue_stop_state.json",
+                "auto_continue_stop_state.json.lock",
+                "auto_continue_stop_state.json.tmp",
+                "auto_continue_permission_state.json",
+                "auto_continue_permission_state.json.lock",
+                "auto_continue_permission_state.json.tmp",
+                "auto_continue_stop_log.jsonl",
+                "error_recovery_state.json",
+                "error_recovery_state.json.lock",
+                "error_recovery_state.json.tmp",
+                "error_recovery_log.jsonl",
+            ]
+            for cleanup_dir in cleanup_dirs:
+                for name in cleanup_names:
+                    path = cleanup_dir / name
+                    if path.exists():
+                        path.unlink()
         except Exception as e:
             errors.append(f"Failed to remove state files: {e}")
 

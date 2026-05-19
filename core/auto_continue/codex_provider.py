@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 from core.atomic_io import atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
@@ -7,6 +8,10 @@ from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
 
 logger = logging.getLogger(__name__)
+
+
+def _is_managed_codex_hook(command: str) -> bool:
+    return "auto_continue_stop.ps1" in command or "error_recovery.ps1" in command
 
 
 def _codex_event_hooks(value) -> list[dict]:
@@ -20,12 +25,61 @@ def _codex_event_hooks(value) -> list[dict]:
             hooks.extend(dict(hook) for hook in nested if isinstance(hook, dict) and hook.get("command"))
         return hooks
     if isinstance(value, list):
-        return [dict(hook) for hook in value if isinstance(hook, dict) and hook.get("command")]
+        hooks = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            if item.get("command"):
+                hooks.append(dict(item))
+            nested = item.get("hooks")
+            if isinstance(nested, list):
+                hooks.extend(dict(hook) for hook in nested if isinstance(hook, dict) and hook.get("command"))
+        return hooks
     return []
 
 
-def _codex_event_has_command(hooks: dict, event_name: str, marker: str) -> bool:
-    return any(marker in str(hook.get("command", "")) for hook in _codex_event_hooks(hooks.get(event_name)))
+def _codex_hooks_container(data: dict, *, migrate_legacy: bool = False) -> dict:
+    """Return the pphoto/Codex hook container, migrating legacy top-level events."""
+    if not isinstance(data, dict):
+        return {}
+
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        data["hooks"] = hooks
+
+    if migrate_legacy:
+        for event_name in list(data.keys()):
+            if event_name == "hooks":
+                continue
+            event_hooks = _codex_event_hooks(data.get(event_name))
+            managed_hooks = [
+                hook for hook in event_hooks
+                if _is_managed_codex_hook(str(hook.get("command", "")))
+            ]
+            if not managed_hooks:
+                continue
+            existing = _codex_event_hooks(hooks.get(event_name))
+            hooks[event_name] = _format_codex_event_hooks(existing + managed_hooks)
+
+            remaining = [
+                hook for hook in event_hooks
+                if not _is_managed_codex_hook(str(hook.get("command", "")))
+            ]
+            formatted = _format_legacy_codex_event_hooks(remaining)
+            if formatted is None:
+                data.pop(event_name, None)
+            else:
+                data[event_name] = formatted
+
+    return hooks
+
+
+def _codex_event_has_command(data: dict, event_name: str, marker: str) -> bool:
+    hooks = _codex_hooks_container(data)
+    candidates = _codex_event_hooks(hooks.get(event_name))
+    candidates.extend(_codex_event_hooks(data.get(event_name)))
+    return any(marker in str(hook.get("command", "")) for hook in candidates)
 
 
 def _codex_hooks_has_entries(hooks: dict) -> bool:
@@ -34,7 +88,26 @@ def _codex_hooks_has_entries(hooks: dict) -> bool:
     return any(_codex_event_hooks(value) for value in hooks.values())
 
 
+def _codex_data_has_entries(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    hooks = _codex_hooks_container(data)
+    if _codex_hooks_has_entries(hooks):
+        return True
+    return any(
+        _codex_event_hooks(value)
+        for key, value in data.items()
+        if key != "hooks"
+    )
+
+
 def _format_codex_event_hooks(hook_list: list[dict]):
+    if not hook_list:
+        return None
+    return [{"hooks": hook_list}]
+
+
+def _format_legacy_codex_event_hooks(hook_list: list[dict]):
     if not hook_list:
         return None
     if len(hook_list) == 1:
@@ -106,8 +179,8 @@ class CodexProvider(AutoContinueProvider):
             return False
         try:
             with open(hooks_path, 'r', encoding='utf-8') as f:
-                hooks = json.load(f)
-            return _codex_event_has_command(hooks, "Stop", "auto_continue_stop.ps1")
+                data = json.load(f)
+            return _codex_event_has_command(data, "Stop", "auto_continue_stop.ps1")
         except Exception as e:
             logger.error(f"Failed to read hooks.json: {e}")
             return False
@@ -118,23 +191,29 @@ class CodexProvider(AutoContinueProvider):
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Read existing hooks
-        hooks = {}
+        data = {}
         if hooks_path.exists():
             try:
                 with open(hooks_path, 'r', encoding='utf-8') as f:
-                    hooks = json.load(f)
+                    data = json.load(f)
             except Exception:
                 pass
+        if not isinstance(data, dict):
+            data = {}
+
+        hooks = _codex_hooks_container(data, migrate_legacy=True)
 
         # Register Stop hook
         script_path = str(self.get_hook_script_path()).replace("\\", "\\\\")
         _upsert_codex_event_hook(hooks, "Stop", {
+            "type": "command",
             "command": f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
-            "timeout": 10
+            "timeout": 10,
+            "statusMessage": "Checking whether Codex should continue"
         }, "auto_continue_stop.ps1")
 
         # Write hooks.json
-        atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
+        atomic_write_text(hooks_path, json.dumps(data, indent=2))
 
         # Enable codex_hooks in config.toml
         self._enable_codex_hooks()
@@ -147,15 +226,18 @@ class CodexProvider(AutoContinueProvider):
 
         try:
             with open(hooks_path, 'r', encoding='utf-8') as f:
-                hooks = json.load(f)
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            hooks = _codex_hooks_container(data, migrate_legacy=True)
 
             # Remove Stop hook if it's ours
             changed = _remove_codex_event_hook(hooks, "Stop", "auto_continue_stop.ps1")
 
             # Write back
-            atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
+            atomic_write_text(hooks_path, json.dumps(data, indent=2))
 
-            if changed and not _codex_hooks_has_entries(hooks):
+            if changed and not _codex_data_has_entries(data):
                 self._set_codex_hooks_enabled(False)
         except Exception as e:
             logger.error(f"Failed to unregister hook: {e}")
@@ -190,26 +272,30 @@ class CodexProvider(AutoContinueProvider):
         self._set_codex_hooks_enabled(True)
 
     def _set_codex_hooks_enabled(self, enabled: bool) -> None:
-        """Set codex_hooks in config.toml, creating the file when enabling."""
+        """Set the root codex_hooks flag without rewriting unrelated TOML."""
         config_path = self.get_config_toml_path()
         if not enabled and not config_path.exists():
             return
 
         try:
-            config = {}
-            try:
-                import tomllib
-            except ModuleNotFoundError:
-                import tomli as tomllib
-
+            lines = []
             if config_path.exists():
-                with open(config_path, 'rb') as f:
-                    config = tomllib.load(f)
+                lines = config_path.read_text(encoding="utf-8").splitlines()
 
-            config["codex_hooks"] = bool(enabled)
+            value = "true" if enabled else "false"
+            root_end = next((i for i, line in enumerate(lines) if line.strip().startswith("[")), len(lines))
+            found = False
 
-            import tomli_w
-            atomic_write_text(config_path, tomli_w.dumps(config))
+            for i in range(root_end):
+                if re.match(r"^\s*codex_hooks\s*=", lines[i]):
+                    lines[i] = f"codex_hooks = {value}"
+                    found = True
+                    break
+
+            if not found:
+                lines.insert(root_end, f"codex_hooks = {value}")
+
+            atomic_write_text(config_path, "\n".join(lines).rstrip() + "\n")
         except Exception as e:
             logger.error(f"Failed to update codex_hooks: {e}")
 
@@ -293,23 +379,29 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 读取现有 hooks
-        hooks = {}
+        data = {}
         if hooks_path.exists():
             try:
                 with open(hooks_path, 'r', encoding='utf-8') as f:
-                    hooks = json.load(f)
+                    data = json.load(f)
             except Exception:
                 pass
+        if not isinstance(data, dict):
+            data = {}
+
+        hooks = _codex_hooks_container(data, migrate_legacy=True)
 
         # 注册 Error hook
         script_path = str(self.get_error_recovery_script_path()).replace("\\", "\\\\")
         _upsert_codex_event_hook(hooks, "Error", {
+            "type": "command",
             "command": f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
-            "timeout": 10
+            "timeout": 10,
+            "statusMessage": "Checking for Codex API errors and auto-recovery"
         }, "error_recovery.ps1")
 
         # 写入 hooks.json
-        atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
+        atomic_write_text(hooks_path, json.dumps(data, indent=2))
 
         self._enable_codex_hooks()
 
@@ -329,13 +421,16 @@ Only stop when you encounter a genuine blocker that requires user input or decis
 
         try:
             with open(hooks_path, 'r', encoding='utf-8') as f:
-                hooks = json.load(f)
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            hooks = _codex_hooks_container(data, migrate_legacy=True)
 
             changed = _remove_codex_event_hook(hooks, "Error", "error_recovery.ps1")
 
-            atomic_write_text(hooks_path, json.dumps(hooks, indent=2))
+            atomic_write_text(hooks_path, json.dumps(data, indent=2))
 
-            if changed and not _codex_hooks_has_entries(hooks):
+            if changed and not _codex_data_has_entries(data):
                 self._set_codex_hooks_enabled(False)
 
             logger.info("Uninstalled Codex error recovery hook")
@@ -354,9 +449,9 @@ Only stop when you encounter a genuine blocker that requires user input or decis
 
         try:
             with open(hooks_path, 'r', encoding='utf-8') as f:
-                hooks = json.load(f)
+                data = json.load(f)
 
-            return _codex_event_has_command(hooks, "Error", "error_recovery.ps1")
+            return _codex_event_has_command(data, "Error", "error_recovery.ps1")
         except Exception:
             return False
 

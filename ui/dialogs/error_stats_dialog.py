@@ -348,16 +348,15 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         def do_clear():
             try:
                 if self.provider.lower() == "claude":
-                    log_path = Path.home() / ".claude" / "error_recovery_log.jsonl"
-                    state_path = Path.home() / ".claude" / "error_recovery_state.json"
+                    config_dir = Path.home() / ".claude"
                 else:
-                    log_path = Path.home() / ".codex" / "error_recovery_log.jsonl"
-                    state_path = Path.home() / ".codex" / "error_recovery_state.json"
+                    config_dir = Path.home() / ".codex"
 
-                if log_path.exists():
-                    log_path.unlink()
-                if state_path.exists():
-                    state_path.unlink()
+                for base_dir in [config_dir / "tmp", config_dir]:
+                    for filename in ["error_recovery_log.jsonl", "error_recovery_state.json"]:
+                        path = base_dir / filename
+                        if path.exists():
+                            path.unlink()
 
                 from ui.widgets.toast import show_toast
                 show_toast(self, "日志已清空")

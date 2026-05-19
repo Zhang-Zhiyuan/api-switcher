@@ -3,11 +3,17 @@ API 错误解析器
 支持多种 API 提供商的错误格式，提取结构化错误信息
 """
 import re
+import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional, Dict, Any
 from enum import Enum
 
-from core.auto_continue.error_patterns import CONTENT_LENGTH_PATTERNS as DEFAULT_CONTENT_LENGTH_PATTERNS
+from core.auto_continue.error_patterns import (
+    CONTENT_LENGTH_PATTERNS as DEFAULT_CONTENT_LENGTH_PATTERNS,
+    TRANSPORT_RECOVERABLE_PATTERNS,
+)
 
 
 class ErrorType(Enum):
@@ -147,7 +153,7 @@ class ErrorParser:
         r"socket[_\s]?hang[_\s]?up",
         r"网络.*错误",
         r"连接.*失败",
-    ]
+    ] + list(TRANSPORT_RECOVERABLE_PATTERNS)
 
     # 服务器错误模式
     SERVER_ERROR_PATTERNS = [
@@ -317,14 +323,14 @@ class ErrorParser:
         if self._matches_patterns(combined, self.QUOTA_PATTERNS):
             return ErrorType.QUOTA_EXCEEDED
 
+        if self._matches_patterns(combined, self.TIMEOUT_PATTERNS) or http_status == 504:
+            return ErrorType.TIMEOUT_ERROR
+
         if self._matches_patterns(combined, self.NETWORK_PATTERNS):
             return ErrorType.NETWORK_ERROR
 
         if self._matches_patterns(combined, self.OVERLOAD_PATTERNS) or http_status == 503:
             return ErrorType.MODEL_OVERLOADED
-
-        if self._matches_patterns(combined, self.TIMEOUT_PATTERNS) or http_status == 504:
-            return ErrorType.TIMEOUT_ERROR
 
         if self._matches_patterns(combined, self.SERVER_ERROR_PATTERNS) or (http_status and 500 <= http_status < 600):
             return ErrorType.SERVER_ERROR
@@ -343,33 +349,98 @@ class ErrorParser:
 
     def _extract_retry_after(self, data: Dict[str, Any]) -> Optional[int]:
         """提取建议的重试等待时间"""
-        # 从 Retry-After 头部提取
-        if "retry_after" in data:
-            try:
-                return int(data["retry_after"])
-            except (ValueError, TypeError):
-                pass
+        retry_values = []
+        for key in [
+            "retry_after",
+            "retryAfter",
+            "retry_after_seconds",
+            "retryAfterSeconds",
+            "Retry-After",
+        ]:
+            if key in data:
+                retry_values.append(data[key])
 
-        # 从错误消息中提取
-        error_message = self._extract_error_message(data) or ""
+        for headers_key in ["headers", "response_headers", "responseHeaders"]:
+            headers = data.get(headers_key)
+            if isinstance(headers, dict):
+                for key in ["retry-after", "Retry-After", "retry_after", "retryAfter"]:
+                    if key in headers:
+                        retry_values.append(headers[key])
 
-        # 匹配 "请在 X 秒后重试" 或 "retry after X seconds"
-        patterns = [
-            r'(\d+)\s*秒后.*重试',
-            r'retry.*?(\d+)\s*second',
-            r'wait.*?(\d+)\s*second',
-            r'(\d+)s\s*后',
-        ]
+        nested_error = data.get("error")
+        if isinstance(nested_error, dict):
+            for key in [
+                "retry_after",
+                "retryAfter",
+                "retry_after_seconds",
+                "retryAfterSeconds",
+                "Retry-After",
+            ]:
+                if key in nested_error:
+                    retry_values.append(nested_error[key])
+            headers = nested_error.get("headers")
+            if isinstance(headers, dict):
+                for key in ["retry-after", "Retry-After", "retry_after", "retryAfter"]:
+                    if key in headers:
+                        retry_values.append(headers[key])
 
-        for pattern in patterns:
-            match = re.search(pattern, error_message, re.IGNORECASE)
-            if match:
-                try:
-                    return int(match.group(1))
-                except (ValueError, IndexError):
-                    pass
+        error_message = self._extract_error_message(data)
+        if error_message:
+            retry_values.append(error_message)
+
+        for value in retry_values:
+            seconds = self._coerce_retry_after_seconds(value)
+            if seconds is not None:
+                return seconds
 
         return None
+
+    def _coerce_retry_after_seconds(self, value: Any) -> Optional[int]:
+        """Convert Retry-After header/message values into seconds."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            seconds = int(value)
+            return seconds if seconds > 0 else None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        if re.fullmatch(r"\d+", text):
+            seconds = int(text)
+            return seconds if seconds > 0 else None
+
+        unit_patterns = [
+            (r"(\d+)\s*(?:ms|millisecond|milliseconds)\b", 1 / 1000),
+            (r"(\d+)\s*(?:s|sec|secs|second|seconds|秒)(?:\b|\s|后|$)", 1),
+            (r"(\d+)\s*(?:m|min|mins|minute|minutes|分钟)(?:\b|\s|后|$)", 60),
+        ]
+        for pattern, multiplier in unit_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                raw_seconds = int(match.group(1)) * multiplier
+                seconds = math.ceil(raw_seconds)
+                return seconds if seconds > 0 else None
+
+        relative_match = re.search(
+            r"(?:retry|try again|wait|重试|等待|稍后).{0,80}?(\d+)\s*"
+            r"(?:s|sec|secs|second|seconds|秒)?(?:\b|\s|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if relative_match:
+            seconds = int(relative_match.group(1))
+            return seconds if seconds > 0 else None
+
+        try:
+            retry_at = parsedate_to_datetime(text)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = int((retry_at - datetime.now(timezone.utc)).total_seconds())
+            return max(1, seconds) if seconds > 0 else None
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
 
     def _extract_details(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """提取额外的错误详情"""

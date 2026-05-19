@@ -271,6 +271,21 @@ class ErrorRecoveryAnalyzer:
                 f.write("-" * 80 + "\n\n")
 
 
+def _get_provider_recovery_log_path(provider: str) -> Path:
+    if provider.lower() == "claude":
+        config_dir = Path.home() / ".claude"
+    elif provider.lower() == "codex":
+        config_dir = Path.home() / ".codex"
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+    current_log_path = config_dir / "tmp" / "error_recovery_log.jsonl"
+    legacy_log_path = config_dir / "error_recovery_log.jsonl"
+    if current_log_path.exists() or not legacy_log_path.exists():
+        return current_log_path
+    return legacy_log_path
+
+
 def get_analyzer(provider: str) -> ErrorRecoveryAnalyzer:
     """
     获取指定 Provider 的分析器
@@ -281,11 +296,4 @@ def get_analyzer(provider: str) -> ErrorRecoveryAnalyzer:
     Returns:
         ErrorRecoveryAnalyzer
     """
-    if provider.lower() == "claude":
-        log_path = Path.home() / ".claude" / "error_recovery_log.jsonl"
-    elif provider.lower() == "codex":
-        log_path = Path.home() / ".codex" / "error_recovery_log.jsonl"
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
-
-    return ErrorRecoveryAnalyzer(log_path)
+    return ErrorRecoveryAnalyzer(_get_provider_recovery_log_path(provider))

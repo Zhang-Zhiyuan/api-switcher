@@ -207,6 +207,43 @@ def test_auto_continue_blocker_patterns_do_not_match_finished_chinese_summary():
     assert not _matches_blocker("不存在问题，所有检查都已经通过。")
 
 
+def test_auto_continue_patterns_match_english_unfinished_work():
+    examples = [
+        "This is still WIP; remaining work includes tests and verification.",
+        "Would you like me to continue with the remaining tests?",
+        "Reply with continue to continue the implementation.",
+        "The feature is not production-ready because verification is missing.",
+        "Next steps: implement the remote hook regression tests.",
+    ]
+
+    for message in examples:
+        assert _matches_incomplete(message), message
+
+
+def test_auto_continue_patterns_do_not_match_completed_english_summary():
+    assert not _matches_incomplete("Completed implementation and verified tests pass.")
+    assert not _matches_incomplete("No remaining work; all checks passed.")
+    assert not _matches_incomplete("There are no remaining TODOs and no follow-up steps.")
+
+
+def test_auto_continue_blocker_patterns_match_english_user_input_requests():
+    examples = [
+        "I need your confirmation before deploying to production.",
+        "Waiting for user input with the API key.",
+        "Please choose which configuration profile to use.",
+        "The credential file is missing, so I cannot sign in.",
+        "Which approach would you like me to use?",
+    ]
+
+    for message in examples:
+        assert _matches_blocker(message), message
+
+
+def test_auto_continue_blocker_patterns_do_not_match_completed_english_summary():
+    assert not _matches_blocker("The confirmation step is complete and tests passed.")
+    assert not _matches_blocker("No user action is required; the implementation is finished.")
+
+
 def test_auto_continue_from_dict_preserves_custom_patterns_and_adds_defaults():
     custom_pattern = r"自定义未完模式"
     settings = AutoContinueSettings.from_dict({

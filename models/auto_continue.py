@@ -1,46 +1,134 @@
-from dataclasses import dataclass, field, asdict
-from typing import Optional
+from dataclasses import asdict, dataclass, field
 import re
+from typing import Optional
 
 
 DEFAULT_INCOMPLETE_PATTERNS = [
-    r"(?i)(still|remaining|todo|wip|work in progress|not (yet )?complete)",
-    r"(?i)(will|need to|should|must).{0,50}(implement|add|create|fix|test|verify)",
-    r"(?i)(next|following) steps?:",
+    r"(?i)^(?!.*\bno\s+remaining\s+todo(s)?\b).*\b(?:todo|to do|fixme|wip|work in progress)\b",
+    r"(?i)\bnot (?:yet )?complete\b",
+    r"(?i)(incomplete|unfinished|not finished|not done|partially done|partial implementation)",
+    r"(?i)(will|need to|should|must).{0,80}(implement|add|create|fix|test|verify|wire|integrate|finish|complete|clean up)",
+    r"(?i)(next|following|follow-up|remaining) steps?:",
     r"(?i)to be (done|completed|implemented)",
-    r"(待办|待完成|待实现|待处理|未完成|未实现|未处理|未修复|未测试|未验证|尚未完成|尚未实现|还没完成|还未完成|进行中)",
-    r"(?<![不无])(?:还|仍|仍然|尚|接下来)?\s*(?:需要|需|必须|应当|应该|(?<![不无需])要).{0,50}(实现|添加|新增|创建|修复|测试|验证|检查|处理|完成|继续|优化)",
-    r"(下一步|接下来|后续步骤|后续计划|下一阶段)[:：]",
-    r"(后续|之后|下一步|接下来).{0,20}(需要|继续|会|将).{0,50}(实现|添加|新增|创建|修复|测试|验证|检查|处理|完成|优化)",
+    r"(?i)(stub|placeholder|scaffold)(s)? remain",
+    r"(?i)(only partially|partially implemented)",
+    r"(?i)(scaffold(ing)? only|not production[- ]ready|not ready (for|to))",
+    r"(?i)not yet (implemented|wired|tested|verified|covered|supported|working|ready)",
+    r"(?i)(has|have) not been (implemented|wired|tested|verified|covered|supported|completed|finished)",
+    r"(?i)(isn't|aren't) (implemented|wired|tested|verified|covered|supported|complete|finished|ready)",
+    r"(?i)still (is|are)? ?(missing|incomplete|unfinished|pending|stubbed|placeholder)",
+    r"(?i)^(?!.*\bno\s+remaining\b).*remaining (work|tasks|implementation|steps|plan|items)",
+    r"(?i)(work|tasks|implementation|steps|items) (remain|remaining)",
+    r"(?i)still (need|needs|needed|left|missing)",
+    r"(?i)still (to do|todo|pending|open)",
+    r"(?i)left to (do|implement|finish|complete)",
+    r"(?i)(need|needs|needed|required|requires?) (to )?(implement|finish|complete|fix|test|verify|wire|integrate|add|update|clean up)",
+    r"(?i)needs? (more work|implementation|cleanup|testing|verification)",
+    r"(?i)(missing|lacking) (implementation|tests|verification|coverage|config|documentation|files|support|integration)",
+    r"(?i)not (tested|verified|validated|covered|wired|integrated|implemented|supported)",
+    r"(?i)without (tests|verification|validation|coverage|implementation|support|integration)",
+    r"(?i)no (tests|verification|validation|coverage|implementation|support|integration|acceptance record)",
+    r"(?i)(next steps?|follow-up|remaining steps?|todo|to do).{0,120}(implement|finish|complete|fix|test|verify|wire|integrate|add|update|build|package|ship)",
+    r"(?i)(should|recommend|recommended|worth) (next|continue|still).{0,120}(implement|finish|complete|fix|test|verify|wire|integrate|add|update|build|package)",
+    r"(?i)(should|shall|would\s+you\s+like(?:\s+me)?\s+to|do\s+you\s+want(?:\s+me)?\s+to|can\s+I|may\s+I).{0,160}(continue|resume|keep\s+going|carry\s+on).{0,80}[\?\uFF1F]\s*$",
+    r"(?i)(^|\n)\s*(continue|resume|keep\s+going|carry\s+on)\s*[\?\uFF1F]\s*$",
+    r"(?i)(type|say|reply(?:\s+with)?).{0,80}continue.{0,80}(to\s+continue|$)\s*$",
+    r"(?i)press\s+(enter|return)\s+to\s+continue\s*[:\uFF1A]?\s*$",
+    r"\u8fd8\u6ca1\u5b8c",
+    r"\u5c1a\u672a\u5b8c",
+    r"\u6ca1\u6709.{0,20}(\u5b8c\u6210|\u7ed3\u675f|\u6536\u5c3e)",
+    r"\u672a\u5b8c\u6210",
+    r"\u6ca1\u5b8c\u6210",
+    r"\u4e0d\u5b8c\u6574",
+    r"\u53ea(\u5b8c\u6210|\u662f).{0,30}(\u521d\u6b65|\u90e8\u5206|\u4e34\u65f6|\u9aa8\u67b6|\u5360\u4f4d)",
+    r"\u90e8\u5206\u5b8c\u6210",
+    r"\u4ec5\u5b8c\u6210",
+    r"\u53ea\u662f.{0,30}(\u521d\u6b65|\u90e8\u5206|\u4e34\u65f6|\u9aa8\u67b6|\u5360\u4f4d)",
+    r"\u8fd8\u4e0d\u80fd.{0,30}(\u4ea4\u4ed8|\u4f7f\u7528|\u5de5\u4f5c|\u901a\u8fc7|\u8dd1\u901a)",
+    r"\u8fd8\u65e0\u6cd5.{0,30}(\u4ea4\u4ed8|\u4f7f\u7528|\u5de5\u4f5c|\u901a\u8fc7|\u8dd1\u901a)",
+    r"\u8fd8(\u6ca1\u6709|\u6ca1).{0,20}(\u5b8c\u6210|\u5b8c|\u7ed3\u675f|\u6536\u5c3e)",
+    r"\u8fd8(\u6709|\u9700|\u9700\u8981|\u5f97|\u8981).{0,80}(\u505a|\u5b9e\u73b0|\u8865|\u8865\u4e0a|\u4fee|\u4fee\u590d|\u6d4b|\u9a8c\u8bc1|\u6e05\u7406|\u6536\u5c3e)",
+    r"\u5269\u4f59.{0,80}(\u5b8c\u6210|\u5b9e\u73b0|\u5de5\u4f5c|\u4efb\u52a1|\u90e8\u5206|\u8ba1\u5212|\u7b56\u7565|\u767e\u5206\u6bd4|\u5b8c\u6574\u5ea6)",
+    r"\u8fd8\u5dee.{0,80}(%|\u767e\u5206\u6bd4|\u5b8c\u6574\u5ea6|\u5b8c\u6210|\u5b9e\u73b0|\u5de5\u4f5c)",
+    r"\u5269\u4e0b.{0,80}(\u9700\u8981|\u5f85|\u672a|\u5de5\u4f5c|\u4efb\u52a1|\u5b9e\u73b0|\u5b8c\u6210)",
+    r"\u8ddd\u79bb.{0,80}(\u5b8c\u6210|\u4ea4\u4ed8|\u53ef\u7528|\u7a33\u5b9a).{0,80}(\u8fd8|\u4ecd|\u6709|\u5dee)",
+    r"(?<!\u65e0)(?<!\u4e0d)(\u9700|\u9700\u8981|\u5e94|\u5e94\u8be5|\u8fd8\u8981|\u8fd8\u9700|\u5fc5\u987b).{0,80}(\u8865|\u8865\u9f50|\u8865\u4e0a|\u5b9e\u73b0|\u4fee\u590d|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8c03\u8bd5|\u5b8c\u5584|\u6536\u5c3e)",
+    r"\u5f85(\u5b9e\u73b0|\u5b8c\u6210|\u5904\u7406|\u4fee\u590d|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8865\u5145|\u8865\u9f50|\u63a5\u5165|\u96c6\u6210|\u8c03\u8bd5)",
+    r"\u672a(\u5b9e\u73b0|\u5b8c\u6210|\u5904\u7406|\u4fee\u590d|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8865\u5145|\u8865\u9f50|\u63a5\u5165|\u96c6\u6210|\u8c03\u8bd5)",
+    r"\u6ca1\u6709.{0,30}(\u5b9e\u73b0|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8dd1\u901a|\u63a5\u5165|\u96c6\u6210|\u6253\u5305|\u6784\u5efa|\u90e8\u7f72|\u8bb0\u5f55)",
+    r"\u6ca1.{0,30}(\u5b9e\u73b0|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8dd1\u901a|\u63a5\u5165|\u96c6\u6210|\u6253\u5305|\u6784\u5efa|\u90e8\u7f72|\u8bb0\u5f55)",
+    r"\u4ecd\u7136.{0,80}(\u9700\u8981|\u5f85|\u672a|\u6ca1|\u7f3a|\u5c11|\u4e0d\u652f\u6301|\u4e0d\u5b8c\u6574)",
+    r"\u4ecd.{0,80}(\u9700\u8981|\u5f85|\u672a|\u6ca1|\u7f3a|\u5c11|\u4e0d\u652f\u6301|\u4e0d\u5b8c\u6574)",
+    r"\u6682\u672a.{0,80}(\u5b9e\u73b0|\u5b8c\u6210|\u9a8c\u8bc1|\u6d4b\u8bd5|\u63a5\u5165|\u652f\u6301)",
+    r"\u5c1a\u9700.{0,80}(\u5b9e\u73b0|\u5b8c\u6210|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8865\u5145|\u5904\u7406)",
+    r"\u7f3a(\u5c11|\u5931)?.{0,80}(\u5b9e\u73b0|\u6587\u4ef6|\u6d4b\u8bd5|\u9a8c\u8bc1|\u914d\u7f6e|\u4f9d\u8d56|\u6587\u6863|\u7b56\u7565)",
+    r"\u6b20\u7f3a.{0,80}(\u5b9e\u73b0|\u6d4b\u8bd5|\u9a8c\u8bc1|\u914d\u7f6e|\u6587\u6863|\u7b56\u7565)",
+    r"\u6f0f\u4e86.{0,80}(\u5b9e\u73b0|\u5904\u7406|\u6d4b\u8bd5|\u9a8c\u8bc1|\u66f4\u65b0)",
+    r"\u6ca1\u6765\u5f97\u53ca.{0,80}(\u5b9e\u73b0|\u4fee\u590d|\u6d4b\u8bd5|\u9a8c\u8bc1)",
+    r"\u63a5\u4e0b\u6765.{0,80}(\u9700\u8981|\u9700|\u5f97|\u8981|\u7ee7\u7eed).{0,80}(\u5b9e\u73b0|\u8865|\u4fee|\u4fee\u590d|\u6d4b|\u6d4b\u8bd5|\u9a8c\u8bc1|\u5b8c\u6210|\u5904\u7406|\u4f18\u5316)",
+    r"\u4e0b\u4e00\u6b65.{0,120}(\u5b9e\u73b0|\u8865|\u4fee|\u6d4b|\u9a8c\u8bc1|\u5b8c\u6210|\u8dd1\u901a|\u6253\u5305|\u6784\u5efa)",
+    r"\u540e\u7eed.{0,120}(\u5b9e\u73b0|\u8865|\u4fee|\u6d4b|\u9a8c\u8bc1|\u5b8c\u6210|\u8dd1\u901a|\u6253\u5305|\u6784\u5efa)",
+    r"\u6700\u503c\u5f97\u505a.{0,120}(\u8865|\u5b9e\u73b0|\u4fee|\u6d4b|\u9a8c\u8bc1|\u5b8c\u6210)",
+    r"\u5efa\u8bae\u7ee7\u7eed.{0,80}(\u5b9e\u73b0|\u8865|\u4fee|\u6d4b|\u9a8c\u8bc1|\u5b8c\u6210)",
+    r"\u5efa\u8bae\u4e0b\u4e00\u6b65.{0,80}(\u5b9e\u73b0|\u8865|\u4fee|\u6d4b|\u9a8c\u8bc1|\u5b8c\u6210)",
+    r"\u5df2\u7ecf.{0,40}\u4f46.{0,120}(\u8fd8|\u4ecd|\u9700|\u672a|\u6ca1|\u7f3a|\u5f85)",
+    r"\u867d\u7136.{0,80}\u4f46.{0,120}(\u8fd8|\u4ecd|\u9700|\u672a|\u6ca1|\u7f3a|\u5f85)",
+    r"\u5f53\u524d.{0,80}(\u53ea|\u4ec5|\u4ecd|\u5c1a|\u8fd8).{0,80}(\u652f\u6301|\u5b9e\u73b0|\u5b8c\u6210|\u8986\u76d6)",
+    r"\u8fd9\u8fd8\u4e0d\u662f.{0,80}(\u5b8c\u6574|\u6700\u7ec8|\u53ef\u4ea4\u4ed8|\u751f\u4ea7\u53ef\u7528)",
+    r"\u8fd8\u4e0d\u662f.{0,80}(\u5b8c\u6574|\u6700\u7ec8|\u53ef\u4ea4\u4ed8|\u751f\u4ea7\u53ef\u7528)",
+    r"\u6ca1\u6709.{0,80}(\u5b8c\u6574|\u771f\u6b63|\u5b9e\u9645|\u771f\u5b9e).{0,80}(\u5b9e\u73b0|\u9a8c\u6536|\u9a8c\u8bc1|\u6d4b\u8bd5|\u8bb0\u5f55|\u652f\u6301)",
+    r"(\u8981\u4e0d\u8981|\u662f\u5426).{0,80}\u7ee7\u7eed",
+    r"(?<!\u4e0d)(?<!\u65e0)(\u9700\u8981|\u8fd8\u8981|\u53ef\u4ee5).{0,80}\u7ee7\u7eed",
+    r"\u7ee7\u7eed\u6267\u884c.{0,100}[\?\uff1f]?$",
+    r"(\u8bf7|\u56de\u590d|\u8f93\u5165).{0,40}\u7ee7\u7eed.{0,40}(\u4ee5|\u6765)?\u7ee7\u7eed\s*$",
+    r"\u6309\s*(enter|\u56de\u8f66)\s*(\u952e)?\s*(\u7ee7\u7eed|\u4ee5\u7ee7\u7eed)\s*[:\uFF1A]?\s*$",
 ]
 
 
 DEFAULT_BLOCKER_PATTERNS = [
+    r"(?i)\u9700\u8981(\u4f60|\u7528\u6237).{0,20}(\u786e\u8ba4|\u63d0\u4f9b|\u51b3\u5b9a|\u9009\u62e9|\u6388\u6743|\u767b\u5f55|\u5bc6\u94a5|\u51ed\u636e|\u5bc6\u7801|token|api\s*key)",
+    r"(?i)(\u7b49\u5f85|\u9700\u8981).{0,30}(\u8f93\u5165|\u786e\u8ba4|\u6388\u6743|\u767b\u5f55|\u5bc6\u94a5|\u51ed\u636e|\u5bc6\u7801|token|api\s*key)",
+    r"(\u9700\u8981|\u7b49\u5f85).{0,30}(\u4f60|\u7528\u6237).{0,30}(\u51b3\u7b56|\u62cd\u677f|\u9009\u62e9|\u786e\u8ba4)",
+    r"\u8bf7.{0,10}(\u9009\u62e9|\u786e\u8ba4|\u63d0\u4f9b|\u6388\u6743|\u51b3\u5b9a)",
+    r"(\u9700\u8981|\u8bf7|\u7b49\u5f85|\u7b49\u4f60|\u7b49\u7528\u6237|\u7531\u4f60|\u7531\u7528\u6237).{0,40}(\u8f93\u5165|\u786e\u8ba4|\u9009\u62e9|\u51b3\u5b9a|\u6388\u6743|\u6279\u51c6|\u540c\u610f|\u63d0\u4f9b|\u8865\u5145|\u56de\u590d|\u544a\u77e5|\u6307\u5b9a)",
+    r"(\u8bf7\u9009\u62e9|\u8bf7\u786e\u8ba4|\u8bf7\u63d0\u4f9b|\u8bf7\u6388\u6743|\u8bf7\u51b3\u5b9a|\u9700\u8981\u4f60\u786e\u8ba4|\u9700\u8981\u4f60\u9009\u62e9|\u9700\u8981\u7528\u6237\u786e\u8ba4|\u7b49\u5f85\u7528\u6237|\u7b49\u4f60\u786e\u8ba4)",
+    r"(\u7f3a\u5c11|\u7f3a\u5931|\u627e\u4e0d\u5230|\u4e0d\u5b58\u5728).{0,20}(\u6587\u4ef6|\u914d\u7f6e|\u8def\u5f84|\u547d\u4ee4|\u4f9d\u8d56|\u53c2\u6570|\u4fe1\u606f|\u51ed\u8bc1|\u6743\u9650|API|api|key|token|\u6a21\u578b|\u8d26\u53f7|\u76ee\u5f55|\u73af\u5883\u53d8\u91cf)",
+    r"(\u6ca1\u6709\u6743\u9650|\u6743\u9650\u4e0d\u8db3|(?<!\u65e0\u987b)\u65e0\u6cd5|(?<!\u4e0d\u5b58\u5728)\u4e0d\u80fd).{0,40}(\u7ee7\u7eed|\u5199\u5165|\u8bbf\u95ee|\u4fee\u6539|\u6267\u884c)?",
+    r"(?i)(cannot|can't|unable to|blocked).{0,80}(credential|secret|password|token|api key|login|sign in|permission|approval)",
+    r"(?i)(need|requires?).{0,80}(your confirmation|user confirmation|credential|secret|password|token|api key|login|sign in|permission|approval)",
+    r"(?i)(need|requires?|waiting for|blocked by).{0,80}(your|user).{0,40}(input|decision|choice|confirmation|approval|permission|credentials?)",
+    r"(?i)(please|can you|could you).{0,80}(choose|select|confirm|approve|provide|authorize|decide|log in|sign in)",
+    r"(?i)which (option|approach|method|profile|configuration|config) (do you|would you like|should I)",
+    r"(?i)(missing|not found|does not exist).{0,80}(file|config|path|command|dependency|parameter|credential|permission|api key|token|model|account|directory|environment variable)",
+    r"(?i)(waiting for|blocked by).{0,80}(user|your).{0,40}(decision|choice|confirmation|approval|credential|secret|password|token|api key)",
+    r"(?i)(deploy|publish|release).{0,80}(confirmation|approval|credential|secret|password|token|api key|login|sign in)",
+    r"(?i)(payment|billing|delete user data|destructive)",
+]
+
+
+LEGACY_GENERATED_PATTERNS_TO_DROP = {
+    r"(?i)(still|remaining|todo|wip|work in progress|not (yet )?complete)",
     r"(?i)(error|failed|cannot|unable to|blocked by)",
     r"(?i)(missing|not found|does not exist)",
-    r"(?i)(need.{0,30}(your|user) (input|decision|approval|confirmation))",
-    r"(?i)which (option|approach|method) (do you|would you like)",
-    r"(错误|失败|无法|不能|被阻塞|卡住|没有权限|权限不足)",
-    r"(缺少|找不到|不存在).{0,20}(文件|配置|路径|命令|依赖|参数|信息|凭证|权限|API|api|key|token|模型|账号|目录|环境变量)",
-    r"(需要|请|等待|等你|等用户|由你|由用户).{0,40}(输入|确认|选择|决定|授权|批准|同意|提供|补充|回复|告知|指定)",
-    r"(请选择|请确认|请提供|请授权|请决定|需要你确认|需要你选择|需要用户确认|等待用户|等你确认)",
-]
+    r"(\u8981\u4e0d\u8981|\u662f\u5426|\u9700\u8981|\u8fd8\u8981|\u53ef\u4ee5).{0,80}\u7ee7\u7eed",
+}
 
 
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
 
 
 def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> list[str]:
-    """Return user patterns plus any missing built-in patterns."""
+    """Return user patterns plus missing built-ins, dropping unsafe generated defaults."""
     merged: list[str] = []
     seen: set[str] = set()
     source = patterns if isinstance(patterns, list) else []
 
     for pattern in source + defaults:
         value = str(pattern).strip()
-        if value and value not in seen:
-            merged.append(value)
-            seen.add(value)
+        if not value or value in LEGACY_GENERATED_PATTERNS_TO_DROP or value in seen:
+            continue
+        merged.append(value)
+        seen.add(value)
 
     return merged
 
@@ -64,48 +152,61 @@ def _merge_unique_strings(values: list[str] | None, defaults: list[str]) -> list
 @dataclass
 class AutoContinueSettings:
     """Settings for auto-continue functionality."""
+
     enabled: bool = False
-    max_continuations: int = 3
+    max_continuations: int = 100
     continuation_prompt: str = "Please continue from where you left off. Complete any remaining work."
-    apply_to_subagents: bool = False  # Claude Code only
-    conservative_mode: bool = True  # stop_hook_active=true 时直接允许停止
-
-    # 错误恢复设置
-    error_recovery_enabled: bool = False  # 是否启用错误自动恢复
-    max_error_recoveries: int = 3  # 单个会话最大恢复次数
-
-    # Git版本管理设置
-    git_auto_snapshot: bool = True  # 是否自动创建git快照（默认开启）
-    git_snapshot_on_start: bool = True  # 对话开始时创建快照
-    git_snapshot_on_recovery: bool = True  # 错误恢复前创建快照
-
+    apply_to_subagents: bool = False
+    conservative_mode: bool = True
+    error_recovery_enabled: bool = False
+    max_error_recoveries: int = 3
+    error_retry_initial_delay_seconds: int = 5
+    error_retry_max_delay_seconds: int = 60
+    git_auto_snapshot: bool = True
+    git_snapshot_on_start: bool = True
+    git_snapshot_on_recovery: bool = True
     auto_approve_permission_requests: bool = False
-    auto_approve_max_per_session: int = 0  # 0 means unlimited
+    auto_approve_max_per_session: int = 0
     auto_approve_bash: bool = True
     auto_approve_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS))
-    # Incomplete patterns (regex)
     incomplete_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_INCOMPLETE_PATTERNS))
-
-    # Blocker patterns (regex) - 遇到这些就不续跑
     blocker_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_BLOCKER_PATTERNS))
 
     def validate(self) -> tuple[bool, str]:
         """Validate settings. Returns (is_valid, error_message)."""
-        # Validate max_continuations
-        if not isinstance(self.max_continuations, int) or self.max_continuations < 0:
-            return False, "max_continuations must be a non-negative integer"
+        if not isinstance(self.max_continuations, int) or self.max_continuations < -1:
+            return False, "max_continuations must be -1 or a non-negative integer"
 
         if self.max_continuations > 100:
             return False, "max_continuations too large (max: 100)"
 
-        # Validate max_error_recoveries
         if not isinstance(self.max_error_recoveries, int) or self.max_error_recoveries < 0:
             return False, "max_error_recoveries must be a non-negative integer"
 
         if self.max_error_recoveries > 10:
             return False, "max_error_recoveries too large (max: 10)"
 
-        # Validate auto approval settings
+        if (
+            not isinstance(self.error_retry_initial_delay_seconds, int)
+            or self.error_retry_initial_delay_seconds < 1
+        ):
+            return False, "error_retry_initial_delay_seconds must be a positive integer"
+
+        if self.error_retry_initial_delay_seconds > 300:
+            return False, "error_retry_initial_delay_seconds too large (max: 300)"
+
+        if (
+            not isinstance(self.error_retry_max_delay_seconds, int)
+            or self.error_retry_max_delay_seconds < 1
+        ):
+            return False, "error_retry_max_delay_seconds must be a positive integer"
+
+        if self.error_retry_max_delay_seconds > 600:
+            return False, "error_retry_max_delay_seconds too large (max: 600)"
+
+        if self.error_retry_initial_delay_seconds > self.error_retry_max_delay_seconds:
+            return False, "error_retry_initial_delay_seconds cannot exceed error_retry_max_delay_seconds"
+
         if not isinstance(self.auto_approve_permission_requests, bool):
             return False, "auto_approve_permission_requests must be a boolean"
 
@@ -126,11 +227,9 @@ class AutoContinueSettings:
             if len(tool.strip()) > 80:
                 return False, "auto_approve_tools contains a tool name that is too long"
 
-        # Validate continuation_prompt
         if not isinstance(self.continuation_prompt, str) or not self.continuation_prompt.strip():
             return False, "continuation_prompt cannot be empty"
 
-        # Validate regex patterns
         for pattern in self.incomplete_patterns:
             try:
                 re.compile(pattern)
@@ -150,8 +249,7 @@ class AutoContinueSettings:
 
     @classmethod
     def from_dict(cls, data: dict) -> "AutoContinueSettings":
-        """Create settings from dict with validation."""
-        # Filter to known fields only
+        """Create settings from a dict with default-pattern migration."""
         known_fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         if "incomplete_patterns" in known_fields:
             known_fields["incomplete_patterns"] = _merge_unique_patterns(
@@ -179,26 +277,23 @@ class AutoContinueSettings:
                 if tool.casefold() != "bash"
             ]
 
-        # Create instance
         instance = cls(**known_fields)
-
-        # Validate
         is_valid, error = instance.validate()
         if not is_valid:
             raise ValueError(f"Invalid settings: {error}")
-
         return instance
 
 
 @dataclass
 class ProviderStatus:
     """Status of a provider's auto-continue installation."""
-    provider_name: str  # "codex" or "claude"
+
+    provider_name: str
     enabled: bool = False
     hook_script_exists: bool = False
     hook_registered: bool = False
     guidance_installed: bool = False
-    error_recovery_installed: bool = False  # 错误恢复是否已安装
+    error_recovery_installed: bool = False
     last_error: Optional[str] = None
 
     def to_dict(self) -> dict:

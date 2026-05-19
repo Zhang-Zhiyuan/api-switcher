@@ -113,6 +113,11 @@ class AutoContinueControl(ctk.CTkFrame):
                 info_lines.append(f"保守模式: {'是' if settings.conservative_mode else '否'}")
                 if settings.error_recovery_enabled:
                     info_lines.append(f"最大恢复次数: {settings.max_error_recoveries}")
+                    info_lines.append(
+                        "断联重试间隔: "
+                        f"{settings.error_retry_initial_delay_seconds}-"
+                        f"{settings.error_retry_max_delay_seconds}s"
+                    )
                 if self.provider.lower() == "claude":
                     info_lines.append(f"应用到 Subagent: {'是' if settings.apply_to_subagents else '否'}")
                     auto_approve_limit = (

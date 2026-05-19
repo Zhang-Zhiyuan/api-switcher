@@ -58,7 +58,106 @@ function ConvertTo-Hashtable {{
     return $result
 }}
 
-# Git快照函数
+# Text matching and decision logging helpers.
+function Get-NormalizedText {{
+    param([string]$Text)
+
+    if ($null -eq $Text) {{
+        return ""
+    }}
+
+    return ($Text -replace "\\s+", " ").Trim()
+}}
+
+function Find-MatchingRegex {{
+    param(
+        [string]$Text,
+        $Patterns
+    )
+
+    if ($null -eq $Patterns) {{
+        return $null
+    }}
+
+    foreach ($pattern in $Patterns) {{
+        $patternText = [string]$pattern
+        if ([string]::IsNullOrWhiteSpace($patternText)) {{
+            continue
+        }}
+        try {{
+            if ([regex]::IsMatch($Text, $patternText, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {{
+                return $patternText
+            }}
+        }} catch {{
+            Write-Log "Invalid regex pattern ignored: $patternText" "WARN"
+        }}
+    }}
+
+    return $null
+}}
+
+function Save-StateFile {{
+    param(
+        [string]$Path,
+        [hashtable]$State
+    )
+
+    try {{
+        $tempPath = "$Path.tmp"
+        $State | ConvertTo-Json | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
+        return $true
+    }} catch {{
+        Write-Log "Failed to save state: $_" "WARN"
+        return $false
+    }}
+}}
+
+function Write-DecisionLog {{
+    param(
+        [string]$StateDir,
+        [string]$SessionId,
+        [string]$HookEvent,
+        [string]$AgentId,
+        [string]$Decision,
+        [string]$Reason,
+        [string]$Match = "",
+        [string]$Message = "",
+        [int]$Count = -1,
+        [string]$ContinuationPrompt = ""
+    )
+
+    try {{
+        if (-not (Test-Path -LiteralPath $StateDir)) {{
+            New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+        }}
+        $excerpt = [string]$Message
+        if ($excerpt.Length -gt 500) {{
+            $excerpt = $excerpt.Substring(0, 500)
+        }}
+        $entry = [ordered]@{{
+            timestamp = (Get-Date -Format "o")
+            session_id = $SessionId
+            hook_event = $HookEvent
+            agent_id = $AgentId
+            decision = $Decision
+            reason = $Reason
+            match = $Match
+            count = $Count
+            excerpt = $excerpt
+        }}
+        if (-not [string]::IsNullOrWhiteSpace($ContinuationPrompt)) {{
+            $entry["continuation_prompt"] = $ContinuationPrompt
+        }}
+        $logPath = Join-Path $StateDir "auto_continue_stop_log.jsonl"
+        $logEntry = $entry | ConvertTo-Json -Compress -Depth 6
+        Add-Content -LiteralPath $logPath -Value $logEntry -Encoding UTF8 -ErrorAction Stop
+    }} catch {{
+        Write-Log "Failed to write decision log: $_" "WARN"
+    }}
+}}
+
+# Git snapshot helpers.
 function Ensure-LocalGitIgnore {{
     try {{
         $gitignorePath = Join-Path (Get-Location) ".gitignore"
@@ -172,6 +271,17 @@ try {{
         exit 0  # Allow stop if settings invalid
     }}
 
+    $configDir = Split-Path -Parent $settingsPath
+    $stateDir = Join-Path $configDir "tmp"
+    try {{
+        if (-not (Test-Path -LiteralPath $stateDir)) {{
+            New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+        }}
+    }} catch {{
+        Write-Log "Failed to create tmp state directory, falling back to config dir: $_" "WARN"
+        $stateDir = $configDir
+    }}
+
     $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
     $gitSnapshotOnStart = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_start"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_start }}
     $autoApprovePermissionRequests = if ($null -eq $settings.PSObject.Properties["auto_approve_permission_requests"]) {{ $false }} else {{ [bool]$settings.auto_approve_permission_requests }}
@@ -191,23 +301,32 @@ try {{
         exit 0
     }}
 
-    # Determine provider based on input structure
-    $isClaude = $null -ne $hookInput.hook_event_name -or $null -ne $hookInput.hookEventName
-    $isCodex = -not $isClaude
-
-    # Get session ID and last message
+    # Get session ID, event name, and the final assistant text. New Codex builds
+    # use the same last_assistant_message shape as Claude-style Stop hooks.
     $sessionId = if ($hookInput.session_id) {{ $hookInput.session_id }} elseif ($hookInput.sessionId) {{ $hookInput.sessionId }} else {{ "" }}
-    $lastMessage = if ($isClaude) {{
-        if ($hookInput.last_assistant_message) {{ $hookInput.last_assistant_message }}
-        elseif ($hookInput.lastAssistantMessage) {{ $hookInput.lastAssistantMessage }}
-        else {{ "" }}
-    }} else {{
-        if ($hookInput.last_message) {{ $hookInput.last_message }}
-        elseif ($hookInput.lastMessage) {{ $hookInput.lastMessage }}
-        else {{ "" }}
-    }}
-    $hookEvent = if ($isClaude) {{ if ($hookInput.hook_event_name) {{ $hookInput.hook_event_name }} elseif ($hookInput.hookEventName) {{ $hookInput.hookEventName }} else {{ "Stop" }} }} else {{ "Stop" }}
+    $hookEvent = if ($hookInput.hook_event_name) {{ $hookInput.hook_event_name }} elseif ($hookInput.hookEventName) {{ $hookInput.hookEventName }} else {{ "Stop" }}
     $agentId = if ($hookInput.agent_id) {{ $hookInput.agent_id }} elseif ($hookInput.agentId) {{ $hookInput.agentId }} else {{ $null }}
+    $isClaude = $null -ne $hookInput.hook_event_name -or $null -ne $hookInput.hookEventName
+
+    $lastMessage = ""
+    foreach ($fieldName in @(
+        "last_assistant_message",
+        "lastAssistantMessage",
+        "last_message",
+        "lastMessage",
+        "assistant_message",
+        "assistantMessage",
+        "message",
+        "content",
+        "text"
+    )) {{
+        $property = $hookInput.PSObject.Properties[$fieldName]
+        if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {{
+            $lastMessage = [string]$property.Value
+            break
+        }}
+    }}
+    $lastMessage = Get-NormalizedText $lastMessage
 
     # Permission prompts must be answered quickly. Git snapshots can be slow in
     # large repositories, so only run them for stop/continue events.
@@ -288,7 +407,6 @@ try {{
         }}
         if ($autoApproveMax -lt 0) {{ $autoApproveMax = 0 }}
 
-        $stateDir = Split-Path $settingsPath
         $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
         $count = 0
 
@@ -471,7 +589,7 @@ try {{
     }}
 
     # Validate settings
-    if ($null -eq $settings.max_continuations -or $settings.max_continuations -lt 0) {{
+    if ($null -eq $settings.max_continuations -or $settings.max_continuations -lt -1) {{
         Write-Log "Invalid max_continuations value" "ERROR"
         exit 0
     }}
@@ -487,8 +605,8 @@ try {{
     }}
 
     # Load state with file locking
-    $stateDir = Split-Path $settingsPath
     $statePath = Join-Path $stateDir "auto_continue_stop_state.json"
+    $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
     $lockPath = "$statePath.lock"
 
     # Exclusive file-based locking (wait up to 2 seconds)
@@ -544,27 +662,6 @@ try {{
             exit 0
         }}
 
-        # Check max continuations
-        if ($count -ge $settings.max_continuations) {{
-            # Log and allow stop
-            $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
-            $logEntry = @{{
-                timestamp = (Get-Date -Format "o")
-                session_id = $sessionId
-                hook_event = $hookEvent
-                agent_id = $agentId
-                decision = "allow_stop"
-                reason = "max_continuations_reached"
-                count = $count
-            }} | ConvertTo-Json -Compress
-            try {{
-                Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop
-            }} catch {{
-                Write-Log "Failed to write log: $_" "WARN"
-            }}
-            exit 0
-        }}
-
         # Check conservative mode for Claude Code
         if ($isClaude -and $settings.conservative_mode -and $hookInput.stop_hook_active) {{
             exit 0  # Allow stop in conservative mode when already continuing
@@ -574,106 +671,90 @@ try {{
         $recoverableApiErrorPatterns = @(
 {_powershell_array(RECOVERABLE_API_ERROR_PATTERNS, 12)}
         )
-        $isRecoverableApiError = $false
-        foreach ($pattern in $recoverableApiErrorPatterns) {{
-            try {{
-                if ($lastMessage -match $pattern) {{
-                    $isRecoverableApiError = $true
-                    break
-                }}
-            }} catch {{
-                Write-Log "Invalid recoverable API error pattern: $pattern" "WARN"
+        $recoverableApiErrorMatch = Find-MatchingRegex -Text $lastMessage -Patterns $recoverableApiErrorPatterns
+        $isRecoverableApiError = $null -ne $recoverableApiErrorMatch
+
+        $blockerMatch = Find-MatchingRegex -Text $lastMessage -Patterns $settings.blocker_patterns
+        if ($null -ne $blockerMatch -and -not $isRecoverableApiError) {{
+            Write-DecisionLog `
+                -StateDir $stateDir `
+                -SessionId $sessionId `
+                -HookEvent $hookEvent `
+                -AgentId $agentId `
+                -Decision "allow_stop" `
+                -Reason "blocker_detected" `
+                -Match $blockerMatch `
+                -Message $lastMessage `
+                -Count $count
+            exit 0
+        }}
+
+        $incompleteMatch = Find-MatchingRegex -Text $lastMessage -Patterns $settings.incomplete_patterns
+        if ($null -eq $incompleteMatch -and -not $isRecoverableApiError) {{
+            if ($state.ContainsKey($stateKey)) {{
+                $state.Remove($stateKey)
+                Save-StateFile -Path $statePath -State $state | Out-Null
             }}
+            Write-DecisionLog `
+                -StateDir $stateDir `
+                -SessionId $sessionId `
+                -HookEvent $hookEvent `
+                -AgentId $agentId `
+                -Decision "allow_stop" `
+                -Reason "no_incomplete_match" `
+                -Match "" `
+                -Message $lastMessage `
+                -Count $count
+            exit 0
         }}
 
-        # Check blocker patterns with error handling
-        $isBlocked = $false
-        if ($settings.blocker_patterns) {{
-            foreach ($pattern in $settings.blocker_patterns) {{
-                try {{
-                    if ($lastMessage -match $pattern) {{
-                        $isBlocked = $true
-                        break
-                    }}
-                }} catch {{
-                    Write-Log "Invalid blocker pattern: $pattern" "WARN"
-                }}
-            }}
-        }}
+        $matchedPattern = if ($isRecoverableApiError) {{ $recoverableApiErrorMatch }} else {{ $incompleteMatch }}
 
-        if ($isBlocked -and -not $isRecoverableApiError) {{
-            exit 0  # Allow stop if blocked
-        }}
-
-        # Check incomplete patterns with error handling
-        $isIncomplete = $false
-        if ($settings.incomplete_patterns) {{
-            foreach ($pattern in $settings.incomplete_patterns) {{
-                try {{
-                    if ($lastMessage -match $pattern) {{
-                        $isIncomplete = $true
-                        break
-                    }}
-                }} catch {{
-                    Write-Log "Invalid incomplete pattern: $pattern" "WARN"
-                }}
-            }}
-        }}
-
-        if (-not $isIncomplete -and -not $isRecoverableApiError) {{
-            exit 0  # Allow stop if complete
+        # Check max continuations after confirming this stop actually needs continuation.
+        if ($settings.max_continuations -ge 0 -and $count -ge $settings.max_continuations) {{
+            Write-DecisionLog `
+                -StateDir $stateDir `
+                -SessionId $sessionId `
+                -HookEvent $hookEvent `
+                -AgentId $agentId `
+                -Decision "allow_stop" `
+                -Reason "max_continuations_reached" `
+                -Match $matchedPattern `
+                -Message $lastMessage `
+                -Count $count
+            exit 0
         }}
 
         # Decision: block stop and continue
         $count++
         $state[$stateKey] = $count
 
-        # Save state with atomic write
-        try {{
-            $tempPath = "$statePath.tmp"
-            $state | ConvertTo-Json | Set-Content $tempPath -ErrorAction Stop
-            Move-Item -Path $tempPath -Destination $statePath -Force -ErrorAction Stop
-        }} catch {{
-            Write-Log "Failed to save state: $_" "ERROR"
-        }}
+        Save-StateFile -Path $statePath -State $state | Out-Null
 
         $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} else {{ "incomplete_work_detected" }}
 
-        # Log decision
-        $logPath = Join-Path $stateDir "auto_continue_stop_log.jsonl"
-        $logEntry = @{{
-            timestamp = (Get-Date -Format "o")
-            session_id = $sessionId
-            hook_event = $hookEvent
-            agent_id = $agentId
-            decision = "block_stop"
-            reason = $continueReason
-            count = $count
-            continuation_prompt = $settings.continuation_prompt
-        }} | ConvertTo-Json -Compress
-        try {{
-            Add-Content -Path $logPath -Value $logEntry -ErrorAction Stop
-        }} catch {{
-            Write-Log "Failed to write log: $_" "WARN"
-        }}
+        Write-DecisionLog `
+            -StateDir $stateDir `
+            -SessionId $sessionId `
+            -HookEvent $hookEvent `
+            -AgentId $agentId `
+            -Decision "block_stop" `
+            -Reason $continueReason `
+            -Match $matchedPattern `
+            -Message $lastMessage `
+            -Count $count `
+            -ContinuationPrompt $settings.continuation_prompt
 
-        # Output decision
-        if ($isClaude) {{
-            # Claude Code format
-            $output = @{{
-                decision = "block"
-                reason = $settings.continuation_prompt
-                suppressOutput = $true
-            }} | ConvertTo-Json
-            Write-Output $output
-        }} else {{
-            # Codex format
-            $output = @{{
-                continue = $true
-                message = $settings.continuation_prompt
-            }} | ConvertTo-Json
-            Write-Output $output
-        }}
+        # Output pphoto-style block decision. The legacy continue/message fields
+        # are kept for older Codex builds that used that shape.
+        $output = @{{
+            decision = "block"
+            reason = $settings.continuation_prompt
+            suppressOutput = $true
+            continue = $true
+            message = $settings.continuation_prompt
+        }} | ConvertTo-Json
+        Write-Output $output
 
     }} finally {{
         # Always remove lock file

@@ -117,6 +117,18 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         error_recovery_switch.pack(anchor="w", pady=5)
 
         self._add_field(scroll, "最大恢复次数", "max_error_recoveries", str(self.settings.max_error_recoveries))
+        self._add_field(
+            scroll,
+            "断联初始重试间隔(秒)",
+            "error_retry_initial_delay_seconds",
+            str(self.settings.error_retry_initial_delay_seconds),
+        )
+        self._add_field(
+            scroll,
+            "断联最大重试间隔(秒)",
+            "error_retry_max_delay_seconds",
+            str(self.settings.error_retry_max_delay_seconds),
+        )
 
         # Git版本管理section
         ctk.CTkLabel(scroll, text="Git 版本管理", text_color=COLORS["text"], font=font(14, "bold")).pack(
@@ -223,6 +235,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             # Collect values
             max_cont = int(self._max_continuations_entry.get())
             max_recoveries = int(self._max_error_recoveries_entry.get())
+            retry_initial_delay = int(self._error_retry_initial_delay_seconds_entry.get())
+            retry_max_delay = int(self._error_retry_max_delay_seconds_entry.get())
             if max_cont < 0 or max_recoveries < 0:
                 raise ValueError("次数不能为负数")
             prompt = self._prompt_text.get("1.0", "end").strip()
@@ -259,6 +273,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 conservative_mode=conservative,
                 error_recovery_enabled=error_recovery,
                 max_error_recoveries=max_recoveries,
+                error_retry_initial_delay_seconds=retry_initial_delay,
+                error_retry_max_delay_seconds=retry_max_delay,
                 git_auto_snapshot=git_auto_snapshot,
                 git_snapshot_on_start=git_snapshot_on_start,
                 git_snapshot_on_recovery=git_snapshot_on_recovery,

@@ -583,6 +583,10 @@ def flatten_text(value):
     return str(value)
 
 
+def normalize_text(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
 def pick_text(data, keys):
     for key in keys:
         text = flatten_text(data.get(key))
@@ -629,16 +633,19 @@ def transcript_tail(path):
     return ""
 
 
-def any_pattern(patterns, text):
+def matching_pattern(patterns, text):
     if not isinstance(patterns, list):
-        return False
+        return ""
     for pattern in patterns:
+        pattern_text = str(pattern or "").strip()
+        if not pattern_text:
+            continue
         try:
-            if re.search(str(pattern), text, re.IGNORECASE):
-                return True
+            if re.search(pattern_text, text, re.IGNORECASE):
+                return pattern_text
         except re.error as exc:
             log(f"Invalid pattern ignored: {pattern}: {exc}", "WARN")
-    return False
+    return ""
 
 
 RECOVERABLE_API_ERROR_PATTERNS = __RECOVERABLE_API_ERROR_PATTERNS__
@@ -748,6 +755,34 @@ def write_jsonl(path, data):
             handle.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception as exc:
         log(f"Failed to write log: {exc}", "WARN")
+
+
+def write_decision_log(
+    log_path,
+    session_id,
+    hook_event,
+    agent_id,
+    decision,
+    reason,
+    match="",
+    message="",
+    count=-1,
+    continuation_prompt="",
+):
+    entry = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "session_id": str(session_id),
+        "hook_event": str(hook_event),
+        "agent_id": str(agent_id),
+        "decision": decision,
+        "reason": reason,
+        "match": str(match or ""),
+        "count": count,
+        "excerpt": normalize_text(message)[:500],
+    }
+    if continuation_prompt:
+        entry["continuation_prompt"] = continuation_prompt
+    write_jsonl(log_path, entry)
 
 
 def permission_suggestions_from_input(data):
@@ -1040,23 +1075,15 @@ def main():
     if not last_message:
         transcript_path = data.get("transcript_path") or data.get("transcriptPath")
         last_message = transcript_tail(transcript_path)
+    last_message = normalize_text(last_message)
     if not last_message.strip():
         return
 
-    max_continuations = as_int(settings.get("max_continuations"), 3)
-    if max_continuations <= 0:
+    max_continuations = as_int(settings.get("max_continuations"), 100)
+    if max_continuations == 0 or max_continuations < -1:
         return
 
     if is_claude and as_bool(settings.get("conservative_mode"), True) and as_bool(data.get("stop_hook_active"), False):
-        return
-
-    recoverable_api_error = is_recoverable_api_error(last_message)
-
-    if any_pattern(settings.get("blocker_patterns"), last_message) and not recoverable_api_error:
-        return
-
-    incomplete_patterns = settings.get("incomplete_patterns")
-    if not any_pattern(incomplete_patterns, last_message) and not recoverable_api_error:
         return
 
     state_seed = f"{session_id}|{hook_event}|{agent_id}"
@@ -1066,6 +1093,43 @@ def main():
     state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
     log_path = os.path.join(state_dir, "auto_continue_stop_log.jsonl")
     lock_path = state_path + ".lock"
+
+    recoverable_api_error_match = matching_pattern(RECOVERABLE_API_ERROR_PATTERNS, last_message)
+    recoverable_api_error = bool(recoverable_api_error_match)
+
+    blocker_match = matching_pattern(settings.get("blocker_patterns"), last_message)
+    if blocker_match and not recoverable_api_error:
+        write_decision_log(
+            log_path,
+            session_id,
+            hook_event,
+            agent_id,
+            "allow_stop",
+            "blocker_detected",
+            blocker_match,
+            last_message,
+        )
+        return
+
+    incomplete_match = matching_pattern(settings.get("incomplete_patterns"), last_message)
+    if not incomplete_match and not recoverable_api_error:
+        state = load_state(state_path)
+        if state_key in state:
+            state.pop(state_key, None)
+            save_state(state_path, state)
+        write_decision_log(
+            log_path,
+            session_id,
+            hook_event,
+            agent_id,
+            "allow_stop",
+            "no_incomplete_match",
+            "",
+            last_message,
+        )
+        return
+
+    matched_pattern = recoverable_api_error_match if recoverable_api_error else incomplete_match
 
     lock_fd = None
     for _ in range(20):
@@ -1089,18 +1153,17 @@ def main():
     try:
         state = load_state(state_path)
         count = as_int(state.get(state_key), 0)
-        if count >= max_continuations:
-            write_jsonl(
+        if max_continuations >= 0 and count >= max_continuations:
+            write_decision_log(
                 log_path,
-                {
-                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "session_id": str(session_id),
-                    "hook_event": str(hook_event),
-                    "agent_id": str(agent_id),
-                    "decision": "allow_stop",
-                    "reason": "max_continuations_reached",
-                    "count": count,
-                },
+                session_id,
+                hook_event,
+                agent_id,
+                "allow_stop",
+                "max_continuations_reached",
+                matched_pattern,
+                last_message,
+                count,
             )
             return
 
@@ -1110,24 +1173,26 @@ def main():
 
         continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
         continue_reason = "recoverable_api_error_detected" if recoverable_api_error else "incomplete_work_detected"
-        write_jsonl(
+        write_decision_log(
             log_path,
-            {
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "session_id": str(session_id),
-                "hook_event": str(hook_event),
-                "agent_id": str(agent_id),
-                "decision": "block_stop",
-                "reason": continue_reason,
-                "count": count,
-                "continuation_prompt": continuation_prompt,
-            },
+            session_id,
+            hook_event,
+            agent_id,
+            "block_stop",
+            continue_reason,
+            matched_pattern,
+            last_message,
+            count,
+            continuation_prompt,
         )
 
-        if is_claude:
-            output = {"decision": "block", "reason": continuation_prompt, "suppressOutput": True}
-        else:
-            output = {"continue": True, "message": continuation_prompt}
+        output = {
+            "decision": "block",
+            "reason": continuation_prompt,
+            "suppressOutput": True,
+            "continue": True,
+            "message": continuation_prompt,
+        }
         print(json.dumps(output, ensure_ascii=False))
     finally:
         try:
@@ -1340,21 +1405,15 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
         _write_json(client, paths.provider_config_path, settings)
 
 
-def _iter_codex_hook_commands(hooks: dict, event_name: str):
-    value = hooks.get(event_name)
-    if isinstance(value, dict):
-        command = value.get("command")
-        if command:
-            yield str(command)
-        for hook in value.get("hooks", []) if isinstance(value.get("hooks"), list) else []:
-            if isinstance(hook, dict) and hook.get("command"):
-                yield str(hook["command"])
-    elif isinstance(value, list):
-        for item in value:
-            if isinstance(item, dict):
-                command = item.get("command")
-                if command:
-                    yield str(command)
+def _iter_codex_hook_commands(data: dict, event_name: str):
+    if not isinstance(data, dict):
+        return
+    hooks = _codex_hooks_container(data)
+    for value in (hooks.get(event_name), data.get(event_name)):
+        for hook in _codex_event_hooks(value):
+            command = hook.get("command")
+            if command:
+                yield str(command)
 
 
 def _codex_event_hooks(value) -> list[dict]:
@@ -1367,11 +1426,62 @@ def _codex_event_hooks(value) -> list[dict]:
             hooks.extend(dict(hook) for hook in nested if isinstance(hook, dict) and hook.get("command"))
         return hooks
     if isinstance(value, list):
-        return [dict(hook) for hook in value if isinstance(hook, dict) and hook.get("command")]
+        hooks = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            if item.get("command"):
+                hooks.append(dict(item))
+            nested = item.get("hooks")
+            if isinstance(nested, list):
+                hooks.extend(dict(hook) for hook in nested if isinstance(hook, dict) and hook.get("command"))
+        return hooks
     return []
 
 
+def _codex_hooks_container(data: dict, *, migrate_legacy: bool = False) -> dict:
+    if not isinstance(data, dict):
+        return {}
+
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        data["hooks"] = hooks
+
+    if migrate_legacy:
+        for event_name in list(data.keys()):
+            if event_name == "hooks":
+                continue
+            event_hooks = _codex_event_hooks(data.get(event_name))
+            managed_hooks = [
+                hook for hook in event_hooks
+                if _is_our_command(str(hook.get("command", "")))
+            ]
+            if not managed_hooks:
+                continue
+            existing = _codex_event_hooks(hooks.get(event_name))
+            hooks[event_name] = _format_codex_event_hooks(existing + managed_hooks)
+
+            remaining = [
+                hook for hook in event_hooks
+                if not _is_our_command(str(hook.get("command", "")))
+            ]
+            formatted = _format_legacy_codex_event_hooks(remaining)
+            if formatted is None:
+                data.pop(event_name, None)
+            else:
+                data[event_name] = formatted
+
+    return hooks
+
+
 def _format_codex_event_hooks(hook_list: list[dict]):
+    if not hook_list:
+        return None
+    return [{"hooks": hook_list}]
+
+
+def _format_legacy_codex_event_hooks(hook_list: list[dict]):
     if not hook_list:
         return None
     if len(hook_list) == 1:
@@ -1409,17 +1519,20 @@ def _remove_codex_event_hook(hooks: dict, event_name: str) -> bool:
 def _codex_hooks_has_entries(hooks: dict) -> bool:
     if not isinstance(hooks, dict):
         return False
-    for value in hooks.values():
-        if isinstance(value, dict):
-            if value.get("command"):
-                return True
-            hook_list = value.get("hooks")
-            if isinstance(hook_list, list) and any(isinstance(hook, dict) and hook.get("command") for hook in hook_list):
-                return True
-        elif isinstance(value, list):
-            if any(isinstance(item, dict) and item.get("command") for item in value):
-                return True
-    return False
+    return any(_codex_event_hooks(value) for value in hooks.values())
+
+
+def _codex_data_has_entries(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    hooks = _codex_hooks_container(data)
+    if _codex_hooks_has_entries(hooks):
+        return True
+    return any(
+        _codex_event_hooks(value)
+        for key, value in data.items()
+        if key != "hooks"
+    )
 
 
 def _set_codex_hooks_enabled(client, paths: RemoteAutoContinuePaths, enabled: bool) -> None:
@@ -1434,11 +1547,21 @@ def _set_codex_hooks_enabled(client, paths: RemoteAutoContinuePaths, enabled: bo
 def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -> None:
     if not paths.codex_hooks_path:
         raise RuntimeError("Codex hooks 路径缺失")
-    hooks = _read_json(client, paths.codex_hooks_path, default={})
-    if not isinstance(hooks, dict):
-        hooks = {}
-    _upsert_codex_event_hook(hooks, "Stop", {"command": command, "timeout": 10})
-    _write_json(client, paths.codex_hooks_path, hooks)
+    data = _read_json(client, paths.codex_hooks_path, default={})
+    if not isinstance(data, dict):
+        data = {}
+    hooks = _codex_hooks_container(data, migrate_legacy=True)
+    _upsert_codex_event_hook(
+        hooks,
+        "Stop",
+        {
+            "type": "command",
+            "command": command,
+            "timeout": 10,
+            "statusMessage": "Checking whether Codex should continue",
+        },
+    )
+    _write_json(client, paths.codex_hooks_path, data)
 
     _set_codex_hooks_enabled(client, paths, True)
 
@@ -1446,11 +1569,12 @@ def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -
 def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
     if not paths.codex_hooks_path:
         return
-    hooks = _read_json(client, paths.codex_hooks_path, default={}, strict=False)
-    if isinstance(hooks, dict) and "Stop" in hooks:
+    data = _read_json(client, paths.codex_hooks_path, default={}, strict=False)
+    if isinstance(data, dict):
+        hooks = _codex_hooks_container(data, migrate_legacy=True)
         if _remove_codex_event_hook(hooks, "Stop"):
-            _write_json(client, paths.codex_hooks_path, hooks)
-            if not _codex_hooks_has_entries(hooks):
+            _write_json(client, paths.codex_hooks_path, data)
+            if not _codex_data_has_entries(data):
                 _set_codex_hooks_enabled(client, paths, False)
 
 

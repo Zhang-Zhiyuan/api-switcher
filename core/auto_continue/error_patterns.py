@@ -37,6 +37,20 @@ TRANSPORT_RECOVERABLE_PATTERNS = [
     r"error sending request for url",
     r"backend-api/codex/responses/compact",
     r"responses/compact",
+    r"\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED)\b",
+    r"connection (?:reset|aborted|closed|lost|terminated|timed out)",
+    r"(?:read|write) ECONNRESET",
+    r"socket hang up",
+    r"fetch failed",
+    r"request timed out",
+    r"TLS handshake timeout",
+    r"temporary failure in name resolution",
+    r"dns.*(?:failed|failure|timeout)",
+    r"network.*(?:unreachable|timeout|reset|disconnect)",
+    r"\u8fde\u63a5.*(\u4e2d\u65ad|\u91cd\u7f6e|\u65ad\u5f00|\u5931\u8d25|\u8d85\u65f6)",
+    r"\u7f51\u7edc.*(\u4e2d\u65ad|\u65ad\u5f00|\u5931\u8d25|\u8d85\u65f6|\u9519\u8bef)",
+    r"\u8bf7\u6c42.*\u8d85\u65f6",
+    r"\u4e0a\u6e38.*(\u65ad\u5f00|\u91cd\u7f6e|\u5931\u8d25)",
 ]
 
 

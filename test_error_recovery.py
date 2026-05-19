@@ -203,6 +203,8 @@ def test_retry_after_extraction():
         ("请在 60 秒后重试", 60),
         ("retry after 30 seconds", 30),
         ("wait 120 seconds before retrying", 120),
+        ("retry after 2 minutes", 120),
+        ("retry after 1500ms", 2),
         ("no time specified", None)
     ]
 
@@ -225,6 +227,8 @@ def test_retry_after_extraction():
 
     print(f"\n总结: {passed} 通过, {failed} 失败")
     assert failed == 0
+    assert error_parser.parse({"headers": {"Retry-After": "2 minutes"}}).retry_after == 120
+    assert error_parser.parse({"error": {"headers": {"retry-after": "1500ms"}}}).retry_after == 2
 
 
 def test_provider_status():
@@ -314,6 +318,12 @@ def test_script_generation():
     assert "connection termination" in claude_script
     assert "backend-api/codex/responses/compact" in claude_script
     assert "压缩任务连接中断" in claude_script
+    assert "error_retry_initial_delay_seconds" in claude_script
+    assert "error_retry_max_delay_seconds" in claude_script
+    assert "Get-BackoffSeconds" in claude_script
+    assert "Get-ClampedSeconds" in claude_script
+    assert "Retry-After" in claude_script
+    assert 'Join-Path $configDir "tmp"' in claude_script
     assert "git config user.email" in claude_script
     assert "Ensure-LocalGitIgnore" in claude_script
     assert "$initializedRepo = $false" in claude_script
@@ -336,7 +346,7 @@ def test_script_generation():
     assert '"message", "error", "errorMessage"' in codex_script
     assert '"body", "data", "errors"' in codex_script
     assert 'return "network"' in codex_script
-    assert '"timeout", "overload", "network"' in codex_script
+    assert '"timeout", "overload", "network", "server"' in codex_script
     assert "stream.*disconnect" in codex_script
     assert "reconnecting\\.\\.\\.\\s*\\d+/\\d+" in codex_script
     assert "upstream connect error" in codex_script
@@ -345,6 +355,13 @@ def test_script_generation():
     assert "backend-api/codex/responses/compact" in codex_script
     assert 'commands = @("/compress", "继续")' in codex_script
     assert "压缩任务连接中断" in codex_script
+    assert "error_retry_initial_delay_seconds" in codex_script
+    assert "error_retry_max_delay_seconds" in codex_script
+    assert "Get-BackoffSeconds" in codex_script
+    assert "Get-ClampedSeconds" in codex_script
+    assert "Retry-After" in codex_script
+    assert 'Join-Path $configDir "tmp"' in codex_script
+    assert "HttpStatus" in codex_script
     assert "git config user.email" in codex_script
     assert "Ensure-LocalGitIgnore" in codex_script
     assert "$initializedRepo = $false" in codex_script
@@ -458,7 +475,11 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
 
     assert result.returncode == 0
     output = json.loads(result.stdout)
-    assert output == {"continue": True, "message": "compact and continue"}
+    assert output["decision"] == "block"
+    assert output["reason"] == "compact and continue"
+    assert output["suppressOutput"] is True
+    assert output["continue"] is True
+    assert output["message"] == "compact and continue"
     log_path = state_dir / "auto_continue_stop_log.jsonl"
     assert "recoverable_api_error_detected" in log_path.read_text(encoding="utf-8")
 
@@ -515,9 +536,93 @@ def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tm
 
     assert result.returncode == 0
     output = json.loads(result.stdout)
-    assert output == {"continue": True, "message": "compact and continue"}
+    assert output["decision"] == "block"
+    assert output["reason"] == "compact and continue"
+    assert output["suppressOutput"] is True
+    assert output["continue"] is True
+    assert output["message"] == "compact and continue"
     log_path = state_dir / "auto_continue_stop_log.jsonl"
     assert "recoverable_api_error_detected" in log_path.read_text(encoding="utf-8")
+
+
+def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=True,
+        max_continuations=10,
+        continuation_prompt="continue remote bilingual",
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+    def run_hook(session_id: str, message: str):
+        input_path.write_text(
+            json.dumps({
+                "session_id": session_id,
+                "last_assistant_message": message,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    english_continue = run_hook(
+        "remote-en-continue",
+        "Reply with continue to continue the implementation.",
+    )
+    assert english_continue.returncode == 0, english_continue.stderr
+    english_output = json.loads(english_continue.stdout)
+    assert english_output["decision"] == "block"
+    assert english_output["reason"] == "continue remote bilingual"
+
+    chinese_continue = run_hook(
+        "remote-cn-continue",
+        "\u63a5\u4e0b\u6765\u9700\u8981\u4fee\u590d\u4e2d\u6587\u8bc6\u522b\u89c4\u5219\u3002",
+    )
+    assert chinese_continue.returncode == 0, chinese_continue.stderr
+    assert json.loads(chinese_continue.stdout)["decision"] == "block"
+
+    blocker = run_hook(
+        "remote-blocker",
+        "Please choose which configuration profile to use.",
+    )
+    assert blocker.returncode == 0, blocker.stderr
+    assert blocker.stdout.strip() == ""
+
+    complete = run_hook(
+        "remote-complete",
+        "Completed implementation and verified tests pass.",
+    )
+    assert complete.returncode == 0, complete.stderr
+    assert complete.stdout.strip() == ""
+
+    log_text = (state_dir / "auto_continue_stop_log.jsonl").read_text(encoding="utf-8")
+    assert "incomplete_work_detected" in log_text
+    assert "blocker_detected" in log_text
+    assert "no_incomplete_match" in log_text
 
 
 def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
@@ -570,7 +675,12 @@ def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
     assert first.returncode == 0, first.stderr
     assert not first.stdout.lstrip().startswith(("False", "True"))
     assert "Invalid incomplete pattern" not in first.stderr
-    assert json.loads(first.stdout) == {"continue": True, "message": "continue cleanly"}
+    output = json.loads(first.stdout)
+    assert output["decision"] == "block"
+    assert output["reason"] == "continue cleanly"
+    assert output["suppressOutput"] is True
+    assert output["continue"] is True
+    assert output["message"] == "continue cleanly"
 
     second = subprocess.run(
         [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
@@ -588,6 +698,97 @@ def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
     assert second.returncode == 0, second.stderr
     assert second.stdout.strip() == ""
     assert "AsHashtable" not in second.stderr
+
+
+def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=True,
+        max_continuations=10,
+        continuation_prompt="continue bilingual",
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    def run_hook(session_id: str, message: str):
+        payload = {
+            "session_id": session_id,
+            "hook_event_name": "Stop",
+            "last_assistant_message": message,
+        }
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            input=json.dumps(payload, ensure_ascii=False),
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    english_continue = run_hook(
+        "session-en-continue",
+        "Would you like me to continue with the remaining tests?",
+    )
+    assert english_continue.returncode == 0, english_continue.stderr
+    english_output = json.loads(english_continue.stdout)
+    assert english_output["decision"] == "block"
+    assert english_output["reason"] == "continue bilingual"
+
+    chinese_continue = run_hook(
+        "session-cn-continue",
+        "\u5f53\u524d\u8fd8\u6ca1\u6709\u5b8c\u6574\u9a8c\u8bc1\uff0c\u8981\u4e0d\u8981\u7ee7\u7eed\uff1f",
+    )
+    assert chinese_continue.returncode == 0, chinese_continue.stderr
+    chinese_output = json.loads(chinese_continue.stdout)
+    assert chinese_output["decision"] == "block"
+
+    english_blocker = run_hook(
+        "session-en-blocker",
+        "I need your confirmation before deploying to production.",
+    )
+    assert english_blocker.returncode == 0, english_blocker.stderr
+    assert english_blocker.stdout.strip() == ""
+
+    chinese_blocker = run_hook(
+        "session-cn-blocker",
+        "\u8bf7\u9009\u62e9\u4e0b\u4e00\u6b65\u64cd\u4f5c\u3002",
+    )
+    assert chinese_blocker.returncode == 0, chinese_blocker.stderr
+    assert chinese_blocker.stdout.strip() == ""
+
+    complete = run_hook(
+        "session-complete",
+        "Completed implementation and verified tests pass.",
+    )
+    assert complete.returncode == 0, complete.stderr
+    assert complete.stdout.strip() == ""
+
+    log_path = tmp_path / "tmp" / "auto_continue_stop_log.jsonl"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "incomplete_work_detected" in log_text
+    assert "blocker_detected" in log_text
+    assert "no_incomplete_match" in log_text
+    assert not (tmp_path / "auto_continue_stop_state.json").exists()
+    assert (tmp_path / "tmp" / "auto_continue_stop_state.json").exists()
 
 
 def test_local_codex_error_hook_outputs_clean_json_with_git_snapshot(tmp_path):
@@ -660,20 +861,310 @@ def test_local_codex_error_hook_outputs_clean_json_with_git_snapshot(tmp_path):
     assert "AsHashtable" not in second.stderr
 
 
+def test_local_codex_error_hook_uses_configured_backoff_for_disconnects(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "error_recovery.ps1"
+    settings = AutoContinueSettings(
+        error_recovery_enabled=True,
+        max_error_recoveries=2,
+        error_retry_initial_delay_seconds=7,
+        error_retry_max_delay_seconds=10,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_codex_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-disconnect-backoff",
+        "error_message": (
+            "Error running remote compact task: unexpected status 503 Service Unavailable: "
+            "disconnect/reset before headers, reset reason: connection termination, "
+            "url: backend-api/codex/responses/compact"
+        ),
+        "status": 503,
+    }
+
+    def run_hook():
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            input=json.dumps(payload),
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    first = run_hook()
+    assert first.returncode == 0, first.stderr
+    first_output = json.loads(first.stdout)
+    assert first_output["recover"] is True
+    assert first_output["wait"] == 7
+    assert first_output["commands"][0] == "/compress"
+
+    second = run_hook()
+    assert second.returncode == 0, second.stderr
+    second_output = json.loads(second.stdout)
+    assert second_output["recover"] is True
+    assert second_output["wait"] == 10
+    assert second_output["commands"][0] == "/compress"
+
+    third = run_hook()
+    assert third.returncode == 0, third.stderr
+    assert third.stdout.strip() == ""
+
+    log_text = (tmp_path / "tmp" / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" in log_text
+
+
+def test_local_claude_error_hook_uses_configured_backoff_for_disconnects(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.error_recovery_script import generate_error_recovery_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "error_recovery.ps1"
+    settings = AutoContinueSettings(
+        error_recovery_enabled=True,
+        max_error_recoveries=2,
+        error_retry_initial_delay_seconds=4,
+        error_retry_max_delay_seconds=6,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "claude-disconnect-backoff",
+        "hook_event_name": "ResponseError",
+        "error_message": (
+            "upstream connect error or disconnect/reset before headers. "
+            "reset reason: connection termination"
+        ),
+        "status": 503,
+    }
+
+    def run_hook():
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            input=json.dumps(payload),
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    first = run_hook()
+    assert first.returncode == 0, first.stderr
+    first_output = json.loads(first.stdout)
+    assert first_output["decision"] == "recover"
+    assert first_output["commands"][0]["type"] == "wait"
+    assert first_output["commands"][0]["seconds"] == 4
+
+    second = run_hook()
+    assert second.returncode == 0, second.stderr
+    second_output = json.loads(second.stdout)
+    assert second_output["decision"] == "recover"
+    assert second_output["commands"][0]["seconds"] == 6
+
+    third = run_hook()
+    assert third.returncode == 0, third.stderr
+    assert third.stdout.strip() == ""
+
+    log_text = (tmp_path / "tmp" / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" in log_text
+
+
+def test_error_hooks_use_retry_after_headers(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.error_recovery_script import (
+        generate_codex_error_recovery_script,
+        generate_error_recovery_script,
+    )
+    from models.auto_continue import AutoContinueSettings
+
+    settings = AutoContinueSettings(
+        error_recovery_enabled=True,
+        max_error_recoveries=2,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    codex_settings_path = codex_dir / "auto_continue_settings.json"
+    codex_script_path = codex_dir / "error_recovery.ps1"
+    codex_settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    codex_script_path.write_text(
+        generate_codex_error_recovery_script(str(codex_settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+    codex_payload = {
+        "session_id": "codex-retry-after",
+        "status": 429,
+        "headers": {"Retry-After": "2 minutes"},
+        "error_message": "rate limit exceeded",
+    }
+    codex_result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(codex_script_path)],
+        input=json.dumps(codex_payload),
+        cwd=codex_dir,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert codex_result.returncode == 0, codex_result.stderr
+    codex_output = json.loads(codex_result.stdout)
+    assert codex_output["recover"] is True
+    assert codex_output["wait"] == 120
+
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir()
+    claude_settings_path = claude_dir / "auto_continue_settings.json"
+    claude_script_path = claude_dir / "error_recovery.ps1"
+    claude_settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    claude_script_path.write_text(
+        generate_error_recovery_script(str(claude_settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+    claude_payload = {
+        "session_id": "claude-retry-after",
+        "status": 429,
+        "error": {
+            "message": "rate limit exceeded",
+            "headers": {"retry-after": "1500ms"},
+        },
+    }
+    claude_result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(claude_script_path)],
+        input=json.dumps(claude_payload),
+        cwd=claude_dir,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert claude_result.returncode == 0, claude_result.stderr
+    claude_output = json.loads(claude_result.stdout)
+    assert claude_output["decision"] == "recover"
+    assert claude_output["commands"][0]["type"] == "wait"
+    assert claude_output["commands"][0]["seconds"] == 2
+
+
+def test_local_codex_error_hook_respects_zero_max_recoveries(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "error_recovery.ps1"
+    settings = AutoContinueSettings(
+        error_recovery_enabled=True,
+        max_error_recoveries=0,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_codex_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-zero-recoveries",
+        "error_message": "stream disconnected before completion",
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    log_text = (tmp_path / "tmp" / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" in log_text
+
+
 def test_auto_continue_settings_permission_auto_approve_validation():
     from models.auto_continue import AutoContinueSettings
 
     assert AutoContinueSettings().auto_approve_max_per_session == 0
+    assert AutoContinueSettings().error_retry_initial_delay_seconds == 5
+    assert AutoContinueSettings().error_retry_max_delay_seconds == 60
 
     settings = AutoContinueSettings(
         auto_approve_permission_requests=True,
         auto_approve_max_per_session=0,
         auto_approve_bash=False,
         auto_approve_tools=["Edit", "MultiEdit", "Write"],
+        error_retry_initial_delay_seconds=3,
+        error_retry_max_delay_seconds=30,
     )
 
     ok, error = settings.validate()
     assert ok, error
+
+    invalid_backoff = AutoContinueSettings(
+        error_retry_initial_delay_seconds=30,
+        error_retry_max_delay_seconds=3,
+    )
+    ok, error = invalid_backoff.validate()
+    assert not ok
+    assert "cannot exceed" in error
 
     restored = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,
@@ -1224,8 +1715,26 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     provider._register_error_recovery_hook()
 
     hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
-    stop_commands = [hook["command"] for hook in hooks["Stop"]["hooks"]]
-    error_commands = [hook["command"] for hook in hooks["Error"]["hooks"]]
+
+    def event_commands(event_name: str) -> list[str]:
+        nested_commands = [
+            hook["command"]
+            for group in hooks["hooks"].get(event_name, [])
+            for hook in group["hooks"]
+        ]
+        legacy = hooks.get(event_name, {})
+        if isinstance(legacy, dict) and legacy.get("command"):
+            nested_commands.append(legacy["command"])
+        if isinstance(legacy, dict) and isinstance(legacy.get("hooks"), list):
+            nested_commands.extend(
+                hook["command"]
+                for hook in legacy["hooks"]
+                if isinstance(hook, dict) and hook.get("command")
+            )
+        return nested_commands
+
+    stop_commands = event_commands("Stop")
+    error_commands = event_commands("Error")
     assert "powershell.exe -File user_stop.ps1" in stop_commands
     assert any("auto_continue_stop.ps1" in command for command in stop_commands)
     assert "powershell.exe -File user_error.ps1" in error_commands
@@ -1246,8 +1755,10 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     provider.uninstall_error_recovery()
 
     hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
-    assert hooks["Stop"]["command"] == "powershell.exe -File user_stop.ps1"
-    assert hooks["Error"]["command"] == "powershell.exe -File user_error.ps1"
+    stop_commands = event_commands("Stop")
+    error_commands = event_commands("Error")
+    assert stop_commands == ["powershell.exe -File user_stop.ps1"]
+    assert error_commands == ["powershell.exe -File user_error.ps1"]
     assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
 
 
@@ -1302,7 +1813,7 @@ def test_load_settings_migrates_chinese_incomplete_patterns(tmp_path, monkeypatc
     raw_saved = settings_path.read_text(encoding="utf-8")
 
     assert settings is not None
-    assert "下一步" in raw_saved
+    assert "\\\\u4e0b\\\\u4e00\\\\u6b65" in raw_saved
     for pattern in DEFAULT_INCOMPLETE_PATTERNS:
         assert pattern in settings.incomplete_patterns
         assert pattern in saved["incomplete_patterns"]

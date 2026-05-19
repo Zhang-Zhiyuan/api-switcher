@@ -19,6 +19,77 @@ def _powershell_regex_union(values: list[str]) -> str:
     return _powershell_single_quoted("|".join(values))
 
 
+POWERSHELL_STATE_DIR_HELPER = r'''function Get-RecoveryStateDir {
+    param([string]$SettingsPath)
+
+    $configDir = Split-Path -Parent $SettingsPath
+    $stateDir = Join-Path $configDir "tmp"
+    try {
+        if (-not (Test-Path -LiteralPath $stateDir)) {
+            New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+        }
+    } catch {
+        Write-Log "Failed to create tmp state directory, falling back to config dir: $_" "WARN"
+        $stateDir = $configDir
+    }
+    return $stateDir
+}'''
+
+
+POWERSHELL_RETRY_AFTER_HELPERS = r'''function Get-ClampedSeconds {
+    param(
+        [int]$Seconds,
+        [int]$DefaultSeconds = 60,
+        [int]$MaxSeconds = 600
+    )
+
+    if ($Seconds -lt 1) { $Seconds = $DefaultSeconds }
+    if ($Seconds -lt 1) { $Seconds = 1 }
+    if ($Seconds -gt $MaxSeconds) { $Seconds = $MaxSeconds }
+    return $Seconds
+}
+
+function Get-RetryAfter {
+    param(
+        [string]$ErrorMessage,
+        [string]$RetryAfterText = "",
+        [int]$DefaultSeconds = 60,
+        [int]$MaxSeconds = 600
+    )
+
+    $candidates = @($RetryAfterText, $ErrorMessage)
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        $text = [string]$candidate
+
+        if ($text -match '^\s*(\d+)\s*$') {
+            return Get-ClampedSeconds -Seconds ([int]$Matches[1]) -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+        }
+        if ($text -match '(\d+)\s*(ms|millisecond|milliseconds)\b') {
+            $seconds = [int][Math]::Ceiling(([double]$Matches[1]) / 1000.0)
+            return Get-ClampedSeconds -Seconds $seconds -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+        }
+        if ($text -match '(\d+)\s*(s|sec|secs|second|seconds|\u79d2)(?:\b|\s|\u540e|$)') {
+            return Get-ClampedSeconds -Seconds ([int]$Matches[1]) -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+        }
+        if ($text -match '(\d+)\s*(m|min|mins|minute|minutes|\u5206\u949f)(?:\b|\s|\u540e|$)') {
+            return Get-ClampedSeconds -Seconds ([int]$Matches[1] * 60) -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+        }
+        if ($text -match '(retry|try again|wait|\u91cd\u8bd5|\u7b49\u5f85|\u7a0d\u540e).{0,80}?(\d+)\s*(s|sec|secs|second|seconds|\u79d2)?(?:\b|\s|$)') {
+            return Get-ClampedSeconds -Seconds ([int]$Matches[2]) -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+        }
+
+        $date = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse($text, [ref]$date)) {
+            $seconds = [int][Math]::Ceiling(($date - [DateTimeOffset]::Now).TotalSeconds)
+            return Get-ClampedSeconds -Seconds $seconds -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+        }
+    }
+
+    return Get-ClampedSeconds -Seconds $DefaultSeconds -DefaultSeconds $DefaultSeconds -MaxSeconds $MaxSeconds
+}'''
+
+
 def generate_error_recovery_script(settings_path: str, enable_git: bool = True) -> str:
     """生成错误恢复 Hook 脚本（增强版）"""
     git_enabled = "$true" if enable_git else "$false"
@@ -67,6 +138,44 @@ function ConvertTo-Hashtable {{
 }}
 
 # Git快照函数
+{POWERSHELL_STATE_DIR_HELPER}
+
+function Get-IntSetting {{
+    param(
+        $Settings,
+        [string]$Name,
+        [int]$Default,
+        [int]$Min,
+        [int]$Max
+    )
+
+    $value = $Default
+    try {{
+        if ($null -ne $Settings.PSObject.Properties[$Name]) {{
+            $value = [int]$Settings.$Name
+        }}
+    }} catch {{
+        $value = $Default
+    }}
+    if ($value -lt $Min) {{ $value = $Min }}
+    if ($value -gt $Max) {{ $value = $Max }}
+    return $value
+}}
+
+function Get-BackoffSeconds {{
+    param(
+        [int]$Attempt,
+        [int]$InitialDelay,
+        [int]$MaxDelay
+    )
+
+    if ($Attempt -lt 1) {{ $Attempt = 1 }}
+    $seconds = [Math]::Min($InitialDelay * [Math]::Pow(2, $Attempt - 1), $MaxDelay)
+    return [int][Math]::Ceiling($seconds)
+}}
+
+{POWERSHELL_RETRY_AFTER_HELPERS}
+
 function Ensure-LocalGitIgnore {{
     try {{
         $gitignorePath = Join-Path (Get-Location) ".gitignore"
@@ -238,7 +347,7 @@ function Get-ErrorType {{
     }}
 
     # Compact transport failures can arrive with HTTP 503, but they are retryable network resets.
-    if ($combined -match "upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|remote compact task|backend-api/codex/responses/compact|responses/compact") {{
+    if ($combined -match "upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|remote compact task|backend-api/codex/responses/compact|responses/compact|\\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED)\\b|fetch failed|tls handshake timeout|temporary failure in name resolution|dns.*(failed|failure|timeout)|connection.*(closed|lost|terminated|timed out)|network.*(unreachable|timeout|reset|disconnect)|\\u8fde\\u63a5.*(\\u4e2d\\u65ad|\\u91cd\\u7f6e|\\u65ad\\u5f00|\\u5931\\u8d25|\\u8d85\\u65f6)|\\u7f51\\u7edc.*(\\u4e2d\\u65ad|\\u65ad\\u5f00|\\u5931\\u8d25|\\u8d85\\u65f6|\\u9519\\u8bef)") {{
         return $ErrorTypes.NETWORK_ERROR
     }}
 
@@ -253,7 +362,7 @@ function Get-ErrorType {{
     }}
 
     # 网络错误
-    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|reconnecting\\.\\.\\.\\s*\\d+/\\d+|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
+    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted|closed|lost|terminated|timed out)|stream.*disconnect|reconnecting\\.\\.\\.\\s*\\d+/\\d+|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|fetch failed|tls handshake timeout|temporary failure in name resolution|dns.*(failed|failure|timeout)|\\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED)\\b|\\u8fde\\u63a5.*(\\u4e2d\\u65ad|\\u91cd\\u7f6e|\\u65ad\\u5f00|\\u5931\\u8d25|\\u8d85\\u65f6)|\\u7f51\\u7edc.*(\\u4e2d\\u65ad|\\u65ad\\u5f00|\\u5931\\u8d25|\\u8d85\\u65f6|\\u9519\\u8bef)") {{
         return $ErrorTypes.NETWORK_ERROR
     }}
 
@@ -292,24 +401,6 @@ function Get-RecoveryStrategy {{
         return $strategyMap[$ErrorType]
     }}
     return $RecoveryStrategies.NONE
-}}
-
-# 提取重试等待时间
-function Get-RetryAfter {{
-    param([string]$ErrorMessage)
-
-    # 匹配 "请在 X 秒后重试" 或 "retry after X seconds"
-    if ($ErrorMessage -match '(\\d+)\\s*秒后.*重试') {{
-        return [int]$Matches[1]
-    }}
-    if ($ErrorMessage -match 'retry.*?(\\d+)\\s*second') {{
-        return [int]$Matches[1]
-    }}
-    if ($ErrorMessage -match 'wait.*?(\\d+)\\s*second') {{
-        return [int]$Matches[1]
-    }}
-
-    return $null
 }}
 
 function Get-TextValue {{
@@ -382,6 +473,9 @@ try {{
 
     $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
     $gitSnapshotOnRecovery = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_recovery"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_recovery }}
+    $retryInitialDelay = Get-IntSetting -Settings $settings -Name "error_retry_initial_delay_seconds" -Default 5 -Min 1 -Max 300
+    $retryMaxDelay = Get-IntSetting -Settings $settings -Name "error_retry_max_delay_seconds" -Default 60 -Min 1 -Max 600
+    if ($retryInitialDelay -gt $retryMaxDelay) {{ $retryInitialDelay = $retryMaxDelay }}
 
     # 读取 stdin (Hook 输入)
     $stdin = [Console]::In.ReadToEnd()
@@ -407,17 +501,35 @@ try {{
         [int]::TryParse([string]$httpStatusText, [ref]$httpStatus) | Out-Null
     }}
     $sessionId = Get-FirstTextField $hookInput @("session_id", "sessionId", "conversation_id", "conversationId")
+    $retryAfterText = Get-FirstTextField $hookInput @("retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After")
+    if ($hookInput.headers) {{
+        $headerRetryAfter = Get-FirstTextField $hookInput.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+        if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
+    }}
 
     # 尝试从嵌套的 error 对象中提取
     if ($hookInput.error) {{
         $nestedCode = Get-FirstTextField $hookInput.error @("code", "type", "error_code", "errorCode")
         $nestedMessage = Get-FirstTextField $hookInput.error @("message", "error_message", "errorMessage", "detail", "hint", "response", "body", "data", "errors")
         $nestedStatusText = Get-FirstTextField $hookInput.error @("status", "status_code", "statusCode", "http_status")
+        $nestedRetryAfter = Get-FirstTextField $hookInput.error @("retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After")
         if (-not [string]::IsNullOrWhiteSpace($nestedCode)) {{ $errorCode = $nestedCode }}
         if (-not [string]::IsNullOrWhiteSpace($nestedMessage)) {{ $errorMessage = $nestedMessage }}
         if (-not [string]::IsNullOrWhiteSpace($nestedStatusText)) {{
             [int]::TryParse([string]$nestedStatusText, [ref]$httpStatus) | Out-Null
         }}
+        if (-not [string]::IsNullOrWhiteSpace($nestedRetryAfter)) {{ $retryAfterText = $nestedRetryAfter }}
+        if ($hookInput.error.headers) {{
+            $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+            if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
+        }}
+    }}
+
+    if ([string]::IsNullOrWhiteSpace($sessionId)) {{
+        $sessionId = Get-FirstTextField $hookInput @("transcript_path", "transcriptPath", "cwd")
+    }}
+    if ([string]::IsNullOrWhiteSpace($sessionId)) {{
+        $sessionId = [System.IO.Directory]::GetCurrentDirectory()
     }}
 
     if ([string]::IsNullOrWhiteSpace($errorCode) -and [string]::IsNullOrWhiteSpace($errorMessage)) {{
@@ -441,7 +553,7 @@ try {{
     }}
 
     # 检查恢复次数限制
-    $stateDir = Split-Path $settingsPath
+    $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath
     $statePath = Join-Path $stateDir "error_recovery_state.json"
     $state = @{{}}
     if (Test-Path $statePath) {{
@@ -455,7 +567,7 @@ try {{
 
     $recoveryKey = "$sessionId-$errorType"
     $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
-    $maxRecoveries = if ($settings.max_error_recoveries) {{ $settings.max_error_recoveries }} else {{ 3 }}
+    $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
 
     if ($recoveryCount -ge $maxRecoveries) {{
         Write-Log "Max recovery attempts reached ($maxRecoveries) for $errorType" "WARN"
@@ -533,8 +645,7 @@ try {{
 
     }} elseif ($recoveryStrategy -eq $RecoveryStrategies.WAIT_AND_RETRY) {{
         # 等待后重试
-        $retryAfter = Get-RetryAfter -ErrorMessage $errorMessage
-        if (-not $retryAfter) {{ $retryAfter = 60 }}  # 默认等待 60 秒
+        $retryAfter = Get-RetryAfter -ErrorMessage $errorMessage -RetryAfterText $retryAfterText -DefaultSeconds 60 -MaxSeconds 600
 
         $output = @{{
             decision = "recover"
@@ -554,7 +665,7 @@ try {{
 
     }} elseif ($recoveryStrategy -eq $RecoveryStrategies.RETRY_WITH_BACKOFF) {{
         # 指数退避重试
-        $backoffSeconds = [Math]::Min(5 * [Math]::Pow(2, $recoveryCount - 1), 60)  # 5, 10, 20, 40, 60
+        $backoffSeconds = Get-BackoffSeconds -Attempt $recoveryCount -InitialDelay $retryInitialDelay -MaxDelay $retryMaxDelay
         $isCompactTransportError = $errorMessage -match "remote compact task|backend-api/codex/responses/compact|responses/compact"
 
         if ($isCompactTransportError) {{
@@ -672,6 +783,44 @@ function ConvertTo-Hashtable {{
     return $result
 }}
 
+{POWERSHELL_STATE_DIR_HELPER}
+
+function Get-IntSetting {{
+    param(
+        $Settings,
+        [string]$Name,
+        [int]$Default,
+        [int]$Min,
+        [int]$Max
+    )
+
+    $value = $Default
+    try {{
+        if ($null -ne $Settings.PSObject.Properties[$Name]) {{
+            $value = [int]$Settings.$Name
+        }}
+    }} catch {{
+        $value = $Default
+    }}
+    if ($value -lt $Min) {{ $value = $Min }}
+    if ($value -gt $Max) {{ $value = $Max }}
+    return $value
+}}
+
+function Get-BackoffSeconds {{
+    param(
+        [int]$Attempt,
+        [int]$InitialDelay,
+        [int]$MaxDelay
+    )
+
+    if ($Attempt -lt 1) {{ $Attempt = 1 }}
+    $seconds = [Math]::Min($InitialDelay * [Math]::Pow(2, $Attempt - 1), $MaxDelay)
+    return [int][Math]::Ceiling($seconds)
+}}
+
+{POWERSHELL_RETRY_AFTER_HELPERS}
+
 # Git快照函数
 function Ensure-LocalGitIgnore {{
     try {{
@@ -764,31 +913,43 @@ function Create-GitSnapshot {{
     }}
 }}
 
-# 错误分类函数（简化版）
+# 错误分类函数
 function Get-ErrorType {{
-    param([string]$ErrorCode, [string]$ErrorMessage)
+    param([string]$ErrorCode, [string]$ErrorMessage, [int]$HttpStatus)
     $combined = "$ErrorCode $ErrorMessage".ToLower()
 
     if ($combined -match {_powershell_regex_union(CONTENT_LENGTH_PATTERNS)}) {{
         return "content_length"
     }}
-    if ($combined -match "rate.*limit|too.*many|频繁|速率") {{
+    if ($HttpStatus -eq 429 -or $combined -match "rate.*limit|too.*many|retry.*after|\\u8bf7\\u6c42.*\\u9891\\u7e41|\\u901f\\u7387|\\u9891\\u7387") {{
         return "rate_limit"
     }}
-    if ($combined -match "timeout|超时") {{
-        return "timeout"
-    }}
-    if ($combined -match "network.*error|connection.*failed|connection.*refused|connection.*(reset|aborted)|stream.*disconnect|reconnecting\\.\\.\\.\\s*\\d+/\\d+|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination|error sending request for url|remote compact task|backend-api/codex/responses/compact|responses/compact|broken.*pipe|socket.*hang.*up|网络.*错误|连接.*失败") {{
-        return "network"
-    }}
-    if ($combined -match "overload|繁忙|503") {{
-        return "overload"
-    }}
-    if ($combined -match "auth|401|认证") {{
+    if ($HttpStatus -eq 401 -or $combined -match "authentication.*failed|invalid.*api.*key|unauthorized|auth|\\u8ba4\\u8bc1|\\u5bc6\\u94a5") {{
         return "auth"
     }}
-    if ($combined -match "quota|配额|余额") {{
+    if ($HttpStatus -eq 403 -or $combined -match "permission.*denied|access.*denied|forbidden|\\u6743\\u9650") {{
+        return "permission"
+    }}
+    if ($combined -match "quota|insufficient.*balance|insufficient.*quota|\\u914d\\u989d|\\u4f59\\u989d") {{
         return "quota"
+    }}
+    if ($combined -match "remote compact task|backend-api/codex/responses/compact|responses/compact|upstream connect error|disconnect/reset before headers|reset reason.*connection termination|connection termination") {{
+        return "network"
+    }}
+    if ($HttpStatus -eq 504 -or $combined -match "timeout|timed.*out|request timed out|\\u8bf7\\u6c42.*\\u8d85\\u65f6|\\u8d85\\u65f6") {{
+        return "timeout"
+    }}
+    if ($combined -match "\\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED)\\b|network.*(error|unreachable|timeout|reset|disconnect)|connection.*(failed|refused|reset|aborted|closed|lost|terminated|timed out)|stream.*disconnect|reconnecting\\.\\.\\.\\s*\\d+/\\d+|error sending request for url|broken.*pipe|socket.*hang.*up|fetch failed|tls handshake timeout|temporary failure in name resolution|dns.*(failed|failure|timeout)|\\u8fde\\u63a5.*(\\u4e2d\\u65ad|\\u91cd\\u7f6e|\\u65ad\\u5f00|\\u5931\\u8d25|\\u8d85\\u65f6)|\\u7f51\\u7edc.*(\\u4e2d\\u65ad|\\u65ad\\u5f00|\\u5931\\u8d25|\\u8d85\\u65f6|\\u9519\\u8bef)") {{
+        return "network"
+    }}
+    if ($HttpStatus -eq 503 -or $combined -match "overload|capacity.*exceeded|service unavailable|503|\\u7e41\\u5fd9|\\u8fc7\\u8f7d") {{
+        return "overload"
+    }}
+    if ($HttpStatus -ge 500 -and $HttpStatus -lt 600) {{
+        return "server"
+    }}
+    if ($HttpStatus -ge 400 -and $HttpStatus -lt 500) {{
+        return "invalid"
     }}
 
     return "unknown"
@@ -855,6 +1016,9 @@ try {{
 
     $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
     $gitSnapshotOnRecovery = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_recovery"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_recovery }}
+    $retryInitialDelay = Get-IntSetting -Settings $settings -Name "error_retry_initial_delay_seconds" -Default 5 -Min 1 -Max 300
+    $retryMaxDelay = Get-IntSetting -Settings $settings -Name "error_retry_max_delay_seconds" -Default 60 -Min 1 -Max 600
+    if ($retryInitialDelay -gt $retryMaxDelay) {{ $retryInitialDelay = $retryMaxDelay }}
 
     # 读取输入
     $stdin = [Console]::In.ReadToEnd()
@@ -866,28 +1030,55 @@ try {{
     $hookInput = $stdin | ConvertFrom-Json
     $errorCode = Get-FirstTextField $hookInput @("error_code", "code", "errorCode", "error_type", "type")
     $errorMessage = Get-FirstTextField $hookInput @("error_message", "message", "error", "errorMessage", "hint", "detail", "response", "body", "data", "errors", "stderr", "stdout")
+    $httpStatusText = Get-FirstTextField $hookInput @("status", "http_status", "status_code", "statusCode")
+    [int]$httpStatus = 0
+    if (-not [string]::IsNullOrWhiteSpace($httpStatusText)) {{
+        [int]::TryParse([string]$httpStatusText, [ref]$httpStatus) | Out-Null
+    }}
     $sessionId = Get-FirstTextField $hookInput @("session_id", "sessionId", "conversation_id", "conversationId")
+    $retryAfterText = Get-FirstTextField $hookInput @("retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After")
+    if ($hookInput.headers) {{
+        $headerRetryAfter = Get-FirstTextField $hookInput.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+        if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
+    }}
 
     # 尝试从嵌套对象提取
     if ($hookInput.error) {{
         $nestedCode = Get-FirstTextField $hookInput.error @("code", "type", "error_code", "errorCode")
         $nestedMessage = Get-FirstTextField $hookInput.error @("message", "error_message", "errorMessage", "detail", "hint", "response", "body", "data", "errors")
+        $nestedStatusText = Get-FirstTextField $hookInput.error @("status", "status_code", "statusCode", "http_status")
+        $nestedRetryAfter = Get-FirstTextField $hookInput.error @("retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After")
         if (-not [string]::IsNullOrWhiteSpace($nestedCode)) {{ $errorCode = $nestedCode }}
         if (-not [string]::IsNullOrWhiteSpace($nestedMessage)) {{ $errorMessage = $nestedMessage }}
+        if (-not [string]::IsNullOrWhiteSpace($nestedStatusText)) {{
+            [int]::TryParse([string]$nestedStatusText, [ref]$httpStatus) | Out-Null
+        }}
+        if (-not [string]::IsNullOrWhiteSpace($nestedRetryAfter)) {{ $retryAfterText = $nestedRetryAfter }}
+        if ($hookInput.error.headers) {{
+            $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+            if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
+        }}
+    }}
+
+    if ([string]::IsNullOrWhiteSpace($sessionId)) {{
+        $sessionId = Get-FirstTextField $hookInput @("transcript_path", "transcriptPath", "cwd")
+    }}
+    if ([string]::IsNullOrWhiteSpace($sessionId)) {{
+        $sessionId = [System.IO.Directory]::GetCurrentDirectory()
     }}
 
     if ([string]::IsNullOrWhiteSpace($errorCode) -and [string]::IsNullOrWhiteSpace($errorMessage)) {{
         exit 0
     }}
 
-    Write-Log "Codex error detected: [$errorCode] $errorMessage" "INFO"
+    Write-Log "Codex error detected: [$errorCode] $errorMessage (HTTP $httpStatus)" "INFO"
 
     # 分类错误
-    $errorType = Get-ErrorType -ErrorCode $errorCode -ErrorMessage $errorMessage
+    $errorType = Get-ErrorType -ErrorCode $errorCode -ErrorMessage $errorMessage -HttpStatus $httpStatus
     Write-Log "Error type: $errorType" "INFO"
 
     # 检查恢复次数
-    $stateDir = Split-Path $settingsPath
+    $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath
     $statePath = Join-Path $stateDir "error_recovery_state.json"
     $state = @{{}}
     if (Test-Path $statePath) {{
@@ -901,7 +1092,7 @@ try {{
 
     $recoveryKey = "$sessionId-$errorType"
     $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
-    $maxRecoveries = if ($settings.max_error_recoveries) {{ $settings.max_error_recoveries }} else {{ 3 }}
+    $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
 
     if ($recoveryCount -ge $maxRecoveries) {{
         Write-Log "Max recoveries reached for $errorType" "WARN"
@@ -914,6 +1105,7 @@ try {{
             error_type = $errorType
             error_code = $errorCode
             error_message = $errorMessage
+            http_status = $httpStatus
             action = "max_recoveries_reached"
             recovery_count = $recoveryCount
         }} | ConvertTo-Json -Compress
@@ -947,6 +1139,7 @@ try {{
         error_type = $errorType
         error_code = $errorCode
         error_message = $errorMessage
+        http_status = $httpStatus
         action = "attempting_recovery"
         recovery_count = $recoveryCount
     }} | ConvertTo-Json -Compress
@@ -966,10 +1159,7 @@ try {{
 
     }} elseif ($errorType -eq "rate_limit") {{
         # 等待后重试
-        $waitSeconds = 60
-        if ($errorMessage -match '(\\d+)\\s*秒') {{
-            $waitSeconds = [int]$Matches[1]
-        }}
+        $waitSeconds = Get-RetryAfter -ErrorMessage $errorMessage -RetryAfterText $retryAfterText -DefaultSeconds 60 -MaxSeconds 600
         $output = @{{
             recover = $true
             wait = $waitSeconds
@@ -978,9 +1168,9 @@ try {{
         }} | ConvertTo-Json
         Write-Log "Recovery: wait $waitSeconds seconds + continue" "INFO"
 
-    }} elseif ($errorType -in @("timeout", "overload", "network")) {{
+    }} elseif ($errorType -in @("timeout", "overload", "network", "server")) {{
         # 指数退避
-        $backoffSeconds = [Math]::Min(5 * [Math]::Pow(2, $recoveryCount - 1), 60)
+        $backoffSeconds = Get-BackoffSeconds -Attempt $recoveryCount -InitialDelay $retryInitialDelay -MaxDelay $retryMaxDelay
         $commands = @("继续")
         $userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
         if ($errorMessage -match "remote compact task|backend-api/codex/responses/compact|responses/compact") {{
@@ -995,9 +1185,13 @@ try {{
         }} | ConvertTo-Json
         Write-Log "Recovery: backoff $backoffSeconds seconds + continue" "INFO"
 
-    }} elseif ($errorType -in @("auth", "quota")) {{
+    }} elseif ($errorType -in @("auth", "quota", "permission")) {{
         # 通知用户
-        $userMsg = if ($errorType -eq "auth") {{ "认证失败，请检查 API 密钥" }} else {{ "配额已用完，请充值" }}
+        $userMsg = switch ($errorType) {{
+            "auth" {{ "认证失败，请检查 API 密钥" }}
+            "permission" {{ "权限不足，请检查账户权限" }}
+            default {{ "配额已用完，请充值" }}
+        }}
         $output = @{{
             recover = $false
             notify = $true

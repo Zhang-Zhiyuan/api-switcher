@@ -181,9 +181,12 @@ def check_provider(provider_name: str) -> Tuple[bool, List[str]]:
         # 6. 检查状态文件
         print("\n6. 检查状态文件...")
         if provider_name.lower() == "claude":
-            state_path = Path.home() / ".claude" / "error_recovery_state.json"
+            config_dir = Path.home() / ".claude"
         else:
-            state_path = Path.home() / ".codex" / "error_recovery_state.json"
+            config_dir = Path.home() / ".codex"
+        state_path = config_dir / "tmp" / "error_recovery_state.json"
+        if not state_path.exists():
+            state_path = config_dir / "error_recovery_state.json"
 
         if state_path.exists():
             print_success(f"状态文件存在: {state_path}")
