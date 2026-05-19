@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 import logging
 import posixpath
@@ -10,7 +11,7 @@ import shlex
 from typing import Any
 
 from core import profile_manager, remote_config, security
-from core.auto_continue.error_patterns import RECOVERABLE_API_ERROR_PATTERNS
+from core.auto_continue.error_patterns import CONTENT_LENGTH_PATTERNS, RECOVERABLE_API_ERROR_PATTERNS
 from core.auto_continue.manager import auto_continue_manager
 from core.auto_continue.permission_rules import (
     apply_managed_permission_rules,
@@ -44,6 +45,21 @@ SCRIPT_NAME = "auto_continue_stop.sh"
 SCRIPT_MARKERS = ("auto_continue_stop.sh", "auto_continue_stop.ps1")
 
 
+def _as_bool_value(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @dataclass
 class RemoteAutoContinuePaths:
     provider_name: str
@@ -55,6 +71,7 @@ class RemoteAutoContinuePaths:
     guidance_path: str
     provider_config_path: str
     permission_rules_path: str
+    error_recovery_script_path: str | None = None
     codex_hooks_path: str | None = None
 
 
@@ -72,6 +89,7 @@ class RemoteAutoContinueStatus:
     settings_valid: bool = False
     git_snapshot_enabled: bool = False
     permission_auto_approve_enabled: bool = False
+    error_recovery_enabled: bool = False
     permission_mode: str = ""
     git_available: bool = False
     runtime_ready: bool = False
@@ -84,7 +102,12 @@ class RemoteAutoContinueStatus:
 
     @property
     def ready(self) -> bool:
-        hook_required = self.enabled or self.git_snapshot_enabled or self.permission_auto_approve_enabled
+        hook_required = (
+            self.enabled
+            or self.git_snapshot_enabled
+            or self.permission_auto_approve_enabled
+            or self.error_recovery_enabled
+        )
         return (
             hook_required
             and not self.issues
@@ -101,6 +124,7 @@ class RemoteAutoContinueStatus:
         parts = [
             f"{self.label}: {state}",
             f"Git snapshot {'on' if self.git_snapshot_enabled else 'off'}",
+            f"Error recovery {'on' if self.error_recovery_enabled else 'off'}",
             f"权限自动确认 {'on' if self.permission_auto_approve_enabled else 'off'}",
             f"Git {'ok' if self.git_available else 'missing'}",
             f"系统 {self.remote_os or 'unknown'}",
@@ -170,6 +194,7 @@ def _paths(client, ssh_profile, provider_name: str) -> RemoteAutoContinuePaths:
         guidance_path=guidance_path,
         provider_config_path=provider_config_path,
         permission_rules_path=permission_rules_path,
+        error_recovery_script_path=script_path,
         codex_hooks_path=codex_hooks_path,
     )
 
@@ -231,6 +256,26 @@ def _remote_file_mode(client, path: str) -> int | None:
                 pass
 
 
+def _backup_remote_text(client, path: str, content: str | None, reason: str) -> str | None:
+    if content is None:
+        return None
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    mode = _remote_file_mode(client, path) or 0o600
+    for suffix in [""] + [f".{i}" for i in range(1, 100)]:
+        backup_path = f"{path}.bak-{timestamp}{suffix}"
+        if _remote_file_exists(client, backup_path):
+            continue
+        try:
+            _write_text(client, backup_path, content, mode=mode)
+            logger.warning(f"Backed up remote file {path} to {backup_path}: {reason}")
+            return backup_path
+        except Exception as e:
+            logger.warning(f"Failed to back up remote file {path}: {e}")
+            return None
+    return None
+
+
 def _snapshot_remote_files(client, paths: list[str]) -> dict[str, tuple[str | None, int | None]]:
     snapshots: dict[str, tuple[str | None, int | None]] = {}
     for path in dict.fromkeys(p for p in paths if p):
@@ -264,6 +309,25 @@ def _read_json(client, path: str, default: Any = None, strict: bool = True) -> A
 
 def _write_json(client, path: str, data: Any, mode: int | None = 0o600) -> None:
     _write_text(client, path, json.dumps(data, indent=2, ensure_ascii=False), mode)
+
+
+def _read_json_object_for_update(client, path: str, label: str) -> dict:
+    raw = _read_text(client, path)
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _backup_remote_text(client, path, raw, f"{label} invalid JSON: {e}")
+        return {}
+    if not isinstance(data, dict):
+        _backup_remote_text(client, path, raw, f"{label} expected object, got {type(data).__name__}")
+        return {}
+    return data
+
+
+def _read_codex_hooks_json_for_update(client, path: str) -> dict:
+    return _read_json_object_for_update(client, path, "Codex hooks.json")
 
 
 def _read_toml(client, path: str, strict: bool = True) -> dict:
@@ -457,6 +521,8 @@ def _load_git_snapshot_settings(provider_name: str, settings: AutoContinueSettin
     copied.enabled = False
     copied.git_auto_snapshot = True
     copied.git_snapshot_on_start = True
+    copied.error_recovery_enabled = False
+    copied.auto_approve_permission_requests = False
     if provider == "codex":
         copied.apply_to_subagents = False
     valid, error = copied.validate()
@@ -649,6 +715,7 @@ def matching_pattern(patterns, text):
 
 
 RECOVERABLE_API_ERROR_PATTERNS = __RECOVERABLE_API_ERROR_PATTERNS__
+CONTENT_LENGTH_PATTERNS = __CONTENT_LENGTH_PATTERNS__
 
 
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
@@ -662,6 +729,334 @@ def is_recoverable_api_error(text):
         except re.error as exc:
             log(f"Invalid recoverable API error pattern ignored: {pattern}: {exc}", "WARN")
     return False
+
+
+def first_text(obj, keys):
+    if not isinstance(obj, dict):
+        return ""
+    for key in keys:
+        if key not in obj:
+            continue
+        text = flatten_text(obj.get(key))
+        if text.strip():
+            return text
+    return ""
+
+
+def header_value(headers, keys):
+    if not isinstance(headers, dict):
+        return ""
+    lower_map = {str(key).lower(): value for key, value in headers.items()}
+    for key in keys:
+        value = lower_map.get(str(key).lower())
+        text = flatten_text(value)
+        if text.strip():
+            return text
+    return ""
+
+
+def parse_int(value, default=0):
+    try:
+        if value is None or str(value).strip() == "":
+            return default
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def int_setting(settings, name, default, minimum, maximum):
+    value = parse_int(settings.get(name), default)
+    if value < minimum:
+        value = minimum
+    if value > maximum:
+        value = maximum
+    return value
+
+
+def clamped_seconds(value, default=60, maximum=600):
+    seconds = parse_int(value, default)
+    if seconds < 1:
+        seconds = default
+    if seconds < 1:
+        seconds = 1
+    return min(seconds, maximum)
+
+
+def retry_after_seconds(error_message="", retry_after_text="", default=60, maximum=600):
+    for candidate in (retry_after_text, error_message):
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if re.fullmatch(r"\d+", text):
+            return clamped_seconds(text, default, maximum)
+        match = re.search(r"(\d+)\s*(ms|millisecond|milliseconds)\b", text, re.IGNORECASE)
+        if match:
+            seconds = int((int(match.group(1)) + 999) / 1000)
+            return clamped_seconds(seconds, default, maximum)
+        match = re.search(r"(\d+)\s*(s|sec|secs|second|seconds|秒)(?:\b|\s|后|$)", text, re.IGNORECASE)
+        if match:
+            return clamped_seconds(match.group(1), default, maximum)
+        match = re.search(r"(\d+)\s*(m|min|mins|minute|minutes|分钟)(?:\b|\s|后|$)", text, re.IGNORECASE)
+        if match:
+            return clamped_seconds(int(match.group(1)) * 60, default, maximum)
+        match = re.search(
+            r"(retry|try again|wait|重试|等待|稍后).{0,80}?(\d+)\s*(s|sec|secs|second|seconds|秒)?(?:\b|\s|后|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return clamped_seconds(match.group(2), default, maximum)
+        try:
+            from email.utils import parsedate_to_datetime
+
+            retry_at = parsedate_to_datetime(text)
+            if retry_at is not None:
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=datetime.timezone.utc)
+                seconds = int((retry_at - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+                return clamped_seconds(seconds, default, maximum)
+        except Exception:
+            pass
+    return clamped_seconds(default, default, maximum)
+
+
+def backoff_seconds(attempt, initial_delay, max_delay):
+    attempt = max(1, parse_int(attempt, 1))
+    seconds = initial_delay * (2 ** (attempt - 1))
+    return int(min(seconds, max_delay))
+
+
+def extract_error_fields(data):
+    error_code = first_text(data, ["error_code", "code", "errorCode", "error_type", "type"])
+    error_message = first_text(
+        data,
+        [
+            "error_message",
+            "message",
+            "error",
+            "errorMessage",
+            "hint",
+            "detail",
+            "response",
+            "body",
+            "data",
+            "errors",
+            "stderr",
+            "stdout",
+        ],
+    )
+    http_status = parse_int(first_text(data, ["status", "http_status", "status_code", "statusCode"]), 0)
+    retry_after = first_text(data, ["retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After"])
+    header_retry_after = header_value(data.get("headers"), ["retry-after", "Retry-After", "retry_after", "retryAfter"])
+    if header_retry_after:
+        retry_after = header_retry_after
+
+    nested = data.get("error")
+    if isinstance(nested, dict):
+        nested_code = first_text(nested, ["code", "type", "error_code", "errorCode"])
+        nested_message = first_text(nested, ["message", "error_message", "errorMessage", "detail", "hint", "response", "body", "data", "errors"])
+        nested_status = first_text(nested, ["status", "status_code", "statusCode", "http_status"])
+        nested_retry_after = first_text(nested, ["retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After"])
+        nested_header_retry_after = header_value(nested.get("headers"), ["retry-after", "Retry-After", "retry_after", "retryAfter"])
+        if nested_code:
+            error_code = nested_code
+        if nested_message:
+            error_message = nested_message
+        if nested_status:
+            http_status = parse_int(nested_status, http_status)
+        if nested_retry_after:
+            retry_after = nested_retry_after
+        if nested_header_retry_after:
+            retry_after = nested_header_retry_after
+
+    return error_code, error_message, http_status, retry_after
+
+
+def classify_api_error(error_code, error_message, http_status):
+    combined = f"{error_code or ''} {error_message or ''}".lower()
+    for pattern in CONTENT_LENGTH_PATTERNS:
+        try:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return "content_length"
+        except re.error as exc:
+            log(f"Invalid content-length pattern ignored: {pattern}: {exc}", "WARN")
+
+    if http_status == 429 or re.search(r"rate.*limit|too.*many|retry.*after|请求.*频繁|速率|频率", combined, re.IGNORECASE):
+        return "rate_limit"
+    if http_status == 401 or re.search(r"authentication.*failed|invalid.*api.*key|unauthorized|auth|认证|密钥", combined, re.IGNORECASE):
+        return "auth"
+    if http_status == 403 or re.search(r"permission.*denied|access.*denied|forbidden|权限", combined, re.IGNORECASE):
+        return "permission"
+    if re.search(r"quota|insufficient.*balance|insufficient.*quota|配额|余额", combined, re.IGNORECASE):
+        return "quota"
+    if http_status == 504 or re.search(r"timeout|timed.*out|request timed out|请求.*超时|超时", combined, re.IGNORECASE):
+        return "timeout"
+    if is_recoverable_api_error(combined):
+        return "network"
+    if http_status == 503 or re.search(r"overload|capacity.*exceeded|service unavailable|503|繁忙|过载", combined, re.IGNORECASE):
+        return "overload"
+    if 500 <= http_status < 600:
+        return "server"
+    if 400 <= http_status < 500:
+        return "invalid"
+    return "unknown"
+
+
+def error_recovery_output(is_claude, error_type, wait_seconds, compact_transport, error_message):
+    if error_type == "content_length":
+        if is_claude:
+            return {
+                "decision": "recover",
+                "commands": [
+                    {"type": "slash_command", "command": "compact"},
+                    {"type": "user_message", "message": "继续"},
+                ],
+                "suppressOutput": True,
+                "userMessage": "对话内容过长，正在自动压缩并继续...",
+            }
+        return {"recover": True, "commands": ["/compress", "继续"], "userMessage": "对话内容过长，正在自动压缩并继续..."}
+
+    if error_type == "rate_limit":
+        if is_claude:
+            return {
+                "decision": "recover",
+                "commands": [
+                    {"type": "wait", "seconds": wait_seconds},
+                    {"type": "user_message", "message": "继续"},
+                ],
+                "suppressOutput": True,
+                "userMessage": f"请求过于频繁，等待 {wait_seconds} 秒后重试...",
+            }
+        return {"recover": True, "wait": wait_seconds, "commands": ["继续"], "userMessage": f"请求过于频繁，等待 {wait_seconds} 秒后重试..."}
+
+    if error_type in {"timeout", "overload", "network", "server"}:
+        if is_claude:
+            commands = [{"type": "wait", "seconds": wait_seconds}]
+            if compact_transport:
+                commands.append({"type": "slash_command", "command": "compact"})
+            commands.append({"type": "user_message", "message": "继续"})
+            return {
+                "decision": "recover",
+                "commands": commands,
+                "suppressOutput": True,
+                "userMessage": f"服务暂时不可用，等待 {wait_seconds} 秒后重试...",
+            }
+        commands = ["/compress", "继续"] if compact_transport else ["继续"]
+        return {"recover": True, "wait": wait_seconds, "commands": commands, "userMessage": f"服务暂时不可用，等待 {wait_seconds} 秒后重试..."}
+
+    if error_type in {"auth", "permission", "quota"}:
+        message = {
+            "auth": "认证失败，请检查 API 密钥",
+            "permission": "权限不足，请检查账户权限",
+            "quota": "配额已用完，请充值或等待配额重置",
+        }.get(error_type, f"发生错误: {error_message}")
+        if is_claude:
+            return {"decision": "notify", "userMessage": message, "suppressOutput": False}
+        return {"recover": False, "notify": True, "userMessage": message}
+
+    return None
+
+
+def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
+    if not as_bool(settings.get("error_recovery_enabled"), False):
+        return False
+
+    error_code, error_message, http_status, retry_after_text = extract_error_fields(data)
+    if not str(error_code or "").strip() and not str(error_message or "").strip():
+        return False
+
+    error_type = classify_api_error(error_code, error_message, http_status)
+    if error_type in {"invalid", "unknown"}:
+        return False
+
+    os.makedirs(state_dir, exist_ok=True)
+    state_path = os.path.join(state_dir, "error_recovery_state.json")
+    log_path = os.path.join(state_dir, "error_recovery_log.jsonl")
+    state_seed = f"{session_id}|{error_type}"
+    state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
+    max_recoveries = int_setting(settings, "max_error_recoveries", 3, 0, 10)
+    lock_path = state_path + ".lock"
+    lock_fd = None
+    for _ in range(20):
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 60:
+                    os.unlink(lock_path)
+                    continue
+            except FileNotFoundError:
+                continue
+            except Exception:
+                pass
+            time.sleep(0.1)
+    if lock_fd is None:
+        log("Failed to acquire error recovery state lock", "WARN")
+        return True
+
+    try:
+        state = load_state(state_path)
+        recovery_count = as_int(state.get(state_key), 0)
+
+        if recovery_count >= max_recoveries:
+            write_jsonl(log_path, {
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "session_id": str(session_id),
+                "error_type": error_type,
+                "error_code": error_code,
+                "error_message": error_message,
+                "http_status": http_status,
+                "action": "max_recoveries_reached",
+                "recovery_count": recovery_count,
+            })
+            return True
+
+        recovery_count += 1
+        state[state_key] = recovery_count
+        save_state(state_path, state)
+    finally:
+        try:
+            if lock_fd is not None:
+                os.close(lock_fd)
+        finally:
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+    if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_recovery"), True):
+        run_git_snapshot()
+
+    write_jsonl(log_path, {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "session_id": str(session_id),
+        "error_type": error_type,
+        "error_code": error_code,
+        "error_message": error_message,
+        "http_status": http_status,
+        "action": "attempting_recovery",
+        "recovery_count": recovery_count,
+    })
+
+    retry_initial = int_setting(settings, "error_retry_initial_delay_seconds", 5, 1, 300)
+    retry_max = int_setting(settings, "error_retry_max_delay_seconds", 60, 1, 600)
+    if retry_initial > retry_max:
+        retry_initial = retry_max
+
+    wait_seconds = 0
+    if error_type == "rate_limit":
+        wait_seconds = retry_after_seconds(error_message, retry_after_text, 60, 600)
+    elif error_type in {"timeout", "overload", "network", "server"}:
+        wait_seconds = backoff_seconds(recovery_count, retry_initial, retry_max)
+
+    compact_transport = bool(re.search(r"remote compact task|backend-api/codex/responses/compact|responses/compact", str(error_message or ""), re.IGNORECASE))
+    output = error_recovery_output(is_claude, error_type, wait_seconds, compact_transport, error_message)
+    if output:
+        print(json.dumps(output, ensure_ascii=False))
+    return True
 
 
 def permission_tools(settings):
@@ -901,12 +1296,13 @@ def main():
         return
 
     auto_approve_enabled = as_bool(settings.get("auto_approve_permission_requests"), False)
+    error_recovery_enabled = as_bool(settings.get("error_recovery_enabled"), False)
     git_snapshot_enabled = as_bool(settings.get("git_auto_snapshot"), True) and as_bool(
         settings.get("git_snapshot_on_start"),
         True,
     )
 
-    if not as_bool(settings.get("enabled"), False) and not auto_approve_enabled and not git_snapshot_enabled:
+    if not as_bool(settings.get("enabled"), False) and not auto_approve_enabled and not git_snapshot_enabled and not error_recovery_enabled:
         return
 
     raw_input = ""
@@ -938,6 +1334,27 @@ def main():
         or data.get("transcriptPath")
         or os.getcwd()
     )
+
+    explicit_error_event = hook_event in {"ResponseError", "Error"}
+    has_error_payload = any(
+        key in data
+        for key in (
+            "error_message",
+            "error_code",
+            "error",
+            "errorMessage",
+            "hint",
+            "detail",
+            "response",
+            "body",
+            "errors",
+            "stderr",
+            "stdout",
+        )
+    )
+    if error_recovery_enabled and (explicit_error_event or (not is_claude and has_error_payload)):
+        if handle_error_recovery(data, settings, state_dir, is_claude, session_id):
+            return
 
     # Permission prompts must be answered quickly. Git snapshots can be slow in
     # large repositories, so only run them for stop/continue events.
@@ -1222,6 +1639,10 @@ exit 0
         "__RECOVERABLE_API_ERROR_PATTERNS__",
         _python_literal_list(RECOVERABLE_API_ERROR_PATTERNS),
     )
+    body = body.replace(
+        "__CONTENT_LENGTH_PATTERNS__",
+        _python_literal_list(CONTENT_LENGTH_PATTERNS),
+    )
     return header + body
 
 
@@ -1235,7 +1656,7 @@ def _claude_event_has_our_command(settings: dict, event_name: str) -> bool:
 
 def _iter_claude_hook_commands(
     settings: dict,
-    event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest"),
+    event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest", "ResponseError"),
 ):
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
@@ -1278,9 +1699,7 @@ def _register_claude_hook(
     apply_to_subagents: bool,
     settings_data: AutoContinueSettings | None = None,
 ) -> None:
-    settings = _read_json(client, paths.provider_config_path, default={})
-    if not isinstance(settings, dict):
-        settings = {}
+    settings = _read_json_object_for_update(client, paths.provider_config_path, "Claude settings.json")
     hooks = settings.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         hooks = {}
@@ -1340,6 +1759,12 @@ def _register_claude_hook(
     else:
         register_event("PreToolUse", None)
         register_event("PermissionRequest", None)
+    if settings_data and settings_data.error_recovery_enabled:
+        error_hook = dict(hook_def)
+        error_hook["statusMessage"] = "Checking for API errors and auto-recovery"
+        register_event("ResponseError", error_hook)
+    else:
+        register_event("ResponseError", None)
 
     previous_rules, previous_ask_rules = _read_managed_permission_state(client, paths.permission_rules_path)
     desired_rules = permission_rules_from_auto_settings(settings_data)
@@ -1363,7 +1788,7 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
 
     changed = False
     if isinstance(hooks, dict):
-        for event_name in ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest"):
+        for event_name in ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest", "ResponseError"):
             groups = hooks.get(event_name, [])
             if isinstance(groups, dict):
                 groups = [groups]
@@ -1535,21 +1960,35 @@ def _codex_data_has_entries(data: dict) -> bool:
     )
 
 
+def _codex_hooks_enabled_from_config(config: dict) -> bool:
+    if not isinstance(config, dict):
+        return False
+    features = config.get("features") if isinstance(config.get("features"), dict) else {}
+    if "codex_hooks" in features:
+        return bool(features.get("codex_hooks"))
+    return bool(config.get("codex_hooks"))
+
+
 def _set_codex_hooks_enabled(client, paths: RemoteAutoContinuePaths, enabled: bool) -> None:
     config = _read_toml(client, paths.provider_config_path, strict=False)
-    if enabled:
-        config["codex_hooks"] = True
-    elif config.get("codex_hooks") is not None:
-        config["codex_hooks"] = False
+    features = config.get("features") if isinstance(config.get("features"), dict) else {}
+    if enabled or "codex_hooks" in features:
+        features["codex_hooks"] = bool(enabled)
+        config["features"] = features
+    if config.get("codex_hooks") is not None:
+        config["codex_hooks"] = bool(enabled)
     _write_toml(client, paths.provider_config_path, config)
 
 
-def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -> None:
+def _register_codex_hook(
+    client,
+    paths: RemoteAutoContinuePaths,
+    command: str,
+    settings_data: AutoContinueSettings | None = None,
+) -> None:
     if not paths.codex_hooks_path:
         raise RuntimeError("Codex hooks 路径缺失")
-    data = _read_json(client, paths.codex_hooks_path, default={})
-    if not isinstance(data, dict):
-        data = {}
+    data = _read_codex_hooks_json_for_update(client, paths.codex_hooks_path)
     hooks = _codex_hooks_container(data, migrate_legacy=True)
     _upsert_codex_event_hook(
         hooks,
@@ -1561,6 +2000,19 @@ def _register_codex_hook(client, paths: RemoteAutoContinuePaths, command: str) -
             "statusMessage": "Checking whether Codex should continue",
         },
     )
+    if settings_data and settings_data.error_recovery_enabled:
+        _upsert_codex_event_hook(
+            hooks,
+            "Error",
+            {
+                "type": "command",
+                "command": command,
+                "timeout": 10,
+                "statusMessage": "Checking for Codex API errors and auto-recovery",
+            },
+        )
+    else:
+        _remove_codex_event_hook(hooks, "Error")
     _write_json(client, paths.codex_hooks_path, data)
 
     _set_codex_hooks_enabled(client, paths, True)
@@ -1572,7 +2024,9 @@ def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
     data = _read_json(client, paths.codex_hooks_path, default={}, strict=False)
     if isinstance(data, dict):
         hooks = _codex_hooks_container(data, migrate_legacy=True)
-        if _remove_codex_event_hook(hooks, "Stop"):
+        changed = _remove_codex_event_hook(hooks, "Stop")
+        changed = _remove_codex_event_hook(hooks, "Error") or changed
+        if changed:
             _write_json(client, paths.codex_hooks_path, data)
             if not _codex_data_has_entries(data):
                 _set_codex_hooks_enabled(client, paths, False)
@@ -1619,7 +2073,13 @@ def install_remote_auto_continue(
     _ensure_remote_runtime(
         client,
         ssh_profile,
-        require_git=bool(resolved_settings.git_auto_snapshot and resolved_settings.git_snapshot_on_start),
+        require_git=bool(
+            resolved_settings.git_auto_snapshot
+            and (
+                resolved_settings.git_snapshot_on_start
+                or (resolved_settings.error_recovery_enabled and resolved_settings.git_snapshot_on_recovery)
+            )
+        ),
     )
 
     paths = _paths(client, ssh_profile, provider)
@@ -1645,7 +2105,7 @@ def install_remote_auto_continue(
         if provider == "claude":
             _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents, resolved_settings)
         else:
-            _register_codex_hook(client, paths, command)
+            _register_codex_hook(client, paths, command, resolved_settings)
     except Exception:
         _restore_remote_files(client, snapshots)
         raise
@@ -1686,7 +2146,7 @@ def install_remote_git_snapshot(
         if provider == "claude":
             _register_claude_hook(client, paths, command, resolved_settings.apply_to_subagents, resolved_settings)
         else:
-            _register_codex_hook(client, paths, command)
+            _register_codex_hook(client, paths, command, resolved_settings)
     except Exception:
         _restore_remote_files(client, snapshots)
         raise
@@ -1705,9 +2165,13 @@ def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     keep_hook = False
     if isinstance(settings, dict):
         settings["enabled"] = False
-        keep_hook = bool(
-            settings.get("git_auto_snapshot", True) and settings.get("git_snapshot_on_start", True)
-        ) or bool(provider == "claude" and settings.get("auto_approve_permission_requests"))
+        keep_hook = (
+            _as_bool_value(settings.get("git_auto_snapshot"), True)
+            and _as_bool_value(settings.get("git_snapshot_on_start"), True)
+        ) or _as_bool_value(settings.get("error_recovery_enabled"), False) or (
+            provider == "claude"
+            and _as_bool_value(settings.get("auto_approve_permission_requests"), False)
+        )
         _write_json(client, paths.settings_path, settings)
 
     if not keep_hook:
@@ -1737,6 +2201,10 @@ def uninstall_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
         posixpath.join(paths.state_dir, "auto_continue_stop_state.json"),
         posixpath.join(paths.state_dir, "auto_continue_stop_state.json.lock"),
         posixpath.join(paths.state_dir, "auto_continue_stop_log.jsonl"),
+        posixpath.join(paths.state_dir, "error_recovery_state.json"),
+        posixpath.join(paths.state_dir, "error_recovery_state.json.lock"),
+        posixpath.join(paths.state_dir, "error_recovery_state.json.tmp"),
+        posixpath.join(paths.state_dir, "error_recovery_log.jsonl"),
     ]:
         _remove_remote_file(client, path)
     _uninstall_guidance(client, paths.guidance_path)
@@ -1786,7 +2254,13 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.permission_auto_approve_enabled = bool(
                 provider == "claude" and parsed.auto_approve_permission_requests
             )
-            if status.git_snapshot_enabled and not env.get("git"):
+            status.error_recovery_enabled = bool(parsed.error_recovery_enabled)
+            recovery_git_snapshot_enabled = bool(
+                parsed.error_recovery_enabled
+                and parsed.git_auto_snapshot
+                and parsed.git_snapshot_on_recovery
+            )
+            if (status.git_snapshot_enabled or recovery_git_snapshot_enabled) and not env.get("git"):
                 status.issues.append("缺少 git")
         except Exception as e:
             status.issues.append(f"设置无效: {e}")
@@ -1802,7 +2276,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
 
     if provider == "claude":
         try:
-            provider_config = _read_json(client, paths.provider_config_path, default={}, strict=False)
+            provider_config = _read_json(client, paths.provider_config_path, default={}, strict=True)
         except Exception as e:
             provider_config = None
             status.issues.append(f"Claude settings.json 读取失败: {e}")
@@ -1810,12 +2284,15 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             stop_hook_registered = _claude_event_has_our_command(provider_config, "Stop")
             pre_tool_hook_registered = _claude_event_has_our_command(provider_config, "PreToolUse")
             permission_hook_registered = _claude_event_has_our_command(provider_config, "PermissionRequest")
+            error_hook_registered = _claude_event_has_our_command(provider_config, "ResponseError")
             needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
             needs_permission_hooks = bool(status.permission_auto_approve_enabled)
-            if needs_stop_hook or needs_permission_hooks:
+            needs_error_hook = bool(status.error_recovery_enabled)
+            if needs_stop_hook or needs_permission_hooks or needs_error_hook:
                 status.hook_registered = (
                     (not needs_stop_hook or stop_hook_registered)
                     and (not needs_permission_hooks or (pre_tool_hook_registered and permission_hook_registered))
+                    and (not needs_error_hook or error_hook_registered)
                 )
             else:
                 status.hook_registered = any(
@@ -1824,6 +2301,8 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                 )
             if needs_stop_hook and not stop_hook_registered:
                 status.issues.append("Stop Hook 未注册；请重新安装/修复远端自动续跑")
+            if needs_error_hook and not error_hook_registered:
+                status.issues.append("ResponseError Hook 未注册；请重新安装/修复远端自动续跑")
             if needs_permission_hooks:
                 missing_permission_hooks = []
                 if not pre_tool_hook_registered:
@@ -1875,12 +2354,24 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append("Claude settings.json 无法读取")
     else:
         try:
-            hooks = _read_json(client, paths.codex_hooks_path or "", default={}, strict=False)
+            hooks = _read_json(client, paths.codex_hooks_path or "", default={}, strict=True)
         except Exception as e:
             hooks = None
             status.issues.append(f"Codex hooks.json 读取失败: {e}")
         if isinstance(hooks, dict):
-            status.hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Stop"))
+            stop_hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Stop"))
+            error_hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Error"))
+            needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
+            needs_error_hook = bool(status.error_recovery_enabled)
+            if needs_stop_hook or needs_error_hook:
+                status.hook_registered = (
+                    (not needs_stop_hook or stop_hook_registered)
+                    and (not needs_error_hook or error_hook_registered)
+                )
+            else:
+                status.hook_registered = stop_hook_registered or error_hook_registered
+            if needs_error_hook and not error_hook_registered:
+                status.issues.append("Error Hook 未注册；请重新安装/修复远端自动续跑")
         else:
             status.issues.append("Codex hooks.json 无法读取")
         try:
@@ -1888,9 +2379,14 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
         except Exception as e:
             config = {}
             status.issues.append(f"Codex config.toml 读取失败: {e}")
-        status.codex_hooks_enabled = bool(config.get("codex_hooks"))
+        status.codex_hooks_enabled = _codex_hooks_enabled_from_config(config)
 
-    hook_required = status.enabled or status.git_snapshot_enabled or status.permission_auto_approve_enabled
+    hook_required = (
+        status.enabled
+        or status.git_snapshot_enabled
+        or status.permission_auto_approve_enabled
+        or status.error_recovery_enabled
+    )
 
     if hook_required and not status.hook_script_exists:
         status.issues.append("Hook 脚本缺失")

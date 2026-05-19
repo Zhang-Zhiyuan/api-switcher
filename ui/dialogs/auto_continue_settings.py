@@ -9,8 +9,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
     def __init__(self, master, provider_name: str, settings: AutoContinueSettings, on_save=None):
         super().__init__(master)
         self.title(f"{provider_name} 自动续跑设置")
-        self.geometry("660x780")
-        self.minsize(560, 600)
+        self.geometry("720x820")
+        self.minsize(620, 640)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.transient(master)
@@ -33,6 +33,12 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(anchor="w")
+        ctk.CTkLabel(
+            header,
+            text="每个自动化能力都可以单独开关；保存后会立即刷新本机 hook。",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(anchor="w", pady=(2, 0))
 
         # Scrollable content
         scroll = ctk.CTkScrollableFrame(
@@ -43,8 +49,19 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         )
         scroll.pack(fill="both", expand=True, padx=15, pady=(0, 10))
 
-        # Max continuations
-        self._add_field(scroll, "最大续跑次数", "max_continuations", str(self.settings.max_continuations))
+        self._add_section(scroll, "核心开关", "控制 Stop hook 是否拦截未完成回答并自动续跑。")
+
+        self._enabled_var = ctk.BooleanVar(value=self.settings.enabled)
+        self._add_switch(scroll, "启用自动续跑 (Stop hook)", self._enabled_var)
+
+        self._conservative_var = ctk.BooleanVar(value=self.settings.conservative_mode)
+        self._add_switch(scroll, "保守模式：hook 已在续跑时允许停止", self._conservative_var)
+
+        if self.provider_name.lower() == "claude":
+            self._subagents_var = ctk.BooleanVar(value=self.settings.apply_to_subagents)
+            self._add_switch(scroll, "应用到 Claude Subagent (SubagentStop hook)", self._subagents_var)
+
+        self._add_field(scroll, "最大续跑次数 (-1=不限)", "max_continuations", str(self.settings.max_continuations))
 
         # Continuation prompt
         prompt_label = ctk.CTkLabel(scroll, text="续跑提示语", text_color=COLORS["muted"], anchor="w", font=font(12))
@@ -53,37 +70,15 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._prompt_text.insert("1.0", self.settings.continuation_prompt)
         self._prompt_text.pack(fill="x", pady=(0, 10))
 
-        # Conservative mode
-        self._conservative_var = ctk.BooleanVar(value=self.settings.conservative_mode)
-        conservative_switch = ctk.CTkSwitch(scroll, text="保守模式 (stop_hook_active=true 时直接允许停止)",
-                                             variable=self._conservative_var,
-                                             text_color=COLORS["text"],
-                                             progress_color=COLORS["success"],
-                                             button_color=COLORS["text"])
-        conservative_switch.pack(anchor="w", pady=5)
-
-        # Apply to subagents (Claude only)
         if self.provider_name.lower() == "claude":
-            self._subagents_var = ctk.BooleanVar(value=self.settings.apply_to_subagents)
-            subagents_switch = ctk.CTkSwitch(scroll, text="应用到 Subagent (注册 SubagentStop hook)",
-                                              variable=self._subagents_var,
-                                              text_color=COLORS["text"],
-                                              progress_color=COLORS["success"],
-                                              button_color=COLORS["text"])
-            subagents_switch.pack(anchor="w", pady=5)
-
-            ctk.CTkLabel(scroll, text="权限询问自动确认", text_color=COLORS["text"], font=font(14, "bold")).pack(
-                anchor="w", pady=(15, 5))
+            self._add_section(scroll, "Claude 权限确认", "自动处理 Claude Code 的 PermissionRequest / PreToolUse。")
             self._permission_auto_approve_var = ctk.BooleanVar(value=self.settings.auto_approve_permission_requests)
-            permission_switch = ctk.CTkSwitch(
+            self._add_switch(
                 scroll,
-                text="自动允许配置内的 Claude Code 权限询问（root 服务器推荐替代 bypass）",
-                variable=self._permission_auto_approve_var,
-                text_color=COLORS["text"],
+                "自动允许配置内的权限询问",
+                self._permission_auto_approve_var,
                 progress_color=COLORS["warning"],
-                button_color=COLORS["text"],
             )
-            permission_switch.pack(anchor="w", pady=5)
             self._add_field(
                 scroll,
                 "自动确认最大次数 (0=一直，推荐)",
@@ -101,20 +96,10 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             self._auto_approve_tools_text.insert("1.0", "\n".join(self.settings.auto_approve_tools))
             self._auto_approve_tools_text.pack(fill="x", pady=(0, 10))
 
-        # Error recovery section
-        ctk.CTkLabel(scroll, text="错误自动恢复", text_color=COLORS["text"], font=font(14, "bold")).pack(
-            anchor="w", pady=(15, 5))
+        self._add_section(scroll, "API 错误恢复", "处理断联、超时、429、服务端错误和上下文过长。")
 
         self._error_recovery_var = ctk.BooleanVar(value=self.settings.error_recovery_enabled)
-        error_recovery_switch = ctk.CTkSwitch(
-            scroll,
-            text="启用错误自动恢复 (智能识别和处理 10 种 API 错误)",
-            variable=self._error_recovery_var,
-            text_color=COLORS["text"],
-            progress_color=COLORS["success"],
-            button_color=COLORS["text"],
-        )
-        error_recovery_switch.pack(anchor="w", pady=5)
+        self._add_switch(scroll, "启用 API 错误自动恢复 (Error / ResponseError hook)", self._error_recovery_var)
 
         self._add_field(scroll, "最大恢复次数", "max_error_recoveries", str(self.settings.max_error_recoveries))
         self._add_field(
@@ -129,43 +114,21 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             "error_retry_max_delay_seconds",
             str(self.settings.error_retry_max_delay_seconds),
         )
+        self._add_note(
+            scroll,
+            "支持：内容超长自动压缩、429 按 Retry-After 等待、断联/超时/服务繁忙指数退避、认证/权限/配额友好提示。",
+        )
 
-        # Git版本管理section
-        ctk.CTkLabel(scroll, text="Git 版本管理", text_color=COLORS["text"], font=font(14, "bold")).pack(
-            anchor="w", pady=(15, 5))
+        self._add_section(scroll, "Git 快照", "自动创建本地 Git 快照，方便恢复到续跑或错误恢复前的状态。")
 
         self._git_auto_snapshot_var = ctk.BooleanVar(value=self.settings.git_auto_snapshot)
-        git_auto_switch = ctk.CTkSwitch(
-            scroll,
-            text="启用自动 Git 快照 (推荐)",
-            variable=self._git_auto_snapshot_var,
-            text_color=COLORS["text"],
-            progress_color=COLORS["success"],
-            button_color=COLORS["text"],
-        )
-        git_auto_switch.pack(anchor="w", pady=5)
+        self._add_switch(scroll, "启用自动 Git 快照 (推荐)", self._git_auto_snapshot_var)
 
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_start)
-        git_start_switch = ctk.CTkSwitch(
-            scroll,
-            text="对话开始时创建快照",
-            variable=self._git_snapshot_on_start_var,
-            text_color=COLORS["text"],
-            progress_color=COLORS["success"],
-            button_color=COLORS["text"],
-        )
-        git_start_switch.pack(anchor="w", pady=5, padx=(20, 0))
+        self._add_switch(scroll, "对话开始时创建快照", self._git_snapshot_on_start_var, padx=(20, 0))
 
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_recovery)
-        git_recovery_switch = ctk.CTkSwitch(
-            scroll,
-            text="错误恢复前创建快照",
-            variable=self._git_snapshot_on_recovery_var,
-            text_color=COLORS["text"],
-            progress_color=COLORS["success"],
-            button_color=COLORS["text"],
-        )
-        git_recovery_switch.pack(anchor="w", pady=5, padx=(20, 0))
+        self._add_switch(scroll, "错误恢复前创建快照", self._git_snapshot_on_recovery_var, padx=(20, 0))
 
         # Git help text
         git_help_frame = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -182,27 +145,9 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         )
         git_help_text.pack(anchor="w")
 
-        # Help text
-        help_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        help_frame.pack(fill="x", pady=(2, 10))
-
-        help_text = ctk.CTkLabel(
-            help_frame,
-            text="支持的错误类型：\n"
-                 "  • 内容超长 → 自动压缩并继续\n"
-                 "  • 速率限制 → 等待后重试\n"
-                 "  • 服务器繁忙/超时 → 指数退避重试\n"
-                 "  • 认证/权限/配额 → 友好提示",
-            font=font(11),
-            text_color=COLORS["muted"],
-            justify="left",
-            anchor="w"
-        )
-        help_text.pack(anchor="w")
-
-        # Patterns section
+        self._add_section(scroll, "识别规则", "中英文正则规则；未完成会继续，阻塞会停止并等待用户。")
         ctk.CTkLabel(scroll, text="未完成模式 (正则表达式)", text_color=COLORS["text"], font=font(13, "bold")).pack(
-            anchor="w", pady=(15, 5))
+            anchor="w", pady=(6, 5))
         self._incomplete_text = ctk.CTkTextbox(scroll, height=100, **textbox_style(monospace=True))
         self._incomplete_text.insert("1.0", "\n".join(self.settings.incomplete_patterns))
         self._incomplete_text.pack(fill="x", pady=(0, 10))
@@ -221,10 +166,48 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(btn_frame, text="取消", command=self.destroy, **button_style("secondary")).pack(side="right", padx=5)
         ctk.CTkButton(btn_frame, text="保存", command=self._save, **button_style("primary")).pack(side="right")
 
+    def _add_section(self, parent, title, subtitle):
+        ctk.CTkLabel(
+            parent,
+            text=title,
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+        ).pack(anchor="w", pady=(16, 2))
+        ctk.CTkLabel(
+            parent,
+            text=subtitle,
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", pady=(0, 6))
+
+    def _add_switch(self, parent, text, variable, progress_color=None, padx=(0, 0)):
+        switch = ctk.CTkSwitch(
+            parent,
+            text=text,
+            variable=variable,
+            text_color=COLORS["text"],
+            progress_color=progress_color or COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        switch.pack(anchor="w", pady=5, padx=padx)
+        return switch
+
+    def _add_note(self, parent, text):
+        ctk.CTkLabel(
+            parent,
+            text=text,
+            text_color=COLORS["muted"],
+            font=font(11),
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", pady=(2, 10))
+
     def _add_field(self, parent, label, key, value):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text=label, width=150, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
+        ctk.CTkLabel(row, text=label, width=190, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
         entry = ctk.CTkEntry(row, width=400, **input_style())
         entry.insert(0, value)
         entry.pack(side="left", fill="x", expand=True)
@@ -237,8 +220,9 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             max_recoveries = int(self._max_error_recoveries_entry.get())
             retry_initial_delay = int(self._error_retry_initial_delay_seconds_entry.get())
             retry_max_delay = int(self._error_retry_max_delay_seconds_entry.get())
-            if max_cont < 0 or max_recoveries < 0:
-                raise ValueError("次数不能为负数")
+            if max_cont < -1 or max_recoveries < 0:
+                raise ValueError("续跑次数必须为 -1 或非负数；恢复次数不能为负数")
+            enabled = self._enabled_var.get()
             prompt = self._prompt_text.get("1.0", "end").strip()
             conservative = self._conservative_var.get()
             error_recovery = self._error_recovery_var.get()
@@ -267,7 +251,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
 
             # Build new settings
             new_settings = AutoContinueSettings(
-                enabled=self.settings.enabled,
+                enabled=enabled,
                 max_continuations=max_cont,
                 continuation_prompt=prompt,
                 conservative_mode=conservative,

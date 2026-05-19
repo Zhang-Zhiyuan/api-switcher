@@ -15,6 +15,22 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
+def _remote_hook_python_path(tmp_path, body: str):
+    script_path = tmp_path / "remote_hook_body.py"
+    script_path.write_text(body, encoding="utf-8")
+    return script_path
+
+
+def _write_stale_lock(path):
+    import os
+    import time
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("stale", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(path, (old_time, old_time))
+
+
 def test_error_parser():
     """测试错误解析器"""
     print("=" * 80)
@@ -309,6 +325,7 @@ def test_script_generation():
     assert "上游服务.*处理能力" in claude_script
     assert "prompt|request|messages?" in claude_script
     assert "Get-FirstTextField" in claude_script
+    assert "Get-BoolSetting" in claude_script
     assert '"message", "error", "errorMessage"' in claude_script
     assert '"body", "data", "errors"' in claude_script
     assert "stream.*disconnect" in claude_script
@@ -323,11 +340,16 @@ def test_script_generation():
     assert "Get-BackoffSeconds" in claude_script
     assert "Get-ClampedSeconds" in claude_script
     assert "Retry-After" in claude_script
+    assert "Acquire-StateLock" in claude_script
+    assert "Release-StateLock" in claude_script
+    assert "Save-RecoveryState" in claude_script
+    assert '"$statePath.lock"' in claude_script
     assert 'Join-Path $configDir "tmp"' in claude_script
     assert "git config user.email" in claude_script
     assert "Ensure-LocalGitIgnore" in claude_script
     assert "$initializedRepo = $false" in claude_script
     assert "if ($initializedRepo)" in claude_script
+    assert "\n        git add -A 2>&1 | Out-Null\n" in claude_script
     assert "node_modules/" in claude_script
     assert ".env.*" in claude_script
 
@@ -343,6 +365,7 @@ def test_script_generation():
     assert "上游服务.*处理能力" in codex_script
     assert "prompt|request|messages?" in codex_script
     assert "Get-FirstTextField" in codex_script
+    assert "Get-BoolSetting" in codex_script
     assert '"message", "error", "errorMessage"' in codex_script
     assert '"body", "data", "errors"' in codex_script
     assert 'return "network"' in codex_script
@@ -360,12 +383,17 @@ def test_script_generation():
     assert "Get-BackoffSeconds" in codex_script
     assert "Get-ClampedSeconds" in codex_script
     assert "Retry-After" in codex_script
+    assert "Acquire-StateLock" in codex_script
+    assert "Release-StateLock" in codex_script
+    assert "Save-RecoveryState" in codex_script
+    assert '"$statePath.lock"' in codex_script
     assert 'Join-Path $configDir "tmp"' in codex_script
     assert "HttpStatus" in codex_script
     assert "git config user.email" in codex_script
     assert "Ensure-LocalGitIgnore" in codex_script
     assert "$initializedRepo = $false" in codex_script
     assert "if ($initializedRepo)" in codex_script
+    assert "\n        git add -A 2>&1 | Out-Null\n" in codex_script
     assert "node_modules/" in codex_script
     assert ".env.*" in codex_script
 
@@ -403,8 +431,10 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
     assert "git config user.email" in local_script
     assert "Ensure-LocalGitIgnore" in local_script
+    assert "Get-BoolSetting" in local_script
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
+    assert "\n        git add -A 2>&1 | Out-Null\n" in local_script
     assert '$hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse"' in local_script
     assert 'permissionDecision = "allow"' in local_script
     assert "auto_continue_permission_state.json" in local_script
@@ -438,6 +468,7 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
         "/home/test/.codex/tmp",
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
 
     settings_path = tmp_path / "settings.json"
     input_path = tmp_path / "input.json"
@@ -462,7 +493,7 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
     )
 
     result = subprocess.run(
-        [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
         cwd=tmp_path,
         text=True,
         encoding="utf-8",
@@ -494,6 +525,7 @@ def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tm
         "/home/test/.codex/tmp",
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
 
     settings_path = tmp_path / "settings.json"
     input_path = tmp_path / "input.json"
@@ -523,7 +555,7 @@ def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tm
     )
 
     result = subprocess.run(
-        [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
         cwd=tmp_path,
         text=True,
         encoding="utf-8",
@@ -556,6 +588,7 @@ def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path
         "/home/test/.codex/tmp",
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
 
     settings_path = tmp_path / "settings.json"
     input_path = tmp_path / "input.json"
@@ -578,7 +611,7 @@ def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path
             encoding="utf-8",
         )
         return subprocess.run(
-            [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+            [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
             cwd=tmp_path,
             text=True,
             encoding="utf-8",
@@ -623,6 +656,234 @@ def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path
     assert "incomplete_work_detected" in log_text
     assert "blocker_detected" in log_text
     assert "no_incomplete_match" in log_text
+
+
+def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        error_recovery_enabled=True,
+        max_error_recoveries=2,
+        error_retry_initial_delay_seconds=4,
+        error_retry_max_delay_seconds=6,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-codex-disconnect",
+            "error_message": (
+                "Error running remote compact task: unexpected status 503 Service Unavailable: "
+                "upstream connect error or disconnect/reset before headers. "
+                "reset reason: connection termination, url: backend-api/codex/responses/compact"
+            ),
+            "status": 503,
+        }),
+        encoding="utf-8",
+    )
+
+    def run_hook():
+        return subprocess.run(
+            [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    first = run_hook()
+    assert first.returncode == 0, first.stderr
+    first_output = json.loads(first.stdout)
+    assert first_output["recover"] is True
+    assert first_output["wait"] == 4
+    assert first_output["commands"][0] == "/compress"
+
+    second = run_hook()
+    assert second.returncode == 0, second.stderr
+    second_output = json.loads(second.stdout)
+    assert second_output["wait"] == 6
+
+    third = run_hook()
+    assert third.returncode == 0, third.stderr
+    assert third.stdout.strip() == ""
+    log_text = (state_dir / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" in log_text
+
+
+def test_remote_error_hook_uses_retry_after_for_claude(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.claude/auto_continue_settings.json",
+        "/home/test/.claude/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        error_recovery_enabled=True,
+        max_error_recoveries=2,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "hook_event_name": "ResponseError",
+            "session_id": "remote-claude-rate",
+            "status": 429,
+            "error": {
+                "message": "rate limit exceeded",
+                "headers": {"retry-after": "1500ms"},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["decision"] == "recover"
+    assert output["commands"][0]["type"] == "wait"
+    assert output["commands"][0]["seconds"] == 2
+
+
+def test_remote_error_hook_respects_zero_max_recoveries(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        error_recovery_enabled=True,
+        max_error_recoveries=0,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-zero-recoveries",
+            "error_message": "stream disconnected before completion",
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    log_text = (state_dir / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" in log_text
+
+
+def test_remote_stop_hook_does_not_treat_status_only_payload_as_error(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=True,
+        error_recovery_enabled=True,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+        continuation_prompt="continue normal stop",
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-status-only",
+            "status": 503,
+            "last_assistant_message": "I still need to continue the implementation.",
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["decision"] == "block"
+    assert output["reason"] == "continue normal stop"
 
 
 def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
@@ -886,6 +1147,8 @@ def test_local_codex_error_hook_uses_configured_backoff_for_disconnects(tmp_path
         generate_codex_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
         encoding="utf-8-sig",
     )
+    lock_path = tmp_path / "tmp" / "error_recovery_state.json.lock"
+    _write_stale_lock(lock_path)
 
     payload = {
         "session_id": "session-disconnect-backoff",
@@ -913,6 +1176,7 @@ def test_local_codex_error_hook_uses_configured_backoff_for_disconnects(tmp_path
 
     first = run_hook()
     assert first.returncode == 0, first.stderr
+    assert not lock_path.exists()
     first_output = json.loads(first.stdout)
     assert first_output["recover"] is True
     assert first_output["wait"] == 7
@@ -958,6 +1222,8 @@ def test_local_claude_error_hook_uses_configured_backoff_for_disconnects(tmp_pat
         generate_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
         encoding="utf-8-sig",
     )
+    lock_path = tmp_path / "tmp" / "error_recovery_state.json.lock"
+    _write_stale_lock(lock_path)
 
     payload = {
         "session_id": "claude-disconnect-backoff",
@@ -985,6 +1251,7 @@ def test_local_claude_error_hook_uses_configured_backoff_for_disconnects(tmp_pat
 
     first = run_hook()
     assert first.returncode == 0, first.stderr
+    assert not lock_path.exists()
     first_output = json.loads(first.stdout)
     assert first_output["decision"] == "recover"
     assert first_output["commands"][0]["type"] == "wait"
@@ -1240,6 +1507,30 @@ def test_permission_auto_approve_treats_bash_as_regular_tool():
     assert 'tool_name.lower() == "bash"' not in remote_script
 
 
+def test_auto_continue_settings_coerces_string_boolean_values():
+    from models.auto_continue import AutoContinueSettings
+
+    settings = AutoContinueSettings.from_dict({
+        "enabled": "true",
+        "conservative_mode": "false",
+        "error_recovery_enabled": "1",
+        "git_auto_snapshot": "0",
+        "git_snapshot_on_start": "off",
+        "git_snapshot_on_recovery": "yes",
+        "auto_approve_permission_requests": "on",
+        "auto_approve_bash": "no",
+    })
+
+    assert settings.enabled is True
+    assert settings.conservative_mode is False
+    assert settings.error_recovery_enabled is True
+    assert settings.git_auto_snapshot is False
+    assert settings.git_snapshot_on_start is False
+    assert settings.git_snapshot_on_recovery is True
+    assert settings.auto_approve_permission_requests is True
+    assert settings.auto_approve_bash is False
+
+
 def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     import subprocess
 
@@ -1250,6 +1541,7 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
         "/home/test/.claude/tmp",
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
 
     def run_hook(settings: dict, tool_name: str, input_extra: dict | None = None, event_name: str | None = "PermissionRequest"):
         settings_path = tmp_path / f"settings_{tool_name}_{len(list(tmp_path.iterdir()))}.json"
@@ -1272,7 +1564,7 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
             payload.update(input_extra)
         input_path.write_text(json.dumps(payload), encoding="utf-8")
         return subprocess.run(
-            [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+            [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
             cwd=tmp_path,
             text=True,
             stdout=subprocess.PIPE,
@@ -1375,6 +1667,55 @@ def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
     assert pre_tool_camel_output["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+def test_local_stop_hook_does_not_continue_when_disabled_but_permission_auto_approve_enabled(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings_path.write_text(
+        json.dumps({
+            "enabled": "false",
+            "git_auto_snapshot": "false",
+            "git_snapshot_on_start": "false",
+            "auto_approve_permission_requests": "true",
+            "max_continuations": 5,
+            "continuation_prompt": "continue unexpectedly",
+            "incomplete_patterns": ["continue"],
+            "blocker_patterns": [],
+        }),
+        encoding="utf-8",
+    )
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps({
+            "hook_event_name": "Stop",
+            "session_id": "session-disabled-stop",
+            "last_assistant_message": "Reply with continue to continue the implementation.",
+        }),
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert not (tmp_path / "tmp" / "auto_continue_stop_state.json").exists()
+
+
 def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, monkeypatch):
     import os
     import stat
@@ -1387,6 +1728,7 @@ def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, m
         "/home/test/.claude/tmp",
     )
     body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
 
     marker = tmp_path / "git_was_called"
     fake_git = tmp_path / ("git.cmd" if os.name == "nt" else "git")
@@ -1424,7 +1766,7 @@ def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, m
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
 
     result = subprocess.run(
-        [sys.executable, "-c", body, str(settings_path), str(state_dir), str(input_path)],
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
         cwd=tmp_path,
         env=env,
         text=True,
@@ -1677,6 +2019,142 @@ def test_auto_continue_manager_enable_uses_provider_enable_with_guidance(monkeyp
     assert calls == [("enable", True, True), ("guidance",)]
 
 
+def test_auto_continue_manager_enable_syncs_error_recovery(monkeypatch):
+    from core.auto_continue.manager import AutoContinueManager
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+
+    class FakeProvider:
+        def enable(self, settings):
+            calls.append(("enable", settings.enabled, settings.error_recovery_enabled))
+
+        def install_error_recovery(self):
+            calls.append("install_error_recovery")
+
+        def uninstall_error_recovery(self):
+            calls.append("uninstall_error_recovery")
+
+    manager = AutoContinueManager()
+    monkeypatch.setattr(manager, "get_provider", lambda _name: FakeProvider())
+
+    manager.enable("codex", AutoContinueSettings(error_recovery_enabled=True))
+
+    assert calls == [("enable", True, True), "install_error_recovery"]
+
+
+def test_auto_continue_manager_repair_handles_standalone_features(monkeypatch):
+    from core.auto_continue.manager import AutoContinueManager
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+        error_recovery_enabled=True,
+    )
+
+    class FakeProvider:
+        def load_settings(self):
+            return settings
+
+        def _settings_require_hook(self, value):
+            return bool(value.git_auto_snapshot and value.git_snapshot_on_start)
+
+        def install_hook_script(self):
+            calls.append("install_hook")
+
+        def register_hook_for_settings(self, value):
+            calls.append(("register", value.enabled))
+
+        def install_error_recovery(self):
+            calls.append("install_error_recovery")
+
+        def uninstall_error_recovery(self):
+            calls.append("uninstall_error_recovery")
+
+        def install_guidance(self):
+            calls.append("guidance")
+
+    manager = AutoContinueManager()
+    monkeypatch.setattr(manager, "get_provider", lambda _name: FakeProvider())
+
+    manager.repair("codex")
+
+    assert calls == ["install_hook", ("register", False), "install_error_recovery"]
+
+
+def test_auto_continue_manager_update_settings_syncs_error_recovery(monkeypatch):
+    from core.auto_continue.manager import AutoContinueManager
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+
+    class FakeProvider:
+        def update_settings(self, settings):
+            calls.append(("update", settings.error_recovery_enabled))
+
+        def install_error_recovery(self):
+            calls.append("install_error_recovery")
+
+        def uninstall_error_recovery(self):
+            calls.append("uninstall_error_recovery")
+
+    manager = AutoContinueManager()
+    monkeypatch.setattr(manager, "get_provider", lambda _name: FakeProvider())
+
+    manager.update_settings("codex", AutoContinueSettings(enabled=False, error_recovery_enabled=True))
+    manager.update_settings("codex", AutoContinueSettings(enabled=False, error_recovery_enabled=False))
+
+    assert calls == [
+        ("update", True),
+        "install_error_recovery",
+        ("update", False),
+        "uninstall_error_recovery",
+    ]
+
+
+def test_update_settings_honors_enabled_switch(tmp_path):
+    from core.auto_continue.base import AutoContinueProvider
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+
+    class FakeProvider(AutoContinueProvider):
+        def get_config_dir(self):
+            return tmp_path
+
+        def get_hook_script_path(self):
+            return tmp_path / "hook.ps1"
+
+        def get_settings_path(self):
+            return tmp_path / "auto_continue_settings.json"
+
+        def is_hook_registered(self):
+            return False
+
+        def register_hook(self):
+            calls.append("register")
+
+        def unregister_hook(self):
+            calls.append("unregister")
+
+        def install_hook_script(self):
+            calls.append("install")
+
+        def uninstall_hook_script(self):
+            calls.append("uninstall")
+
+    provider = FakeProvider("codex")
+    provider.save_settings(AutoContinueSettings(enabled=False, git_auto_snapshot=False))
+
+    provider.update_settings(AutoContinueSettings(enabled=True, git_auto_snapshot=False))
+
+    assert provider.load_settings().enabled is True
+    assert calls == ["install", "register"]
+
+
 def test_permission_rule_helpers_detect_ask_conflicts_and_broad_allows():
     from core.auto_continue.permission_rules import (
         conflicting_permission_rules,
@@ -1745,7 +2223,8 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
         import tomllib
     except ModuleNotFoundError:
         import tomli as tomllib
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+    config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert config["features"]["codex_hooks"] is True
 
     provider.get_error_recovery_script_path().parent.mkdir(parents=True, exist_ok=True)
     provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
@@ -1759,7 +2238,52 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     error_commands = event_commands("Error")
     assert stop_commands == ["powershell.exe -File user_stop.ps1"]
     assert error_commands == ["powershell.exe -File user_error.ps1"]
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+    config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert config["features"]["codex_hooks"] is True
+
+
+def test_local_codex_hook_repair_backs_up_invalid_hooks_json(tmp_path, monkeypatch):
+    from core.auto_continue.codex_provider import CodexProvider
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text("{not valid json", encoding="utf-8")
+
+    provider = CodexProvider()
+    provider.register_hook()
+
+    backups = list(tmp_path.glob("hooks.json.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{not valid json"
+    hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+    assert any("auto_continue_stop.ps1" in command for command in [
+        hook["command"]
+        for group in hooks["hooks"]["Stop"]
+        for hook in group["hooks"]
+    ])
+
+
+def test_local_claude_hook_repair_backs_up_invalid_settings_json(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from models.auto_continue import AutoContinueSettings
+
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{not valid json", encoding="utf-8")
+
+    provider.register_hook(settings=AutoContinueSettings())
+
+    backups = list(tmp_path.glob("settings.json.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{not valid json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    commands = [
+        hook["command"]
+        for group in settings["hooks"]["Stop"]
+        for hook in group["hooks"]
+    ]
+    assert any("auto_continue_stop.ps1" in command for command in commands)
 
 
 def test_local_codex_hooks_toggle_config_when_no_hooks_remain(tmp_path, monkeypatch):
@@ -1774,16 +2298,64 @@ def test_local_codex_hooks_toggle_config_when_no_hooks_remain(tmp_path, monkeypa
     except ModuleNotFoundError:
         import tomli as tomllib
 
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is True
     provider.unregister_hook()
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is False
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is False
 
     provider._register_error_recovery_hook()
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is True
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is True
     provider.get_error_recovery_script_path().parent.mkdir(parents=True, exist_ok=True)
     provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
     provider.uninstall_error_recovery()
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["codex_hooks"] is False
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is False
+
+
+def test_local_uninstall_removes_error_recovery_hook(tmp_path, monkeypatch):
+    from core.auto_continue.codex_provider import CodexProvider
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    provider = CodexProvider()
+    provider.register_hook()
+    provider._register_error_recovery_hook()
+    provider.get_hook_script_path().parent.mkdir(parents=True, exist_ok=True)
+    provider.get_hook_script_path().write_text("", encoding="utf-8")
+    provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
+
+    provider.uninstall()
+
+    hooks = json.loads((tmp_path / "hooks.json").read_text(encoding="utf-8"))
+    assert not hooks.get("hooks")
+    assert not provider.get_hook_script_path().exists()
+    assert not provider.get_error_recovery_script_path().exists()
+
+
+def test_local_codex_hooks_sync_legacy_root_flag(tmp_path, monkeypatch):
+    from core.auto_continue.codex_provider import CodexProvider
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        "model = \"gpt-5.5\"\n"
+        "codex_hooks = false\n"
+        "\n"
+        "[projects]\n",
+        encoding="utf-8",
+    )
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+
+    provider = CodexProvider()
+    provider.register_hook()
+    config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert config["codex_hooks"] is True
+    assert config["features"]["codex_hooks"] is True
+
+    provider.unregister_hook()
+    config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert config["codex_hooks"] is False
+    assert config["features"]["codex_hooks"] is False
 
 
 def test_load_settings_migrates_chinese_incomplete_patterns(tmp_path, monkeypatch):

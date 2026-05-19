@@ -115,6 +115,32 @@ LEGACY_GENERATED_PATTERNS_TO_DROP = {
 
 
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
+BOOL_SETTING_FIELDS = {
+    "enabled",
+    "apply_to_subagents",
+    "conservative_mode",
+    "error_recovery_enabled",
+    "git_auto_snapshot",
+    "git_snapshot_on_start",
+    "git_snapshot_on_recovery",
+    "auto_approve_permission_requests",
+    "auto_approve_bash",
+}
+
+
+def _coerce_bool_setting(value, default):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return value
 
 
 def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> list[str]:
@@ -174,6 +200,10 @@ class AutoContinueSettings:
 
     def validate(self) -> tuple[bool, str]:
         """Validate settings. Returns (is_valid, error_message)."""
+        for field_name in BOOL_SETTING_FIELDS:
+            if not isinstance(getattr(self, field_name), bool):
+                return False, f"{field_name} must be a boolean"
+
         if not isinstance(self.max_continuations, int) or self.max_continuations < -1:
             return False, "max_continuations must be -1 or a non-negative integer"
 
@@ -251,6 +281,13 @@ class AutoContinueSettings:
     def from_dict(cls, data: dict) -> "AutoContinueSettings":
         """Create settings from a dict with default-pattern migration."""
         known_fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        defaults = cls()
+        for field_name in BOOL_SETTING_FIELDS:
+            if field_name in known_fields:
+                known_fields[field_name] = _coerce_bool_setting(
+                    known_fields[field_name],
+                    getattr(defaults, field_name),
+                )
         if "incomplete_patterns" in known_fields:
             known_fields["incomplete_patterns"] = _merge_unique_patterns(
                 known_fields.get("incomplete_patterns"),

@@ -1,7 +1,8 @@
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
 from core.auto_continue.permission_rules import (
     apply_managed_permission_rules,
@@ -14,6 +15,52 @@ from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_error_recovery_script
 
 logger = logging.getLogger(__name__)
+
+
+def _backup_claude_settings_file(path: Path, reason: str) -> Path | None:
+    if not path.exists():
+        return None
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for suffix in [""] + [f".{i}" for i in range(1, 100)]:
+        backup_path = path.with_name(f"{path.name}.bak-{timestamp}{suffix}")
+        if backup_path.exists():
+            continue
+        try:
+            atomic_write_bytes(backup_path, path.read_bytes())
+            logger.warning(f"Backed up Claude settings.json to {backup_path}: {reason}")
+            return backup_path
+        except Exception as e:
+            logger.warning(f"Failed to back up Claude settings.json {path}: {e}")
+            return None
+    return None
+
+
+def _read_claude_settings_json(path: Path, *, recover: bool = False) -> dict | None:
+    if not path.exists():
+        return {}
+
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as e:
+        if recover:
+            _backup_claude_settings_file(path, f"invalid JSON: {e}")
+            return {}
+        logger.error(f"Failed to read Claude settings.json: {e}")
+        return None
+
+    if not isinstance(data, dict):
+        reason = f"expected object, got {type(data).__name__}"
+        if recover:
+            _backup_claude_settings_file(path, reason)
+            return {}
+        logger.error(f"Invalid Claude settings.json: {reason}")
+        return None
+
+    return data
 
 
 class ClaudeProvider(AutoContinueProvider):
@@ -50,22 +97,20 @@ class ClaudeProvider(AutoContinueProvider):
         settings_path = self.get_claude_settings_path()
         if not settings_path.exists():
             return False
-        try:
-            with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
-
-            hooks = settings.get("hooks", {})
-            stop_hooks = hooks.get("Stop", [])
-
-            for hook_group in stop_hooks:
-                for hook in hook_group.get("hooks", []):
-                    command = hook.get("command", "")
-                    if "auto_continue_stop.ps1" in command:
-                        return True
+        settings = _read_claude_settings_json(settings_path)
+        if not isinstance(settings, dict):
             return False
-        except Exception as e:
-            logger.error(f"Failed to read Claude settings.json: {e}")
-            return False
+
+        hooks = settings.get("hooks", {})
+        stop_hooks = hooks.get("Stop", []) if isinstance(hooks, dict) else []
+        for hook_group in stop_hooks:
+            if not isinstance(hook_group, dict):
+                continue
+            for hook in hook_group.get("hooks", []):
+                command = hook.get("command", "") if isinstance(hook, dict) else ""
+                if "auto_continue_stop.ps1" in command:
+                    return True
+        return False
 
     def register_hook(self, apply_to_subagents: bool = False, settings=None) -> None:
         """Register hook in settings.json."""
@@ -73,14 +118,9 @@ class ClaudeProvider(AutoContinueProvider):
         settings_path = self.get_claude_settings_path()
         settings_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Read existing settings
-        claude_settings = {}
-        if settings_path.exists():
-            try:
-                with open(settings_path, 'r', encoding='utf-8') as f:
-                    claude_settings = json.load(f)
-            except Exception:
-                pass
+        # Read existing settings. If repair finds corrupt JSON, keep a backup
+        # before rebuilding so user configuration can be recovered manually.
+        claude_settings = _read_claude_settings_json(settings_path, recover=True) or {}
 
         # Ensure hooks structure exists
         if "hooks" not in claude_settings:
@@ -135,7 +175,7 @@ class ClaudeProvider(AutoContinueProvider):
         )
 
         # Write settings.json
-        atomic_write_text(settings_path, json.dumps(claude_settings, indent=2))
+        atomic_write_text(settings_path, json.dumps(claude_settings, indent=2, ensure_ascii=False))
         self._save_managed_permission_state(managed_rules, removed_ask_rules)
 
     def _register_hook_event(self, settings: dict, event_name: str, hook_def: dict | None) -> None:
@@ -165,8 +205,9 @@ class ClaudeProvider(AutoContinueProvider):
             return
 
         try:
-            with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
+            settings = _read_claude_settings_json(settings_path)
+            if not isinstance(settings, dict):
+                return
 
             hooks = settings.get("hooks", {})
 
@@ -191,7 +232,7 @@ class ClaudeProvider(AutoContinueProvider):
             )
 
             # Write back
-            atomic_write_text(settings_path, json.dumps(settings, indent=2))
+            atomic_write_text(settings_path, json.dumps(settings, indent=2, ensure_ascii=False))
             self._save_managed_permission_state([], [])
         except Exception as e:
             logger.error(f"Failed to unregister hook: {e}")
@@ -351,13 +392,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         settings_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 读取现有配置
-        settings = {}
-        if settings_path.exists():
-            try:
-                with open(settings_path, 'r', encoding='utf-8') as f:
-                    settings = json.load(f)
-            except Exception:
-                pass
+        settings = _read_claude_settings_json(settings_path, recover=True) or {}
 
         if "hooks" not in settings:
             settings["hooks"] = {}
@@ -374,7 +409,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         self._register_hook_event(settings, "ResponseError", hook_def)
 
         # 写入配置
-        atomic_write_text(settings_path, json.dumps(settings, indent=2))
+        atomic_write_text(settings_path, json.dumps(settings, indent=2, ensure_ascii=False))
 
         logger.info("Registered error recovery hook to ResponseError event")
 
@@ -391,8 +426,9 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             return
 
         try:
-            with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
+            settings = _read_claude_settings_json(settings_path)
+            if not isinstance(settings, dict):
+                return
 
             hooks = settings.get("hooks", {})
             if "ResponseError" in hooks:
@@ -405,7 +441,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
                         filtered.append(hook_group)
                 hooks["ResponseError"] = filtered
 
-            atomic_write_text(settings_path, json.dumps(settings, indent=2))
+            atomic_write_text(settings_path, json.dumps(settings, indent=2, ensure_ascii=False))
 
             logger.info("Uninstalled error recovery hook")
         except Exception as e:
@@ -422,8 +458,9 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             return False
 
         try:
-            with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
+            settings = _read_claude_settings_json(settings_path)
+            if not isinstance(settings, dict):
+                return False
 
             hooks = settings.get("hooks", {})
             error_hooks = hooks.get("ResponseError", [])

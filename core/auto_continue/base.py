@@ -212,6 +212,13 @@ class AutoContinueProvider(ABC):
         except Exception as e:
             errors.append(f"Failed to unregister hook: {e}")
 
+        uninstall_error_recovery = getattr(self, "uninstall_error_recovery", None)
+        if callable(uninstall_error_recovery):
+            try:
+                uninstall_error_recovery()
+            except Exception as e:
+                errors.append(f"Failed to uninstall error recovery: {e}")
+
         # Remove script
         try:
             self.uninstall_hook_script()
@@ -255,15 +262,12 @@ class AutoContinueProvider(ABC):
             logger.warning(f"Warnings during uninstall: {'; '.join(errors)}")
 
     def update_settings(self, settings: AutoContinueSettings) -> None:
-        """Update settings without changing enabled state."""
+        """Update settings and synchronize hook registration."""
         # Validate first
         is_valid, error = settings.validate()
         if not is_valid:
             raise ValueError(f"Invalid settings: {error}")
 
-        current = self.load_settings()
-        if current:
-            settings.enabled = current.enabled
         self.save_settings(settings)
 
         # Re-install/register the stop hook for either auto-continue or standalone Git snapshots.

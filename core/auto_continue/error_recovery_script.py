@@ -90,6 +90,117 @@ function Get-RetryAfter {
 }'''
 
 
+POWERSHELL_BOOL_HELPERS = r'''function ConvertTo-Bool {
+    param($Value, [bool]$Default = $false)
+
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [byte] -or $Value -is [int] -or $Value -is [long] -or $Value -is [double]) {
+        return [bool]$Value
+    }
+
+    $text = ([string]$Value).Trim().ToLowerInvariant()
+    if ($text -in @("1", "true", "yes", "on")) { return $true }
+    if ($text -in @("0", "false", "no", "off")) { return $false }
+    return $Default
+}
+
+function Get-BoolSetting {
+    param($Settings, [string]$Name, [bool]$Default = $false)
+
+    if ($null -eq $Settings -or $null -eq $Settings.PSObject.Properties[$Name]) {
+        return $Default
+    }
+    return ConvertTo-Bool -Value $Settings.PSObject.Properties[$Name].Value -Default $Default
+}'''
+
+
+POWERSHELL_STATE_LOCK_HELPERS = r'''function Acquire-StateLock {
+    param(
+        [string]$LockPath,
+        [int]$TimeoutMilliseconds = 2000,
+        [int]$StaleSeconds = 60
+    )
+
+    $lockStream = $null
+    $deadline = [DateTimeOffset]::Now.AddMilliseconds($TimeoutMilliseconds)
+    while ($null -eq $lockStream -and [DateTimeOffset]::Now -lt $deadline) {
+        try {
+            $lockStream = [System.IO.File]::Open(
+                $LockPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+        } catch [System.IO.IOException] {
+            try {
+                if ((Test-Path -LiteralPath $LockPath) -and ((Get-Date) - (Get-Item -LiteralPath $LockPath).LastWriteTime).TotalSeconds -gt $StaleSeconds) {
+                    Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+            } catch {
+                # Ignore stale-lock inspection errors and wait.
+            }
+            Start-Sleep -Milliseconds 100
+        } catch {
+            Write-Log "Failed to create recovery state lock: $_" "WARN"
+            return $null
+        }
+    }
+
+    return $lockStream
+}
+
+function Release-StateLock {
+    param($LockStream, [string]$LockPath)
+
+    if ($null -ne $LockStream) {
+        try {
+            $LockStream.Dispose()
+        } catch {
+            # Ignore lock stream disposal errors.
+        }
+    }
+    try {
+        if (Test-Path -LiteralPath $LockPath) {
+            Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # Ignore lock cleanup errors.
+    }
+}
+
+function Load-RecoveryState {
+    param([string]$Path)
+
+    $state = @{}
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            $stateContent = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+            $state = ConvertTo-Hashtable ($stateContent | ConvertFrom-Json -ErrorAction Stop)
+        } catch {
+            Write-Log "Failed to parse recovery state JSON, resetting state: $_" "WARN"
+            $state = @{}
+        }
+    }
+    return $state
+}
+
+function Save-RecoveryState {
+    param([string]$Path, [hashtable]$State)
+
+    try {
+        $tempPath = "$Path.tmp"
+        $State | ConvertTo-Json | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Log "Failed to save recovery state: $_" "ERROR"
+        return $false
+    }
+}'''
+
+
 def generate_error_recovery_script(settings_path: str, enable_git: bool = True) -> str:
     """生成错误恢复 Hook 脚本（增强版）"""
     git_enabled = "$true" if enable_git else "$false"
@@ -138,6 +249,8 @@ function ConvertTo-Hashtable {{
 }}
 
 # Git快照函数
+{POWERSHELL_BOOL_HELPERS}
+
 {POWERSHELL_STATE_DIR_HELPER}
 
 function Get-IntSetting {{
@@ -175,6 +288,8 @@ function Get-BackoffSeconds {{
 }}
 
 {POWERSHELL_RETRY_AFTER_HELPERS}
+
+{POWERSHELL_STATE_LOCK_HELPERS}
 
 function Ensure-LocalGitIgnore {{
     try {{
@@ -467,12 +582,12 @@ try {{
     }}
 
     # 检查是否启用错误恢复
-    if (-not $settings.error_recovery_enabled) {{
+    if (-not (Get-BoolSetting -Settings $settings -Name "error_recovery_enabled" -Default $false)) {{
         exit 0
     }}
 
-    $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
-    $gitSnapshotOnRecovery = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_recovery"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_recovery }}
+    $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
+    $gitSnapshotOnRecovery = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_recovery" -Default $gitSnapshotEnabled
     $retryInitialDelay = Get-IntSetting -Settings $settings -Name "error_retry_initial_delay_seconds" -Default 5 -Min 1 -Max 300
     $retryMaxDelay = Get-IntSetting -Settings $settings -Name "error_retry_max_delay_seconds" -Default 60 -Min 1 -Max 600
     if ($retryInitialDelay -gt $retryMaxDelay) {{ $retryInitialDelay = $retryMaxDelay }}
@@ -555,50 +670,52 @@ try {{
     # 检查恢复次数限制
     $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath
     $statePath = Join-Path $stateDir "error_recovery_state.json"
-    $state = @{{}}
-    if (Test-Path $statePath) {{
-        try {{
-            $stateContent = Get-Content $statePath -Raw -Encoding UTF8 -ErrorAction Stop
-            $state = ConvertTo-Hashtable ($stateContent | ConvertFrom-Json -ErrorAction Stop)
-        }} catch {{
-            $state = @{{}}
-        }}
-    }}
-
-    $recoveryKey = "$sessionId-$errorType"
-    $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
-    $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
-
-    if ($recoveryCount -ge $maxRecoveries) {{
-        Write-Log "Max recovery attempts reached ($maxRecoveries) for $errorType" "WARN"
-
-        # 记录日志
-        $recoveryLogPath = Join-Path $stateDir "error_recovery_log.jsonl"
-        $logEntry = @{{
-            timestamp = (Get-Date -Format "o")
-            session_id = $sessionId
-            error_type = $errorType
-            error_code = $errorCode
-            error_message = $errorMessage
-            http_status = $httpStatus
-            recovery_strategy = $recoveryStrategy
-            action = "max_recoveries_reached"
-            recovery_count = $recoveryCount
-        }} | ConvertTo-Json -Compress
-        Add-Content -Path $recoveryLogPath -Value $logEntry -ErrorAction SilentlyContinue
-
+    $lockPath = "$statePath.lock"
+    $lockStream = Acquire-StateLock -LockPath $lockPath
+    if ($null -eq $lockStream) {{
+        Write-Log "Failed to acquire recovery state lock" "WARN"
         exit 0
     }}
 
-    # 更新恢复次数
-    $recoveryCount++
-    $state[$recoveryKey] = $recoveryCount
+    $maxRecoveriesReached = $false
     try {{
-        $tempPath = "$statePath.tmp"
-        $state | ConvertTo-Json | Set-Content $tempPath -ErrorAction Stop
-        Move-Item -Path $tempPath -Destination $statePath -Force -ErrorAction Stop
-    }} catch {{
-        Write-Log "Failed to save recovery state: $_" "ERROR"
+        $state = Load-RecoveryState -Path $statePath
+
+        $recoveryKey = "$sessionId-$errorType"
+        $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
+        $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
+
+        if ($recoveryCount -ge $maxRecoveries) {{
+            Write-Log "Max recovery attempts reached ($maxRecoveries) for $errorType" "WARN"
+
+            # 记录日志
+            $recoveryLogPath = Join-Path $stateDir "error_recovery_log.jsonl"
+            $logEntry = @{{
+                timestamp = (Get-Date -Format "o")
+                session_id = $sessionId
+                error_type = $errorType
+                error_code = $errorCode
+                error_message = $errorMessage
+                http_status = $httpStatus
+                recovery_strategy = $recoveryStrategy
+                action = "max_recoveries_reached"
+                recovery_count = $recoveryCount
+            }} | ConvertTo-Json -Compress
+            Add-Content -LiteralPath $recoveryLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+
+            $maxRecoveriesReached = $true
+        }} else {{
+
+            # 更新恢复次数
+            $recoveryCount++
+            $state[$recoveryKey] = $recoveryCount
+            Save-RecoveryState -Path $statePath -State $state | Out-Null
+        }}
+    }} finally {{
+        Release-StateLock -LockStream $lockStream -LockPath $lockPath
+    }}
+    if ($maxRecoveriesReached) {{
+        exit 0
     }}
 
     # 创建Git快照（如果启用）
@@ -620,7 +737,7 @@ try {{
         action = "attempting_recovery"
         recovery_count = $recoveryCount
     }} | ConvertTo-Json -Compress
-    Add-Content -Path $recoveryLogPath -Value $logEntry -ErrorAction SilentlyContinue
+    Add-Content -LiteralPath $recoveryLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
 
     # 根据恢复策略生成响应
     $output = $null
@@ -783,6 +900,8 @@ function ConvertTo-Hashtable {{
     return $result
 }}
 
+{POWERSHELL_BOOL_HELPERS}
+
 {POWERSHELL_STATE_DIR_HELPER}
 
 function Get-IntSetting {{
@@ -822,6 +941,8 @@ function Get-BackoffSeconds {{
 {POWERSHELL_RETRY_AFTER_HELPERS}
 
 # Git快照函数
+{POWERSHELL_STATE_LOCK_HELPERS}
+
 function Ensure-LocalGitIgnore {{
     try {{
         $gitignorePath = Join-Path (Get-Location) ".gitignore"
@@ -1010,12 +1131,12 @@ try {{
     }}
 
     $settings = Get-Content $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (-not $settings.error_recovery_enabled) {{
+    if (-not (Get-BoolSetting -Settings $settings -Name "error_recovery_enabled" -Default $false)) {{
         exit 0
     }}
 
-    $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
-    $gitSnapshotOnRecovery = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_recovery"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_recovery }}
+    $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
+    $gitSnapshotOnRecovery = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_recovery" -Default $gitSnapshotEnabled
     $retryInitialDelay = Get-IntSetting -Settings $settings -Name "error_retry_initial_delay_seconds" -Default 5 -Min 1 -Max 300
     $retryMaxDelay = Get-IntSetting -Settings $settings -Name "error_retry_max_delay_seconds" -Default 60 -Min 1 -Max 600
     if ($retryInitialDelay -gt $retryMaxDelay) {{ $retryInitialDelay = $retryMaxDelay }}
@@ -1080,49 +1201,51 @@ try {{
     # 检查恢复次数
     $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath
     $statePath = Join-Path $stateDir "error_recovery_state.json"
-    $state = @{{}}
-    if (Test-Path $statePath) {{
-        try {{
-            $stateContent = Get-Content $statePath -Raw -Encoding UTF8
-            $state = ConvertTo-Hashtable ($stateContent | ConvertFrom-Json)
-        }} catch {{
-            $state = @{{}}
-        }}
-    }}
-
-    $recoveryKey = "$sessionId-$errorType"
-    $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
-    $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
-
-    if ($recoveryCount -ge $maxRecoveries) {{
-        Write-Log "Max recoveries reached for $errorType" "WARN"
-
-        # 记录日志
-        $logPath = Join-Path $stateDir "error_recovery_log.jsonl"
-        $logEntry = @{{
-            timestamp = (Get-Date -Format "o")
-            session_id = $sessionId
-            error_type = $errorType
-            error_code = $errorCode
-            error_message = $errorMessage
-            http_status = $httpStatus
-            action = "max_recoveries_reached"
-            recovery_count = $recoveryCount
-        }} | ConvertTo-Json -Compress
-        Add-Content -Path $logPath -Value $logEntry -ErrorAction SilentlyContinue
-
+    $lockPath = "$statePath.lock"
+    $lockStream = Acquire-StateLock -LockPath $lockPath
+    if ($null -eq $lockStream) {{
+        Write-Log "Failed to acquire recovery state lock" "WARN"
         exit 0
     }}
 
-    # 更新恢复次数
-    $recoveryCount++
-    $state[$recoveryKey] = $recoveryCount
+    $maxRecoveriesReached = $false
     try {{
-        $tempPath = "$statePath.tmp"
-        $state | ConvertTo-Json | Set-Content $tempPath
-        Move-Item -Path $tempPath -Destination $statePath -Force
-    }} catch {{
-        Write-Log "Failed to save state: $_" "ERROR"
+        $state = Load-RecoveryState -Path $statePath
+
+        $recoveryKey = "$sessionId-$errorType"
+        $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
+        $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
+
+        if ($recoveryCount -ge $maxRecoveries) {{
+            Write-Log "Max recoveries reached for $errorType" "WARN"
+
+            # 记录日志
+            $logPath = Join-Path $stateDir "error_recovery_log.jsonl"
+            $logEntry = @{{
+                timestamp = (Get-Date -Format "o")
+                session_id = $sessionId
+                error_type = $errorType
+                error_code = $errorCode
+                error_message = $errorMessage
+                http_status = $httpStatus
+                action = "max_recoveries_reached"
+                recovery_count = $recoveryCount
+            }} | ConvertTo-Json -Compress
+            Add-Content -LiteralPath $logPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+
+            $maxRecoveriesReached = $true
+        }} else {{
+
+            # 更新恢复次数
+            $recoveryCount++
+            $state[$recoveryKey] = $recoveryCount
+            Save-RecoveryState -Path $statePath -State $state | Out-Null
+        }}
+    }} finally {{
+        Release-StateLock -LockStream $lockStream -LockPath $lockPath
+    }}
+    if ($maxRecoveriesReached) {{
+        exit 0
     }}
 
     # 创建Git快照（如果启用）
@@ -1143,7 +1266,7 @@ try {{
         action = "attempting_recovery"
         recovery_count = $recoveryCount
     }} | ConvertTo-Json -Compress
-    Add-Content -Path $logPath -Value $logEntry -ErrorAction SilentlyContinue
+    Add-Content -LiteralPath $logPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
 
     # 根据错误类型选择恢复策略
     $output = $null

@@ -5,6 +5,7 @@ from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue
+from core.auto_continue.manager import auto_continue_manager
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 
 
@@ -24,6 +25,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_status_label = None
         self._ssh_busy = False
         self._remote_auto_provider_combo = None
+        self._remote_auto_feature_label = None
         self._remote_auto_status_label = None
         self._remote_auto_buttons = []
         self._remote_auto_busy = False
@@ -268,6 +270,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             auto_controls,
             values=list(self._remote_auto_options.keys()),
             width=160,
+            command=lambda _value: self._update_remote_auto_feature_label(),
             **combo_style(),
         )
         self._remote_auto_provider_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
@@ -315,6 +318,17 @@ class SSHTab(ctk.CTkScrollableFrame):
         uninstall_button.grid(row=0, column=6, sticky="e")
         self._remote_auto_buttons = [check_button, git_snapshot_button, install_button, pause_button, uninstall_button]
 
+        self._remote_auto_feature_label = ctk.CTkLabel(
+            auto_controls,
+            text="",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._remote_auto_feature_label.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
+        bind_wraplength(auto_controls, self._remote_auto_feature_label, padding=20)
+
         self._remote_auto_status_label = ctk.CTkLabel(
             auto_controls,
             text="未检查。安装时会同步本机自动续跑设置，并要求远端具备 sh 和 Python 3.6+。",
@@ -323,7 +337,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_status_label.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
+        self._remote_auto_status_label.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
@@ -455,6 +469,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         else:
             self._server_combo.set("(无)")
         self._refresh_sync_profile_combo()
+        self._update_remote_auto_feature_label()
 
     def _create_server(self):
         def on_save(profile, _):
@@ -588,6 +603,29 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not self._clear_api_combo:
             return "all"
         return self._clear_api_options.get(self._clear_api_combo.get(), "all")
+
+    def _update_remote_auto_feature_label(self):
+        if not self._remote_auto_feature_label:
+            return
+        parts = []
+        for provider in self._selected_remote_auto_targets():
+            settings = auto_continue_manager.get_settings(provider)
+            label = "Claude" if provider == "claude" else "Codex"
+            if not settings:
+                parts.append(f"{label}: 本机未保存设置")
+                continue
+            feature_parts = [
+                f"自动续跑 {'ON' if settings.enabled else 'OFF'}",
+                f"Git快照 {'ON' if settings.git_auto_snapshot else 'OFF'}",
+                f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
+            ]
+            if provider == "claude":
+                feature_parts.append(f"权限确认 {'ON' if settings.auto_approve_permission_requests else 'OFF'}")
+                feature_parts.append(f"Subagent {'ON' if settings.apply_to_subagents else 'OFF'}")
+            parts.append(f"{label}: " + " / ".join(feature_parts))
+        self._remote_auto_feature_label.configure(
+            text="远端安装/修复会同步这些本机开关：" + " | ".join(parts)
+        )
 
     def _update_codex_wire_hint(self):
         if not self._codex_wire_api_hint:

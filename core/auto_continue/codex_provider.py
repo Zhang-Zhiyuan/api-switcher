@@ -1,8 +1,9 @@
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
 from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
@@ -139,6 +140,52 @@ def _remove_codex_event_hook(hooks: dict, event_name: str, marker: str) -> bool:
     return True
 
 
+def _backup_codex_hooks_file(path: Path, reason: str) -> Path | None:
+    if not path.exists():
+        return None
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for suffix in [""] + [f".{i}" for i in range(1, 100)]:
+        backup_path = path.with_name(f"{path.name}.bak-{timestamp}{suffix}")
+        if backup_path.exists():
+            continue
+        try:
+            atomic_write_bytes(backup_path, path.read_bytes())
+            logger.warning(f"Backed up Codex hooks.json to {backup_path}: {reason}")
+            return backup_path
+        except Exception as e:
+            logger.warning(f"Failed to back up Codex hooks.json {path}: {e}")
+            return None
+    return None
+
+
+def _read_codex_hooks_json(path: Path, *, recover: bool = False) -> dict | None:
+    if not path.exists():
+        return {}
+
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as e:
+        if recover:
+            _backup_codex_hooks_file(path, f"invalid JSON: {e}")
+            return {}
+        logger.error(f"Failed to read hooks.json: {e}")
+        return None
+
+    if not isinstance(data, dict):
+        reason = f"expected object, got {type(data).__name__}"
+        if recover:
+            _backup_codex_hooks_file(path, reason)
+            return {}
+        logger.error(f"Invalid hooks.json: {reason}")
+        return None
+
+    return data
+
+
 class CodexProvider(AutoContinueProvider):
     """Auto-continue provider for Codex CLI."""
 
@@ -177,29 +224,17 @@ class CodexProvider(AutoContinueProvider):
         hooks_path = self.get_hooks_json_path()
         if not hooks_path.exists():
             return False
-        try:
-            with open(hooks_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return _codex_event_has_command(data, "Stop", "auto_continue_stop.ps1")
-        except Exception as e:
-            logger.error(f"Failed to read hooks.json: {e}")
-            return False
+        data = _read_codex_hooks_json(hooks_path)
+        return bool(data and _codex_event_has_command(data, "Stop", "auto_continue_stop.ps1"))
 
     def register_hook(self) -> None:
         """Register hook in hooks.json."""
         hooks_path = self.get_hooks_json_path()
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Read existing hooks
-        data = {}
-        if hooks_path.exists():
-            try:
-                with open(hooks_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            except Exception:
-                pass
-        if not isinstance(data, dict):
-            data = {}
+        # Read existing hooks. If the file is corrupt, keep a backup before
+        # rebuilding it so repair never destroys the only copy.
+        data = _read_codex_hooks_json(hooks_path, recover=True) or {}
 
         hooks = _codex_hooks_container(data, migrate_legacy=True)
 
@@ -213,7 +248,7 @@ class CodexProvider(AutoContinueProvider):
         }, "auto_continue_stop.ps1")
 
         # Write hooks.json
-        atomic_write_text(hooks_path, json.dumps(data, indent=2))
+        atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
 
         # Enable codex_hooks in config.toml
         self._enable_codex_hooks()
@@ -225,8 +260,7 @@ class CodexProvider(AutoContinueProvider):
             return
 
         try:
-            with open(hooks_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = _read_codex_hooks_json(hooks_path)
             if not isinstance(data, dict):
                 return
             hooks = _codex_hooks_container(data, migrate_legacy=True)
@@ -235,7 +269,7 @@ class CodexProvider(AutoContinueProvider):
             changed = _remove_codex_event_hook(hooks, "Stop", "auto_continue_stop.ps1")
 
             # Write back
-            atomic_write_text(hooks_path, json.dumps(data, indent=2))
+            atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
 
             if changed and not _codex_data_has_entries(data):
                 self._set_codex_hooks_enabled(False)
@@ -272,28 +306,52 @@ class CodexProvider(AutoContinueProvider):
         self._set_codex_hooks_enabled(True)
 
     def _set_codex_hooks_enabled(self, enabled: bool) -> None:
-        """Set the root codex_hooks flag without rewriting unrelated TOML."""
+        """Set the Codex hook feature flag without rewriting unrelated TOML."""
         config_path = self.get_config_toml_path()
         if not enabled and not config_path.exists():
             return
 
         try:
-            lines = []
-            if config_path.exists():
-                lines = config_path.read_text(encoding="utf-8").splitlines()
-
+            lines = config_path.read_text(encoding="utf-8-sig").splitlines() if config_path.exists() else []
             value = "true" if enabled else "false"
-            root_end = next((i for i, line in enumerate(lines) if line.strip().startswith("[")), len(lines))
-            found = False
 
+            # Codex currently expects this under [features]. Keep an existing
+            # legacy root-level key in sync so older configs do not become
+            # contradictory after repair/uninstall.
+            root_end = next((i for i, line in enumerate(lines) if line.strip().startswith("[")), len(lines))
             for i in range(root_end):
                 if re.match(r"^\s*codex_hooks\s*=", lines[i]):
                     lines[i] = f"codex_hooks = {value}"
-                    found = True
                     break
 
-            if not found:
-                lines.insert(root_end, f"codex_hooks = {value}")
+            features_index = next(
+                (
+                    i for i, line in enumerate(lines)
+                    if re.match(r"^\s*\[features\]\s*$", line)
+                ),
+                -1,
+            )
+            if features_index < 0:
+                if enabled:
+                    block = ["[features]", f"codex_hooks = {value}", ""]
+                    if root_end > 0 and lines[root_end - 1].strip():
+                        block.insert(0, "")
+                    lines = lines[:root_end] + block + lines[root_end:]
+            else:
+                insert_index = features_index + 1
+                found = False
+                for i in range(features_index + 1, len(lines)):
+                    if re.match(r"^\s*\[.+\]\s*$", lines[i]):
+                        insert_index = i
+                        break
+                    if re.match(r"^\s*codex_hooks\s*=", lines[i]):
+                        lines[i] = f"codex_hooks = {value}"
+                        found = True
+                        break
+                    insert_index = i + 1
+
+                if not found:
+                    lines.insert(insert_index, f"codex_hooks = {value}")
 
             atomic_write_text(config_path, "\n".join(lines).rstrip() + "\n")
         except Exception as e:
@@ -379,15 +437,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 读取现有 hooks
-        data = {}
-        if hooks_path.exists():
-            try:
-                with open(hooks_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            except Exception:
-                pass
-        if not isinstance(data, dict):
-            data = {}
+        data = _read_codex_hooks_json(hooks_path, recover=True) or {}
 
         hooks = _codex_hooks_container(data, migrate_legacy=True)
 
@@ -401,7 +451,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         }, "error_recovery.ps1")
 
         # 写入 hooks.json
-        atomic_write_text(hooks_path, json.dumps(data, indent=2))
+        atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
 
         self._enable_codex_hooks()
 
@@ -420,15 +470,14 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             return
 
         try:
-            with open(hooks_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = _read_codex_hooks_json(hooks_path)
             if not isinstance(data, dict):
                 return
             hooks = _codex_hooks_container(data, migrate_legacy=True)
 
             changed = _remove_codex_event_hook(hooks, "Error", "error_recovery.ps1")
 
-            atomic_write_text(hooks_path, json.dumps(data, indent=2))
+            atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
 
             if changed and not _codex_data_has_entries(data):
                 self._set_codex_hooks_enabled(False)
@@ -448,8 +497,9 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             return False
 
         try:
-            with open(hooks_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = _read_codex_hooks_json(hooks_path)
+            if not isinstance(data, dict):
+                return False
 
             return _codex_event_has_command(data, "Error", "error_recovery.ps1")
         except Exception:

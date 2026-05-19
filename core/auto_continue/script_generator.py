@@ -11,6 +11,31 @@ def _powershell_array(values: list[str], indent: int = 12) -> str:
     return ",\n".join(lines)
 
 
+POWERSHELL_BOOL_HELPERS = r'''function ConvertTo-Bool {
+    param($Value, [bool]$Default = $false)
+
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [byte] -or $Value -is [int] -or $Value -is [long] -or $Value -is [double]) {
+        return [bool]$Value
+    }
+
+    $text = ([string]$Value).Trim().ToLowerInvariant()
+    if ($text -in @("1", "true", "yes", "on")) { return $true }
+    if ($text -in @("0", "false", "no", "off")) { return $false }
+    return $Default
+}
+
+function Get-BoolSetting {
+    param($Settings, [string]$Name, [bool]$Default = $false)
+
+    if ($null -eq $Settings -or $null -eq $Settings.PSObject.Properties[$Name]) {
+        return $Default
+    }
+    return ConvertTo-Bool -Value $Settings.PSObject.Properties[$Name].Value -Default $Default
+}'''
+
+
 def generate_hook_script(settings_path: str, enable_git: bool = True) -> str:
     """Generate the PowerShell hook script with enhanced error handling."""
     git_enabled = "$true" if enable_git else "$false"
@@ -57,6 +82,8 @@ function ConvertTo-Hashtable {{
     }}
     return $result
 }}
+
+{POWERSHELL_BOOL_HELPERS}
 
 # Text matching and decision logging helpers.
 function Get-NormalizedText {{
@@ -282,9 +309,10 @@ try {{
         $stateDir = $configDir
     }}
 
-    $gitAutoSnapshot = if ($null -eq $settings.PSObject.Properties["git_auto_snapshot"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_auto_snapshot }}
-    $gitSnapshotOnStart = if ($null -eq $settings.PSObject.Properties["git_snapshot_on_start"]) {{ $gitSnapshotEnabled }} else {{ [bool]$settings.git_snapshot_on_start }}
-    $autoApprovePermissionRequests = if ($null -eq $settings.PSObject.Properties["auto_approve_permission_requests"]) {{ $false }} else {{ [bool]$settings.auto_approve_permission_requests }}
+    $autoContinueEnabled = Get-BoolSetting -Settings $settings -Name "enabled" -Default $false
+    $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
+    $gitSnapshotOnStart = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_start" -Default $gitSnapshotEnabled
+    $autoApprovePermissionRequests = Get-BoolSetting -Settings $settings -Name "auto_approve_permission_requests" -Default $false
 
     # Read stdin (hook input)
     $stdin = [Console]::In.ReadToEnd()
@@ -355,7 +383,7 @@ try {{
             exit 0
         }}
 
-        $legacyBashAllowed = if ($null -eq $settings.PSObject.Properties["auto_approve_bash"]) {{ $true }} else {{ [bool]$settings.auto_approve_bash }}
+        $legacyBashAllowed = Get-BoolSetting -Settings $settings -Name "auto_approve_bash" -Default $true
         if ($null -eq $settings.PSObject.Properties["auto_approve_tools"]) {{
             $allowedTools = if ($legacyBashAllowed) {{
                 @("Bash", "Edit", "MultiEdit", "Write", "NotebookEdit")
@@ -584,7 +612,7 @@ try {{
         exit 0
     }}
 
-    if ((-not $settings.enabled) -and (-not $autoApprovePermissionRequests)) {{
+    if (-not $autoContinueEnabled) {{
         exit 0  # Allow stop if auto-continue is disabled
     }}
 
@@ -658,12 +686,16 @@ try {{
         # Get continuation count
         $count = if ($state.ContainsKey($stateKey)) {{ $state[$stateKey] }} else {{ 0 }}
 
-        if (-not $settings.enabled) {{
+        if (-not $autoContinueEnabled) {{
             exit 0
         }}
 
         # Check conservative mode for Claude Code
-        if ($isClaude -and $settings.conservative_mode -and $hookInput.stop_hook_active) {{
+        if (
+            $isClaude -and
+            (Get-BoolSetting -Settings $settings -Name "conservative_mode" -Default $true) -and
+            (ConvertTo-Bool -Value $hookInput.stop_hook_active -Default $false)
+        ) {{
             exit 0  # Allow stop in conservative mode when already continuing
         }}
 

@@ -33,6 +33,18 @@ class AutoContinueManager:
         provider = self.get_provider(provider_name)
         return provider.load_settings()
 
+    def _sync_error_recovery(self, provider, settings: AutoContinueSettings) -> None:
+        if not (
+            hasattr(provider, "install_error_recovery")
+            and hasattr(provider, "uninstall_error_recovery")
+        ):
+            return
+
+        if settings.error_recovery_enabled:
+            provider.install_error_recovery()
+        else:
+            provider.uninstall_error_recovery()
+
     def enable(self, provider_name: str, settings: Optional[AutoContinueSettings] = None,
                apply_to_subagents: bool = False) -> None:
         """Enable auto-continue for a provider."""
@@ -46,6 +58,7 @@ class AutoContinueManager:
             settings.apply_to_subagents = apply_to_subagents
 
         provider.enable(settings)
+        self._sync_error_recovery(provider, settings)
 
         # Install guidance
         if hasattr(provider, 'install_guidance'):
@@ -69,17 +82,29 @@ class AutoContinueManager:
         """Update settings for a provider."""
         provider = self.get_provider(provider_name)
         provider.update_settings(settings)
+        self._sync_error_recovery(provider, settings)
 
         # provider.update_settings re-installs/registers the hook when either
-        # auto-continue or standalone Git snapshots need it.
+        # auto-continue or standalone Git snapshots need it. Error recovery is
+        # synchronized above because it uses a separate Error/ResponseError hook.
+        if settings.enabled and hasattr(provider, 'install_guidance'):
+            provider.install_guidance()
 
     def repair(self, provider_name: str) -> None:
         """Repair installation (re-enable with current settings)."""
         provider = self.get_provider(provider_name)
         settings = provider.load_settings()
-        if settings and settings.enabled:
-            apply_to_subagents = settings.apply_to_subagents if provider_name.lower() == "claude" else False
-            self.enable(provider_name, settings, apply_to_subagents)
+        if not settings:
+            return
+
+        if provider._settings_require_hook(settings):
+            provider.install_hook_script()
+            provider.register_hook_for_settings(settings)
+
+        self._sync_error_recovery(provider, settings)
+
+        if settings.enabled and hasattr(provider, 'install_guidance'):
+            provider.install_guidance()
 
     def enable_error_recovery(self, provider_name: str) -> None:
         """启用错误自动恢复功能"""
