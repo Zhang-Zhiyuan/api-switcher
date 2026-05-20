@@ -140,10 +140,38 @@ def test_git_manager_snapshot_flow(tmp_path):
     messages = [commit["message"] for commit in commits]
     assert "second snapshot" in messages
     assert "test snapshot" in messages
+    assert commits[0]["full_hash"]
+    assert commits[0]["changed_files"] >= 1
 
     success, no_change_result = git_mgr.create_snapshot(message="no change", tag="test")
     assert success
     assert no_change_result == "没有需要提交的更改"
+
+
+def test_git_manager_auto_snapshot_history_and_diff(tmp_path):
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    git_mgr = GitManager(project_dir)
+
+    success, message = git_mgr.init_repo()
+    assert success, message
+
+    snapshot_file = project_dir / "snapshot.txt"
+    snapshot_file.write_text("v1", encoding="utf-8")
+    success, commit_hash = git_mgr.create_snapshot(
+        message="[git-snapshot] 2026-05-21 10:00:00",
+        tag="git-snapshot",
+    )
+    assert success, commit_hash
+
+    commits = git_mgr.get_recent_commits(count=5, auto_only=True)
+    assert len(commits) == 1
+    assert commits[0]["auto_snapshot"] is True
+    assert commits[0]["changed_files"] >= 1
+
+    ok, diff_stat = git_mgr.get_commit_diff(commits[0]["full_hash"], stat_only=True)
+    assert ok, diff_stat
+    assert "snapshot.txt" in diff_stat
 
 
 def test_git_manager_hard_rollback_preserves_uncommitted_changes_with_safety_tag(tmp_path):

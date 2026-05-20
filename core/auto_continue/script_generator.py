@@ -180,7 +180,8 @@ function Write-DecisionLog {{
         [string]$Match = "",
         [string]$Message = "",
         [int]$Count = -1,
-        [string]$ContinuationPrompt = ""
+        [string]$ContinuationPrompt = "",
+        [string]$GitCommitHash = ""
     )
 
     try {{
@@ -204,6 +205,9 @@ function Write-DecisionLog {{
         }}
         if (-not [string]::IsNullOrWhiteSpace($ContinuationPrompt)) {{
             $entry["continuation_prompt"] = $ContinuationPrompt
+        }}
+        if (-not [string]::IsNullOrWhiteSpace($GitCommitHash)) {{
+            $entry["git_commit_hash"] = $GitCommitHash
         }}
         $logPath = Join-Path $StateDir "auto_continue_stop_log.jsonl"
         $logEntry = $entry | ConvertTo-Json -Compress -Depth 6
@@ -303,7 +307,7 @@ function Create-GitSnapshot {{
             $indexLockPath = Join-Path $gitDir "index.lock"
             if (Test-Path $indexLockPath) {{
                 Write-Log "Git index lock exists; skipping git snapshot" "WARN"
-                return $false
+                return ""
             }}
         }}
 
@@ -311,14 +315,14 @@ function Create-GitSnapshot {{
         $status = git status --porcelain 2>$null
         if ([string]::IsNullOrWhiteSpace($status)) {{
             Write-Log "No changes to commit" "INFO"
-            return $true
+            return ""
         }}
 
         # 添加所有更改
         git add -A 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {{
             Write-Log "Git add did not complete; skipping git snapshot" "WARN"
-            return $false
+            return ""
         }}
 
         # 检查git配置
@@ -338,11 +342,11 @@ function Create-GitSnapshot {{
         # 获取commit hash
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"
-        return $true
+        return [string]$commitHash
 
     }} catch {{
         Write-Log "Failed to create git snapshot: $_" "WARN"
-        return $false
+        return ""
     }} finally {{
         $ErrorActionPreference = $previousErrorActionPreference
     }}
@@ -427,11 +431,12 @@ try {{
     $lastMessage = Get-NormalizedText $lastMessage
 
     $gitSnapshotAttempted = $false
+    $gitSnapshotHash = ""
     $promptSnapshotEvents = @("UserPromptSubmit", "SessionStart")
     if ($promptSnapshotEvents -contains $hookEvent) {{
         if ($gitAutoSnapshot -and $gitSnapshotOnStart) {{
             Write-Log "Creating git snapshot on prompt/session start hook..." "INFO"
-            [void](Create-GitSnapshot -Message "git-snapshot")
+            $gitSnapshotHash = Create-GitSnapshot -Message "git-snapshot"
             $gitSnapshotAttempted = $true
         }}
         exit 0
@@ -442,7 +447,7 @@ try {{
     $stopSnapshotEvents = @("Stop", "SubagentStop")
     if (($stopSnapshotEvents -contains $hookEvent) -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
         Write-Log "Creating git snapshot on stop hook..." "INFO"
-        [void](Create-GitSnapshot -Message "git-snapshot")
+        $gitSnapshotHash = Create-GitSnapshot -Message "git-snapshot"
         $gitSnapshotAttempted = $true
     }}
 
@@ -811,7 +816,8 @@ try {{
                     -Reason "training_target_met" `
                     -Match $trainingTargetMetMatch `
                     -Message $lastMessage `
-                    -Count $count
+                    -Count $count `
+                    -GitCommitHash $gitSnapshotHash
                 exit 0
             }}
 
@@ -833,7 +839,8 @@ try {{
                     -Reason "training_not_applicable" `
                     -Match $trainingSkipMatch `
                     -Message $lastMessage `
-                    -Count $count
+                    -Count $count `
+                    -GitCommitHash $gitSnapshotHash
                 exit 0
             }}
 
@@ -855,7 +862,8 @@ try {{
                 -Reason "blocker_detected" `
                 -Match $blockerMatch `
                 -Message $lastMessage `
-                -Count $count
+                -Count $count `
+                -GitCommitHash $gitSnapshotHash
             exit 0
         }}
 
@@ -877,7 +885,8 @@ try {{
                 -Reason $allowReason `
                 -Match "" `
                 -Message $lastMessage `
-                -Count $count
+                -Count $count `
+                -GitCommitHash $gitSnapshotHash
             exit 0
         }}
 
@@ -894,7 +903,8 @@ try {{
                 -Reason "max_continuations_reached" `
                 -Match $matchedPattern `
                 -Message $lastMessage `
-                -Count $count
+                -Count $count `
+                -GitCommitHash $gitSnapshotHash
             exit 0
         }}
 
@@ -915,6 +925,11 @@ try {{
 
         $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} elseif ($trainingGuardApplies) {{ "training_guard_continue" }} else {{ "incomplete_work_detected" }}
 
+        if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart -and -not $gitSnapshotAttempted) {{
+            Write-Log "Creating git snapshot before auto-continue..." "INFO"
+            $gitSnapshotHash = Create-GitSnapshot -Message "git-snapshot"
+        }}
+
         Write-DecisionLog `
             -StateDir $stateDir `
             -SessionId $sessionId `
@@ -925,12 +940,8 @@ try {{
             -Match $matchedPattern `
             -Message $lastMessage `
             -Count $count `
-            -ContinuationPrompt $continuationPrompt
-
-        if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart -and -not $gitSnapshotAttempted) {{
-            Write-Log "Creating git snapshot before auto-continue..." "INFO"
-            [void](Create-GitSnapshot -Message "git-snapshot")
-        }}
+            -ContinuationPrompt $continuationPrompt `
+            -GitCommitHash $gitSnapshotHash
 
         # Output pphoto-style block decision. Current Codex/Claude Stop hooks
         # treat the block reason as the continuation instruction.

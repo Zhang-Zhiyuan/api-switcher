@@ -291,8 +291,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         check_button = ctk.CTkButton(
             auto_controls,
-            text="检查",
-            width=78,
+            text="一致性检查",
+            width=104,
             command=self._check_remote_auto_continue,
             **button_style("secondary"),
         )
@@ -307,7 +307,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         git_snapshot_button.grid(row=0, column=3, sticky="e", padx=(0, 8))
         install_button = ctk.CTkButton(
             auto_controls,
-            text="安装/修复",
+            text="一键修复",
             width=102,
             command=self._install_remote_auto_continue,
             **button_style("primary"),
@@ -1100,9 +1100,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             return {"statuses": statuses, "failures": failures, "results": []}
 
         self._run_remote_auto_task(
-            f"正在检查 {server_name} 的远端自动续跑状态...",
+            f"正在检查 {server_name} 的远端自动续跑一致性...",
             worker,
-            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑检查完成", expect_ready=True),
+            lambda payload: self._show_remote_auto_result(payload, "远端一致性检查完成", expect_ready=True),
         )
 
     def _install_remote_git_snapshot(self):
@@ -1150,9 +1150,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             return {"statuses": statuses, "failures": failures, "results": results}
 
         self._run_remote_auto_task(
-            f"正在安装/修复 {server_name} 的远端自动续跑...",
+            f"正在一键修复 {server_name} 的远端自动续跑...",
             worker,
-            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑安装完成", expect_ready=True),
+            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑修复完成", expect_ready=True),
         )
 
     def _pause_remote_auto_continue(self):

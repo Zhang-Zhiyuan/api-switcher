@@ -332,7 +332,58 @@ class GitManager:
             logger.error(f"创建快照失败: {e}")
             return False, f"创建快照失败: {str(e)}"
 
-    def get_recent_commits(self, count: int = 10) -> list[dict]:
+    def _changed_file_count(self, commit_hash: str) -> int:
+        """Return number of files changed by a commit."""
+        result = subprocess.run(
+            ["git", "show", "--name-only", "--pretty=format:", "--no-renames", commit_hash],
+            cwd=self._git_cwd(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return 0
+        return len([line for line in result.stdout.splitlines() if line.strip()])
+
+    def get_commit_diff(self, commit_hash: str, stat_only: bool = False) -> Tuple[bool, str]:
+        """Return a commit diff or diffstat for display/copying."""
+        target_success, target_commit = self._resolve_commit(commit_hash)
+        if not target_success:
+            return False, target_commit
+
+        command = ["git", "show", "--stat", "--summary", target_commit]
+        if not stat_only:
+            command = ["git", "show", "--stat", "--patch", "--find-renames", target_commit]
+        result = subprocess.run(
+            command,
+            cwd=self._git_cwd(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return False, result.stderr.strip() or "无法读取 diff"
+        return True, result.stdout
+
+    @staticmethod
+    def is_auto_snapshot_message(message: str) -> bool:
+        """Return True for API Switcher generated snapshot commit messages."""
+        text = str(message or "").lower()
+        markers = [
+            "git-snapshot",
+            "error-recovery",
+            "codex-error-recovery",
+            "auto snapshot",
+            "[rollback]",
+            "safety snapshot before reset",
+        ]
+        return any(marker in text for marker in markers)
+
+    def get_recent_commits(self, count: int = 10, auto_only: bool = False) -> list[dict]:
         """
         获取最近的提交记录
 
@@ -346,8 +397,15 @@ class GitManager:
             if not self.is_git_repo():
                 return []
 
+            fetch_count = max(count * 3 if auto_only else count, count)
             result = subprocess.run(
-                ["git", "log", f"-{count}", "--pretty=format:%h|%s|%an|%ar"],
+                [
+                    "git",
+                    "log",
+                    f"-{fetch_count}",
+                    "--date=iso-strict",
+                    "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%ad",
+                ],
                 cwd=self._git_cwd(),
                 capture_output=True,
                 text=True,
@@ -363,14 +421,23 @@ class GitManager:
             for line in result.stdout.strip().split("\n"):
                 if not line:
                     continue
-                parts = line.split("|", 3)
-                if len(parts) == 4:
+                parts = line.split("\x1f", 4)
+                if len(parts) == 5:
+                    full_hash, short_hash, message, author, date = parts
+                    if auto_only and not self.is_auto_snapshot_message(message):
+                        continue
                     commits.append({
-                        "hash": parts[0],
-                        "message": parts[1],
-                        "author": parts[2],
-                        "date": parts[3]
+                        "hash": short_hash,
+                        "short_hash": short_hash,
+                        "full_hash": full_hash,
+                        "message": message,
+                        "author": author,
+                        "date": date,
+                        "changed_files": self._changed_file_count(full_hash),
+                        "auto_snapshot": self.is_auto_snapshot_message(message),
                     })
+                if len(commits) >= count:
+                    break
 
             return commits
 

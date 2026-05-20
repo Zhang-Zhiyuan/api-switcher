@@ -70,6 +70,22 @@ class AutoContinueControl(ctk.CTkFrame):
             **button_style("accent", compact=True),
         ).pack(side="left", padx=(0, 5))
 
+        ctk.CTkButton(
+            controls,
+            text="续跑日志",
+            width=80,
+            command=self._show_auto_continue_logs,
+            **button_style("secondary", compact=True),
+        ).pack(side="left", padx=(0, 5))
+
+        ctk.CTkButton(
+            controls,
+            text="Git历史",
+            width=76,
+            command=self._show_git_history,
+            **button_style("secondary", compact=True),
+        ).pack(side="left", padx=(0, 5))
+
         # Uninstall button
         ctk.CTkButton(
             controls,
@@ -391,3 +407,13 @@ class AutoContinueControl(ctk.CTkFrame):
         """显示错误统计"""
         from ui.dialogs.error_stats_dialog import ErrorStatsDialog
         ErrorStatsDialog(self.winfo_toplevel(), self.provider)
+
+    def _show_auto_continue_logs(self):
+        """显示自动续跑日志"""
+        from ui.dialogs.auto_continue_logs_dialog import AutoContinueLogsDialog
+        AutoContinueLogsDialog(self.winfo_toplevel(), self.provider)
+
+    def _show_git_history(self):
+        """显示 Git 快照历史"""
+        from ui.dialogs.git_snapshot_history_dialog import GitSnapshotHistoryDialog
+        GitSnapshotHistoryDialog(self.winfo_toplevel())

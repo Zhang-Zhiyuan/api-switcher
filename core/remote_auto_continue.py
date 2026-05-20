@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 import json
 import logging
 import posixpath
@@ -93,6 +94,9 @@ class RemoteAutoContinueStatus:
     hook_registered: bool = False
     guidance_installed: bool = False
     settings_valid: bool = False
+    settings_sha256: str = ""
+    expected_settings_sha256: str = ""
+    settings_matches_expected: bool | None = None
     git_snapshot_enabled: bool = False
     git_snapshot_master_enabled: bool = False
     git_snapshot_on_start_enabled: bool = False
@@ -104,6 +108,10 @@ class RemoteAutoContinueStatus:
     git_available: bool = False
     runtime_ready: bool = False
     codex_hooks_enabled: bool | None = None
+    hook_script_mode: int | None = None
+    hook_script_sha256: str = ""
+    expected_hook_script_sha256: str = ""
+    hook_script_matches_expected: bool | None = None
     issues: list[str] = field(default_factory=list)
 
     @property
@@ -125,8 +133,10 @@ class RemoteAutoContinueStatus:
             and self.hook_script_exists
             and self.hook_registered
             and self.settings_valid
+            and (self.settings_matches_expected is not False)
             and self.runtime_ready
             and (self.codex_hooks_enabled is not False)
+            and (self.hook_script_matches_expected is not False)
             and (not self.git_snapshot_enabled or self.git_available)
         )
 
@@ -145,6 +155,12 @@ class RemoteAutoContinueStatus:
             f"Hook {'已注册' if self.hook_registered else '未注册'}",
             f"设置 {'有效' if self.settings_valid else '缺失/无效'}",
         ]
+        if self.hook_script_matches_expected is not None:
+            parts.append(f"脚本一致性 {'ok' if self.hook_script_matches_expected else 'stale'}")
+        if self.settings_matches_expected is not None:
+            parts.append(f"设置一致性 {'ok' if self.settings_matches_expected else 'stale'}")
+        if self.hook_script_mode is not None:
+            parts.append(f"权限 {oct(self.hook_script_mode)}")
         if self.provider_name == "claude":
             parts.append(f"权限模式 {self.permission_mode or '(未设置)'}")
         if self.provider_name == "codex":
@@ -266,6 +282,14 @@ def _remote_file_mode(client, path: str) -> int | None:
                 sftp.close()
             except Exception:
                 pass
+
+
+def _sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _sha256_json(data: Any) -> str:
+    return _sha256_text(json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def _backup_remote_text(client, path: str, content: str | None, reason: str) -> str | None:
@@ -1100,10 +1124,11 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
             except Exception:
                 pass
 
+    git_commit_hash = ""
     if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_recovery"), True):
-        run_git_snapshot()
+        git_commit_hash = run_git_snapshot()
 
-    write_jsonl(log_path, {
+    log_entry = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "session_id": str(session_id),
         "error_type": error_type,
@@ -1112,7 +1137,10 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
         "http_status": http_status,
         "action": "attempting_recovery",
         "recovery_count": recovery_count,
-    })
+    }
+    if git_commit_hash:
+        log_entry["git_commit_hash"] = git_commit_hash
+    write_jsonl(log_path, log_entry)
 
     retry_initial = int_setting(settings, "error_retry_initial_delay_seconds", 5, 1, 300)
     retry_max = int_setting(settings, "error_retry_max_delay_seconds", 60, 1, 600)
@@ -1236,6 +1264,7 @@ def write_decision_log(
     message="",
     count=-1,
     continuation_prompt="",
+    git_commit_hash="",
 ):
     entry = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1250,6 +1279,8 @@ def write_decision_log(
     }
     if continuation_prompt:
         entry["continuation_prompt"] = continuation_prompt
+    if git_commit_hash:
+        entry["git_commit_hash"] = str(git_commit_hash)
     write_jsonl(log_path, entry)
 
 
@@ -1321,7 +1352,7 @@ def ensure_gitignore():
 
 def run_git_snapshot():
     if not shutil.which("git"):
-        return
+        return ""
 
     def run(args, timeout=15):
         return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
@@ -1351,7 +1382,7 @@ def run_git_snapshot():
         git_dir = git_dir_result.stdout.strip()
         if git_dir and os.path.exists(os.path.join(git_dir, "index.lock")):
             log("Git index lock exists; skipping git snapshot", "WARN")
-            return
+            return ""
 
         status = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -1361,12 +1392,12 @@ def run_git_snapshot():
             timeout=15,
         )
         if not status.stdout.strip():
-            return
+            return ""
 
         add_result = run(["git", "add", "-A"], timeout=30)
         if add_result.returncode != 0:
             log("Git add did not complete; skipping git snapshot", "WARN")
-            return
+            return ""
         username = subprocess.run(
             ["git", "config", "user.name"],
             stdout=subprocess.PIPE,
@@ -1389,8 +1420,18 @@ def run_git_snapshot():
         commit = run(["git", "commit", "-m", f"[git-snapshot] {stamp}"], timeout=30)
         if commit.returncode != 0:
             log("Git snapshot commit did not complete", "WARN")
+            return ""
+        rev = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        return rev.stdout.strip() if rev.returncode == 0 else ""
     except Exception as exc:
         log(f"Git snapshot failed: {exc}", "WARN")
+        return ""
 
 
 def main():
@@ -1476,16 +1517,17 @@ def main():
             return
 
     git_snapshot_attempted = False
+    git_snapshot_hash = ""
     if hook_event in PROMPT_SNAPSHOT_EVENTS:
         if git_snapshot_enabled:
-            run_git_snapshot()
+            git_snapshot_hash = run_git_snapshot()
             git_snapshot_attempted = True
         return
 
     # Stop hooks are the broadest safety net: they cover normal manual turns,
     # auto-continue turns, and older Codex builds that do not emit prompt hooks.
     if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:
-        run_git_snapshot()
+        git_snapshot_hash = run_git_snapshot()
         git_snapshot_attempted = True
 
     if is_claude and hook_event in {"PermissionRequest", "PreToolUse"}:
@@ -1659,6 +1701,7 @@ def main():
                 "training_target_met",
                 training_target_met_match,
                 last_message,
+                git_commit_hash=git_snapshot_hash,
             )
             return
 
@@ -1677,6 +1720,7 @@ def main():
                 "training_not_applicable",
                 training_skip_match,
                 last_message,
+                git_commit_hash=git_snapshot_hash,
             )
             return
 
@@ -1694,6 +1738,7 @@ def main():
             "blocker_detected",
             blocker_match,
             last_message,
+            git_commit_hash=git_snapshot_hash,
         )
         return
 
@@ -1719,6 +1764,7 @@ def main():
             allow_reason,
             "",
             last_message,
+            git_commit_hash=git_snapshot_hash,
         )
         return
 
@@ -1763,6 +1809,7 @@ def main():
                 matched_pattern,
                 last_message,
                 count,
+                git_commit_hash=git_snapshot_hash,
             )
             return
 
@@ -1781,6 +1828,10 @@ def main():
             if training_guard_applies
             else "incomplete_work_detected"
         )
+
+        if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:
+            git_snapshot_hash = run_git_snapshot()
+
         write_decision_log(
             log_path,
             session_id,
@@ -1792,10 +1843,8 @@ def main():
             last_message,
             count,
             continuation_prompt,
+            git_commit_hash=git_snapshot_hash,
         )
-
-        if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:
-            run_git_snapshot()
 
         output = {
             "decision": "block",
@@ -2588,6 +2637,18 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
         status.issues.append("缺少 Python 3.6+")
 
     status.hook_script_exists = _remote_file_exists(client, paths.script_path)
+    if status.hook_script_exists:
+        status.hook_script_mode = _remote_file_mode(client, paths.script_path)
+        remote_script = _read_text(client, paths.script_path)
+        if remote_script is not None:
+            status.hook_script_sha256 = _sha256_text(remote_script)
+            expected_script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+            status.expected_hook_script_sha256 = _sha256_text(expected_script)
+            status.hook_script_matches_expected = (
+                status.hook_script_sha256 == status.expected_hook_script_sha256
+            )
+        if status.hook_script_mode is not None and not (status.hook_script_mode & 0o111):
+            status.issues.append("Hook 脚本缺少可执行权限")
 
     try:
         settings = _read_json(client, paths.settings_path, default=None, strict=False)
@@ -2600,6 +2661,10 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             parsed = AutoContinueSettings.from_dict(settings)
             parsed_settings = parsed
             status.settings_valid = True
+            canonical_settings = parsed.to_dict()
+            status.settings_sha256 = _sha256_json(settings)
+            status.expected_settings_sha256 = _sha256_json(canonical_settings)
+            status.settings_matches_expected = status.settings_sha256 == status.expected_settings_sha256
             status.enabled = parsed.enabled
             status.git_snapshot_master_enabled = bool(parsed.git_auto_snapshot)
             status.git_snapshot_on_start_enabled = bool(parsed.git_snapshot_on_start)
@@ -2617,6 +2682,8 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             )
             if (status.git_snapshot_enabled or recovery_git_snapshot_enabled) and not env.get("git"):
                 status.issues.append("缺少 git")
+            if not status.settings_matches_expected:
+                status.issues.append("自动续跑设置不是最新格式；请一键修复")
         except Exception as e:
             status.issues.append(f"设置无效: {e}")
     else:
@@ -2795,6 +2862,8 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
 
     if hook_required and not status.hook_script_exists:
         status.issues.append("Hook 脚本缺失")
+    if hook_required and status.hook_script_matches_expected is False:
+        status.issues.append("Hook 脚本与当前版本不一致；请一键修复")
     if hook_required and not status.hook_registered:
         status.issues.append("Hook 未注册")
     if provider == "codex" and hook_required and not status.codex_hooks_enabled:

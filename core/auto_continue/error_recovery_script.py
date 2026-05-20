@@ -358,7 +358,7 @@ function Create-GitSnapshot {{
         $status = git status --porcelain 2>$null
         if ([string]::IsNullOrWhiteSpace($status)) {{
             Write-Log "No changes to commit" "INFO"
-            return $true
+            return ""
         }}
 
         # 添加所有更改
@@ -381,11 +381,11 @@ function Create-GitSnapshot {{
         # 获取commit hash
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"
-        return $true
+        return [string]$commitHash
 
     }} catch {{
         Write-Log "Failed to create git snapshot: $_" "WARN"
-        return $false
+        return ""
     }}
 }}
 
@@ -718,15 +718,17 @@ try {{
         exit 0
     }}
 
+    $gitCommitHash = ""
+
     # 创建Git快照（如果启用）
     if ($gitAutoSnapshot -and $gitSnapshotOnRecovery) {{
         Write-Log "Creating git snapshot before recovery..." "INFO"
-        Create-GitSnapshot -Message "error-recovery" | Out-Null
+        $gitCommitHash = Create-GitSnapshot -Message "error-recovery"
     }}
 
     # 记录恢复尝试
     $recoveryLogPath = Join-Path $stateDir "error_recovery_log.jsonl"
-    $logEntry = @{{
+    $logEntryData = @{{
         timestamp = (Get-Date -Format "o")
         session_id = $sessionId
         error_type = $errorType
@@ -736,7 +738,11 @@ try {{
         recovery_strategy = $recoveryStrategy
         action = "attempting_recovery"
         recovery_count = $recoveryCount
-    }} | ConvertTo-Json -Compress
+    }}
+    if (-not [string]::IsNullOrWhiteSpace($gitCommitHash)) {{
+        $logEntryData.git_commit_hash = $gitCommitHash
+    }}
+    $logEntry = $logEntryData | ConvertTo-Json -Compress
     Add-Content -LiteralPath $recoveryLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
 
     # 根据恢复策略生成响应
@@ -1007,7 +1013,7 @@ function Create-GitSnapshot {{
         $status = git status --porcelain 2>$null
         if ([string]::IsNullOrWhiteSpace($status)) {{
             Write-Log "No changes to commit" "INFO"
-            return $true
+            return ""
         }}
 
         git add -A 2>&1 | Out-Null
@@ -1026,11 +1032,11 @@ function Create-GitSnapshot {{
 
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"
-        return $true
+        return [string]$commitHash
 
     }} catch {{
         Write-Log "Failed to create git snapshot: $_" "WARN"
-        return $false
+        return ""
     }}
 }}
 
@@ -1248,15 +1254,17 @@ try {{
         exit 0
     }}
 
+    $gitCommitHash = ""
+
     # 创建Git快照（如果启用）
     if ($gitAutoSnapshot -and $gitSnapshotOnRecovery) {{
         Write-Log "Creating git snapshot before recovery..." "INFO"
-        Create-GitSnapshot -Message "codex-error-recovery" | Out-Null
+        $gitCommitHash = Create-GitSnapshot -Message "codex-error-recovery"
     }}
 
     # 记录恢复尝试
     $logPath = Join-Path $stateDir "error_recovery_log.jsonl"
-    $logEntry = @{{
+    $logEntryData = @{{
         timestamp = (Get-Date -Format "o")
         session_id = $sessionId
         error_type = $errorType
@@ -1265,7 +1273,11 @@ try {{
         http_status = $httpStatus
         action = "attempting_recovery"
         recovery_count = $recoveryCount
-    }} | ConvertTo-Json -Compress
+    }}
+    if (-not [string]::IsNullOrWhiteSpace($gitCommitHash)) {{
+        $logEntryData.git_commit_hash = $gitCommitHash
+    }}
+    $logEntry = $logEntryData | ConvertTo-Json -Compress
     Add-Content -LiteralPath $logPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
 
     # 根据错误类型选择恢复策略
