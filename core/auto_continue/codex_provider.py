@@ -7,6 +7,7 @@ from core.atomic_io import atomic_write_bytes, atomic_write_text
 from core.auto_continue.base import AutoContinueProvider
 from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
+from models.auto_continue import AutoContinueSettings
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,29 @@ class CodexProvider(AutoContinueProvider):
         if not hooks_path.exists():
             return False
         data = _read_codex_hooks_json(hooks_path)
-        return bool(data and _codex_event_has_command(data, "Stop", "auto_continue_stop.ps1"))
+        if not isinstance(data, dict):
+            return False
+
+        settings = self.load_settings() or AutoContinueSettings()
+        git_snapshot_on_start = bool(settings.git_auto_snapshot and settings.git_snapshot_on_start)
+        needs_stop_hook = bool(settings.enabled or git_snapshot_on_start)
+
+        required_events = []
+        if needs_stop_hook:
+            required_events.append("Stop")
+        if git_snapshot_on_start:
+            required_events.extend(["UserPromptSubmit", "SessionStart"])
+
+        if required_events:
+            return all(
+                _codex_event_has_command(data, event_name, "auto_continue_stop.ps1")
+                for event_name in required_events
+            )
+
+        return any(
+            _codex_event_has_command(data, event_name, "auto_continue_stop.ps1")
+            for event_name in ("Stop", "UserPromptSubmit", "SessionStart")
+        )
 
     def register_hook(self, settings=None) -> None:
         """Register hook in hooks.json."""

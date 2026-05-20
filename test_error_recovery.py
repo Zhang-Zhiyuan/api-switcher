@@ -2505,6 +2505,75 @@ def test_local_claude_hook_repair_backs_up_invalid_settings_json(tmp_path, monke
     assert any("auto_continue_stop.ps1" in command for command in commands)
 
 
+def test_local_status_requires_prompt_snapshot_hooks_when_git_snapshot_enabled(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from core.auto_continue.codex_provider import CodexProvider
+    from models.auto_continue import AutoContinueSettings
+
+    auto_settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+    )
+
+    codex_home = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    codex = CodexProvider()
+    codex.save_settings(auto_settings)
+    codex.get_hooks_json_path().write_text(json.dumps({
+        "hooks": {
+            "Stop": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}]
+        }
+    }), encoding="utf-8")
+    assert not codex.is_hook_registered()
+    codex.register_hook(settings=auto_settings)
+    assert codex.is_hook_registered()
+
+    claude_home = tmp_path / "claude"
+    claude = ClaudeProvider()
+    monkeypatch.setattr(claude, "get_config_dir", lambda: claude_home)
+    claude.save_settings(auto_settings)
+    claude.get_claude_settings_path().write_text(json.dumps({
+        "hooks": {
+            "Stop": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}]
+        }
+    }), encoding="utf-8")
+    assert not claude.is_hook_registered()
+    claude.register_hook(settings=auto_settings)
+    assert claude.is_hook_registered()
+
+
+def test_local_claude_permission_only_status_does_not_require_stop(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from models.auto_continue import AutoContinueSettings
+
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+        auto_approve_permission_requests=True,
+    )
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    provider.save_settings(settings)
+    provider.get_claude_settings_path().write_text(json.dumps({
+        "hooks": {
+            "PreToolUse": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}],
+            "PermissionRequest": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}],
+        }
+    }), encoding="utf-8")
+
+    assert provider.is_hook_registered()
+
+    provider.get_claude_settings_path().write_text(json.dumps({
+        "hooks": {
+            "PreToolUse": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}],
+        }
+    }), encoding="utf-8")
+
+    assert not provider.is_hook_registered()
+
+
 def test_local_claude_error_recovery_hook_is_deduped(tmp_path, monkeypatch):
     from core.auto_continue.claude_provider import ClaudeProvider
 

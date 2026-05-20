@@ -13,12 +13,51 @@ from core.auto_continue.permission_rules import (
 )
 from core.auto_continue.script_generator import generate_hook_script
 from core.auto_continue.error_recovery_script import generate_error_recovery_script
+from models.auto_continue import AutoContinueSettings
 
 logger = logging.getLogger(__name__)
 
 
 def _is_managed_hook_command(command: str) -> bool:
     return "auto_continue_stop.ps1" in command or "error_recovery.ps1" in command
+
+
+def _iter_claude_hook_commands(
+    settings: dict,
+    event_names: tuple[str, ...] = (
+        "Stop",
+        "SubagentStop",
+        "UserPromptSubmit",
+        "SessionStart",
+        "PreToolUse",
+        "PermissionRequest",
+        "ResponseError",
+    ),
+):
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return
+    for event_name in event_names:
+        groups = hooks.get(event_name, [])
+        if isinstance(groups, dict):
+            groups = [groups]
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            hook_list = group.get("hooks", [])
+            if isinstance(hook_list, dict):
+                hook_list = [hook_list]
+            if not isinstance(hook_list, list):
+                continue
+            for hook in hook_list:
+                if isinstance(hook, dict):
+                    yield str(hook.get("command", ""))
+
+
+def _claude_event_has_command(settings: dict, event_name: str, marker: str) -> bool:
+    return any(marker in command for command in _iter_claude_hook_commands(settings, (event_name,)))
 
 
 def _backup_claude_settings_file(path: Path, reason: str) -> Path | None:
@@ -101,20 +140,37 @@ class ClaudeProvider(AutoContinueProvider):
         settings_path = self.get_claude_settings_path()
         if not settings_path.exists():
             return False
-        settings = _read_claude_settings_json(settings_path)
-        if not isinstance(settings, dict):
+        claude_settings = _read_claude_settings_json(settings_path)
+        if not isinstance(claude_settings, dict):
             return False
 
-        hooks = settings.get("hooks", {})
-        stop_hooks = hooks.get("Stop", []) if isinstance(hooks, dict) else []
-        for hook_group in stop_hooks:
-            if not isinstance(hook_group, dict):
-                continue
-            for hook in hook_group.get("hooks", []):
-                command = hook.get("command", "") if isinstance(hook, dict) else ""
-                if "auto_continue_stop.ps1" in command:
-                    return True
-        return False
+        auto_settings = self.load_settings() or AutoContinueSettings()
+        git_snapshot_on_start = bool(
+            auto_settings.git_auto_snapshot and auto_settings.git_snapshot_on_start
+        )
+        needs_stop_hook = bool(auto_settings.enabled or git_snapshot_on_start)
+        needs_permission_hooks = bool(auto_settings.auto_approve_permission_requests)
+
+        required_events = []
+        if needs_stop_hook:
+            required_events.append("Stop")
+            if auto_settings.apply_to_subagents:
+                required_events.append("SubagentStop")
+        if git_snapshot_on_start:
+            required_events.extend(["UserPromptSubmit", "SessionStart"])
+        if needs_permission_hooks:
+            required_events.extend(["PreToolUse", "PermissionRequest"])
+
+        if required_events:
+            return all(
+                _claude_event_has_command(claude_settings, event_name, "auto_continue_stop.ps1")
+                for event_name in required_events
+            )
+
+        return any(
+            "auto_continue_stop.ps1" in command
+            for command in _iter_claude_hook_commands(claude_settings)
+        )
 
     def register_hook(self, apply_to_subagents: bool = False, settings=None) -> None:
         """Register hook in settings.json."""
