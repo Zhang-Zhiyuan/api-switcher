@@ -40,6 +40,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_permission_auto_approve_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_switch = None
         self._remote_auto_last_statuses = {}
+        self._remote_auto_last_payload = None
         self._remote_auto_busy = False
         self._sync_kind_options = {
             "Claude API": "claude_api",
@@ -328,11 +329,26 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._uninstall_remote_auto_continue,
             **button_style("danger"),
         )
-        uninstall_button.grid(row=0, column=6, sticky="e")
-        self._remote_auto_buttons = [check_button, git_snapshot_button, install_button, pause_button, uninstall_button]
+        uninstall_button.grid(row=0, column=6, sticky="e", padx=(0, 8))
+        copy_diag_button = ctk.CTkButton(
+            auto_controls,
+            text="复制诊断",
+            width=96,
+            command=self._copy_remote_auto_diagnostics,
+            **button_style("secondary"),
+        )
+        copy_diag_button.grid(row=0, column=7, sticky="e")
+        self._remote_auto_buttons = [
+            check_button,
+            git_snapshot_button,
+            install_button,
+            pause_button,
+            uninstall_button,
+            copy_diag_button,
+        ]
 
         remote_switch_frame = ctk.CTkFrame(auto_controls, fg_color="transparent")
-        remote_switch_frame.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
+        remote_switch_frame.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(10, 0))
         for col in range(1, 5):
             remote_switch_frame.grid_columnconfigure(col, weight=0)
         ctk.CTkLabel(
@@ -379,7 +395,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_feature_label.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(10, 0))
+        self._remote_auto_feature_label.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(10, 0))
         bind_wraplength(auto_controls, self._remote_auto_feature_label, padding=20)
 
         self._remote_auto_status_label = ctk.CTkLabel(
@@ -390,7 +406,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_status_label.grid(row=3, column=0, columnspan=7, sticky="ew", pady=(8, 0))
+        self._remote_auto_status_label.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
@@ -978,6 +994,70 @@ class SSHTab(ctk.CTkScrollableFrame):
             parts.append("失败: " + "；".join(failures))
         return " | ".join(parts) if parts else "没有可显示的远端自动续跑状态"
 
+    def _format_remote_auto_diagnostics(self, statuses=None, failures: list[str] | None = None) -> str:
+        if statuses is None:
+            statuses = self._cached_remote_auto_statuses_for_selection()
+        failures = failures or []
+        server_name = self._server_combo.get() if self._server_combo else ""
+        targets = ", ".join(self._selected_remote_auto_targets())
+        lines = [
+            f"SSH: {server_name or '-'}",
+            f"Targets: {targets or '-'}",
+            "",
+        ]
+        if failures:
+            lines.append("Failures:")
+            lines.extend(f"- {failure}" for failure in failures)
+            lines.append("")
+
+        if not statuses:
+            lines.append("No cached consistency status. Run 一致性检查 first.")
+            return "\n".join(lines)
+
+        for status in statuses:
+            issues = getattr(status, "issues", []) or []
+            lines.extend([
+                f"[{getattr(status, 'label', status.provider_name)}]",
+                f"ready={status.ready}",
+                f"config_dir={status.config_dir}",
+                f"script_path={status.script_path}",
+                f"settings_path={status.settings_path}",
+                f"enabled={status.enabled}",
+                f"training_auto_continue={status.training_auto_continue_enabled}",
+                f"git_snapshot={status.git_snapshot_enabled}",
+                f"error_recovery={status.error_recovery_enabled}",
+                f"permission_auto_approve={status.permission_auto_approve_enabled}",
+                f"runtime_ready={status.runtime_ready}",
+                f"git_available={status.git_available}",
+                f"hook_script_exists={status.hook_script_exists}",
+                f"hook_registered={status.hook_registered}",
+                f"settings_valid={status.settings_valid}",
+                f"hook_script_mode={oct(status.hook_script_mode) if status.hook_script_mode is not None else '-'}",
+                f"hook_script_sha256={status.hook_script_sha256 or '-'}",
+                f"expected_hook_script_sha256={status.expected_hook_script_sha256 or '-'}",
+                f"hook_script_matches_expected={status.hook_script_matches_expected}",
+                f"settings_sha256={getattr(status, 'settings_sha256', '') or '-'}",
+                f"expected_settings_sha256={getattr(status, 'expected_settings_sha256', '') or '-'}",
+                f"settings_matches_expected={getattr(status, 'settings_matches_expected', None)}",
+                f"codex_hooks_enabled={status.codex_hooks_enabled}",
+                f"permission_mode={status.permission_mode or '-'}",
+                "issues=" + ("; ".join(issues) if issues else "-"),
+                "",
+            ])
+        return "\n".join(lines).strip()
+
+    def _copy_remote_auto_diagnostics(self):
+        payload = self._remote_auto_last_payload or {}
+        statuses = payload.get("statuses") or self._cached_remote_auto_statuses_for_selection()
+        failures = payload.get("failures") or []
+        text = self._format_remote_auto_diagnostics(statuses, failures)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        if statuses or failures:
+            show_toast(self.winfo_toplevel(), "远端自动续跑诊断已复制")
+        else:
+            show_toast(self.winfo_toplevel(), "还没有诊断结果，请先点一致性检查", is_error=True)
+
     def _collect_remote_auto_statuses(self, server_name: str, targets: list[str]) -> tuple[list, list[str]]:
         statuses = []
         failures = []
@@ -992,6 +1072,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         statuses = payload.get("statuses", [])
         failures = payload.get("failures", [])
         results = payload.get("results", [])
+        self._remote_auto_last_payload = payload
         message = self._summarize_remote_auto_status(statuses, failures)
         has_not_ready = expect_ready and any(not status.ready for status in statuses)
         severity = "error" if failures else "warning" if has_not_ready else "info"

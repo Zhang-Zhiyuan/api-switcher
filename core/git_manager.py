@@ -349,25 +349,33 @@ class GitManager:
 
     def get_commit_diff(self, commit_hash: str, stat_only: bool = False) -> Tuple[bool, str]:
         """Return a commit diff or diffstat for display/copying."""
-        target_success, target_commit = self._resolve_commit(commit_hash)
-        if not target_success:
-            return False, target_commit
+        try:
+            target_success, target_commit = self._resolve_commit(commit_hash)
+            if not target_success:
+                return False, target_commit
 
-        command = ["git", "show", "--stat", "--summary", target_commit]
-        if not stat_only:
-            command = ["git", "show", "--stat", "--patch", "--find-renames", target_commit]
-        result = subprocess.run(
-            command,
-            cwd=self._git_cwd(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return False, result.stderr.strip() or "无法读取 diff"
-        return True, result.stdout
+            command = ["git", "show", "--stat", "--summary", target_commit]
+            timeout = 10
+            if not stat_only:
+                command = ["git", "show", "--stat", "--patch", "--find-renames", target_commit]
+                timeout = 20
+            result = subprocess.run(
+                command,
+                cwd=self._git_cwd(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                return False, result.stderr.strip() or "无法读取 diff"
+            return True, result.stdout
+        except subprocess.TimeoutExpired:
+            return False, "读取 diff 超时；该快照改动可能过大"
+        except Exception as e:
+            logger.debug(f"读取 diff 失败: {e}")
+            return False, f"读取 diff 失败: {e}"
 
     @staticmethod
     def is_auto_snapshot_message(message: str) -> bool:
@@ -394,10 +402,12 @@ class GitManager:
             提交记录列表，每个记录包含 hash, message, author, date
         """
         try:
+            count = max(1, min(int(count), 500))
+
             if not self.is_git_repo():
                 return []
 
-            fetch_count = max(count * 3 if auto_only else count, count)
+            fetch_count = min(max(count * 5, 50), 1500) if auto_only else count
             result = subprocess.run(
                 [
                     "git",
