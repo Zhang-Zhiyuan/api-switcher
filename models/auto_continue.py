@@ -243,7 +243,16 @@ BOOL_SETTING_FIELDS = {
     "training_auto_continue_enabled",
 }
 STRING_SETTING_FIELDS = {
+    "continuation_prompt",
+    "training_continue_prompt",
     "training_prompt_template_key",
+}
+INTEGER_SETTING_FIELDS = {
+    "max_continuations",
+    "max_error_recoveries",
+    "error_retry_initial_delay_seconds",
+    "error_retry_max_delay_seconds",
+    "auto_approve_max_per_session",
 }
 
 
@@ -260,6 +269,29 @@ def _coerce_bool_setting(value, default):
     if text in {"0", "false", "no", "off"}:
         return False
     return value
+
+
+def _coerce_int_setting(value, default):
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if value is None:
+        return default
+
+    text = str(value).strip()
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    return default
+
+
+def _coerce_string_setting(value, default):
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
 
 
 def _merge_unique_patterns(patterns: list[str] | None, defaults: list[str]) -> list[str]:
@@ -294,9 +326,20 @@ def _merge_unique_strings(values: list[str] | None, defaults: list[str]) -> list
     return merged
 
 
+def _resolve_training_prompt_template_key(value) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    folded = normalized.casefold()
+    for template in TRAINING_PROMPT_TEMPLATES:
+        if template["key"].casefold() == folded or template["name"].casefold() == folded:
+            return template["key"]
+    return None
+
+
 def training_prompt_template_by_key(key: str | None) -> dict[str, str]:
     """Return a built-in training prompt template, falling back to the general template."""
-    normalized = str(key or "").strip()
+    normalized = _resolve_training_prompt_template_key(key)
     for template in TRAINING_PROMPT_TEMPLATES:
         if template["key"] == normalized:
             return template
@@ -305,11 +348,7 @@ def training_prompt_template_by_key(key: str | None) -> dict[str, str]:
 
 def training_prompt_template_by_name(name: str | None) -> dict[str, str]:
     """Return a built-in training prompt template by display name."""
-    normalized = str(name or "").strip()
-    for template in TRAINING_PROMPT_TEMPLATES:
-        if template["name"] == normalized:
-            return template
-    return TRAINING_PROMPT_TEMPLATES[0]
+    return training_prompt_template_by_key(name)
 
 
 @dataclass
@@ -435,6 +474,8 @@ class AutoContinueSettings:
     @classmethod
     def from_dict(cls, data: dict) -> "AutoContinueSettings":
         """Create settings from a dict with default-pattern migration."""
+        if not isinstance(data, dict):
+            data = {}
         known_fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         defaults = cls()
         for field_name in BOOL_SETTING_FIELDS:
@@ -445,12 +486,21 @@ class AutoContinueSettings:
                 )
         for field_name in STRING_SETTING_FIELDS:
             if field_name in known_fields:
-                known_fields[field_name] = str(known_fields[field_name]).strip()
-        if (
-            "training_prompt_template_key" in known_fields
-            and known_fields["training_prompt_template_key"] not in TRAINING_PROMPT_TEMPLATE_KEYS
-        ):
-            known_fields["training_prompt_template_key"] = DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
+                known_fields[field_name] = _coerce_string_setting(
+                    known_fields[field_name],
+                    getattr(defaults, field_name),
+                )
+        for field_name in INTEGER_SETTING_FIELDS:
+            if field_name in known_fields:
+                known_fields[field_name] = _coerce_int_setting(
+                    known_fields[field_name],
+                    getattr(defaults, field_name),
+                )
+        if "training_prompt_template_key" in known_fields:
+            known_fields["training_prompt_template_key"] = (
+                _resolve_training_prompt_template_key(known_fields["training_prompt_template_key"])
+                or DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
+            )
         if "incomplete_patterns" in known_fields:
             known_fields["incomplete_patterns"] = _merge_unique_patterns(
                 known_fields.get("incomplete_patterns"),

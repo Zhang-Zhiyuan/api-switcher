@@ -1723,6 +1723,8 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert "TRAINING_TARGET_MET" in AutoContinueSettings().training_continue_prompt
     assert len(TRAINING_PROMPT_TEMPLATES) >= 5
     assert training_prompt_template_by_key(DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY)["key"] == "general"
+    assert training_prompt_template_by_key("分类/表格模型")["key"] == "classification"
+    assert training_prompt_template_by_key("CLASSIFICATION")["key"] == "classification"
     assert training_prompt_template_by_key("missing")["key"] == "general"
     assert len({template["key"] for template in TRAINING_PROMPT_TEMPLATES}) == len(TRAINING_PROMPT_TEMPLATES)
     for template in TRAINING_PROMPT_TEMPLATES:
@@ -1786,6 +1788,11 @@ def test_auto_continue_settings_permission_auto_approve_validation():
         "training_prompt_template_key": "unknown-template",
     })
     assert fallback_template.training_prompt_template_key == DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
+
+    named_template = AutoContinueSettings.from_dict({
+        "training_prompt_template_key": "分类/表格模型",
+    })
+    assert named_template.training_prompt_template_key == "classification"
 
     legacy_disabled = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,
@@ -1855,23 +1862,58 @@ def test_auto_continue_settings_coerces_string_boolean_values():
 
     settings = AutoContinueSettings.from_dict({
         "enabled": "true",
+        "max_continuations": "12",
         "conservative_mode": "false",
         "error_recovery_enabled": "1",
+        "max_error_recoveries": "4",
+        "error_retry_initial_delay_seconds": "8",
+        "error_retry_max_delay_seconds": 40.0,
         "git_auto_snapshot": "0",
         "git_snapshot_on_start": "off",
         "git_snapshot_on_recovery": "yes",
         "auto_approve_permission_requests": "on",
+        "auto_approve_max_per_session": "6",
         "auto_approve_bash": "no",
+        "continuation_prompt": 12345,
+        "training_continue_prompt": 67890,
+        "training_prompt_template_key": "LLM 微调/评测",
     })
 
     assert settings.enabled is True
+    assert settings.max_continuations == 12
     assert settings.conservative_mode is False
     assert settings.error_recovery_enabled is True
+    assert settings.max_error_recoveries == 4
+    assert settings.error_retry_initial_delay_seconds == 8
+    assert settings.error_retry_max_delay_seconds == 40
     assert settings.git_auto_snapshot is False
     assert settings.git_snapshot_on_start is False
     assert settings.git_snapshot_on_recovery is True
     assert settings.auto_approve_permission_requests is True
+    assert settings.auto_approve_max_per_session == 6
     assert settings.auto_approve_bash is False
+    assert settings.continuation_prompt == "12345"
+    assert settings.training_continue_prompt == "67890"
+    assert settings.training_prompt_template_key == "llm_finetune"
+
+    fallback = AutoContinueSettings.from_dict({
+        "max_continuations": "not-a-number",
+        "max_error_recoveries": None,
+        "error_retry_initial_delay_seconds": "",
+        "error_retry_max_delay_seconds": object(),
+        "auto_approve_max_per_session": True,
+        "continuation_prompt": "",
+        "training_continue_prompt": None,
+    })
+    assert fallback.max_continuations == AutoContinueSettings().max_continuations
+    assert fallback.max_error_recoveries == AutoContinueSettings().max_error_recoveries
+    assert fallback.error_retry_initial_delay_seconds == AutoContinueSettings().error_retry_initial_delay_seconds
+    assert fallback.error_retry_max_delay_seconds == AutoContinueSettings().error_retry_max_delay_seconds
+    assert fallback.auto_approve_max_per_session == AutoContinueSettings().auto_approve_max_per_session
+    assert fallback.continuation_prompt == AutoContinueSettings().continuation_prompt
+    assert fallback.training_continue_prompt == AutoContinueSettings().training_continue_prompt
+
+    assert AutoContinueSettings.from_dict(None).to_dict() == AutoContinueSettings().to_dict()
 
 
 def test_remote_permission_hook_respects_explicit_empty_tools(tmp_path):
