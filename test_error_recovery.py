@@ -648,6 +648,20 @@ def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path
     assert reply_continue.returncode == 0, reply_continue.stderr
     assert json.loads(reply_continue.stdout)["decision"] == "block"
 
+    chinese_project_continue = run_hook(
+        "remote-cn-project-not-done",
+        "项目实际上没有完成，可以继续跑。",
+    )
+    assert chinese_project_continue.returncode == 0, chinese_project_continue.stderr
+    assert json.loads(chinese_project_continue.stdout)["decision"] == "block"
+
+    english_project_continue = run_hook(
+        "remote-en-project-not-done",
+        "The project is not actually complete, so it can keep running.",
+    )
+    assert english_project_continue.returncode == 0, english_project_continue.stderr
+    assert json.loads(english_project_continue.stdout)["decision"] == "block"
+
     blocker = run_hook(
         "remote-blocker",
         "Please choose which configuration profile to use.",
@@ -1135,6 +1149,20 @@ def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_pat
     assert reply_continue.returncode == 0, reply_continue.stderr
     reply_output = json.loads(reply_continue.stdout)
     assert reply_output["decision"] == "block"
+
+    chinese_project_continue = run_hook(
+        "session-cn-project-not-done",
+        "项目实际上没有完成，可以继续跑。",
+    )
+    assert chinese_project_continue.returncode == 0, chinese_project_continue.stderr
+    assert json.loads(chinese_project_continue.stdout)["decision"] == "block"
+
+    english_project_continue = run_hook(
+        "session-en-project-not-done",
+        "The implementation is actually not finished; we can continue running it.",
+    )
+    assert english_project_continue.returncode == 0, english_project_continue.stderr
+    assert json.loads(english_project_continue.stdout)["decision"] == "block"
 
     english_blocker = run_hook(
         "session-en-blocker",
