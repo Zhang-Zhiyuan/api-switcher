@@ -347,9 +347,11 @@ def test_script_generation():
     assert 'Join-Path $configDir "tmp"' in claude_script
     assert "git config user.email" in claude_script
     assert "Ensure-LocalGitIgnore" in claude_script
+    assert "Get-Command git" in claude_script
     assert "$initializedRepo = $false" in claude_script
     assert "if ($initializedRepo)" in claude_script
     assert "\n        git add -A 2>&1 | Out-Null\n" in claude_script
+    assert "git commit --no-verify" in claude_script
     assert "node_modules/" in claude_script
     assert ".env.*" in claude_script
 
@@ -391,9 +393,11 @@ def test_script_generation():
     assert "HttpStatus" in codex_script
     assert "git config user.email" in codex_script
     assert "Ensure-LocalGitIgnore" in codex_script
+    assert "Get-Command git" in codex_script
     assert "$initializedRepo = $false" in codex_script
     assert "if ($initializedRepo)" in codex_script
     assert "\n        git add -A 2>&1 | Out-Null\n" in codex_script
+    assert "git commit --no-verify" in codex_script
     assert "node_modules/" in codex_script
     assert ".env.*" in codex_script
 
@@ -431,11 +435,15 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
     assert "git config user.email" in local_script
     assert "Ensure-LocalGitIgnore" in local_script
+    assert "Get-Command git" in local_script
     assert "Get-BoolSetting" in local_script
     assert "Read-HookInput" in local_script
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
     assert "\n        git add -A 2>&1 | Out-Null\n" in local_script
+    assert "git commit --no-verify" in local_script
+    assert "Convert-HookDirectoryCandidateToPath" in local_script
+    assert '"uri"' in local_script
     assert '"UserPromptSubmit", "SessionStart"' in local_script
     assert '$stopSnapshotEvents = @("Stop", "SubagentStop")' in local_script
     assert "Creating git snapshot on stop hook" in local_script
@@ -445,9 +453,12 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "node_modules/" in local_script
     assert ".env.*" in local_script
     assert '["git", "config", "user.email"]' in remote_script
+    assert '["git", "commit", "--no-verify", "-m"' in remote_script
     assert "DEFAULT_GITIGNORE_LINES" in remote_script
     assert "initialized_repo = False" in remote_script
     assert "if initialized_repo:" in remote_script
+    assert "normalize_project_dir_candidate" in remote_script
+    assert '"uri"' in remote_script
     assert 'PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}' in remote_script
     assert 'STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}' in remote_script
     assert "if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:" in remote_script
@@ -826,6 +837,65 @@ def test_remote_session_start_hook_uses_payload_cwd_for_initial_git_snapshot(tmp
     )
     assert log.returncode == 0, log.stderr
     assert "git-snapshot" in log.stdout
+
+
+def test_remote_session_start_hook_accepts_workspace_file_uri(tmp_path):
+    import subprocess
+
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    hook_cwd = tmp_path / "hook-cwd"
+    project_dir = tmp_path / "project uri"
+    hook_cwd.mkdir()
+    project_dir.mkdir()
+    (project_dir / "model.py").write_text("print('train uri')\n", encoding="utf-8")
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+        error_recovery_enabled=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-session-start-git-uri",
+            "hook_event_name": "SessionStart",
+            "workspaceFolders": [{"uri": project_dir.as_uri()}],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=hook_cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert (project_dir / ".git").exists()
+    assert not (hook_cwd / ".git").exists()
 
 
 def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
@@ -1307,6 +1377,63 @@ def test_local_session_start_hook_uses_payload_cwd_for_initial_git_snapshot(tmp_
     )
     assert log.returncode == 0, log.stderr
     assert "git-snapshot" in log.stdout
+
+
+def test_local_session_start_hook_accepts_workspace_file_uri(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    hook_cwd = tmp_path / "hook-cwd"
+    project_dir = tmp_path / "project uri"
+    hook_cwd.mkdir()
+    project_dir.mkdir()
+    (project_dir / "train.py").write_text("print('hello uri')\n", encoding="utf-8")
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+        error_recovery_enabled=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-start-git-uri",
+        "hook_event_name": "SessionStart",
+        "workspaceFolders": [{"uri": project_dir.as_uri()}],
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=hook_cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert (project_dir / ".git").exists()
+    assert not (hook_cwd / ".git").exists()
+    assert "Using hook project directory" in result.stderr
 
 
 def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_path):

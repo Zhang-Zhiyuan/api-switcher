@@ -665,6 +665,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 
 
 DEFAULT_GITIGNORE_LINES = [
@@ -1206,6 +1207,7 @@ def tool_allowed(tool_name, allowed_tools):
 
 PROJECT_DIR_FIELDS = (
     "cwd",
+    "uri",
     "current_directory",
     "currentDirectory",
     "current_working_directory",
@@ -1264,13 +1266,33 @@ def resolve_hook_project_dir(data):
 
     seen = set()
     for candidate in candidates:
-        expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(candidate)))
+        expanded = normalize_project_dir_candidate(candidate)
+        if not expanded:
+            continue
         if expanded in seen:
             continue
         seen.add(expanded)
         if os.path.isdir(expanded):
             return expanded
     return ""
+
+
+def normalize_project_dir_candidate(candidate):
+    text = str(candidate or "").strip().strip('"').strip("'")
+    if not text:
+        return ""
+    if text.lower().startswith("file://"):
+        try:
+            parsed = urllib.parse.urlparse(text)
+            if parsed.scheme.lower() != "file":
+                return ""
+            text = urllib.parse.unquote(parsed.path or "")
+            if os.name == "nt" and re.match(r"^/[A-Za-z]:/", text):
+                text = text[1:]
+        except Exception as exc:
+            log(f"Invalid file URI hook project directory candidate ignored: {exc}", "WARN")
+            return ""
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(text)))
 
 
 def use_hook_project_dir(data):
@@ -1450,6 +1472,9 @@ def run_git_snapshot():
         )
         if git_dir_result.returncode != 0:
             initialized_repo = run(["git", "init"]).returncode == 0
+            if not initialized_repo:
+                log("Git init did not complete; skipping git snapshot", "WARN")
+                return ""
             git_dir_result = subprocess.run(
                 ["git", "rev-parse", "--git-dir"],
                 stdout=subprocess.PIPE,
@@ -1499,7 +1524,7 @@ def run_git_snapshot():
             run(["git", "config", "user.email", "auto@api-switcher.local"], timeout=5)
 
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        commit = run(["git", "commit", "-m", f"[git-snapshot] {stamp}"], timeout=30)
+        commit = run(["git", "commit", "--no-verify", "-m", f"[git-snapshot] {stamp}"], timeout=30)
         if commit.returncode != 0:
             log("Git snapshot commit did not complete", "WARN")
             return ""

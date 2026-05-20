@@ -340,18 +340,36 @@ function Create-GitSnapshot {{
     param([string]$Message = "Auto snapshot before error recovery")
 
     try {{
+        if ($null -eq (Get-Command git -ErrorAction SilentlyContinue)) {{
+            Write-Log "Git command is not available; skipping git snapshot" "WARN"
+            return ""
+        }}
+
         # 检查是否是git仓库
         $isGitRepo = git rev-parse --git-dir 2>$null
         $initializedRepo = $false
         if (-not $isGitRepo) {{
             # 初始化git仓库
             git init 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {{
+                Write-Log "Git init did not complete; skipping git snapshot" "WARN"
+                return ""
+            }}
             $initializedRepo = $true
             Write-Log "Initialized git repository" "INFO"
         }}
 
         if ($initializedRepo) {{
             Ensure-LocalGitIgnore
+        }}
+
+        $gitDir = git rev-parse --git-dir 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($gitDir)) {{
+            $indexLockPath = Join-Path $gitDir "index.lock"
+            if (Test-Path $indexLockPath) {{
+                Write-Log "Git index lock exists; skipping git snapshot" "WARN"
+                return ""
+            }}
         }}
 
         # 检查是否有更改
@@ -363,6 +381,10 @@ function Create-GitSnapshot {{
 
         # 添加所有更改
         git add -A 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Log "Git add did not complete; skipping git snapshot" "WARN"
+            return ""
+        }}
 
         # 检查git配置
         $userName = git config user.name 2>$null
@@ -376,7 +398,11 @@ function Create-GitSnapshot {{
         # 提交
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         $commitMsg = "[$Message] $timestamp"
-        git commit -m $commitMsg 2>&1 | Out-Null
+        git commit --no-verify -m $commitMsg 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Log "Git snapshot commit did not complete" "WARN"
+            return ""
+        }}
 
         # 获取commit hash
         $commitHash = git rev-parse --short HEAD 2>$null
@@ -998,16 +1024,34 @@ function Create-GitSnapshot {{
     param([string]$Message = "Auto snapshot before error recovery")
 
     try {{
+        if ($null -eq (Get-Command git -ErrorAction SilentlyContinue)) {{
+            Write-Log "Git command is not available; skipping git snapshot" "WARN"
+            return ""
+        }}
+
         $isGitRepo = git rev-parse --git-dir 2>$null
         $initializedRepo = $false
         if (-not $isGitRepo) {{
             git init 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {{
+                Write-Log "Git init did not complete; skipping git snapshot" "WARN"
+                return ""
+            }}
             $initializedRepo = $true
             Write-Log "Initialized git repository" "INFO"
         }}
 
         if ($initializedRepo) {{
             Ensure-LocalGitIgnore
+        }}
+
+        $gitDir = git rev-parse --git-dir 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($gitDir)) {{
+            $indexLockPath = Join-Path $gitDir "index.lock"
+            if (Test-Path $indexLockPath) {{
+                Write-Log "Git index lock exists; skipping git snapshot" "WARN"
+                return ""
+            }}
         }}
 
         $status = git status --porcelain 2>$null
@@ -1017,6 +1061,10 @@ function Create-GitSnapshot {{
         }}
 
         git add -A 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Log "Git add did not complete; skipping git snapshot" "WARN"
+            return ""
+        }}
 
         $userName = git config user.name 2>$null
         $userEmail = git config user.email 2>$null
@@ -1028,7 +1076,11 @@ function Create-GitSnapshot {{
 
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         $commitMsg = "[$Message] $timestamp"
-        git commit -m $commitMsg 2>&1 | Out-Null
+        git commit --no-verify -m $commitMsg 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Log "Git snapshot commit did not complete" "WARN"
+            return ""
+        }}
 
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"

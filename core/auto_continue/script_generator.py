@@ -118,6 +118,7 @@ function Add-HookDirectoryCandidate {{
     if ($Value -is [System.Collections.IDictionary]) {{
         foreach ($key in @(
             "cwd",
+            "uri",
             "path",
             "dir",
             "directory",
@@ -154,6 +155,7 @@ function Add-HookDirectoryCandidate {{
     if ($Value -isnot [string] -and $Value.PSObject -and $Value.PSObject.Properties) {{
         foreach ($key in @(
             "cwd",
+            "uri",
             "path",
             "dir",
             "directory",
@@ -200,6 +202,7 @@ function Resolve-HookProjectDirectory {{
     $candidates = New-Object System.Collections.ArrayList
     foreach ($fieldName in @(
         "cwd",
+        "uri",
         "current_directory",
         "currentDirectory",
         "current_working_directory",
@@ -244,7 +247,7 @@ function Resolve-HookProjectDirectory {{
 
     foreach ($candidate in $candidates) {{
         try {{
-            $pathText = [Environment]::ExpandEnvironmentVariables(([string]$candidate).Trim().Trim('"'))
+            $pathText = Convert-HookDirectoryCandidateToPath -Candidate ([string]$candidate)
             if ([string]::IsNullOrWhiteSpace($pathText)) {{
                 continue
             }}
@@ -257,6 +260,48 @@ function Resolve-HookProjectDirectory {{
     }}
 
     return ""
+}}
+
+function Convert-HookDirectoryCandidateToPath {{
+    param([string]$Candidate)
+
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {{
+        return ""
+    }}
+
+    $pathText = ([string]$Candidate).Trim().Trim('"').Trim("'")
+    if ([string]::IsNullOrWhiteSpace($pathText)) {{
+        return ""
+    }}
+
+    if ($pathText -match "(?i)^file://") {{
+        try {{
+            $uri = [System.Uri]$pathText
+            if ($uri.IsFile) {{
+                return $uri.LocalPath
+            }}
+        }} catch {{
+            Write-Log "Ignoring invalid file URI hook project directory candidate: $Candidate" "WARN"
+        }}
+        return ""
+    }}
+
+    $pathText = [Environment]::ExpandEnvironmentVariables($pathText)
+    if ($pathText -eq "~" -or $pathText.StartsWith("~/") -or $pathText.StartsWith("~\")) {{
+        try {{
+            $home = [Environment]::GetFolderPath("UserProfile")
+            if (-not [string]::IsNullOrWhiteSpace($home)) {{
+                if ($pathText.Length -eq 1) {{
+                    return $home
+                }}
+                return (Join-Path $home $pathText.Substring(2))
+            }}
+        }} catch {{
+            Write-Log "Failed to expand home directory candidate: $Candidate" "WARN"
+        }}
+    }}
+
+    return $pathText
 }}
 
 function Use-HookProjectDirectory {{
@@ -464,12 +509,21 @@ function Create-GitSnapshot {{
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {{
+        if ($null -eq (Get-Command git -ErrorAction SilentlyContinue)) {{
+            Write-Log "Git command is not available; skipping git snapshot" "WARN"
+            return ""
+        }}
+
         # 检查是否是git仓库
         $isGitRepo = git rev-parse --git-dir 2>$null
         $initializedRepo = $false
         if (-not $isGitRepo) {{
             # 初始化git仓库
             git init 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {{
+                Write-Log "Git init did not complete; skipping git snapshot" "WARN"
+                return ""
+            }}
             $initializedRepo = $true
             Write-Log "Initialized git repository" "INFO"
         }}
@@ -513,7 +567,11 @@ function Create-GitSnapshot {{
         # 提交
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         $commitMsg = "[$Message] $timestamp"
-        git commit -m $commitMsg 2>&1 | Out-Null
+        git commit --no-verify -m $commitMsg 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Log "Git snapshot commit did not complete" "WARN"
+            return ""
+        }}
 
         # 获取commit hash
         $commitHash = git rev-parse --short HEAD 2>$null
