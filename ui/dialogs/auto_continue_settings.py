@@ -1,6 +1,10 @@
 import customtkinter as ctk
-from models.auto_continue import AutoContinueSettings
-from ui.theme import COLORS, button_style, center_window, font, input_style, textbox_style
+from models.auto_continue import (
+    DEFAULT_TRAINING_CONTINUE_PROMPT,
+    TRAINING_PROMPT_TEMPLATES,
+    AutoContinueSettings,
+)
+from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style, textbox_style
 
 
 class AutoContinueSettingsDialog(ctk.CTkToplevel):
@@ -9,8 +13,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
     def __init__(self, master, provider_name: str, settings: AutoContinueSettings, on_save=None):
         super().__init__(master)
         self.title(f"{provider_name} 自动续跑设置")
-        self.geometry("720x820")
-        self.minsize(620, 640)
+        self.geometry("780x860")
+        self.minsize(680, 680)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.transient(master)
@@ -19,6 +23,10 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self.provider_name = provider_name
         self.settings = settings
         self._on_save = on_save
+        self._training_template_by_name = {
+            template["name"]: template
+            for template in TRAINING_PROMPT_TEMPLATES
+        }
 
         self._build_ui()
         center_window(self, master)
@@ -82,19 +90,72 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             self._training_auto_continue_var,
             progress_color=COLORS["accent"],
         )
+
+        template_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        template_row.pack(fill="x", pady=(8, 2))
+        ctk.CTkLabel(
+            template_row,
+            text="Prompt 模板",
+            text_color=COLORS["muted"],
+            anchor="w",
+            font=font(12),
+            width=86,
+        ).pack(side="left")
+        self._training_template_var = ctk.StringVar(value=TRAINING_PROMPT_TEMPLATES[0]["name"])
+        template_names = [template["name"] for template in TRAINING_PROMPT_TEMPLATES]
+        self._training_template_combo = ctk.CTkComboBox(
+            template_row,
+            variable=self._training_template_var,
+            values=template_names,
+            command=self._on_training_template_selected,
+            width=210,
+            **combo_style(),
+        )
+        self._training_template_combo.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            template_row,
+            text="应用",
+            width=58,
+            command=lambda: self._apply_training_template(append=False),
+            **button_style("accent", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            template_row,
+            text="追加",
+            width=58,
+            command=lambda: self._apply_training_template(append=True),
+            **button_style("secondary", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            template_row,
+            text="恢复默认",
+            width=86,
+            command=self._restore_default_training_prompt,
+            **button_style("secondary", compact=True),
+        ).pack(side="left")
+        self._training_template_desc = ctk.CTkLabel(
+            scroll,
+            text=TRAINING_PROMPT_TEMPLATES[0]["description"],
+            text_color=COLORS["muted_soft"],
+            anchor="w",
+            justify="left",
+            font=font(11),
+        )
+        self._training_template_desc.pack(fill="x", pady=(0, 6))
+
         ctk.CTkLabel(
             scroll,
-            text="训练目标/续跑指令（自定义）",
+            text="训练目标/续跑指令（可手写，也可先套模板再改指标）",
             text_color=COLORS["muted"],
             anchor="w",
             font=font(12),
         ).pack(fill="x", pady=(10, 2))
-        self._training_prompt_text = ctk.CTkTextbox(scroll, height=110, **textbox_style())
+        self._training_prompt_text = ctk.CTkTextbox(scroll, height=150, **textbox_style())
         self._training_prompt_text.insert("1.0", self.settings.training_continue_prompt)
         self._training_prompt_text.pack(fill="x", pady=(0, 6))
         self._add_note(
             scroll,
-            "达标时让模型在最终回复写出 TRAINING_TARGET_MET，hook 就会允许停止。",
+            "达标时写出 TRAINING_TARGET_MET 会停止续跑；非训练任务可写 TRAINING_NOT_APPLICABLE 跳过训练守护。",
         )
 
         if self.provider_name.lower() == "claude":
@@ -239,6 +300,34 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         entry.insert(0, value)
         entry.pack(side="left", fill="x", expand=True)
         setattr(self, f"_{key}_entry", entry)
+
+    def _selected_training_template(self) -> dict[str, str]:
+        name = self._training_template_var.get()
+        return self._training_template_by_name.get(name, TRAINING_PROMPT_TEMPLATES[0])
+
+    def _set_training_prompt_text(self, text: str) -> None:
+        self._training_prompt_text.delete("1.0", "end")
+        self._training_prompt_text.insert("1.0", text.strip())
+
+    def _on_training_template_selected(self, _value=None):
+        template = self._selected_training_template()
+        self._training_template_desc.configure(text=template["description"])
+
+    def _apply_training_template(self, append: bool = False):
+        template_prompt = self._selected_training_template()["prompt"].strip()
+        if append:
+            current = self._training_prompt_text.get("1.0", "end").strip()
+            next_prompt = f"{current}\n\n---\n{template_prompt}" if current else template_prompt
+        else:
+            next_prompt = template_prompt
+        self._set_training_prompt_text(next_prompt)
+        self._error_label.configure(text="")
+
+    def _restore_default_training_prompt(self):
+        self._set_training_prompt_text(DEFAULT_TRAINING_CONTINUE_PROMPT)
+        self._training_template_var.set(TRAINING_PROMPT_TEMPLATES[0]["name"])
+        self._on_training_template_selected()
+        self._error_label.configure(text="")
 
     def _save(self):
         try:

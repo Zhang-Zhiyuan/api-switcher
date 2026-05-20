@@ -1708,13 +1708,26 @@ def test_local_codex_error_hook_respects_zero_max_recoveries(tmp_path):
 
 
 def test_auto_continue_settings_permission_auto_approve_validation():
-    from models.auto_continue import AutoContinueSettings
+    from models.auto_continue import (
+        DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY,
+        TRAINING_PROMPT_TEMPLATES,
+        AutoContinueSettings,
+        training_prompt_template_by_key,
+    )
 
     assert AutoContinueSettings().auto_approve_max_per_session == 0
     assert AutoContinueSettings().error_retry_initial_delay_seconds == 5
     assert AutoContinueSettings().error_retry_max_delay_seconds == 60
     assert AutoContinueSettings().training_auto_continue_enabled is False
     assert "TRAINING_TARGET_MET" in AutoContinueSettings().training_continue_prompt
+    assert len(TRAINING_PROMPT_TEMPLATES) >= 5
+    assert training_prompt_template_by_key(DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY)["key"] == "general"
+    assert training_prompt_template_by_key("missing")["key"] == "general"
+    assert len({template["key"] for template in TRAINING_PROMPT_TEMPLATES}) == len(TRAINING_PROMPT_TEMPLATES)
+    for template in TRAINING_PROMPT_TEMPLATES:
+        assert template["name"].strip()
+        assert template["description"].strip()
+        assert "TRAINING_TARGET_MET" in template["prompt"]
 
     settings = AutoContinueSettings(
         auto_approve_permission_requests=True,

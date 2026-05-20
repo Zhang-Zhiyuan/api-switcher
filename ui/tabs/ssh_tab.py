@@ -684,7 +684,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             parts.append(f"{label}: " + " / ".join(feature_parts))
         self._remote_auto_feature_label.configure(
             text=(
-                "\u5b89\u88c5/\u4fee\u590d\u4f1a\u540c\u6b65\u672c\u673a\u6a21\u677f\uff1b"
+                "\u5b89\u88c5/\u4fee\u590d\u4f1a\u540c\u6b65\u672c\u673a\u8bbe\u7f6e\u548c\u8bad\u7ec3 Prompt \u6a21\u677f\uff1b"
                 "\u4e0a\u65b9\u8fdc\u7a0b\u5f00\u5173\u4f1a\u76f4\u63a5\u5199\u5165\u5df2\u9009 SSH \u670d\u52a1\u5668\u3002"
                 + (" | " if parts else "")
                 + " | ".join(parts)

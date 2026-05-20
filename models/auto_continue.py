@@ -128,6 +128,69 @@ DEFAULT_TRAINING_CONTINUE_PROMPT = (
     "\u5982\u679c\u5df2\u7ecf\u8fbe\u5230\u76ee\u6807\uff0c\u8bf7\u5728\u6700\u7ec8\u56de\u590d\u4e2d\u5199\u51fa TRAINING_TARGET_MET\uff0c"
     "\u5e76\u5217\u51fa\u5173\u952e\u6307\u6807\u548c\u4ea7\u7269\u8def\u5f84\u3002"
 )
+DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY = "general"
+TRAINING_PROMPT_TEMPLATES = [
+    {
+        "key": "general",
+        "name": "通用训练评估",
+        "description": "适合已有明确指标但任务类型不固定的训练项目。",
+        "prompt": (
+            "任务类型：通用深度学习/机器学习训练。\n"
+            "目标指标：请把这里改成具体要求，例如 val_acc >= 0.95、F1 >= 0.90、loss <= 0.20。\n"
+            "检查：读取最新训练日志、验证集/测试集指标、最佳 checkpoint、模型产物路径和最近一次实验配置。\n"
+            "如果未达标：定位瓶颈，继续训练、调参、清理数据或补充验证，并记录新的指标。\n"
+            "如果达标：最终回复中写出 TRAINING_TARGET_MET，并列出关键指标、模型/checkpoint 路径和复现实验命令。"
+        ),
+    },
+    {
+        "key": "classification",
+        "name": "分类/表格模型",
+        "description": "关注 accuracy、F1、AUC、precision、recall、类别不均衡和阈值。",
+        "prompt": (
+            "任务类型：分类或表格模型训练。\n"
+            "目标指标：请把这里改成具体要求，例如 AUC >= 0.92、macro-F1 >= 0.88、recall >= 0.90。\n"
+            "检查：验证集/测试集指标、混淆矩阵、类别分布、阈值、过拟合迹象和最佳模型文件。\n"
+            "如果未达标：优先尝试学习率、正则化、类别权重、采样策略、阈值搜索、特征处理或模型结构调整。\n"
+            "如果达标：最终回复中写出 TRAINING_TARGET_MET，并列出指标、阈值、模型路径和可复现实验命令。"
+        ),
+    },
+    {
+        "key": "vision",
+        "name": "视觉检测/分割",
+        "description": "适合目标检测、语义分割、实例分割、OCR 等视觉训练。",
+        "prompt": (
+            "任务类型：计算机视觉训练，例如 detection、segmentation、OCR 或 image classification。\n"
+            "目标指标：请把这里改成具体要求，例如 mAP50 >= 0.80、mIoU >= 0.75、val_loss 持续下降。\n"
+            "检查：验证集指标、样例可视化、漏检/误检类别、数据增强、输入尺寸、best checkpoint 和导出模型。\n"
+            "如果未达标：调整数据增强、类别采样、学习率、冻结层、输入分辨率、训练轮数或后处理阈值。\n"
+            "如果达标：最终回复中写出 TRAINING_TARGET_MET，并列出指标、模型路径、导出格式和推理验证结果。"
+        ),
+    },
+    {
+        "key": "llm_finetune",
+        "name": "LLM 微调/评测",
+        "description": "适合 SFT、LoRA、RAG 评测、指令跟随和 benchmark 通过率。",
+        "prompt": (
+            "任务类型：LLM 微调、LoRA/SFT、RAG 评测或文本生成模型改进。\n"
+            "目标指标：请把这里改成具体要求，例如 eval_loss <= 目标值、benchmark 通过率 >= 90%、人工样例全部通过。\n"
+            "检查：eval loss、perplexity、benchmark 结果、失败样例、幻觉/格式错误、adapter/checkpoint 路径。\n"
+            "如果未达标：继续微调或改进数据、prompt、RAG 检索、负样本、训练步数、学习率和评测集覆盖。\n"
+            "如果达标：最终回复中写出 TRAINING_TARGET_MET，并列出指标、checkpoint/adapter 路径和关键评测样例。"
+        ),
+    },
+    {
+        "key": "forecasting",
+        "name": "回归/时序预测",
+        "description": "适合 MAE、MSE、RMSE、MAPE、分位数损失等回归或预测任务。",
+        "prompt": (
+            "任务类型：回归、排序或时间序列预测。\n"
+            "目标指标：请把这里改成具体要求，例如 RMSE <= 目标值、MAE <= 目标值、MAPE <= 10%。\n"
+            "检查：验证/测试集误差、分桶误差、异常样本、数据泄漏、特征窗口、归一化方式和最佳模型文件。\n"
+            "如果未达标：调整特征、窗口长度、损失函数、正则化、学习率、模型容量或异常值处理。\n"
+            "如果达标：最终回复中写出 TRAINING_TARGET_MET，并列出指标、模型路径、数据版本和复现实验命令。"
+        ),
+    },
+]
 DEFAULT_TRAINING_COMPLETION_PATTERNS = [
     r"(?i)\bTRAINING_TARGET_MET\b",
     r"(?i)\b(training|evaluation|model)\b.{0,80}\b(target|goal|criteria|requirement)s?\b.{0,80}\b(met|reached|satisfied|passed)\b",
@@ -222,6 +285,15 @@ def _merge_unique_strings(values: list[str] | None, defaults: list[str]) -> list
             seen.add(key)
 
     return merged
+
+
+def training_prompt_template_by_key(key: str | None) -> dict[str, str]:
+    """Return a built-in training prompt template, falling back to the general template."""
+    normalized = str(key or "").strip()
+    for template in TRAINING_PROMPT_TEMPLATES:
+        if template["key"] == normalized:
+            return template
+    return TRAINING_PROMPT_TEMPLATES[0]
 
 
 @dataclass
