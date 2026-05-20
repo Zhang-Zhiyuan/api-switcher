@@ -148,7 +148,11 @@ class ClaudeProvider(AutoContinueProvider):
         git_snapshot_on_start = bool(
             auto_settings.git_auto_snapshot and auto_settings.git_snapshot_on_start
         )
-        needs_stop_hook = bool(auto_settings.enabled or git_snapshot_on_start)
+        needs_stop_hook = bool(
+            auto_settings.enabled
+            or auto_settings.training_auto_continue_enabled
+            or git_snapshot_on_start
+        )
         needs_permission_hooks = bool(auto_settings.auto_approve_permission_requests)
 
         required_events = []
@@ -202,7 +206,11 @@ class ClaudeProvider(AutoContinueProvider):
         needs_stop_hook = (
             True
             if auto_settings is None
-            else bool(auto_settings.enabled or git_snapshot_on_start)
+            else bool(
+                auto_settings.enabled
+                or auto_settings.training_auto_continue_enabled
+                or git_snapshot_on_start
+            )
         )
 
         # Register Stop hook

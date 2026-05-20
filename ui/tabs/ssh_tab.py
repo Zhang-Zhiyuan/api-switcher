@@ -34,6 +34,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_git_snapshot_var = ctk.BooleanVar(value=True)
         self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
+        self._remote_training_auto_continue_var = ctk.BooleanVar(value=False)
         self._remote_error_recovery_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_switch = None
@@ -331,7 +332,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         remote_switch_frame = ctk.CTkFrame(auto_controls, fg_color="transparent")
         remote_switch_frame.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
-        for col in range(1, 4):
+        for col in range(1, 5):
             remote_switch_frame.grid_columnconfigure(col, weight=0)
         ctk.CTkLabel(
             remote_switch_frame,
@@ -355,8 +356,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             return switch
 
         add_remote_switch("\u81ea\u52a8\u7eed\u8dd1", self._remote_auto_continue_var, "auto_continue", 0, 1)
-        add_remote_switch("Git", self._remote_git_snapshot_var, "git_snapshot", 0, 2)
-        add_remote_switch("API\u6062\u590d", self._remote_error_recovery_var, "error_recovery", 0, 3)
+        add_remote_switch("\u8bad\u7ec3\u7eed\u8dd1", self._remote_training_auto_continue_var, "training_auto_continue", 0, 2, color="accent")
+        add_remote_switch("Git", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
+        add_remote_switch("API\u6062\u590d", self._remote_error_recovery_var, "error_recovery", 0, 4)
         add_remote_switch("\u624b\u52a8/\u7eed\u8dd1\u5feb\u7167", self._remote_git_snapshot_on_start_var, "git_snapshot_on_start", 1, 1)
         add_remote_switch("\u6062\u590d\u5feb\u7167", self._remote_git_snapshot_on_recovery_var, "git_snapshot_on_recovery", 1, 2)
         self._remote_permission_auto_approve_switch = add_remote_switch(
@@ -672,6 +674,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 continue
             feature_parts = [
                 f"自动续跑 {'ON' if settings.enabled else 'OFF'}",
+                f"训练续跑 {'ON' if settings.training_auto_continue_enabled else 'OFF'}",
                 f"Git快照 {'ON' if settings.git_auto_snapshot else 'OFF'}",
                 f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
             ]
@@ -855,6 +858,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _remote_auto_var_for_feature(self, feature: str):
         return {
             "auto_continue": self._remote_auto_continue_var,
+            "training_auto_continue": self._remote_training_auto_continue_var,
             "git_snapshot": self._remote_git_snapshot_var,
             "git_snapshot_on_start": self._remote_git_snapshot_on_start_var,
             "git_snapshot_on_recovery": self._remote_git_snapshot_on_recovery_var,
@@ -889,6 +893,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_refreshing = True
         try:
             self._remote_auto_continue_var.set(all_enabled("enabled"))
+            self._remote_training_auto_continue_var.set(all_enabled("training_auto_continue_enabled"))
             self._remote_git_snapshot_var.set(all_enabled("git_snapshot_master_enabled"))
             self._remote_git_snapshot_on_start_var.set(all_enabled("git_snapshot_on_start_enabled"))
             self._remote_git_snapshot_on_recovery_var.set(all_enabled("git_snapshot_on_recovery_enabled"))
@@ -1011,6 +1016,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         targets = self._selected_remote_auto_targets()
         value_by_feature = {
             "auto_continue": bool(self._remote_auto_continue_var.get()),
+            "training_auto_continue": bool(self._remote_training_auto_continue_var.get()),
             "git_snapshot": bool(self._remote_git_snapshot_var.get()),
             "git_snapshot_on_start": bool(self._remote_git_snapshot_on_start_var.get()),
             "git_snapshot_on_recovery": bool(self._remote_git_snapshot_on_recovery_var.get()),
@@ -1019,6 +1025,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         }
         field_by_feature = {
             "auto_continue": "enabled",
+            "training_auto_continue": "training_auto_continue_enabled",
             "git_snapshot": "git_auto_snapshot",
             "git_snapshot_on_start": "git_snapshot_on_start",
             "git_snapshot_on_recovery": "git_snapshot_on_recovery",

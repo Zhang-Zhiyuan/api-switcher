@@ -23,7 +23,11 @@ from core.auto_continue.permission_rules import (
     rules_payload,
 )
 from core.ssh_manager import ssh_manager
-from models.auto_continue import AutoContinueSettings
+from models.auto_continue import (
+    AutoContinueSettings,
+    DEFAULT_TRAINING_COMPLETION_PATTERNS,
+    DEFAULT_TRAINING_CONTINUE_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,7 @@ class RemoteAutoContinueStatus:
     git_snapshot_master_enabled: bool = False
     git_snapshot_on_start_enabled: bool = False
     git_snapshot_on_recovery_enabled: bool = False
+    training_auto_continue_enabled: bool = False
     permission_auto_approve_enabled: bool = False
     error_recovery_enabled: bool = False
     permission_mode: str = ""
@@ -107,6 +112,7 @@ class RemoteAutoContinueStatus:
     def ready(self) -> bool:
         hook_required = (
             self.enabled
+            or self.training_auto_continue_enabled
             or self.git_snapshot_enabled
             or self.permission_auto_approve_enabled
             or self.error_recovery_enabled
@@ -126,6 +132,7 @@ class RemoteAutoContinueStatus:
         state = "正常" if self.ready else "需处理"
         parts = [
             f"{self.label}: {state}",
+            f"Training guard {'on' if self.training_auto_continue_enabled else 'off'}",
             f"Git snapshot {'on' if self.git_snapshot_enabled else 'off'}",
             f"Error recovery {'on' if self.error_recovery_enabled else 'off'}",
             f"权限自动确认 {'on' if self.permission_auto_approve_enabled else 'off'}",
@@ -522,6 +529,7 @@ def _load_git_snapshot_settings(provider_name: str, settings: AutoContinueSettin
     source = settings or auto_continue_manager.get_settings(provider) or AutoContinueSettings()
     copied = AutoContinueSettings.from_dict(source.to_dict())
     copied.enabled = False
+    copied.training_auto_continue_enabled = False
     copied.git_auto_snapshot = True
     copied.git_snapshot_on_start = True
     copied.error_recovery_enabled = False
@@ -540,6 +548,7 @@ def _settings_require_remote_hook(provider_name: str, settings: AutoContinueSett
     provider = _normal_provider(provider_name)
     return bool(
         settings.enabled
+        or settings.training_auto_continue_enabled
         or (settings.git_auto_snapshot and settings.git_snapshot_on_start)
         or settings.error_recovery_enabled
         or (provider == "claude" and settings.auto_approve_permission_requests)
@@ -563,6 +572,7 @@ def _remote_switch_baseline_settings(provider_name: str) -> AutoContinueSettings
     source = auto_continue_manager.get_settings(provider) or AutoContinueSettings()
     copied = AutoContinueSettings.from_dict(source.to_dict())
     copied.enabled = False
+    copied.training_auto_continue_enabled = False
     copied.git_auto_snapshot = True
     copied.git_snapshot_on_start = True
     copied.git_snapshot_on_recovery = True
@@ -776,6 +786,8 @@ CONTENT_LENGTH_PATTERNS = __CONTENT_LENGTH_PATTERNS__
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
 PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}
 STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}
+TRAINING_COMPLETION_PATTERNS = __TRAINING_COMPLETION_PATTERNS__
+DEFAULT_TRAINING_CONTINUE_PROMPT = __DEFAULT_TRAINING_CONTINUE_PROMPT__
 
 
 def is_recoverable_api_error(text):
@@ -1237,6 +1249,22 @@ def write_decision_log(
     write_jsonl(log_path, entry)
 
 
+def training_continue_prompt(settings):
+    custom = ""
+    if isinstance(settings, dict):
+        custom = str(settings.get("training_continue_prompt") or "").strip()
+    if not custom:
+        custom = DEFAULT_TRAINING_CONTINUE_PROMPT
+    return (
+        "请检查当前深度学习/模型训练任务的最新评估结果、训练日志、指标和模型产物。\n\n"
+        "用户定义的训练目标/续跑要求：\n"
+        f"{custom}\n\n"
+        "如果尚未达标，请继续训练、调参、改进模型或补充验证，并记录新的评估结果。\n"
+        "如果已达标，请停止续跑，并在最终回复中明确写出 TRAINING_TARGET_MET，"
+        "同时列出关键指标和模型产物路径。"
+    )
+
+
 def permission_suggestions_from_input(data):
     raw = data.get("permission_suggestions")
     if raw is None:
@@ -1377,12 +1405,19 @@ def main():
     auto_approve_enabled = as_bool(settings.get("auto_approve_permission_requests"), False)
     error_recovery_enabled = as_bool(settings.get("error_recovery_enabled"), False)
     auto_continue_enabled = as_bool(settings.get("enabled"), False)
+    training_auto_continue_enabled = as_bool(settings.get("training_auto_continue_enabled"), False)
     git_snapshot_enabled = as_bool(settings.get("git_auto_snapshot"), True) and as_bool(
         settings.get("git_snapshot_on_start"),
         True,
     )
 
-    if not auto_continue_enabled and not auto_approve_enabled and not git_snapshot_enabled and not error_recovery_enabled:
+    if (
+        not auto_continue_enabled
+        and not training_auto_continue_enabled
+        and not auto_approve_enabled
+        and not git_snapshot_enabled
+        and not error_recovery_enabled
+    ):
         return
 
     raw_input = ""
@@ -1560,7 +1595,7 @@ def main():
         print(json.dumps(output, ensure_ascii=False))
         return
 
-    if not auto_continue_enabled:
+    if not auto_continue_enabled and not training_auto_continue_enabled:
         return
 
     last_message = pick_text(
@@ -1602,6 +1637,25 @@ def main():
     recoverable_api_error_match = matching_pattern(RECOVERABLE_API_ERROR_PATTERNS, last_message)
     recoverable_api_error = bool(recoverable_api_error_match)
 
+    if training_auto_continue_enabled:
+        training_target_met_match = matching_pattern(TRAINING_COMPLETION_PATTERNS, last_message)
+        if training_target_met_match:
+            state = load_state(state_path)
+            if state_key in state:
+                state.pop(state_key, None)
+                save_state(state_path, state)
+            write_decision_log(
+                log_path,
+                session_id,
+                hook_event,
+                agent_id,
+                "allow_stop",
+                "training_target_met",
+                training_target_met_match,
+                last_message,
+            )
+            return
+
     blocker_match = matching_pattern(settings.get("blocker_patterns"), last_message)
     if blocker_match and not recoverable_api_error:
         write_decision_log(
@@ -1617,7 +1671,7 @@ def main():
         return
 
     incomplete_match = matching_pattern(settings.get("incomplete_patterns"), last_message)
-    if not incomplete_match and not recoverable_api_error:
+    if not incomplete_match and not recoverable_api_error and not training_auto_continue_enabled:
         state = load_state(state_path)
         if state_key in state:
             state.pop(state_key, None)
@@ -1634,7 +1688,13 @@ def main():
         )
         return
 
-    matched_pattern = recoverable_api_error_match if recoverable_api_error else incomplete_match
+    matched_pattern = (
+        recoverable_api_error_match
+        if recoverable_api_error
+        else "training_auto_continue_enabled"
+        if training_auto_continue_enabled
+        else incomplete_match
+    )
 
     lock_fd = None
     for _ in range(20):
@@ -1676,8 +1736,17 @@ def main():
         state[state_key] = count
         save_state(state_path, state)
 
-        continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
-        continue_reason = "recoverable_api_error_detected" if recoverable_api_error else "incomplete_work_detected"
+        if training_auto_continue_enabled and not recoverable_api_error:
+            continuation_prompt = training_continue_prompt(settings)
+        else:
+            continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
+        continue_reason = (
+            "recoverable_api_error_detected"
+            if recoverable_api_error
+            else "training_guard_continue"
+            if training_auto_continue_enabled
+            else "incomplete_work_detected"
+        )
         write_decision_log(
             log_path,
             session_id,
@@ -1731,6 +1800,14 @@ exit 0
     body = body.replace(
         "__CONTENT_LENGTH_PATTERNS__",
         _python_literal_list(CONTENT_LENGTH_PATTERNS),
+    )
+    body = body.replace(
+        "__TRAINING_COMPLETION_PATTERNS__",
+        _python_literal_list(DEFAULT_TRAINING_COMPLETION_PATTERNS),
+    )
+    body = body.replace(
+        "__DEFAULT_TRAINING_CONTINUE_PROMPT__",
+        repr(DEFAULT_TRAINING_CONTINUE_PROMPT),
     )
     return header + body
 
@@ -1841,7 +1918,7 @@ def _register_claude_hook(
     needs_stop_hook = (
         True
         if settings_data is None
-        else bool(settings_data.enabled or needs_git_start_hook)
+        else bool(settings_data.enabled or settings_data.training_auto_continue_enabled or needs_git_start_hook)
     )
     register_event("Stop", hook_def if needs_stop_hook else None)
     if needs_git_start_hook:
@@ -2123,7 +2200,7 @@ def _register_codex_hook(
     needs_stop_hook = (
         True
         if settings_data is None
-        else bool(settings_data.enabled or needs_git_start_hook)
+        else bool(settings_data.enabled or settings_data.training_auto_continue_enabled or needs_git_start_hook)
     )
     hook_def = {
         "type": "command",
@@ -2398,7 +2475,9 @@ def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
         keep_hook = (
             _as_bool_value(settings.get("git_auto_snapshot"), True)
             and _as_bool_value(settings.get("git_snapshot_on_start"), True)
-        ) or _as_bool_value(settings.get("error_recovery_enabled"), False) or (
+        ) or _as_bool_value(settings.get("training_auto_continue_enabled"), False) or _as_bool_value(
+            settings.get("error_recovery_enabled"), False
+        ) or (
             provider == "claude"
             and _as_bool_value(settings.get("auto_approve_permission_requests"), False)
         )
@@ -2483,6 +2562,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.git_snapshot_master_enabled = bool(parsed.git_auto_snapshot)
             status.git_snapshot_on_start_enabled = bool(parsed.git_snapshot_on_start)
             status.git_snapshot_on_recovery_enabled = bool(parsed.git_snapshot_on_recovery)
+            status.training_auto_continue_enabled = bool(parsed.training_auto_continue_enabled)
             status.git_snapshot_enabled = bool(parsed.git_auto_snapshot and parsed.git_snapshot_on_start)
             status.permission_auto_approve_enabled = bool(
                 provider == "claude" and parsed.auto_approve_permission_requests
@@ -2520,7 +2600,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             pre_tool_hook_registered = _claude_event_has_our_command(provider_config, "PreToolUse")
             permission_hook_registered = _claude_event_has_our_command(provider_config, "PermissionRequest")
             error_hook_registered = _claude_event_has_our_command(provider_config, "ResponseError")
-            needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
+            needs_stop_hook = bool(status.enabled or status.training_auto_continue_enabled or status.git_snapshot_enabled)
             needs_prompt_snapshot_hooks = bool(status.git_snapshot_enabled)
             needs_permission_hooks = bool(status.permission_auto_approve_enabled)
             needs_error_hook = bool(status.error_recovery_enabled)
@@ -2621,7 +2701,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                 for command in _iter_codex_hook_commands(hooks, "SessionStart")
             )
             error_hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Error"))
-            needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
+            needs_stop_hook = bool(status.enabled or status.training_auto_continue_enabled or status.git_snapshot_enabled)
             needs_prompt_snapshot_hooks = bool(status.git_snapshot_enabled)
             needs_error_hook = bool(status.error_recovery_enabled)
             if needs_stop_hook or needs_prompt_snapshot_hooks or needs_error_hook:
@@ -2665,6 +2745,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
 
     hook_required = (
         status.enabled
+        or status.training_auto_continue_enabled
         or status.git_snapshot_enabled
         or status.permission_auto_approve_enabled
         or status.error_recovery_enabled

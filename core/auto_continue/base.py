@@ -57,6 +57,7 @@ class AutoContinueProvider(ABC):
             return False
         return (
             bool(settings.enabled)
+            or bool(settings.training_auto_continue_enabled)
             or bool(settings.git_auto_snapshot and settings.git_snapshot_on_start)
             or bool(self.name == "claude" and settings.auto_approve_permission_requests)
         )

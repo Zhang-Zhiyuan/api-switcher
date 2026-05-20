@@ -3,6 +3,7 @@ Enhanced PowerShell hook script generator with robust error handling.
 """
 
 from core.auto_continue.error_patterns import RECOVERABLE_API_ERROR_PATTERNS
+from models.auto_continue import DEFAULT_TRAINING_COMPLETION_PATTERNS
 
 
 def _powershell_array(values: list[str], indent: int = 12) -> str:
@@ -33,6 +34,19 @@ function Get-BoolSetting {
         return $Default
     }
     return ConvertTo-Bool -Value $Settings.PSObject.Properties[$Name].Value -Default $Default
+}
+
+function Get-StringSetting {
+    param($Settings, [string]$Name, [string]$Default = "")
+
+    if ($null -eq $Settings -or $null -eq $Settings.PSObject.Properties[$Name]) {
+        return $Default
+    }
+    $value = [string]$Settings.PSObject.Properties[$Name].Value
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $Default
+    }
+    return $value.Trim()
 }'''
 
 
@@ -195,6 +209,25 @@ function Write-DecisionLog {{
     }}
 }}
 
+function Get-TrainingContinuationPrompt {{
+    param($Settings)
+
+    $custom = Get-StringSetting -Settings $Settings -Name "training_continue_prompt" -Default ""
+    if ([string]::IsNullOrWhiteSpace($custom)) {{
+        $custom = "\u8bf7\u68c0\u67e5\u5f53\u524d\u6df1\u5ea6\u5b66\u4e60/\u6a21\u578b\u8bad\u7ec3\u4efb\u52a1\u7684\u6700\u65b0\u8bc4\u4f30\u7ed3\u679c\u3001\u8bad\u7ec3\u65e5\u5fd7\u3001\u6307\u6807\u548c\u6a21\u578b\u4ea7\u7269\u3002"
+    }}
+
+    return @"
+\u8bf7\u68c0\u67e5\u5f53\u524d\u6df1\u5ea6\u5b66\u4e60/\u6a21\u578b\u8bad\u7ec3\u4efb\u52a1\u7684\u6700\u65b0\u8bc4\u4f30\u7ed3\u679c\u3001\u8bad\u7ec3\u65e5\u5fd7\u3001\u6307\u6807\u548c\u6a21\u578b\u4ea7\u7269\u3002
+
+\u7528\u6237\u5b9a\u4e49\u7684\u8bad\u7ec3\u76ee\u6807/\u7eed\u8dd1\u8981\u6c42\uff1a
+$custom
+
+\u5982\u679c\u5c1a\u672a\u8fbe\u6807\uff0c\u8bf7\u7ee7\u7eed\u8bad\u7ec3\u3001\u8c03\u53c2\u3001\u6539\u8fdb\u6a21\u578b\u6216\u8865\u5145\u9a8c\u8bc1\uff0c\u5e76\u8bb0\u5f55\u65b0\u7684\u8bc4\u4f30\u7ed3\u679c\u3002
+\u5982\u679c\u5df2\u8fbe\u6807\uff0c\u8bf7\u505c\u6b62\u7eed\u8dd1\uff0c\u5e76\u5728\u6700\u7ec8\u56de\u590d\u4e2d\u660e\u786e\u5199\u51fa TRAINING_TARGET_MET\uff0c\u540c\u65f6\u5217\u51fa\u5173\u952e\u6307\u6807\u548c\u6a21\u578b\u4ea7\u7269\u8def\u5f84\u3002
+"@
+}}
+
 # Git snapshot helpers.
 function Ensure-LocalGitIgnore {{
     try {{
@@ -338,9 +371,14 @@ try {{
     }}
 
     $autoContinueEnabled = Get-BoolSetting -Settings $settings -Name "enabled" -Default $false
+    $trainingAutoContinueEnabled = Get-BoolSetting -Settings $settings -Name "training_auto_continue_enabled" -Default $false
     $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
     $gitSnapshotOnStart = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_start" -Default $gitSnapshotEnabled
     $autoApprovePermissionRequests = Get-BoolSetting -Settings $settings -Name "auto_approve_permission_requests" -Default $false
+
+    if (-not $autoContinueEnabled -and -not $trainingAutoContinueEnabled -and -not $autoApprovePermissionRequests -and -not ($gitAutoSnapshot -and $gitSnapshotOnStart)) {{
+        exit 0
+    }}
 
     # Read stdin (hook input)
     $stdin = Read-HookInput
@@ -653,8 +691,8 @@ try {{
         exit 0
     }}
 
-    if (-not $autoContinueEnabled) {{
-        exit 0  # Allow stop if auto-continue is disabled
+    if (-not $autoContinueEnabled -and -not $trainingAutoContinueEnabled) {{
+        exit 0  # Allow stop if continue modes are disabled
     }}
 
     # Validate settings
@@ -727,7 +765,7 @@ try {{
         # Get continuation count
         $count = if ($state.ContainsKey($stateKey)) {{ $state[$stateKey] }} else {{ 0 }}
 
-        if (-not $autoContinueEnabled) {{
+        if (-not $autoContinueEnabled -and -not $trainingAutoContinueEnabled) {{
             exit 0
         }}
 
@@ -747,6 +785,31 @@ try {{
         $recoverableApiErrorMatch = Find-MatchingRegex -Text $lastMessage -Patterns $recoverableApiErrorPatterns
         $isRecoverableApiError = $null -ne $recoverableApiErrorMatch
 
+        $trainingTargetMetMatch = $null
+        if ($trainingAutoContinueEnabled) {{
+            $trainingCompletionPatterns = @(
+{_powershell_array(DEFAULT_TRAINING_COMPLETION_PATTERNS, 16)}
+            )
+            $trainingTargetMetMatch = Find-MatchingRegex -Text $lastMessage -Patterns $trainingCompletionPatterns
+            if ($null -ne $trainingTargetMetMatch) {{
+                if ($state.ContainsKey($stateKey)) {{
+                    $state.Remove($stateKey)
+                    Save-StateFile -Path $statePath -State $state | Out-Null
+                }}
+                Write-DecisionLog `
+                    -StateDir $stateDir `
+                    -SessionId $sessionId `
+                    -HookEvent $hookEvent `
+                    -AgentId $agentId `
+                    -Decision "allow_stop" `
+                    -Reason "training_target_met" `
+                    -Match $trainingTargetMetMatch `
+                    -Message $lastMessage `
+                    -Count $count
+                exit 0
+            }}
+        }}
+
         $blockerMatch = Find-MatchingRegex -Text $lastMessage -Patterns $settings.blocker_patterns
         if ($null -ne $blockerMatch -and -not $isRecoverableApiError) {{
             Write-DecisionLog `
@@ -763,7 +826,7 @@ try {{
         }}
 
         $incompleteMatch = Find-MatchingRegex -Text $lastMessage -Patterns $settings.incomplete_patterns
-        if ($null -eq $incompleteMatch -and -not $isRecoverableApiError) {{
+        if ($null -eq $incompleteMatch -and -not $isRecoverableApiError -and -not $trainingAutoContinueEnabled) {{
             if ($state.ContainsKey($stateKey)) {{
                 $state.Remove($stateKey)
                 Save-StateFile -Path $statePath -State $state | Out-Null
@@ -781,7 +844,7 @@ try {{
             exit 0
         }}
 
-        $matchedPattern = if ($isRecoverableApiError) {{ $recoverableApiErrorMatch }} else {{ $incompleteMatch }}
+        $matchedPattern = if ($isRecoverableApiError) {{ $recoverableApiErrorMatch }} elseif ($trainingAutoContinueEnabled) {{ "training_auto_continue_enabled" }} else {{ $incompleteMatch }}
 
         # Check max continuations after confirming this stop actually needs continuation.
         if ($settings.max_continuations -ge 0 -and $count -ge $settings.max_continuations) {{
@@ -804,7 +867,16 @@ try {{
 
         Save-StateFile -Path $statePath -State $state | Out-Null
 
-        $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} else {{ "incomplete_work_detected" }}
+        $continuationPrompt = if ($trainingAutoContinueEnabled -and -not $isRecoverableApiError) {{
+            Get-TrainingContinuationPrompt -Settings $settings
+        }} else {{
+            [string]$settings.continuation_prompt
+        }}
+        if ([string]::IsNullOrWhiteSpace($continuationPrompt)) {{
+            $continuationPrompt = "Please continue from where you left off. Complete any remaining work."
+        }}
+
+        $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} elseif ($trainingAutoContinueEnabled) {{ "training_guard_continue" }} else {{ "incomplete_work_detected" }}
 
         Write-DecisionLog `
             -StateDir $stateDir `
@@ -816,7 +888,7 @@ try {{
             -Match $matchedPattern `
             -Message $lastMessage `
             -Count $count `
-            -ContinuationPrompt $settings.continuation_prompt
+            -ContinuationPrompt $continuationPrompt
 
         if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart -and -not $gitSnapshotAttempted) {{
             Write-Log "Creating git snapshot before auto-continue..." "INFO"
@@ -827,7 +899,7 @@ try {{
         # treat the block reason as the continuation instruction.
         $output = @{{
             decision = "block"
-            reason = $settings.continuation_prompt
+            reason = $continuationPrompt
             suppressOutput = $true
         }} | ConvertTo-Json
         Write-Output $output

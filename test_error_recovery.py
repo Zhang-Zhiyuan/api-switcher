@@ -685,6 +685,68 @@ def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path
     assert "no_incomplete_match" in log_text
 
 
+def test_remote_training_guard_continues_independently_and_stops_when_target_met(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        training_auto_continue_enabled=True,
+        training_continue_prompt="AUC >= 0.90 and F1 >= 0.85",
+        max_continuations=3,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+    def run_hook(message: str):
+        input_path.write_text(
+            json.dumps({
+                "session_id": "remote-training-session",
+                "last_assistant_message": message,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    continue_result = run_hook("Current eval: AUC=0.87, F1=0.82.")
+    assert continue_result.returncode == 0, continue_result.stderr
+    output = json.loads(continue_result.stdout)
+    assert output["decision"] == "block"
+    assert "AUC >= 0.90" in output["reason"]
+    assert "TRAINING_TARGET_MET" in output["reason"]
+
+    stop_result = run_hook("训练目标已达成：AUC=0.91, F1=0.86.")
+    assert stop_result.returncode == 0, stop_result.stderr
+    assert stop_result.stdout.strip() == ""
+
+    log_text = (state_dir / "auto_continue_stop_log.jsonl").read_text(encoding="utf-8")
+    assert "training_guard_continue" in log_text
+    assert "training_target_met" in log_text
+
+
 def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
     import subprocess
 
@@ -1210,6 +1272,67 @@ def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_pat
     assert (tmp_path / "tmp" / "auto_continue_stop_state.json").exists()
 
 
+def test_local_training_guard_continues_independently_and_stops_when_target_met(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=False,
+        training_auto_continue_enabled=True,
+        training_continue_prompt="val_acc >= 0.95 and loss <= 0.2",
+        max_continuations=3,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    def run_hook(message: str):
+        payload = {
+            "session_id": "training-session",
+            "hook_event_name": "Stop",
+            "last_assistant_message": message,
+        }
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            input=json.dumps(payload, ensure_ascii=False),
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+    continue_result = run_hook("Finished epoch 8. Current val_acc is 0.91, loss is 0.28.")
+    assert continue_result.returncode == 0, continue_result.stderr
+    output = json.loads(continue_result.stdout)
+    assert output["decision"] == "block"
+    assert "val_acc >= 0.95" in output["reason"]
+    assert "TRAINING_TARGET_MET" in output["reason"]
+
+    stop_result = run_hook("TRAINING_TARGET_MET: val_acc=0.956 and loss=0.18. Model saved.")
+    assert stop_result.returncode == 0, stop_result.stderr
+    assert stop_result.stdout.strip() == ""
+
+    log_text = (tmp_path / "tmp" / "auto_continue_stop_log.jsonl").read_text(encoding="utf-8")
+    assert "training_guard_continue" in log_text
+    assert "training_target_met" in log_text
+
+
 def test_local_codex_error_hook_outputs_clean_json_with_git_snapshot(tmp_path):
     import subprocess
 
@@ -1570,6 +1693,8 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert AutoContinueSettings().auto_approve_max_per_session == 0
     assert AutoContinueSettings().error_retry_initial_delay_seconds == 5
     assert AutoContinueSettings().error_retry_max_delay_seconds == 60
+    assert AutoContinueSettings().training_auto_continue_enabled is False
+    assert "TRAINING_TARGET_MET" in AutoContinueSettings().training_continue_prompt
 
     settings = AutoContinueSettings(
         auto_approve_permission_requests=True,
@@ -1591,16 +1716,28 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert not ok
     assert "cannot exceed" in error
 
+    invalid_training_prompt = AutoContinueSettings(
+        training_auto_continue_enabled=True,
+        training_continue_prompt="",
+    )
+    ok, error = invalid_training_prompt.validate()
+    assert not ok
+    assert "training_continue_prompt" in error
+
     restored = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,
         "auto_approve_max_per_session": 5,
         "auto_approve_tools": ["Edit", "edit", "Write"],
+        "training_auto_continue_enabled": "true",
+        "training_continue_prompt": "accuracy >= 0.95",
     })
 
     assert restored.auto_approve_permission_requests is True
     assert restored.auto_approve_max_per_session == 5
     assert restored.auto_approve_bash is True
     assert restored.auto_approve_tools == ["Bash", "Edit", "Write"]
+    assert restored.training_auto_continue_enabled is True
+    assert restored.training_continue_prompt == "accuracy >= 0.95"
 
     legacy_disabled = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,
@@ -2538,6 +2675,37 @@ def test_local_status_requires_prompt_snapshot_hooks_when_git_snapshot_enabled(t
             "Stop": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}]
         }
     }), encoding="utf-8")
+    assert not claude.is_hook_registered()
+    claude.register_hook(settings=auto_settings)
+    assert claude.is_hook_registered()
+
+
+def test_local_status_requires_stop_hook_when_training_guard_enabled(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from core.auto_continue.codex_provider import CodexProvider
+    from models.auto_continue import AutoContinueSettings
+
+    auto_settings = AutoContinueSettings(
+        enabled=False,
+        training_auto_continue_enabled=True,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+
+    codex_home = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    codex = CodexProvider()
+    codex.save_settings(auto_settings)
+    codex.get_hooks_json_path().write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+    assert not codex.is_hook_registered()
+    codex.register_hook(settings=auto_settings)
+    assert codex.is_hook_registered()
+
+    claude_home = tmp_path / "claude"
+    claude = ClaudeProvider()
+    monkeypatch.setattr(claude, "get_config_dir", lambda: claude_home)
+    claude.save_settings(auto_settings)
+    claude.get_claude_settings_path().write_text(json.dumps({"hooks": {}}), encoding="utf-8")
     assert not claude.is_hook_registered()
     claude.register_hook(settings=auto_settings)
     assert claude.is_hook_registered()

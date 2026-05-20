@@ -70,6 +70,33 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._prompt_text.insert("1.0", self.settings.continuation_prompt)
         self._prompt_text.pack(fill="x", pady=(0, 10))
 
+        self._add_section(
+            scroll,
+            "深度学习续跑",
+            "独立的 Stop hook 守护；让 Codex/Claude 检查训练评估结果，未达标就继续训练或改进模型。",
+        )
+        self._training_auto_continue_var = ctk.BooleanVar(value=self.settings.training_auto_continue_enabled)
+        self._add_switch(
+            scroll,
+            "启用训练续跑守护",
+            self._training_auto_continue_var,
+            progress_color=COLORS["accent"],
+        )
+        ctk.CTkLabel(
+            scroll,
+            text="训练目标/续跑指令（自定义）",
+            text_color=COLORS["muted"],
+            anchor="w",
+            font=font(12),
+        ).pack(fill="x", pady=(10, 2))
+        self._training_prompt_text = ctk.CTkTextbox(scroll, height=110, **textbox_style())
+        self._training_prompt_text.insert("1.0", self.settings.training_continue_prompt)
+        self._training_prompt_text.pack(fill="x", pady=(0, 6))
+        self._add_note(
+            scroll,
+            "达标时让模型在最终回复写出 TRAINING_TARGET_MET，hook 就会允许停止。",
+        )
+
         if self.provider_name.lower() == "claude":
             self._add_section(scroll, "Claude 权限确认", "自动处理 Claude Code 的 PermissionRequest / PreToolUse。")
             self._permission_auto_approve_var = ctk.BooleanVar(value=self.settings.auto_approve_permission_requests)
@@ -224,6 +251,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 raise ValueError("续跑次数必须为 -1 或非负数；恢复次数不能为负数")
             enabled = self._enabled_var.get()
             prompt = self._prompt_text.get("1.0", "end").strip()
+            training_auto_continue = self._training_auto_continue_var.get()
+            training_prompt = self._training_prompt_text.get("1.0", "end").strip()
             conservative = self._conservative_var.get()
             error_recovery = self._error_recovery_var.get()
 
@@ -255,6 +284,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 max_continuations=max_cont,
                 continuation_prompt=prompt,
                 conservative_mode=conservative,
+                training_auto_continue_enabled=training_auto_continue,
+                training_continue_prompt=training_prompt,
                 error_recovery_enabled=error_recovery,
                 max_error_recoveries=max_recoveries,
                 error_retry_initial_delay_seconds=retry_initial_delay,

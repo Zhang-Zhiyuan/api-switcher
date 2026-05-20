@@ -121,6 +121,22 @@ LEGACY_GENERATED_PATTERNS_TO_DROP = {
 
 
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
+DEFAULT_TRAINING_CONTINUE_PROMPT = (
+    "\u8bf7\u68c0\u67e5\u5f53\u524d\u6df1\u5ea6\u5b66\u4e60/\u6a21\u578b\u8bad\u7ec3\u4efb\u52a1\u7684\u6700\u65b0\u8bc4\u4f30\u7ed3\u679c\u3001"
+    "\u8bad\u7ec3\u65e5\u5fd7\u3001\u6307\u6807\u548c\u6a21\u578b\u4ea7\u7269\u3002\u5982\u679c\u5c1a\u672a\u8fbe\u5230\u6211\u914d\u7f6e\u7684\u76ee\u6807\uff0c"
+    "\u8bf7\u7ee7\u7eed\u8bad\u7ec3\u3001\u8c03\u53c2\u3001\u6539\u8fdb\u6a21\u578b\u6216\u8865\u5145\u9a8c\u8bc1\uff1b"
+    "\u5982\u679c\u5df2\u7ecf\u8fbe\u5230\u76ee\u6807\uff0c\u8bf7\u5728\u6700\u7ec8\u56de\u590d\u4e2d\u5199\u51fa TRAINING_TARGET_MET\uff0c"
+    "\u5e76\u5217\u51fa\u5173\u952e\u6307\u6807\u548c\u4ea7\u7269\u8def\u5f84\u3002"
+)
+DEFAULT_TRAINING_COMPLETION_PATTERNS = [
+    r"(?i)\bTRAINING_TARGET_MET\b",
+    r"(?i)\b(training|evaluation|model)\b.{0,80}\b(target|goal|criteria|requirement)s?\b.{0,80}\b(met|reached|satisfied|passed)\b",
+    r"(?i)\b(met|reached|satisfied|passed)\b.{0,80}\b(training|evaluation|model)\b.{0,80}\b(target|goal|criteria|requirement)s?\b",
+    r"\u8bad\u7ec3\u76ee\u6807\u5df2\u8fbe\u6210",
+    r"\u6307\u6807\u5df2\u8fbe\u6807",
+    r"\u8bc4\u4f30\u7ed3\u679c\u5df2\u8fbe\u6807",
+    r"(\u51c6\u786e\u7387|\u7cbe\u5ea6|\u53ec\u56de\u7387|F1|loss|AUC).{0,80}(\u8fbe\u6807|\u8fbe\u5230\u8981\u6c42|\u6ee1\u8db3\u8981\u6c42)",
+]
 BOOL_SETTING_FIELDS = {
     "enabled",
     "apply_to_subagents",
@@ -131,6 +147,7 @@ BOOL_SETTING_FIELDS = {
     "git_snapshot_on_recovery",
     "auto_approve_permission_requests",
     "auto_approve_bash",
+    "training_auto_continue_enabled",
 }
 
 
@@ -194,6 +211,8 @@ class AutoContinueSettings:
     max_error_recoveries: int = 3
     error_retry_initial_delay_seconds: int = 5
     error_retry_max_delay_seconds: int = 60
+    training_auto_continue_enabled: bool = False
+    training_continue_prompt: str = DEFAULT_TRAINING_CONTINUE_PROMPT
     git_auto_snapshot: bool = True
     git_snapshot_on_start: bool = True
     git_snapshot_on_recovery: bool = True
@@ -242,6 +261,15 @@ class AutoContinueSettings:
 
         if self.error_retry_initial_delay_seconds > self.error_retry_max_delay_seconds:
             return False, "error_retry_initial_delay_seconds cannot exceed error_retry_max_delay_seconds"
+
+        if not isinstance(self.training_continue_prompt, str):
+            return False, "training_continue_prompt must be a string"
+
+        if self.training_auto_continue_enabled and not self.training_continue_prompt.strip():
+            return False, "training_continue_prompt cannot be empty when training auto-continue is enabled"
+
+        if len(self.training_continue_prompt) > 8000:
+            return False, "training_continue_prompt is too long (max: 8000 characters)"
 
         if not isinstance(self.auto_approve_permission_requests, bool):
             return False, "auto_approve_permission_requests must be a boolean"

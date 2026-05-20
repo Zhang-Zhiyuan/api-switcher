@@ -100,6 +100,18 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._auto_continue_switch.pack(side="left", padx=(0, 12))
 
+        self._training_auto_continue_var = ctk.BooleanVar(value=False)
+        self._training_auto_continue_switch = ctk.CTkSwitch(
+            quick,
+            text="\u8bad\u7ec3\u7eed\u8dd1",
+            variable=self._training_auto_continue_var,
+            command=lambda: self._toggle_feature("training_auto_continue"),
+            text_color=COLORS["text"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text"],
+        )
+        self._training_auto_continue_switch.pack(side="left", padx=(0, 12))
+
         self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
             quick,
@@ -200,6 +212,7 @@ class AutoContinueControl(ctk.CTkFrame):
             try:
                 display_settings = settings or AutoContinueSettings()
                 self._auto_continue_var.set(bool(display_settings.enabled))
+                self._training_auto_continue_var.set(bool(display_settings.training_auto_continue_enabled))
                 self._git_snapshot_var.set(bool(display_settings.git_auto_snapshot))
                 self._git_snapshot_on_start_var.set(bool(display_settings.git_snapshot_on_start))
                 self._git_snapshot_on_recovery_var.set(bool(display_settings.git_snapshot_on_recovery))
@@ -210,6 +223,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     )
                 for switch in [
                     self._auto_continue_switch,
+                    self._training_auto_continue_switch,
                     self._git_snapshot_switch,
                     self._git_snapshot_on_start_switch,
                     self._git_snapshot_on_recovery_switch,
@@ -233,6 +247,9 @@ class AutoContinueControl(ctk.CTkFrame):
                 info_lines.append(
                     f"自动续跑: {'ON' if settings.enabled else 'OFF'} / "
                     f"最大 {settings.max_continuations} / 保守 {'ON' if settings.conservative_mode else 'OFF'}"
+                )
+                info_lines.append(
+                    f"训练续跑: {'ON' if settings.training_auto_continue_enabled else 'OFF'}"
                 )
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
@@ -294,6 +311,8 @@ class AutoContinueControl(ctk.CTkFrame):
                 return
             elif feature == "git_snapshot":
                 settings.git_auto_snapshot = self._git_snapshot_var.get()
+            elif feature == "training_auto_continue":
+                settings.training_auto_continue_enabled = bool(self._training_auto_continue_var.get())
             elif feature == "git_snapshot_on_start":
                 settings.git_snapshot_on_start = bool(self._git_snapshot_on_start_var.get())
             elif feature == "git_snapshot_on_recovery":

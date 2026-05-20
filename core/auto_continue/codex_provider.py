@@ -231,7 +231,7 @@ class CodexProvider(AutoContinueProvider):
 
         settings = self.load_settings() or AutoContinueSettings()
         git_snapshot_on_start = bool(settings.git_auto_snapshot and settings.git_snapshot_on_start)
-        needs_stop_hook = bool(settings.enabled or git_snapshot_on_start)
+        needs_stop_hook = bool(settings.enabled or settings.training_auto_continue_enabled or git_snapshot_on_start)
 
         required_events = []
         if needs_stop_hook:
@@ -277,7 +277,7 @@ class CodexProvider(AutoContinueProvider):
         needs_stop_hook = (
             True
             if settings is None
-            else bool(settings.enabled or git_snapshot_on_start)
+            else bool(settings.enabled or settings.training_auto_continue_enabled or git_snapshot_on_start)
         )
         if needs_stop_hook:
             _upsert_codex_event_hook(hooks, "Stop", hook_def, "auto_continue_stop.ps1")
