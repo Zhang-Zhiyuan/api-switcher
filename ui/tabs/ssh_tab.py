@@ -39,6 +39,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_error_recovery_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_switch = None
+        self._remote_git_snapshot_on_start_switch = None
+        self._remote_git_snapshot_on_recovery_switch = None
         self._remote_auto_last_statuses = {}
         self._remote_auto_last_payload = None
         self._remote_auto_busy = False
@@ -261,7 +263,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
         ctk.CTkLabel(
             auto_header,
-            text="把本机 Claude/Codex 自动续跑设置安装到已连接的 SSH 服务器",
+            text="同步 Stop 续跑、训练守护、Git 快照、API 恢复和权限自动确认到 SSH",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(side="left", padx=(10, 0))
@@ -300,8 +302,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         check_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
         git_snapshot_button = ctk.CTkButton(
             auto_controls,
-            text="Git快照",
-            width=78,
+            text="修复 Git",
+            width=86,
             command=self._install_remote_git_snapshot,
             **button_style("secondary"),
         )
@@ -316,8 +318,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         install_button.grid(row=0, column=4, sticky="e", padx=(0, 8))
         pause_button = ctk.CTkButton(
             auto_controls,
-            text="暂停",
-            width=78,
+            text="暂停续跑",
+            width=90,
             command=self._pause_remote_auto_continue,
             **button_style("warning"),
         )
@@ -353,9 +355,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             remote_switch_frame.grid_columnconfigure(col, weight=0)
         ctk.CTkLabel(
             remote_switch_frame,
-            text="\u8fdc\u7a0b\u5f00\u5173",
+            text="远端开关",
             text_color=COLORS["muted"],
-            font=font(12),
+            font=font(12, "bold"),
         ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 10))
 
         def add_remote_switch(text, variable, feature, row, column, color="success"):
@@ -372,14 +374,26 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._remote_auto_switches.append(switch)
             return switch
 
-        add_remote_switch("\u81ea\u52a8\u7eed\u8dd1", self._remote_auto_continue_var, "auto_continue", 0, 1)
-        add_remote_switch("\u8bad\u7ec3\u7eed\u8dd1", self._remote_training_auto_continue_var, "training_auto_continue", 0, 2, color="accent")
-        add_remote_switch("Git", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
-        add_remote_switch("API\u6062\u590d", self._remote_error_recovery_var, "error_recovery", 0, 4)
-        add_remote_switch("\u624b\u52a8/\u7eed\u8dd1\u5feb\u7167", self._remote_git_snapshot_on_start_var, "git_snapshot_on_start", 1, 1)
-        add_remote_switch("\u6062\u590d\u5feb\u7167", self._remote_git_snapshot_on_recovery_var, "git_snapshot_on_recovery", 1, 2)
+        add_remote_switch("Stop 续跑", self._remote_auto_continue_var, "auto_continue", 0, 1)
+        add_remote_switch("训练达标续跑", self._remote_training_auto_continue_var, "training_auto_continue", 0, 2, color="accent")
+        add_remote_switch("Git 总开关", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
+        add_remote_switch("API 恢复", self._remote_error_recovery_var, "error_recovery", 0, 4)
+        self._remote_git_snapshot_on_start_switch = add_remote_switch(
+            "对话/消息/Stop 快照",
+            self._remote_git_snapshot_on_start_var,
+            "git_snapshot_on_start",
+            1,
+            1,
+        )
+        self._remote_git_snapshot_on_recovery_switch = add_remote_switch(
+            "API 恢复快照",
+            self._remote_git_snapshot_on_recovery_var,
+            "git_snapshot_on_recovery",
+            1,
+            2,
+        )
         self._remote_permission_auto_approve_switch = add_remote_switch(
-            "\u6743\u9650\u786e\u8ba4",
+            "权限自动确认",
             self._remote_permission_auto_approve_var,
             "permission_auto_approve",
             1,
@@ -690,14 +704,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                 parts.append(f"{label}: 本机未保存设置")
                 continue
             feature_parts = [
-                f"自动续跑 {'ON' if settings.enabled else 'OFF'}",
+                f"Stop续跑 {'ON' if settings.enabled else 'OFF'}",
                 f"训练续跑 {'ON' if settings.training_auto_continue_enabled else 'OFF'}",
                 f"训练模板 {training_prompt_template_by_key(settings.training_prompt_template_key)['name']}",
-                f"Git快照 {'ON' if settings.git_auto_snapshot else 'OFF'}",
+                f"Git快照总开关 {'ON' if settings.git_auto_snapshot else 'OFF'}",
                 f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
             ]
             if provider == "claude":
-                feature_parts.append(f"权限确认 {'ON' if settings.auto_approve_permission_requests else 'OFF'}")
+                feature_parts.append(f"权限自动确认 {'ON' if settings.auto_approve_permission_requests else 'OFF'}")
                 feature_parts.append(f"Subagent {'ON' if settings.apply_to_subagents else 'OFF'}")
             parts.append(f"{label}: " + " / ".join(feature_parts))
         self._remote_auto_feature_label.configure(
@@ -865,6 +879,16 @@ class SSHTab(ctk.CTkScrollableFrame):
                 pass
         if "claude" not in targets and not self._remote_auto_refreshing:
             self._remote_permission_auto_approve_var.set(False)
+        git_trigger_state = action_state if bool(self._remote_git_snapshot_var.get()) else "disabled"
+        for switch in (
+            self._remote_git_snapshot_on_start_switch,
+            self._remote_git_snapshot_on_recovery_switch,
+        ):
+            if switch:
+                try:
+                    switch.configure(state=git_trigger_state)
+                except Exception:
+                    pass
 
     def _remote_auto_statuses_cover_selection(self, statuses) -> bool:
         if not statuses:
@@ -1256,9 +1280,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             return {"statuses": statuses, "failures": failures, "results": results}
 
         self._run_remote_auto_task(
-            f"正在暂停 {server_name} 的远端自动续跑...",
+            f"正在暂停 {server_name} 的远端 Stop 续跑...",
             worker,
-            lambda payload: self._show_remote_auto_result(payload, "远端自动续跑已暂停"),
+            lambda payload: self._show_remote_auto_result(payload, "远端 Stop 续跑已暂停"),
         )
 
     def _uninstall_remote_auto_continue(self):

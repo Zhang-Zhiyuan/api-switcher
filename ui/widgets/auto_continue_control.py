@@ -2,7 +2,7 @@ import customtkinter as ctk
 from models.auto_continue import AutoContinueSettings, training_prompt_template_by_key
 from core.auto_continue.manager import auto_continue_manager
 from ui.widgets.toast import show_toast
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
+from ui.theme import COLORS, button_style, card_frame_kwargs, font, textbox_style
 
 
 class AutoContinueControl(ctk.CTkFrame):
@@ -38,16 +38,19 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._status_label.pack(side="left", padx=(10, 0))
 
-        self._state_hint_label = ctk.CTkLabel(
-            self,
-            text="",
-            anchor="w",
-            justify="left",
-            text_color=COLORS["muted"],
-            font=font(12),
-        )
-        self._state_hint_label.pack(fill="x", padx=10, pady=(0, 4))
-        bind_wraplength(self, self._state_hint_label, padding=28, min_width=280, max_width=1100)
+        self._state_chips = {}
+        state_summary = ctk.CTkFrame(self, fg_color="transparent")
+        state_summary.pack(fill="x", padx=10, pady=(0, 4))
+        state_row = ctk.CTkFrame(state_summary, fg_color="transparent")
+        state_row.pack(fill="x", pady=(0, 3))
+        state_row_extra = ctk.CTkFrame(state_summary, fg_color="transparent")
+        state_row_extra.pack(fill="x")
+        self._create_state_chip(state_row, "stop", "Stop续跑", width=92)
+        self._create_state_chip(state_row, "git", "Git快照", width=92)
+        self._create_state_chip(state_row, "recovery", "API恢复", width=92)
+        self._create_state_chip(state_row_extra, "training", "训练续跑", width=92)
+        if self.provider.lower() == "claude":
+            self._create_state_chip(state_row_extra, "permission", "权限自动确认", width=108)
 
         # Controls
         controls = ctk.CTkFrame(self, fg_color="transparent")
@@ -97,6 +100,8 @@ class AutoContinueControl(ctk.CTkFrame):
             **button_style("secondary", compact=True),
         ).pack(side="left", padx=(0, 5))
 
+        ctk.CTkFrame(controls, fg_color="transparent").pack(side="left", fill="x", expand=True)
+
         # Uninstall button
         ctk.CTkButton(
             controls,
@@ -117,6 +122,8 @@ class AutoContinueControl(ctk.CTkFrame):
 
         feature_row = ctk.CTkFrame(quick, fg_color="transparent")
         feature_row.pack(fill="x")
+        feature_row_extra = ctk.CTkFrame(quick, fg_color="transparent")
+        feature_row_extra.pack(fill="x", pady=(2, 0))
 
         self._auto_continue_var = ctk.BooleanVar(value=False)
         self._auto_continue_switch = ctk.CTkSwitch(
@@ -132,7 +139,7 @@ class AutoContinueControl(ctk.CTkFrame):
 
         self._training_auto_continue_var = ctk.BooleanVar(value=False)
         self._training_auto_continue_switch = ctk.CTkSwitch(
-            feature_row,
+            feature_row_extra,
             text="训练达标续跑",
             variable=self._training_auto_continue_var,
             command=lambda: self._toggle_feature("training_auto_continue"),
@@ -171,7 +178,7 @@ class AutoContinueControl(ctk.CTkFrame):
         if self.provider.lower() == "claude":
             self._permission_auto_approve_var = ctk.BooleanVar(value=False)
             self._permission_auto_approve_switch = ctk.CTkSwitch(
-                feature_row,
+                feature_row_extra,
                 text="权限自动确认",
                 variable=self._permission_auto_approve_var,
                 command=lambda: self._toggle_feature("permission_auto_approve"),
@@ -221,6 +228,32 @@ class AutoContinueControl(ctk.CTkFrame):
         self._info_text = ctk.CTkTextbox(self, height=118, **textbox_style(monospace=True))
         self._info_text.pack(fill="x", padx=10, pady=(5, 8))
 
+    def _create_state_chip(self, parent, key: str, label: str, width: int = 88):
+        chip = ctk.CTkLabel(
+            parent,
+            text=f"{label} OFF",
+            width=width,
+            height=24,
+            corner_radius=12,
+            fg_color=COLORS["surface_alt"],
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+        )
+        chip.pack(side="left", padx=(0, 8), pady=(0, 2))
+        self._state_chips[key] = (chip, label)
+        return chip
+
+    def _set_state_chip(self, key: str, enabled: bool):
+        item = self._state_chips.get(key)
+        if not item:
+            return
+        chip, label = item
+        chip.configure(
+            text=f"{label} {'ON' if enabled else 'OFF'}",
+            text_color=COLORS["success"] if enabled else COLORS["muted"],
+            fg_color=COLORS["surface_alt"],
+        )
+
     def refresh(self):
         """Refresh status display."""
         try:
@@ -246,25 +279,15 @@ class AutoContinueControl(ctk.CTkFrame):
             else:
                 self._toggle_btn.configure(text="启用续跑", **button_style("primary", compact=True))
 
-            stop_state = "ON" if display_settings.enabled else "OFF"
-            training_state = "ON" if display_settings.training_auto_continue_enabled else "OFF"
-            git_state = "ON" if display_settings.git_auto_snapshot else "OFF"
-            recovery_state = "ON" if display_settings.error_recovery_enabled else "OFF"
-            hint_parts = [
-                f"Stop续跑 {stop_state}",
-                f"训练续跑 {training_state}",
-                f"Git快照 {git_state}",
-                f"API恢复 {recovery_state}",
-            ]
+            self._set_state_chip("stop", bool(display_settings.enabled))
+            self._set_state_chip("training", bool(display_settings.training_auto_continue_enabled))
+            self._set_state_chip("git", bool(display_settings.git_auto_snapshot))
+            self._set_state_chip("recovery", bool(display_settings.error_recovery_enabled))
             if self.provider.lower() == "claude":
-                permission_state = (
-                    "ON" if display_settings.auto_approve_permission_requests else "OFF"
+                self._set_state_chip(
+                    "permission",
+                    bool(display_settings.auto_approve_permission_requests),
                 )
-                hint_parts.append(f"权限确认 {permission_state}")
-            self._state_hint_label.configure(
-                text=" | ".join(hint_parts),
-                text_color=COLORS["muted"] if status.hook_registered else COLORS["muted_soft"],
-            )
 
             self._refreshing = True
             try:
@@ -282,13 +305,14 @@ class AutoContinueControl(ctk.CTkFrame):
                     self._auto_continue_switch,
                     self._training_auto_continue_switch,
                     self._git_snapshot_switch,
-                    self._git_snapshot_on_start_switch,
-                    self._git_snapshot_on_recovery_switch,
                     self._error_recovery_switch,
                     self._permission_auto_approve_switch,
                 ]:
                     if switch is not None:
                         switch.configure(state="normal")
+                git_trigger_state = "normal" if display_settings.git_auto_snapshot else "disabled"
+                self._git_snapshot_on_start_switch.configure(state=git_trigger_state)
+                self._git_snapshot_on_recovery_switch.configure(state=git_trigger_state)
             finally:
                 self._refreshing = False
 
@@ -302,7 +326,7 @@ class AutoContinueControl(ctk.CTkFrame):
 
             if settings:
                 info_lines.append(
-                    f"自动续跑: {'ON' if settings.enabled else 'OFF'} / "
+                    f"Stop续跑: {'ON' if settings.enabled else 'OFF'} / "
                     f"最大 {settings.max_continuations} / 保守 {'ON' if settings.conservative_mode else 'OFF'}"
                 )
                 info_lines.append(
@@ -387,7 +411,7 @@ class AutoContinueControl(ctk.CTkFrame):
                 return
 
             self._save_settings(settings)
-            show_toast(self.winfo_toplevel(), "功能开关已更新")
+            show_toast(self.winfo_toplevel(), "独立开关已更新")
             self.refresh()
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"开关更新失败: {e}", is_error=True)
@@ -401,7 +425,7 @@ class AutoContinueControl(ctk.CTkFrame):
             if status.enabled:
                 # Pause
                 auto_continue_manager.pause(self.provider)
-                show_toast(self.winfo_toplevel(), f"{self.provider} 自动续跑已暂停")
+                show_toast(self.winfo_toplevel(), f"{self.provider} Stop 续跑已暂停")
             else:
                 # Enable
                 settings = auto_continue_manager.get_settings(self.provider)
@@ -410,7 +434,7 @@ class AutoContinueControl(ctk.CTkFrame):
 
                 apply_to_subagents = settings.apply_to_subagents if self.provider.lower() == "claude" else False
                 auto_continue_manager.enable(self.provider, settings, apply_to_subagents)
-                show_toast(self.winfo_toplevel(), f"{self.provider} 自动续跑已启用")
+                show_toast(self.winfo_toplevel(), f"{self.provider} Stop 续跑已启用")
 
             self.refresh()
         except Exception as e:

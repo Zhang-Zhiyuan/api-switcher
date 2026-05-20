@@ -35,13 +35,13 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         header.pack(fill="x", padx=15, pady=(15, 10))
         ctk.CTkLabel(
             header,
-            text="自动续跑设置",
+            text="自动续跑与 Hook 设置",
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
             header,
-            text="每个自动化能力都可以单独开关；保存后会立即刷新本机 hook。",
+            text="Stop 续跑、训练守护、Git 快照、API 恢复和权限自动确认分别独立控制。",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
@@ -55,10 +55,10 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         )
         scroll.pack(fill="both", expand=True, padx=15, pady=(0, 10))
 
-        self._add_section(scroll, "核心开关", "控制 Stop hook 是否拦截未完成回答并自动续跑。")
+        self._add_section(scroll, "Stop 续跑", "控制 Stop hook 是否拦截未完成回答并自动续跑。")
 
         self._enabled_var = ctk.BooleanVar(value=self.settings.enabled)
-        self._add_switch(scroll, "启用自动续跑 (Stop hook)", self._enabled_var)
+        self._add_switch(scroll, "启用 Stop 自动续跑", self._enabled_var)
 
         self._conservative_var = ctk.BooleanVar(value=self.settings.conservative_mode)
         self._add_switch(scroll, "保守模式：hook 已在续跑时允许停止", self._conservative_var)
@@ -158,7 +158,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         )
 
         if self.provider_name.lower() == "claude":
-            self._add_section(scroll, "Claude 权限确认", "自动处理 Claude Code 的 PermissionRequest / PreToolUse。")
+            self._add_section(scroll, "Claude 权限自动确认", "自动处理 Claude Code 的 PermissionRequest / PreToolUse。")
             self._permission_auto_approve_var = ctk.BooleanVar(value=self.settings.auto_approve_permission_requests)
             self._add_switch(
                 scroll,
@@ -212,10 +212,10 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._add_switch(scroll, "启用自动 Git 快照 (推荐)", self._git_auto_snapshot_var)
 
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_start)
-        self._add_switch(scroll, "手动任务/续跑时创建快照", self._git_snapshot_on_start_var, padx=(20, 0))
+        self._add_switch(scroll, "开新对话/发消息/Stop 时创建快照", self._git_snapshot_on_start_var, padx=(20, 0))
 
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_recovery)
-        self._add_switch(scroll, "错误恢复前创建快照", self._git_snapshot_on_recovery_var, padx=(20, 0))
+        self._add_switch(scroll, "API 错误恢复前创建快照", self._git_snapshot_on_recovery_var, padx=(20, 0))
 
         # Git help text
         git_help_frame = ctk.CTkFrame(scroll, fg_color="transparent")
