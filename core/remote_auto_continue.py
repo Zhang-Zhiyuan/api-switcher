@@ -563,7 +563,7 @@ def _remote_switch_baseline_settings(provider_name: str) -> AutoContinueSettings
     source = auto_continue_manager.get_settings(provider) or AutoContinueSettings()
     copied = AutoContinueSettings.from_dict(source.to_dict())
     copied.enabled = False
-    copied.git_auto_snapshot = False
+    copied.git_auto_snapshot = True
     copied.git_snapshot_on_start = True
     copied.git_snapshot_on_recovery = True
     copied.error_recovery_enabled = False

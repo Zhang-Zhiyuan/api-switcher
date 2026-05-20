@@ -31,9 +31,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_switches = []
         self._remote_auto_refreshing = False
         self._remote_auto_continue_var = ctk.BooleanVar(value=False)
-        self._remote_git_snapshot_var = ctk.BooleanVar(value=False)
-        self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=False)
-        self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=False)
+        self._remote_git_snapshot_var = ctk.BooleanVar(value=True)
+        self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=True)
+        self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
         self._remote_error_recovery_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_switch = None

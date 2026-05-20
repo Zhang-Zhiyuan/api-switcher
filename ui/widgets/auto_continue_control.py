@@ -100,7 +100,7 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._auto_continue_switch.pack(side="left", padx=(0, 12))
 
-        self._git_snapshot_var = ctk.BooleanVar(value=False)
+        self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
             quick,
             text="Git快照",
@@ -148,7 +148,7 @@ class AutoContinueControl(ctk.CTkFrame):
             font=font(12),
         ).pack(side="left", padx=(0, 10))
 
-        self._git_snapshot_on_start_var = ctk.BooleanVar(value=False)
+        self._git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_start_switch = ctk.CTkSwitch(
             detail,
             text="\u624b\u52a8/\u7eed\u8dd1\u65f6",
@@ -160,7 +160,7 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._git_snapshot_on_start_switch.pack(side="left", padx=(0, 12))
 
-        self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=False)
+        self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_recovery_switch = ctk.CTkSwitch(
             detail,
             text="API \u6062\u590d\u65f6",
@@ -198,14 +198,15 @@ class AutoContinueControl(ctk.CTkFrame):
 
             self._refreshing = True
             try:
-                self._auto_continue_var.set(bool(settings and settings.enabled))
-                self._git_snapshot_var.set(bool(settings and settings.git_auto_snapshot))
-                self._git_snapshot_on_start_var.set(bool(settings and settings.git_snapshot_on_start))
-                self._git_snapshot_on_recovery_var.set(bool(settings and settings.git_snapshot_on_recovery))
-                self._error_recovery_var.set(bool(settings and settings.error_recovery_enabled))
+                display_settings = settings or AutoContinueSettings()
+                self._auto_continue_var.set(bool(display_settings.enabled))
+                self._git_snapshot_var.set(bool(display_settings.git_auto_snapshot))
+                self._git_snapshot_on_start_var.set(bool(display_settings.git_snapshot_on_start))
+                self._git_snapshot_on_recovery_var.set(bool(display_settings.git_snapshot_on_recovery))
+                self._error_recovery_var.set(bool(display_settings.error_recovery_enabled))
                 if self._permission_auto_approve_var is not None:
                     self._permission_auto_approve_var.set(
-                        bool(settings and settings.auto_approve_permission_requests)
+                        bool(display_settings.auto_approve_permission_requests)
                     )
                 for switch in [
                     self._auto_continue_switch,

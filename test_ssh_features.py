@@ -1399,7 +1399,7 @@ def test_update_remote_codex_error_recovery_switch_registers_error_hook(monkeypa
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
 
 
-def test_update_remote_switch_without_remote_settings_starts_from_neutral_baseline(monkeypatch):
+def test_update_remote_switch_without_remote_settings_keeps_git_snapshot_on_by_default(monkeypatch):
     from models.auto_continue import AutoContinueSettings
 
     sftp = _FakeSFTP()
@@ -1440,12 +1440,17 @@ def test_update_remote_switch_without_remote_settings_starts_from_neutral_baseli
     )
 
     settings = json.loads(sftp.files[paths.settings_path].decode("utf-8"))
+    hooks = json.loads(sftp.files[paths.codex_hooks_path].decode("utf-8"))
 
     assert settings["enabled"] is False
-    assert settings["git_auto_snapshot"] is False
+    assert settings["git_auto_snapshot"] is True
     assert settings["git_snapshot_on_start"] is True
     assert settings["error_recovery_enabled"] is True
-    assert runtime_checks == [False]
+    assert runtime_checks == [True]
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit"))
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart"))
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Error"))
 
 
 def test_remote_claude_permission_only_registers_permission_hooks_without_stop():
