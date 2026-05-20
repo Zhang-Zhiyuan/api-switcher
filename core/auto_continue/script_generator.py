@@ -3,7 +3,11 @@ Enhanced PowerShell hook script generator with robust error handling.
 """
 
 from core.auto_continue.error_patterns import RECOVERABLE_API_ERROR_PATTERNS
-from models.auto_continue import DEFAULT_TRAINING_COMPLETION_PATTERNS
+from models.auto_continue import (
+    DEFAULT_TRAINING_COMPLETION_PATTERNS,
+    DEFAULT_TRAINING_CONTEXT_PATTERNS,
+    DEFAULT_TRAINING_SKIP_PATTERNS,
+)
 
 
 def _powershell_array(values: list[str], indent: int = 12) -> str:
@@ -785,7 +789,9 @@ try {{
         $recoverableApiErrorMatch = Find-MatchingRegex -Text $lastMessage -Patterns $recoverableApiErrorPatterns
         $isRecoverableApiError = $null -ne $recoverableApiErrorMatch
 
+        $trainingGuardApplies = $false
         $trainingTargetMetMatch = $null
+        $trainingContextMatch = $null
         if ($trainingAutoContinueEnabled) {{
             $trainingCompletionPatterns = @(
 {_powershell_array(DEFAULT_TRAINING_COMPLETION_PATTERNS, 16)}
@@ -808,6 +814,34 @@ try {{
                     -Count $count
                 exit 0
             }}
+
+            $trainingSkipPatterns = @(
+{_powershell_array(DEFAULT_TRAINING_SKIP_PATTERNS, 16)}
+            )
+            $trainingSkipMatch = Find-MatchingRegex -Text $lastMessage -Patterns $trainingSkipPatterns
+            if ($null -ne $trainingSkipMatch) {{
+                if ($state.ContainsKey($stateKey)) {{
+                    $state.Remove($stateKey)
+                    Save-StateFile -Path $statePath -State $state | Out-Null
+                }}
+                Write-DecisionLog `
+                    -StateDir $stateDir `
+                    -SessionId $sessionId `
+                    -HookEvent $hookEvent `
+                    -AgentId $agentId `
+                    -Decision "allow_stop" `
+                    -Reason "training_not_applicable" `
+                    -Match $trainingSkipMatch `
+                    -Message $lastMessage `
+                    -Count $count
+                exit 0
+            }}
+
+            $trainingContextPatterns = @(
+{_powershell_array(DEFAULT_TRAINING_CONTEXT_PATTERNS, 16)}
+            )
+            $trainingContextMatch = Find-MatchingRegex -Text $lastMessage -Patterns $trainingContextPatterns
+            $trainingGuardApplies = $null -ne $trainingContextMatch
         }}
 
         $blockerMatch = Find-MatchingRegex -Text $lastMessage -Patterns $settings.blocker_patterns
@@ -826,25 +860,28 @@ try {{
         }}
 
         $incompleteMatch = Find-MatchingRegex -Text $lastMessage -Patterns $settings.incomplete_patterns
-        if ($null -eq $incompleteMatch -and -not $isRecoverableApiError -and -not $trainingAutoContinueEnabled) {{
+        $genericContinueMatch = $autoContinueEnabled -and ($null -ne $incompleteMatch)
+        $shouldContinue = $isRecoverableApiError -or $trainingGuardApplies -or $genericContinueMatch
+        if (-not $shouldContinue) {{
             if ($state.ContainsKey($stateKey)) {{
                 $state.Remove($stateKey)
                 Save-StateFile -Path $statePath -State $state | Out-Null
             }}
+            $allowReason = if ($trainingAutoContinueEnabled -and -not $autoContinueEnabled) {{ "training_context_not_detected" }} else {{ "no_incomplete_match" }}
             Write-DecisionLog `
                 -StateDir $stateDir `
                 -SessionId $sessionId `
                 -HookEvent $hookEvent `
                 -AgentId $agentId `
                 -Decision "allow_stop" `
-                -Reason "no_incomplete_match" `
+                -Reason $allowReason `
                 -Match "" `
                 -Message $lastMessage `
                 -Count $count
             exit 0
         }}
 
-        $matchedPattern = if ($isRecoverableApiError) {{ $recoverableApiErrorMatch }} elseif ($trainingAutoContinueEnabled) {{ "training_auto_continue_enabled" }} else {{ $incompleteMatch }}
+        $matchedPattern = if ($isRecoverableApiError) {{ $recoverableApiErrorMatch }} elseif ($trainingGuardApplies) {{ $trainingContextMatch }} else {{ $incompleteMatch }}
 
         # Check max continuations after confirming this stop actually needs continuation.
         if ($settings.max_continuations -ge 0 -and $count -ge $settings.max_continuations) {{
@@ -867,7 +904,7 @@ try {{
 
         Save-StateFile -Path $statePath -State $state | Out-Null
 
-        $continuationPrompt = if ($trainingAutoContinueEnabled -and -not $isRecoverableApiError) {{
+        $continuationPrompt = if ($trainingGuardApplies -and -not $isRecoverableApiError) {{
             Get-TrainingContinuationPrompt -Settings $settings
         }} else {{
             [string]$settings.continuation_prompt
@@ -876,7 +913,7 @@ try {{
             $continuationPrompt = "Please continue from where you left off. Complete any remaining work."
         }}
 
-        $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} elseif ($trainingAutoContinueEnabled) {{ "training_guard_continue" }} else {{ "incomplete_work_detected" }}
+        $continueReason = if ($isRecoverableApiError) {{ "recoverable_api_error_detected" }} elseif ($trainingGuardApplies) {{ "training_guard_continue" }} else {{ "incomplete_work_detected" }}
 
         Write-DecisionLog `
             -StateDir $stateDir `

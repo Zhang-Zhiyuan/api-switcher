@@ -26,7 +26,9 @@ from core.ssh_manager import ssh_manager
 from models.auto_continue import (
     AutoContinueSettings,
     DEFAULT_TRAINING_COMPLETION_PATTERNS,
+    DEFAULT_TRAINING_CONTEXT_PATTERNS,
     DEFAULT_TRAINING_CONTINUE_PROMPT,
+    DEFAULT_TRAINING_SKIP_PATTERNS,
 )
 
 logger = logging.getLogger(__name__)
@@ -787,6 +789,8 @@ DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "
 PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}
 STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}
 TRAINING_COMPLETION_PATTERNS = __TRAINING_COMPLETION_PATTERNS__
+TRAINING_SKIP_PATTERNS = __TRAINING_SKIP_PATTERNS__
+TRAINING_CONTEXT_PATTERNS = __TRAINING_CONTEXT_PATTERNS__
 DEFAULT_TRAINING_CONTINUE_PROMPT = __DEFAULT_TRAINING_CONTINUE_PROMPT__
 
 
@@ -1637,6 +1641,8 @@ def main():
     recoverable_api_error_match = matching_pattern(RECOVERABLE_API_ERROR_PATTERNS, last_message)
     recoverable_api_error = bool(recoverable_api_error_match)
 
+    training_guard_applies = False
+    training_context_match = ""
     if training_auto_continue_enabled:
         training_target_met_match = matching_pattern(TRAINING_COMPLETION_PATTERNS, last_message)
         if training_target_met_match:
@@ -1656,6 +1662,27 @@ def main():
             )
             return
 
+        training_skip_match = matching_pattern(TRAINING_SKIP_PATTERNS, last_message)
+        if training_skip_match:
+            state = load_state(state_path)
+            if state_key in state:
+                state.pop(state_key, None)
+                save_state(state_path, state)
+            write_decision_log(
+                log_path,
+                session_id,
+                hook_event,
+                agent_id,
+                "allow_stop",
+                "training_not_applicable",
+                training_skip_match,
+                last_message,
+            )
+            return
+
+        training_context_match = matching_pattern(TRAINING_CONTEXT_PATTERNS, last_message)
+        training_guard_applies = bool(training_context_match)
+
     blocker_match = matching_pattern(settings.get("blocker_patterns"), last_message)
     if blocker_match and not recoverable_api_error:
         write_decision_log(
@@ -1671,18 +1698,25 @@ def main():
         return
 
     incomplete_match = matching_pattern(settings.get("incomplete_patterns"), last_message)
-    if not incomplete_match and not recoverable_api_error and not training_auto_continue_enabled:
+    generic_continue_match = bool(auto_continue_enabled and incomplete_match)
+    should_continue = recoverable_api_error or training_guard_applies or generic_continue_match
+    if not should_continue:
         state = load_state(state_path)
         if state_key in state:
             state.pop(state_key, None)
             save_state(state_path, state)
+        allow_reason = (
+            "training_context_not_detected"
+            if training_auto_continue_enabled and not auto_continue_enabled
+            else "no_incomplete_match"
+        )
         write_decision_log(
             log_path,
             session_id,
             hook_event,
             agent_id,
             "allow_stop",
-            "no_incomplete_match",
+            allow_reason,
             "",
             last_message,
         )
@@ -1691,8 +1725,8 @@ def main():
     matched_pattern = (
         recoverable_api_error_match
         if recoverable_api_error
-        else "training_auto_continue_enabled"
-        if training_auto_continue_enabled
+        else training_context_match
+        if training_guard_applies
         else incomplete_match
     )
 
@@ -1736,7 +1770,7 @@ def main():
         state[state_key] = count
         save_state(state_path, state)
 
-        if training_auto_continue_enabled and not recoverable_api_error:
+        if training_guard_applies and not recoverable_api_error:
             continuation_prompt = training_continue_prompt(settings)
         else:
             continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
@@ -1744,7 +1778,7 @@ def main():
             "recoverable_api_error_detected"
             if recoverable_api_error
             else "training_guard_continue"
-            if training_auto_continue_enabled
+            if training_guard_applies
             else "incomplete_work_detected"
         )
         write_decision_log(
@@ -1804,6 +1838,14 @@ exit 0
     body = body.replace(
         "__TRAINING_COMPLETION_PATTERNS__",
         _python_literal_list(DEFAULT_TRAINING_COMPLETION_PATTERNS),
+    )
+    body = body.replace(
+        "__TRAINING_SKIP_PATTERNS__",
+        _python_literal_list(DEFAULT_TRAINING_SKIP_PATTERNS),
+    )
+    body = body.replace(
+        "__TRAINING_CONTEXT_PATTERNS__",
+        _python_literal_list(DEFAULT_TRAINING_CONTEXT_PATTERNS),
     )
     body = body.replace(
         "__DEFAULT_TRAINING_CONTINUE_PROMPT__",

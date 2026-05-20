@@ -731,6 +731,14 @@ def test_remote_training_guard_continues_independently_and_stops_when_target_met
             check=False,
         )
 
+    non_training_result = run_hook("Completed docs cleanup and tests pass.")
+    assert non_training_result.returncode == 0, non_training_result.stderr
+    assert non_training_result.stdout.strip() == ""
+
+    skip_result = run_hook("TRAINING_NOT_APPLICABLE: this is not a training task.")
+    assert skip_result.returncode == 0, skip_result.stderr
+    assert skip_result.stdout.strip() == ""
+
     continue_result = run_hook("Current eval: AUC=0.87, F1=0.82.")
     assert continue_result.returncode == 0, continue_result.stderr
     output = json.loads(continue_result.stdout)
@@ -743,6 +751,8 @@ def test_remote_training_guard_continues_independently_and_stops_when_target_met
     assert stop_result.stdout.strip() == ""
 
     log_text = (state_dir / "auto_continue_stop_log.jsonl").read_text(encoding="utf-8")
+    assert "training_context_not_detected" in log_text
+    assert "training_not_applicable" in log_text
     assert "training_guard_continue" in log_text
     assert "training_target_met" in log_text
 
@@ -1317,6 +1327,14 @@ def test_local_training_guard_continues_independently_and_stops_when_target_met(
             check=False,
         )
 
+    non_training_result = run_hook("Completed docs cleanup and tests pass.")
+    assert non_training_result.returncode == 0, non_training_result.stderr
+    assert non_training_result.stdout.strip() == ""
+
+    skip_result = run_hook("TRAINING_NOT_APPLICABLE: this is not a training task.")
+    assert skip_result.returncode == 0, skip_result.stderr
+    assert skip_result.stdout.strip() == ""
+
     continue_result = run_hook("Finished epoch 8. Current val_acc is 0.91, loss is 0.28.")
     assert continue_result.returncode == 0, continue_result.stderr
     output = json.loads(continue_result.stdout)
@@ -1329,6 +1347,8 @@ def test_local_training_guard_continues_independently_and_stops_when_target_met(
     assert stop_result.stdout.strip() == ""
 
     log_text = (tmp_path / "tmp" / "auto_continue_stop_log.jsonl").read_text(encoding="utf-8")
+    assert "training_context_not_detected" in log_text
+    assert "training_not_applicable" in log_text
     assert "training_guard_continue" in log_text
     assert "training_target_met" in log_text
 

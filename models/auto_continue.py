@@ -137,6 +137,32 @@ DEFAULT_TRAINING_COMPLETION_PATTERNS = [
     r"\u8bc4\u4f30\u7ed3\u679c\u5df2\u8fbe\u6807",
     r"(\u51c6\u786e\u7387|\u7cbe\u5ea6|\u53ec\u56de\u7387|F1|loss|AUC).{0,80}(\u8fbe\u6807|\u8fbe\u5230\u8981\u6c42|\u6ee1\u8db3\u8981\u6c42)",
 ]
+DEFAULT_TRAINING_SKIP_PATTERNS = [
+    r"(?i)\bTRAINING_NOT_APPLICABLE\b",
+    r"(?i)\bNOT_A_TRAINING_TASK\b",
+    r"(?i)\b(no|not a|not an)\s+(training|model training|deep learning)\s+(task|job|project)\b",
+    r"(?i)\btraining\s+(guard|auto-continue)\s+(not applicable|does not apply)\b",
+    r"\u5f53\u524d\u4e0d\u662f.{0,40}(\u8bad\u7ec3|\u6a21\u578b|\u6df1\u5ea6\u5b66\u4e60).{0,40}(\u4efb\u52a1|\u9879\u76ee)",
+    r"\u4e0d\u662f.{0,40}(\u8bad\u7ec3|\u6a21\u578b|\u6df1\u5ea6\u5b66\u4e60).{0,40}(\u4efb\u52a1|\u9879\u76ee)",
+    r"\u6ca1\u6709.{0,40}(\u8bad\u7ec3|\u6a21\u578b|\u8bc4\u4f30).{0,40}(\u4efb\u52a1|\u7ed3\u679c|\u4e0a\u4e0b\u6587)",
+    r"\u65e0.{0,20}(\u8bad\u7ec3|\u6a21\u578b\u8bad\u7ec3|\u6df1\u5ea6\u5b66\u4e60).{0,20}(\u4efb\u52a1|\u9879\u76ee)",
+    r"\u8bad\u7ec3\u7eed\u8dd1\u4e0d\u9002\u7528",
+]
+DEFAULT_TRAINING_CONTEXT_PATTERNS = [
+    r"(?i)\b(train|training|trained|fine[- ]?tune|finetune|finetuning|epoch|epochs)\b",
+    r"(?i)\b(eval|evaluation|evaluate|validation|validating|val[_ -]?acc|val[_ -]?loss|test set|dev set|holdout)\b",
+    r"(?i)\b(accuracy|acc|loss|auc|f1|precision|recall|mae|mse|rmse|bleu|rouge|perplexity|metric|metrics)\b",
+    r"(?i)\b(checkpoint|ckpt|weights|model artifact|model output|best model|early stopping)\b",
+    r"(?i)\b(dataset|dataloader|batch size|learning rate|lr|optimizer|scheduler|gradient|overfit|underfit)\b",
+    r"(?i)\b(wandb|tensorboard|mlflow|huggingface|pytorch|tensorflow|keras|sklearn|xgboost|lightgbm)\b",
+    r"(?i)\b(model|classifier|regressor|network|nn|llm)\b.{0,80}\b(train|training|fine[- ]?tune|eval|evaluation|metric|accuracy|loss|checkpoint|weights)\b",
+    r"(?i)\b(train|training|fine[- ]?tune|eval|evaluation|metric|accuracy|loss|checkpoint|weights)\b.{0,80}\b(model|classifier|regressor|network|nn|llm)\b",
+    r"\u8bad\u7ec3|\u5fae\u8c03|\u8c03\u53c2|\u8fed\u4ee3|\u8f6e\u6b21|epoch|\u6b65\u6570|\u5b66\u4e60\u7387|\u4f18\u5316\u5668",
+    r"\u8bc4\u4f30|\u9a8c\u8bc1\u96c6|\u6d4b\u8bd5\u96c6|\u6307\u6807|\u51c6\u786e\u7387|\u7cbe\u5ea6|\u53ec\u56de\u7387|\u635f\u5931|AUC|F1|loss",
+    r"\u6743\u91cd|\u68c0\u67e5\u70b9|\u6700\u4f73\u6a21\u578b|\u8fc7\u62df\u5408|\u6b20\u62df\u5408|\u6570\u636e\u96c6",
+    r"(\u6a21\u578b|\u7f51\u7edc|\u5206\u7c7b\u5668).{0,80}(\u8bad\u7ec3|\u5fae\u8c03|\u8bc4\u4f30|\u6307\u6807|\u51c6\u786e\u7387|\u635f\u5931|\u68c0\u67e5\u70b9|\u6743\u91cd)",
+    r"(\u8bad\u7ec3|\u5fae\u8c03|\u8bc4\u4f30|\u6307\u6807|\u51c6\u786e\u7387|\u635f\u5931|\u68c0\u67e5\u70b9|\u6743\u91cd).{0,80}(\u6a21\u578b|\u7f51\u7edc|\u5206\u7c7b\u5668)",
+]
 BOOL_SETTING_FIELDS = {
     "enabled",
     "apply_to_subagents",
