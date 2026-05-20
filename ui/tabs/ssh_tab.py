@@ -28,6 +28,16 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_feature_label = None
         self._remote_auto_status_label = None
         self._remote_auto_buttons = []
+        self._remote_auto_switches = []
+        self._remote_auto_refreshing = False
+        self._remote_auto_continue_var = ctk.BooleanVar(value=False)
+        self._remote_git_snapshot_var = ctk.BooleanVar(value=False)
+        self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=False)
+        self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=False)
+        self._remote_error_recovery_var = ctk.BooleanVar(value=False)
+        self._remote_permission_auto_approve_var = ctk.BooleanVar(value=False)
+        self._remote_permission_auto_approve_switch = None
+        self._remote_auto_last_statuses = {}
         self._remote_auto_busy = False
         self._sync_kind_options = {
             "Claude API": "claude_api",
@@ -115,6 +125,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             sync_controls,
             values=["(无)"],
             width=220,
+            command=lambda _value: self._on_remote_auto_provider_change(),
             **combo_style(),
         )
         self._server_combo.grid(row=0, column=1, sticky="ew", padx=(8, 12))
@@ -270,7 +281,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             auto_controls,
             values=list(self._remote_auto_options.keys()),
             width=160,
-            command=lambda _value: self._update_remote_auto_feature_label(),
+            command=lambda _value: self._on_remote_auto_provider_change(),
             **combo_style(),
         )
         self._remote_auto_provider_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
@@ -318,6 +329,45 @@ class SSHTab(ctk.CTkScrollableFrame):
         uninstall_button.grid(row=0, column=6, sticky="e")
         self._remote_auto_buttons = [check_button, git_snapshot_button, install_button, pause_button, uninstall_button]
 
+        remote_switch_frame = ctk.CTkFrame(auto_controls, fg_color="transparent")
+        remote_switch_frame.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
+        for col in range(1, 4):
+            remote_switch_frame.grid_columnconfigure(col, weight=0)
+        ctk.CTkLabel(
+            remote_switch_frame,
+            text="\u8fdc\u7a0b\u5f00\u5173",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 10))
+
+        def add_remote_switch(text, variable, feature, row, column, color="success"):
+            switch = ctk.CTkSwitch(
+                remote_switch_frame,
+                text=text,
+                variable=variable,
+                command=lambda: self._toggle_remote_auto_feature(feature),
+                text_color=COLORS["text"],
+                progress_color=COLORS[color],
+                button_color=COLORS["text"],
+            )
+            switch.grid(row=row, column=column, sticky="w", padx=(0, 14), pady=2)
+            self._remote_auto_switches.append(switch)
+            return switch
+
+        add_remote_switch("\u81ea\u52a8\u7eed\u8dd1", self._remote_auto_continue_var, "auto_continue", 0, 1)
+        add_remote_switch("Git", self._remote_git_snapshot_var, "git_snapshot", 0, 2)
+        add_remote_switch("API\u6062\u590d", self._remote_error_recovery_var, "error_recovery", 0, 3)
+        add_remote_switch("\u7eed\u8dd1\u5feb\u7167", self._remote_git_snapshot_on_start_var, "git_snapshot_on_start", 1, 1)
+        add_remote_switch("\u6062\u590d\u5feb\u7167", self._remote_git_snapshot_on_recovery_var, "git_snapshot_on_recovery", 1, 2)
+        self._remote_permission_auto_approve_switch = add_remote_switch(
+            "\u6743\u9650\u786e\u8ba4",
+            self._remote_permission_auto_approve_var,
+            "permission_auto_approve",
+            1,
+            3,
+            color="warning",
+        )
+
         self._remote_auto_feature_label = ctk.CTkLabel(
             auto_controls,
             text="",
@@ -326,7 +376,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_feature_label.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(10, 0))
+        self._remote_auto_feature_label.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(10, 0))
         bind_wraplength(auto_controls, self._remote_auto_feature_label, padding=20)
 
         self._remote_auto_status_label = ctk.CTkLabel(
@@ -337,7 +387,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_status_label.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(8, 0))
+        self._remote_auto_status_label.grid(row=3, column=0, columnspan=7, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
@@ -470,6 +520,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._server_combo.set("(无)")
         self._refresh_sync_profile_combo()
         self._update_remote_auto_feature_label()
+        self._refresh_remote_auto_switch_availability()
+        if not server_names:
+            self._set_remote_auto_status("\u8bf7\u5148\u6dfb\u52a0\u5e76\u9009\u62e9 SSH \u670d\u52a1\u5668", severity="warning")
 
     def _create_server(self):
         def on_save(profile, _):
@@ -575,6 +628,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _sync_current(self):
         server_name = self._server_combo.get()
+        if not self._has_selected_server():
+            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
+            return
         if server_name == "(无)":
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
@@ -624,7 +680,11 @@ class SSHTab(ctk.CTkScrollableFrame):
                 feature_parts.append(f"Subagent {'ON' if settings.apply_to_subagents else 'OFF'}")
             parts.append(f"{label}: " + " / ".join(feature_parts))
         self._remote_auto_feature_label.configure(
-            text="远端安装/修复会同步这些本机开关：" + " | ".join(parts)
+            text=(
+                "\u5b89\u88c5/\u4fee\u590d\u4f1a\u540c\u6b65\u672c\u673a\u6a21\u677f\uff1b"
+                "\u4e0a\u65b9\u8fdc\u7a0b\u5f00\u5173\u4f1a\u76f4\u63a5\u5199\u5165\u5df2\u9009 SSH \u670d\u52a1\u5668\u3002"
+                + " | ".join(parts)
+            )
         )
 
     def _update_codex_wire_hint(self):
@@ -661,6 +721,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _sync_selected(self):
         server_name = self._server_combo.get()
+        if not self._has_selected_server():
+            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
+            return
         if server_name == "(无)":
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
@@ -697,6 +760,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _clear_remote_api_info(self):
         server_name = self._server_combo.get()
+        if not self._has_selected_server():
+            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
+            return
         if server_name == "(无)":
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
@@ -729,8 +795,116 @@ class SSHTab(ctk.CTkScrollableFrame):
             return ["claude", "codex"]
         return [selected]
 
+    def _has_selected_server(self) -> bool:
+        if not self._server_combo:
+            return False
+        server_name = str(self._server_combo.get() or "").strip()
+        return bool(server_name) and not (server_name.startswith("(") and server_name.endswith(")"))
+
+    def _on_remote_auto_provider_change(self):
+        self._update_remote_auto_feature_label()
+        cached = self._cached_remote_auto_statuses_for_selection()
+        if cached:
+            self._refresh_remote_auto_switches_from_statuses(cached)
+        else:
+            self._refresh_remote_auto_switch_availability()
+
+    def _cached_remote_auto_statuses_for_selection(self):
+        if not self._server_combo:
+            return []
+        server_name = self._server_combo.get()
+        targets = self._selected_remote_auto_targets()
+        statuses = []
+        for provider in targets:
+            status = self._remote_auto_last_statuses.get((server_name, provider))
+            if not status:
+                return []
+            statuses.append(status)
+        return statuses
+
+    def _refresh_remote_auto_switch_availability(self):
+        action_state = "normal" if self._has_selected_server() and not self._remote_auto_busy else "disabled"
+        for button in self._remote_auto_buttons:
+            try:
+                button.configure(state=action_state)
+            except Exception:
+                pass
+        for switch in self._remote_auto_switches:
+            try:
+                switch.configure(state=action_state)
+            except Exception:
+                pass
+        targets = self._selected_remote_auto_targets()
+        permission_state = action_state if "claude" in targets else "disabled"
+        if self._remote_permission_auto_approve_switch:
+            try:
+                self._remote_permission_auto_approve_switch.configure(state=permission_state)
+            except Exception:
+                pass
+        if "claude" not in targets and not self._remote_auto_refreshing:
+            self._remote_permission_auto_approve_var.set(False)
+
+    def _remote_auto_statuses_cover_selection(self, statuses) -> bool:
+        if not statuses:
+            return False
+        selected_targets = set(self._selected_remote_auto_targets())
+        status_targets = {status.provider_name for status in statuses}
+        return selected_targets.issubset(status_targets)
+
+    def _remote_auto_var_for_feature(self, feature: str):
+        return {
+            "auto_continue": self._remote_auto_continue_var,
+            "git_snapshot": self._remote_git_snapshot_var,
+            "git_snapshot_on_start": self._remote_git_snapshot_on_start_var,
+            "git_snapshot_on_recovery": self._remote_git_snapshot_on_recovery_var,
+            "error_recovery": self._remote_error_recovery_var,
+            "permission_auto_approve": self._remote_permission_auto_approve_var,
+        }.get(feature)
+
+    def _set_remote_auto_feature_var(self, feature: str, value: bool):
+        var = self._remote_auto_var_for_feature(feature)
+        if not var:
+            return
+        self._remote_auto_refreshing = True
+        try:
+            var.set(bool(value))
+        finally:
+            self._remote_auto_refreshing = False
+
+    def _refresh_remote_auto_switches_from_statuses(self, statuses):
+        if not statuses:
+            self._refresh_remote_auto_switch_availability()
+            return
+
+        if not self._remote_auto_statuses_cover_selection(statuses):
+            self._refresh_remote_auto_switch_availability()
+            return
+
+        claude_statuses = [status for status in statuses if status.provider_name == "claude"]
+
+        def all_enabled(attr: str) -> bool:
+            return bool(statuses) and all(bool(getattr(status, attr, False)) for status in statuses)
+
+        self._remote_auto_refreshing = True
+        try:
+            self._remote_auto_continue_var.set(all_enabled("enabled"))
+            self._remote_git_snapshot_var.set(all_enabled("git_snapshot_master_enabled"))
+            self._remote_git_snapshot_on_start_var.set(all_enabled("git_snapshot_on_start_enabled"))
+            self._remote_git_snapshot_on_recovery_var.set(all_enabled("git_snapshot_on_recovery_enabled"))
+            self._remote_error_recovery_var.set(all_enabled("error_recovery_enabled"))
+            self._remote_permission_auto_approve_var.set(
+                bool(claude_statuses)
+                and all(bool(status.permission_auto_approve_enabled) for status in claude_statuses)
+            )
+        finally:
+            self._remote_auto_refreshing = False
+        self._refresh_remote_auto_switch_availability()
+
     def _selected_server_name(self) -> str | None:
         server_name = self._server_combo.get()
+        if not self._has_selected_server():
+            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
+            return None
         if server_name == "(无)":
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return None
@@ -750,17 +924,13 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _set_remote_auto_busy(self, busy: bool, message: str | None = None):
         self._remote_auto_busy = busy
-        state = "disabled" if busy else "normal"
-        for button in self._remote_auto_buttons:
-            try:
-                button.configure(state=state)
-            except Exception:
-                pass
         if self._remote_auto_provider_combo:
             try:
+                state = "disabled" if busy else "normal"
                 self._remote_auto_provider_combo.configure(state=state)
             except Exception:
                 pass
+        self._refresh_remote_auto_switch_availability()
         if message:
             self._set_remote_auto_status(message)
 
@@ -818,10 +988,95 @@ class SSHTab(ctk.CTkScrollableFrame):
         has_not_ready = expect_ready and any(not status.ready for status in statuses)
         severity = "error" if failures else "warning" if has_not_ready else "info"
         self._set_remote_auto_status(message, severity=severity)
+        if self._server_combo:
+            server_name = self._server_combo.get()
+            for status in statuses:
+                self._remote_auto_last_statuses[(server_name, status.provider_name)] = status
+        self._refresh_remote_auto_switches_from_statuses(statuses)
         toast_message = " | ".join(results)
         if failures:
             toast_message = (toast_message + " | " if toast_message else "") + "失败: " + "；".join(failures)
         show_toast(self.winfo_toplevel(), toast_message or default_message, is_error=bool(failures))
+
+    def _toggle_remote_auto_feature(self, feature: str):
+        if self._remote_auto_refreshing:
+            return
+
+        server_name = self._selected_server_name()
+        if not server_name:
+            self._refresh_remote_auto_switch_availability()
+            return
+
+        targets = self._selected_remote_auto_targets()
+        value_by_feature = {
+            "auto_continue": bool(self._remote_auto_continue_var.get()),
+            "git_snapshot": bool(self._remote_git_snapshot_var.get()),
+            "git_snapshot_on_start": bool(self._remote_git_snapshot_on_start_var.get()),
+            "git_snapshot_on_recovery": bool(self._remote_git_snapshot_on_recovery_var.get()),
+            "error_recovery": bool(self._remote_error_recovery_var.get()),
+            "permission_auto_approve": bool(self._remote_permission_auto_approve_var.get()),
+        }
+        field_by_feature = {
+            "auto_continue": "enabled",
+            "git_snapshot": "git_auto_snapshot",
+            "git_snapshot_on_start": "git_snapshot_on_start",
+            "git_snapshot_on_recovery": "git_snapshot_on_recovery",
+            "error_recovery": "error_recovery_enabled",
+            "permission_auto_approve": "auto_approve_permission_requests",
+        }
+        if feature not in field_by_feature:
+            return
+
+        update_value = value_by_feature[feature]
+        previous_value = not update_value
+        update_field = field_by_feature[feature]
+        active_targets = [
+            provider for provider in targets
+            if feature != "permission_auto_approve" or provider == "claude"
+        ]
+        if not active_targets:
+            show_toast(self.winfo_toplevel(), "\u6743\u9650\u81ea\u52a8\u786e\u8ba4\u53ea\u9002\u7528\u4e8e Claude", is_error=True)
+            self._refresh_remote_auto_switch_availability()
+            return
+
+        def worker():
+            results = []
+            failures = []
+            updates = {update_field: update_value}
+            for provider in active_targets:
+                try:
+                    results.append(
+                        remote_auto_continue.update_remote_auto_continue_settings(
+                            server_name,
+                            provider,
+                            updates,
+                        )
+                    )
+                except Exception as e:
+                    failures.append(f"{provider}: {e}")
+            statuses, status_failures = self._collect_remote_auto_statuses(server_name, targets)
+            failures.extend(status_failures)
+            return {"statuses": statuses, "failures": failures, "results": results}
+
+        self._run_remote_auto_task(
+            f"\u6b63\u5728\u66f4\u65b0 {server_name} \u7684\u8fdc\u7a0b\u81ea\u52a8\u7eed\u8dd1\u5f00\u5173...",
+            worker,
+            lambda payload: self._finish_remote_auto_toggle(
+                payload,
+                feature,
+                previous_value,
+            ),
+        )
+
+    def _finish_remote_auto_toggle(self, payload, feature: str, previous_value: bool):
+        self._show_remote_auto_result(payload, "\u8fdc\u7a0b\u5f00\u5173\u5df2\u66f4\u65b0", expect_ready=False)
+        if payload.get("failures") and not self._remote_auto_statuses_cover_selection(payload.get("statuses", [])):
+            cached = self._cached_remote_auto_statuses_for_selection()
+            if cached:
+                self._refresh_remote_auto_switches_from_statuses(cached)
+            else:
+                self._set_remote_auto_feature_var(feature, previous_value)
+                self._refresh_remote_auto_switch_availability()
 
     def _check_remote_auto_continue(self):
         server_name = self._selected_server_name()
@@ -951,6 +1206,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _pull_from_server(self):
         server_name = self._server_combo.get()
+        if not self._has_selected_server():
+            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
+            return
         if server_name == "(无)":
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return

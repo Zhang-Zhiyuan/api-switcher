@@ -1315,6 +1315,210 @@ def test_remote_git_snapshot_settings_do_not_inherit_error_or_permission_hooks()
         assert resolved.auto_approve_permission_requests is False
 
 
+def test_remote_hook_requirement_covers_error_recovery_and_permission():
+    from models.auto_continue import AutoContinueSettings
+
+    assert remote_auto_continue._settings_require_remote_hook(
+        "codex",
+        AutoContinueSettings(enabled=False, git_auto_snapshot=False, error_recovery_enabled=True),
+    )
+    assert remote_auto_continue._settings_require_remote_hook(
+        "claude",
+        AutoContinueSettings(
+            enabled=False,
+            git_auto_snapshot=False,
+            auto_approve_permission_requests=True,
+        ),
+    )
+    assert not remote_auto_continue._settings_require_remote_hook(
+        "codex",
+        AutoContinueSettings(
+            enabled=False,
+            git_auto_snapshot=False,
+            auto_approve_permission_requests=True,
+        ),
+    )
+
+
+def test_update_remote_codex_error_recovery_switch_registers_error_hook(monkeypatch):
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="codex",
+        config_dir="/home/test/.codex",
+        hooks_dir="/home/test/.codex/hooks",
+        settings_path="/home/test/.codex/auto_continue_settings.json",
+        script_path="/home/test/.codex/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.codex/tmp",
+        guidance_path="/home/test/.codex/AGENTS.md",
+        provider_config_path="/home/test/.codex/config.toml",
+        permission_rules_path="/home/test/.codex/auto_continue_permission_rules.json",
+        codex_hooks_path="/home/test/.codex/hooks.json",
+    )
+    sftp.files[paths.settings_path] = json.dumps(
+        AutoContinueSettings(
+            enabled=False,
+            git_auto_snapshot=False,
+            git_snapshot_on_start=False,
+            error_recovery_enabled=False,
+        ).to_dict()
+    ).encode("utf-8")
+    runtime_checks = []
+
+    monkeypatch.setattr(remote_auto_continue, "_connect", lambda ssh_name: (SSHProfile(name="remote", host="host"), client))
+    monkeypatch.setattr(remote_auto_continue, "_paths", lambda _client, _profile, _provider: paths)
+    monkeypatch.setattr(
+        remote_auto_continue,
+        "_ensure_remote_runtime",
+        lambda _client, _profile, require_git=False: runtime_checks.append(require_git) or {},
+    )
+
+    remote_auto_continue.update_remote_auto_continue_settings(
+        "remote",
+        "codex",
+        {"error_recovery_enabled": True},
+    )
+
+    settings = json.loads(sftp.files[paths.settings_path].decode("utf-8"))
+    hooks = json.loads(sftp.files[paths.codex_hooks_path].decode("utf-8"))
+
+    assert settings["error_recovery_enabled"] is True
+    assert runtime_checks == [False]
+    assert sftp.files[paths.script_path].startswith(b"#!/bin/sh")
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Error"))
+    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
+
+
+def test_update_remote_switch_without_remote_settings_starts_from_neutral_baseline(monkeypatch):
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="codex",
+        config_dir="/home/test/.codex",
+        hooks_dir="/home/test/.codex/hooks",
+        settings_path="/home/test/.codex/auto_continue_settings.json",
+        script_path="/home/test/.codex/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.codex/tmp",
+        guidance_path="/home/test/.codex/AGENTS.md",
+        provider_config_path="/home/test/.codex/config.toml",
+        permission_rules_path="/home/test/.codex/auto_continue_permission_rules.json",
+        codex_hooks_path="/home/test/.codex/hooks.json",
+    )
+    local_settings = AutoContinueSettings(
+        enabled=True,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+        error_recovery_enabled=False,
+    )
+    runtime_checks = []
+
+    monkeypatch.setattr(remote_auto_continue, "_connect", lambda ssh_name: (SSHProfile(name="remote", host="host"), client))
+    monkeypatch.setattr(remote_auto_continue, "_paths", lambda _client, _profile, _provider: paths)
+    monkeypatch.setattr(remote_auto_continue.auto_continue_manager, "get_settings", lambda _provider: local_settings)
+    monkeypatch.setattr(
+        remote_auto_continue,
+        "_ensure_remote_runtime",
+        lambda _client, _profile, require_git=False: runtime_checks.append(require_git) or {},
+    )
+
+    remote_auto_continue.update_remote_auto_continue_settings(
+        "remote",
+        "codex",
+        {"error_recovery_enabled": True},
+    )
+
+    settings = json.loads(sftp.files[paths.settings_path].decode("utf-8"))
+
+    assert settings["enabled"] is False
+    assert settings["git_auto_snapshot"] is False
+    assert settings["git_snapshot_on_start"] is True
+    assert settings["error_recovery_enabled"] is True
+    assert runtime_checks == [False]
+
+
+def test_remote_claude_permission_only_registers_permission_hooks_without_stop():
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    settings_path = "/home/test/.claude/settings.json"
+    permission_rules_path = "/home/test/.claude/auto_continue_permission_rules.json"
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="claude",
+        config_dir="/home/test/.claude",
+        hooks_dir="/home/test/.claude/hooks",
+        settings_path="/home/test/.claude/auto_continue_settings.json",
+        script_path="/home/test/.claude/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.claude/tmp",
+        guidance_path="/home/test/.claude/CLAUDE.md",
+        provider_config_path=settings_path,
+        permission_rules_path=permission_rules_path,
+    )
+
+    remote_auto_continue._register_claude_hook(
+        client,
+        paths,
+        "sh /home/test/.claude/hooks/auto_continue_stop.sh",
+        True,
+        AutoContinueSettings(
+            enabled=False,
+            git_auto_snapshot=False,
+            git_snapshot_on_start=False,
+            auto_approve_permission_requests=True,
+        ),
+    )
+
+    settings = json.loads(sftp.files[settings_path].decode("utf-8"))
+
+    assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("Stop",)))
+    assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("SubagentStop",)))
+    assert list(remote_auto_continue._iter_claude_hook_commands(settings, ("PreToolUse",)))
+    assert list(remote_auto_continue._iter_claude_hook_commands(settings, ("PermissionRequest",)))
+
+
+def test_update_remote_codex_permission_switch_is_ignored(monkeypatch):
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="codex",
+        config_dir="/home/test/.codex",
+        hooks_dir="/home/test/.codex/hooks",
+        settings_path="/home/test/.codex/auto_continue_settings.json",
+        script_path="/home/test/.codex/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.codex/tmp",
+        guidance_path="/home/test/.codex/AGENTS.md",
+        provider_config_path="/home/test/.codex/config.toml",
+        permission_rules_path="/home/test/.codex/auto_continue_permission_rules.json",
+        codex_hooks_path="/home/test/.codex/hooks.json",
+    )
+    sftp.files[paths.settings_path] = json.dumps(
+        AutoContinueSettings(
+            enabled=False,
+            git_auto_snapshot=False,
+            git_snapshot_on_start=False,
+        ).to_dict()
+    ).encode("utf-8")
+
+    monkeypatch.setattr(remote_auto_continue, "_connect", lambda ssh_name: (SSHProfile(name="remote", host="host"), client))
+    monkeypatch.setattr(remote_auto_continue, "_paths", lambda _client, _profile, _provider: paths)
+
+    remote_auto_continue.update_remote_auto_continue_settings(
+        "remote",
+        "codex",
+        {"auto_approve_permission_requests": True},
+    )
+
+    settings = json.loads(sftp.files[paths.settings_path].decode("utf-8"))
+    assert settings["auto_approve_permission_requests"] is False
+    assert paths.codex_hooks_path not in sftp.files
+
+
 def test_remote_claude_auto_approve_preseeds_permission_allow_rules():
     from models.auto_continue import AutoContinueSettings
 

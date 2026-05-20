@@ -88,6 +88,18 @@ class AutoContinueControl(ctk.CTkFrame):
             font=font(12),
         ).pack(side="left", padx=(0, 10))
 
+        self._auto_continue_var = ctk.BooleanVar(value=False)
+        self._auto_continue_switch = ctk.CTkSwitch(
+            quick,
+            text="\u81ea\u52a8\u7eed\u8dd1",
+            variable=self._auto_continue_var,
+            command=lambda: self._toggle_feature("auto_continue"),
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        self._auto_continue_switch.pack(side="left", padx=(0, 12))
+
         self._git_snapshot_var = ctk.BooleanVar(value=False)
         self._git_snapshot_switch = ctk.CTkSwitch(
             quick,
@@ -127,6 +139,39 @@ class AutoContinueControl(ctk.CTkFrame):
             )
             self._permission_auto_approve_switch.pack(side="left", padx=(0, 12))
 
+        detail = ctk.CTkFrame(self, fg_color="transparent")
+        detail.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            detail,
+            text="Git \u7ec6\u9879",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(side="left", padx=(0, 10))
+
+        self._git_snapshot_on_start_var = ctk.BooleanVar(value=False)
+        self._git_snapshot_on_start_switch = ctk.CTkSwitch(
+            detail,
+            text="\u7eed\u8dd1\u65f6",
+            variable=self._git_snapshot_on_start_var,
+            command=lambda: self._toggle_feature("git_snapshot_on_start"),
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        self._git_snapshot_on_start_switch.pack(side="left", padx=(0, 12))
+
+        self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=False)
+        self._git_snapshot_on_recovery_switch = ctk.CTkSwitch(
+            detail,
+            text="API \u6062\u590d\u65f6",
+            variable=self._git_snapshot_on_recovery_var,
+            command=lambda: self._toggle_feature("git_snapshot_on_recovery"),
+            text_color=COLORS["text"],
+            progress_color=COLORS["success"],
+            button_color=COLORS["text"],
+        )
+        self._git_snapshot_on_recovery_switch.pack(side="left", padx=(0, 12))
+
         # Info display
         self._info_text = ctk.CTkTextbox(self, height=118, **textbox_style(monospace=True))
         self._info_text.pack(fill="x", padx=10, pady=(5, 8))
@@ -153,14 +198,20 @@ class AutoContinueControl(ctk.CTkFrame):
 
             self._refreshing = True
             try:
+                self._auto_continue_var.set(bool(settings and settings.enabled))
                 self._git_snapshot_var.set(bool(settings and settings.git_auto_snapshot))
+                self._git_snapshot_on_start_var.set(bool(settings and settings.git_snapshot_on_start))
+                self._git_snapshot_on_recovery_var.set(bool(settings and settings.git_snapshot_on_recovery))
                 self._error_recovery_var.set(bool(settings and settings.error_recovery_enabled))
                 if self._permission_auto_approve_var is not None:
                     self._permission_auto_approve_var.set(
                         bool(settings and settings.auto_approve_permission_requests)
                     )
                 for switch in [
+                    self._auto_continue_switch,
                     self._git_snapshot_switch,
+                    self._git_snapshot_on_start_switch,
+                    self._git_snapshot_on_recovery_switch,
                     self._error_recovery_switch,
                     self._permission_auto_approve_switch,
                 ]:
@@ -227,8 +278,25 @@ class AutoContinueControl(ctk.CTkFrame):
             return
         try:
             settings = auto_continue_manager.get_settings(self.provider) or AutoContinueSettings()
-            if feature == "git_snapshot":
+            if feature == "auto_continue":
+                if bool(self._auto_continue_var.get()):
+                    apply_to_subagents = (
+                        settings.apply_to_subagents
+                        if self.provider.lower() == "claude"
+                        else False
+                    )
+                    auto_continue_manager.enable(self.provider, settings, apply_to_subagents)
+                else:
+                    auto_continue_manager.pause(self.provider)
+                show_toast(self.winfo_toplevel(), "鍔熻兘寮€鍏冲凡鏇存柊")
+                self.refresh()
+                return
+            elif feature == "git_snapshot":
                 settings.git_auto_snapshot = self._git_snapshot_var.get()
+            elif feature == "git_snapshot_on_start":
+                settings.git_snapshot_on_start = bool(self._git_snapshot_on_start_var.get())
+            elif feature == "git_snapshot_on_recovery":
+                settings.git_snapshot_on_recovery = bool(self._git_snapshot_on_recovery_var.get())
             elif feature == "error_recovery":
                 settings.error_recovery_enabled = self._error_recovery_var.get()
             elif feature == "permission_auto_approve":

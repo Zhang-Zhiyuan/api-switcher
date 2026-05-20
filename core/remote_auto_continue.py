@@ -88,6 +88,9 @@ class RemoteAutoContinueStatus:
     guidance_installed: bool = False
     settings_valid: bool = False
     git_snapshot_enabled: bool = False
+    git_snapshot_master_enabled: bool = False
+    git_snapshot_on_start_enabled: bool = False
+    git_snapshot_on_recovery_enabled: bool = False
     permission_auto_approve_enabled: bool = False
     error_recovery_enabled: bool = False
     permission_mode: str = ""
@@ -529,6 +532,58 @@ def _load_git_snapshot_settings(provider_name: str, settings: AutoContinueSettin
     if not valid:
         raise ValueError(f"Git snapshot settings invalid: {error}")
     return copied
+
+
+def _settings_require_remote_hook(provider_name: str, settings: AutoContinueSettings | None) -> bool:
+    if not settings:
+        return False
+    provider = _normal_provider(provider_name)
+    return bool(
+        settings.enabled
+        or (settings.git_auto_snapshot and settings.git_snapshot_on_start)
+        or settings.error_recovery_enabled
+        or (provider == "claude" and settings.auto_approve_permission_requests)
+    )
+
+
+def _settings_require_remote_git(settings: AutoContinueSettings | None) -> bool:
+    if not settings:
+        return False
+    return bool(
+        settings.git_auto_snapshot
+        and (
+            settings.git_snapshot_on_start
+            or (settings.error_recovery_enabled and settings.git_snapshot_on_recovery)
+        )
+    )
+
+
+def _remote_switch_baseline_settings(provider_name: str) -> AutoContinueSettings:
+    provider = _normal_provider(provider_name)
+    source = auto_continue_manager.get_settings(provider) or AutoContinueSettings()
+    copied = AutoContinueSettings.from_dict(source.to_dict())
+    copied.enabled = False
+    copied.git_auto_snapshot = False
+    copied.git_snapshot_on_start = True
+    copied.git_snapshot_on_recovery = True
+    copied.error_recovery_enabled = False
+    copied.auto_approve_permission_requests = False
+    if provider == "codex":
+        copied.apply_to_subagents = False
+    return copied
+
+
+def _load_remote_settings_for_update(client, paths: RemoteAutoContinuePaths, provider_name: str) -> AutoContinueSettings:
+    settings = _read_json(client, paths.settings_path, default=None, strict=False)
+    if isinstance(settings, dict):
+        try:
+            parsed = AutoContinueSettings.from_dict(settings)
+            valid, _error = parsed.validate()
+            if valid:
+                return parsed
+        except Exception as e:
+            logger.warning(f"Remote auto-continue settings are invalid and will be rebuilt: {e}")
+    return _remote_switch_baseline_settings(provider_name)
 
 
 def _python_literal_list(values: list[str]) -> str:
@@ -1761,8 +1816,13 @@ def _register_claude_hook(
             filtered.append({"hooks": [hook]})
         hooks[event_name] = filtered
 
-    register_event("Stop", hook_def)
-    if apply_to_subagents:
+    needs_stop_hook = (
+        True
+        if settings_data is None
+        else bool(settings_data.enabled or (settings_data.git_auto_snapshot and settings_data.git_snapshot_on_start))
+    )
+    register_event("Stop", hook_def if needs_stop_hook else None)
+    if apply_to_subagents and needs_stop_hook:
         subagent_hook = dict(hook_def)
         subagent_hook["statusMessage"] = "Checking whether Claude subagent should continue"
         register_event("SubagentStop", subagent_hook)
@@ -2015,16 +2075,24 @@ def _register_codex_hook(
         raise RuntimeError("Codex hooks 路径缺失")
     data = _read_codex_hooks_json_for_update(client, paths.codex_hooks_path)
     hooks = _codex_hooks_container(data, migrate_legacy=True)
-    _upsert_codex_event_hook(
-        hooks,
-        "Stop",
-        {
-            "type": "command",
-            "command": command,
-            "timeout": 10,
-            "statusMessage": "Checking whether Codex should continue",
-        },
+    needs_stop_hook = (
+        True
+        if settings_data is None
+        else bool(settings_data.enabled or (settings_data.git_auto_snapshot and settings_data.git_snapshot_on_start))
     )
+    if needs_stop_hook:
+        _upsert_codex_event_hook(
+            hooks,
+            "Stop",
+            {
+                "type": "command",
+                "command": command,
+                "timeout": 10,
+                "statusMessage": "Checking whether Codex should continue",
+            },
+        )
+    else:
+        _remove_codex_event_hook(hooks, "Stop")
     if settings_data and settings_data.error_recovery_enabled:
         _upsert_codex_event_hook(
             hooks,
@@ -2180,6 +2248,85 @@ def install_remote_git_snapshot(
     return f"已在 {ssh_profile.host} 安装 {_provider_label(provider)} 远端 Git 快照 Hook"
 
 
+def update_remote_auto_continue_settings(
+    ssh_name: str,
+    provider_name: str,
+    updates: dict[str, Any],
+) -> str:
+    """Update selected remote auto-continue settings and reconcile hooks."""
+    provider = _normal_provider(provider_name)
+    if not isinstance(updates, dict) or not updates:
+        raise ValueError("No remote auto-continue settings to update")
+
+    ssh_profile, client = _connect(ssh_name)
+    paths = _paths(client, ssh_profile, provider)
+    resolved_settings = _load_remote_settings_for_update(client, paths, provider)
+
+    for key, value in updates.items():
+        if key not in AutoContinueSettings.__dataclass_fields__:
+            raise ValueError(f"Unsupported auto-continue setting: {key}")
+        setattr(resolved_settings, key, value)
+
+    if provider == "codex":
+        resolved_settings.apply_to_subagents = False
+        resolved_settings.auto_approve_permission_requests = False
+
+    valid, error = resolved_settings.validate()
+    if not valid:
+        raise ValueError(f"Remote auto-continue settings invalid: {error}")
+
+    hook_required = _settings_require_remote_hook(provider, resolved_settings)
+    git_required = _settings_require_remote_git(resolved_settings)
+    if hook_required:
+        _ensure_remote_runtime(client, ssh_profile, require_git=git_required)
+
+    snapshot_paths = [
+        paths.settings_path,
+        paths.script_path,
+        paths.guidance_path,
+        paths.provider_config_path,
+        paths.permission_rules_path,
+    ]
+    if paths.codex_hooks_path:
+        snapshot_paths.append(paths.codex_hooks_path)
+    snapshots = _snapshot_remote_files(client, snapshot_paths)
+
+    try:
+        _write_json(client, paths.settings_path, resolved_settings.to_dict())
+
+        if hook_required:
+            script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+            _write_text(client, paths.script_path, script, mode=0o700)
+            if resolved_settings.enabled:
+                _install_guidance(client, paths.guidance_path)
+            else:
+                _uninstall_guidance(client, paths.guidance_path)
+
+            command = f"sh {shlex.quote(paths.script_path)}"
+            if provider == "claude":
+                _register_claude_hook(
+                    client,
+                    paths,
+                    command,
+                    resolved_settings.apply_to_subagents,
+                    resolved_settings,
+                )
+            else:
+                _register_codex_hook(client, paths, command, resolved_settings)
+        else:
+            if provider == "claude":
+                _unregister_claude_hook(client, paths)
+            else:
+                _unregister_codex_hook(client, paths)
+            _uninstall_guidance(client, paths.guidance_path)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
+
+    logger.info(f"Updated remote auto-continue settings for {provider} on {ssh_profile.host}: {updates}")
+    return f"\u5df2\u66f4\u65b0 {ssh_profile.host} \u7684 {_provider_label(provider)} \u8fdc\u7a0b\u81ea\u52a8\u7eed\u8dd1\u8bbe\u7f6e"
+
+
 def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     """Disable remote auto-continue while keeping script/settings on the server."""
     provider = _normal_provider(provider_name)
@@ -2275,6 +2422,9 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             parsed_settings = parsed
             status.settings_valid = True
             status.enabled = parsed.enabled
+            status.git_snapshot_master_enabled = bool(parsed.git_auto_snapshot)
+            status.git_snapshot_on_start_enabled = bool(parsed.git_snapshot_on_start)
+            status.git_snapshot_on_recovery_enabled = bool(parsed.git_snapshot_on_recovery)
             status.git_snapshot_enabled = bool(parsed.git_auto_snapshot and parsed.git_snapshot_on_start)
             status.permission_auto_approve_enabled = bool(
                 provider == "claude" and parsed.auto_approve_permission_requests
