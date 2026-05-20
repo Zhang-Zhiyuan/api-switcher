@@ -1473,6 +1473,7 @@ def test_update_remote_training_switch_uses_local_training_prompt(monkeypatch):
     local_settings = AutoContinueSettings(
         enabled=True,
         training_auto_continue_enabled=False,
+        training_prompt_template_key="classification",
         training_continue_prompt="val_acc >= 0.95",
         git_auto_snapshot=False,
         git_snapshot_on_start=False,
@@ -1495,6 +1496,7 @@ def test_update_remote_training_switch_uses_local_training_prompt(monkeypatch):
 
     assert settings["enabled"] is False
     assert settings["training_auto_continue_enabled"] is True
+    assert settings["training_prompt_template_key"] == "classification"
     assert settings["training_continue_prompt"] == "val_acc >= 0.95"
     assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Error"))

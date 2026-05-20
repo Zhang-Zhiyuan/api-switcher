@@ -3,6 +3,8 @@ from models.auto_continue import (
     DEFAULT_TRAINING_CONTINUE_PROMPT,
     TRAINING_PROMPT_TEMPLATES,
     AutoContinueSettings,
+    training_prompt_template_by_key,
+    training_prompt_template_by_name,
 )
 from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style, textbox_style
 
@@ -23,10 +25,6 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self.provider_name = provider_name
         self.settings = settings
         self._on_save = on_save
-        self._training_template_by_name = {
-            template["name"]: template
-            for template in TRAINING_PROMPT_TEMPLATES
-        }
 
         self._build_ui()
         center_window(self, master)
@@ -101,7 +99,8 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             font=font(12),
             width=86,
         ).pack(side="left")
-        self._training_template_var = ctk.StringVar(value=TRAINING_PROMPT_TEMPLATES[0]["name"])
+        selected_template = training_prompt_template_by_key(self.settings.training_prompt_template_key)
+        self._training_template_var = ctk.StringVar(value=selected_template["name"])
         template_names = [template["name"] for template in TRAINING_PROMPT_TEMPLATES]
         self._training_template_combo = ctk.CTkComboBox(
             template_row,
@@ -135,7 +134,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         ).pack(side="left")
         self._training_template_desc = ctk.CTkLabel(
             scroll,
-            text=TRAINING_PROMPT_TEMPLATES[0]["description"],
+            text=selected_template["description"],
             text_color=COLORS["muted_soft"],
             anchor="w",
             justify="left",
@@ -303,7 +302,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
 
     def _selected_training_template(self) -> dict[str, str]:
         name = self._training_template_var.get()
-        return self._training_template_by_name.get(name, TRAINING_PROMPT_TEMPLATES[0])
+        return training_prompt_template_by_name(name)
 
     def _set_training_prompt_text(self, text: str) -> None:
         self._training_prompt_text.delete("1.0", "end")
@@ -321,6 +320,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         else:
             next_prompt = template_prompt
         self._set_training_prompt_text(next_prompt)
+        self._training_auto_continue_var.set(True)
         self._error_label.configure(text="")
 
     def _restore_default_training_prompt(self):
@@ -342,6 +342,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             prompt = self._prompt_text.get("1.0", "end").strip()
             training_auto_continue = self._training_auto_continue_var.get()
             training_prompt = self._training_prompt_text.get("1.0", "end").strip()
+            training_template_key = self._selected_training_template()["key"]
             conservative = self._conservative_var.get()
             error_recovery = self._error_recovery_var.get()
 
@@ -374,6 +375,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 continuation_prompt=prompt,
                 conservative_mode=conservative,
                 training_auto_continue_enabled=training_auto_continue,
+                training_prompt_template_key=training_template_key,
                 training_continue_prompt=training_prompt,
                 error_recovery_enabled=error_recovery,
                 max_error_recoveries=max_recoveries,

@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from models.auto_continue import AutoContinueSettings
+from models.auto_continue import AutoContinueSettings, training_prompt_template_by_key
 from core.auto_continue.manager import auto_continue_manager
 from ui.widgets.toast import show_toast
 from ui.theme import COLORS, button_style, card_frame_kwargs, font, textbox_style
@@ -251,6 +251,9 @@ class AutoContinueControl(ctk.CTkFrame):
                 info_lines.append(
                     f"训练续跑: {'ON' if settings.training_auto_continue_enabled else 'OFF'}"
                 )
+                if settings.training_auto_continue_enabled:
+                    template = training_prompt_template_by_key(settings.training_prompt_template_key)
+                    info_lines.append(f"训练模板: {template['name']}")
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
                     f"手动/续跑 {'ON' if settings.git_snapshot_on_start else 'OFF'} / "

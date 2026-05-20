@@ -191,6 +191,10 @@ TRAINING_PROMPT_TEMPLATES = [
         ),
     },
 ]
+TRAINING_PROMPT_TEMPLATE_KEYS = {
+    template["key"]
+    for template in TRAINING_PROMPT_TEMPLATES
+}
 DEFAULT_TRAINING_COMPLETION_PATTERNS = [
     r"(?i)\bTRAINING_TARGET_MET\b",
     r"(?i)\b(training|evaluation|model)\b.{0,80}\b(target|goal|criteria|requirement)s?\b.{0,80}\b(met|reached|satisfied|passed)\b",
@@ -237,6 +241,9 @@ BOOL_SETTING_FIELDS = {
     "auto_approve_permission_requests",
     "auto_approve_bash",
     "training_auto_continue_enabled",
+}
+STRING_SETTING_FIELDS = {
+    "training_prompt_template_key",
 }
 
 
@@ -296,6 +303,15 @@ def training_prompt_template_by_key(key: str | None) -> dict[str, str]:
     return TRAINING_PROMPT_TEMPLATES[0]
 
 
+def training_prompt_template_by_name(name: str | None) -> dict[str, str]:
+    """Return a built-in training prompt template by display name."""
+    normalized = str(name or "").strip()
+    for template in TRAINING_PROMPT_TEMPLATES:
+        if template["name"] == normalized:
+            return template
+    return TRAINING_PROMPT_TEMPLATES[0]
+
+
 @dataclass
 class AutoContinueSettings:
     """Settings for auto-continue functionality."""
@@ -310,6 +326,7 @@ class AutoContinueSettings:
     error_retry_initial_delay_seconds: int = 5
     error_retry_max_delay_seconds: int = 60
     training_auto_continue_enabled: bool = False
+    training_prompt_template_key: str = DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
     training_continue_prompt: str = DEFAULT_TRAINING_CONTINUE_PROMPT
     git_auto_snapshot: bool = True
     git_snapshot_on_start: bool = True
@@ -369,6 +386,12 @@ class AutoContinueSettings:
         if len(self.training_continue_prompt) > 8000:
             return False, "training_continue_prompt is too long (max: 8000 characters)"
 
+        if not isinstance(self.training_prompt_template_key, str):
+            return False, "training_prompt_template_key must be a string"
+
+        if self.training_prompt_template_key not in TRAINING_PROMPT_TEMPLATE_KEYS:
+            return False, "training_prompt_template_key is not a known template"
+
         if not isinstance(self.auto_approve_permission_requests, bool):
             return False, "auto_approve_permission_requests must be a boolean"
 
@@ -420,6 +443,14 @@ class AutoContinueSettings:
                     known_fields[field_name],
                     getattr(defaults, field_name),
                 )
+        for field_name in STRING_SETTING_FIELDS:
+            if field_name in known_fields:
+                known_fields[field_name] = str(known_fields[field_name]).strip()
+        if (
+            "training_prompt_template_key" in known_fields
+            and known_fields["training_prompt_template_key"] not in TRAINING_PROMPT_TEMPLATE_KEYS
+        ):
+            known_fields["training_prompt_template_key"] = DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
         if "incomplete_patterns" in known_fields:
             known_fields["incomplete_patterns"] = _merge_unique_patterns(
                 known_fields.get("incomplete_patterns"),

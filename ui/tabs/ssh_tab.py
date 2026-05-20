@@ -6,6 +6,7 @@ from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue
 from core.auto_continue.manager import auto_continue_manager
+from models.auto_continue import training_prompt_template_by_key
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 
 
@@ -675,6 +676,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             feature_parts = [
                 f"自动续跑 {'ON' if settings.enabled else 'OFF'}",
                 f"训练续跑 {'ON' if settings.training_auto_continue_enabled else 'OFF'}",
+                f"训练模板 {training_prompt_template_by_key(settings.training_prompt_template_key)['name']}",
                 f"Git快照 {'ON' if settings.git_auto_snapshot else 'OFF'}",
                 f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
             ]

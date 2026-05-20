@@ -1719,6 +1719,7 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert AutoContinueSettings().error_retry_initial_delay_seconds == 5
     assert AutoContinueSettings().error_retry_max_delay_seconds == 60
     assert AutoContinueSettings().training_auto_continue_enabled is False
+    assert AutoContinueSettings().training_prompt_template_key == DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
     assert "TRAINING_TARGET_MET" in AutoContinueSettings().training_continue_prompt
     assert len(TRAINING_PROMPT_TEMPLATES) >= 5
     assert training_prompt_template_by_key(DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY)["key"] == "general"
@@ -1757,11 +1758,19 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert not ok
     assert "training_continue_prompt" in error
 
+    invalid_training_template = AutoContinueSettings(
+        training_prompt_template_key="does-not-exist",
+    )
+    ok, error = invalid_training_template.validate()
+    assert not ok
+    assert "training_prompt_template_key" in error
+
     restored = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,
         "auto_approve_max_per_session": 5,
         "auto_approve_tools": ["Edit", "edit", "Write"],
         "training_auto_continue_enabled": "true",
+        "training_prompt_template_key": "classification",
         "training_continue_prompt": "accuracy >= 0.95",
     })
 
@@ -1770,7 +1779,13 @@ def test_auto_continue_settings_permission_auto_approve_validation():
     assert restored.auto_approve_bash is True
     assert restored.auto_approve_tools == ["Bash", "Edit", "Write"]
     assert restored.training_auto_continue_enabled is True
+    assert restored.training_prompt_template_key == "classification"
     assert restored.training_continue_prompt == "accuracy >= 0.95"
+
+    fallback_template = AutoContinueSettings.from_dict({
+        "training_prompt_template_key": "unknown-template",
+    })
+    assert fallback_template.training_prompt_template_key == DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
 
     legacy_disabled = AutoContinueSettings.from_dict({
         "auto_approve_permission_requests": True,
