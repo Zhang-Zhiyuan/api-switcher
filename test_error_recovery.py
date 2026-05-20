@@ -436,8 +436,9 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
     assert "\n        git add -A 2>&1 | Out-Null\n" in local_script
-    assert '$hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse"' in local_script
-    assert "Creating standalone git snapshot on stop hook" in local_script
+    assert '"UserPromptSubmit", "SessionStart"' in local_script
+    assert '$stopSnapshotEvents = @("Stop", "SubagentStop")' in local_script
+    assert "Creating git snapshot on stop hook" in local_script
     assert "Creating git snapshot before auto-continue" in local_script
     assert 'permissionDecision = "allow"' in local_script
     assert "auto_continue_permission_state.json" in local_script
@@ -447,7 +448,9 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "DEFAULT_GITIGNORE_LINES" in remote_script
     assert "initialized_repo = False" in remote_script
     assert "if initialized_repo:" in remote_script
-    assert 'if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled and not auto_continue_enabled:' in remote_script
+    assert 'PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}' in remote_script
+    assert 'STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}' in remote_script
+    assert "if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:" in remote_script
     assert '"permissionDecision": "allow"' in remote_script
     assert "auto_continue_permission_state.json" in remote_script
     assert "node_modules/" in remote_script
@@ -1033,12 +1036,14 @@ def test_local_stop_hook_reads_utf8_stdin_bytes(tmp_path):
     assert "????" not in log_text
 
 
-def test_local_stop_hook_skips_git_snapshot_until_continuation_needed(tmp_path):
+def test_local_stop_hook_snapshots_completed_manual_turn(tmp_path):
     import subprocess
 
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
     if not powershell:
         pytest.skip("PowerShell is not available")
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
 
     from core.auto_continue.script_generator import generate_hook_script
     from models.auto_continue import AutoContinueSettings
@@ -1077,8 +1082,19 @@ def test_local_stop_hook_skips_git_snapshot_until_continuation_needed(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ""
-    assert not (tmp_path / ".git").exists()
-    assert "Creating git snapshot" not in result.stderr
+    assert (tmp_path / ".git").exists()
+    assert "Creating git snapshot on stop hook" in result.stderr
+
+    rev_parse = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert rev_parse.returncode == 0, rev_parse.stderr
 
 
 def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_path):
@@ -1858,6 +1874,59 @@ def test_local_stop_hook_does_not_continue_when_disabled_but_permission_auto_app
     assert not (tmp_path / "tmp" / "auto_continue_stop_state.json").exists()
 
 
+def test_remote_prompt_hook_snapshots_without_auto_continue(tmp_path):
+    import subprocess
+
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
+
+    from core import remote_auto_continue
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings_path.write_text(
+        json.dumps({
+            "enabled": True,
+            "git_auto_snapshot": True,
+            "git_snapshot_on_start": True,
+            "continuation_prompt": "should not continue from prompt hook",
+            "incomplete_patterns": ["continue"],
+            "blocker_patterns": [],
+        }),
+        encoding="utf-8",
+    )
+    input_path.write_text(
+        json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "session-prompt-snapshot",
+            "message": "continue the implementation",
+        }),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+    assert (tmp_path / ".git").exists()
+    assert not (state_dir / "auto_continue_stop_state.json").exists()
+
+
 def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, monkeypatch):
     import os
     import stat
@@ -2354,9 +2423,13 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
         return nested_commands
 
     stop_commands = event_commands("Stop")
+    prompt_commands = event_commands("UserPromptSubmit")
+    session_commands = event_commands("SessionStart")
     error_commands = event_commands("Error")
     assert "powershell.exe -File user_stop.ps1" in stop_commands
     assert any("auto_continue_stop.ps1" in command for command in stop_commands)
+    assert any("auto_continue_stop.ps1" in command for command in prompt_commands)
+    assert any("auto_continue_stop.ps1" in command for command in session_commands)
     assert "powershell.exe -File user_error.ps1" in error_commands
     assert any("error_recovery.ps1" in command for command in error_commands)
     assert provider.is_hook_registered()
@@ -2377,8 +2450,12 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
 
     hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
     stop_commands = event_commands("Stop")
+    prompt_commands = event_commands("UserPromptSubmit")
+    session_commands = event_commands("SessionStart")
     error_commands = event_commands("Error")
     assert stop_commands == ["powershell.exe -File user_stop.ps1"]
+    assert prompt_commands == []
+    assert session_commands == []
     assert error_commands == ["powershell.exe -File user_error.ps1"]
     config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
     assert config["features"]["codex_hooks"] is True
@@ -2426,6 +2503,38 @@ def test_local_claude_hook_repair_backs_up_invalid_settings_json(tmp_path, monke
         for hook in group["hooks"]
     ]
     assert any("auto_continue_stop.ps1" in command for command in commands)
+
+
+def test_local_claude_error_recovery_hook_is_deduped(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({
+        "hooks": {
+            "ResponseError": [
+                {
+                    "hooks": [
+                        {"command": "powershell.exe -File user_response_error.ps1"},
+                        {"command": "powershell.exe -File error_recovery.ps1"},
+                    ]
+                }
+            ]
+        }
+    }), encoding="utf-8")
+
+    provider._register_error_recovery_hook()
+    provider._register_error_recovery_hook()
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    commands = [
+        hook["command"]
+        for group in settings["hooks"]["ResponseError"]
+        for hook in group["hooks"]
+    ]
+    assert "powershell.exe -File user_response_error.ps1" in commands
+    assert sum("error_recovery.ps1" in command for command in commands) == 1
 
 
 def test_local_codex_hooks_toggle_config_when_no_hooks_remain(tmp_path, monkeypatch):

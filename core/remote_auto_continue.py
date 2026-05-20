@@ -774,6 +774,8 @@ CONTENT_LENGTH_PATTERNS = __CONTENT_LENGTH_PATTERNS__
 
 
 DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
+PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}
+STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}
 
 
 def is_recoverable_api_error(text):
@@ -1434,11 +1436,18 @@ def main():
         if handle_error_recovery(data, settings, state_dir, is_claude, session_id):
             return
 
-    # Standalone Git snapshot hooks still run even when auto-continue itself is
-    # disabled. When auto-continue is enabled, snapshot only after a block
-    # decision is confirmed so snapshot failures cannot hide the continuation.
-    if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled and not auto_continue_enabled:
+    git_snapshot_attempted = False
+    if hook_event in PROMPT_SNAPSHOT_EVENTS:
+        if git_snapshot_enabled:
+            run_git_snapshot()
+            git_snapshot_attempted = True
+        return
+
+    # Stop hooks are the broadest safety net: they cover normal manual turns,
+    # auto-continue turns, and older Codex builds that do not emit prompt hooks.
+    if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:
         run_git_snapshot()
+        git_snapshot_attempted = True
 
     if is_claude and hook_event in {"PermissionRequest", "PreToolUse"}:
         if not auto_approve_enabled:
@@ -1682,7 +1691,7 @@ def main():
             continuation_prompt,
         )
 
-        if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled:
+        if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:
             run_git_snapshot()
 
         output = {
@@ -1736,7 +1745,15 @@ def _claude_event_has_our_command(settings: dict, event_name: str) -> bool:
 
 def _iter_claude_hook_commands(
     settings: dict,
-    event_names: tuple[str, ...] = ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest", "ResponseError"),
+    event_names: tuple[str, ...] = (
+        "Stop",
+        "SubagentStop",
+        "UserPromptSubmit",
+        "SessionStart",
+        "PreToolUse",
+        "PermissionRequest",
+        "ResponseError",
+    ),
 ):
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
@@ -1816,12 +1833,27 @@ def _register_claude_hook(
             filtered.append({"hooks": [hook]})
         hooks[event_name] = filtered
 
+    needs_git_start_hook = (
+        True
+        if settings_data is None
+        else bool(settings_data.git_auto_snapshot and settings_data.git_snapshot_on_start)
+    )
     needs_stop_hook = (
         True
         if settings_data is None
-        else bool(settings_data.enabled or (settings_data.git_auto_snapshot and settings_data.git_snapshot_on_start))
+        else bool(settings_data.enabled or needs_git_start_hook)
     )
     register_event("Stop", hook_def if needs_stop_hook else None)
+    if needs_git_start_hook:
+        prompt_hook = dict(hook_def)
+        prompt_hook["statusMessage"] = "Creating Git snapshot before Claude starts work"
+        register_event("UserPromptSubmit", prompt_hook)
+        session_hook = dict(hook_def)
+        session_hook["statusMessage"] = "Creating Git snapshot when Claude session starts"
+        register_event("SessionStart", session_hook)
+    else:
+        register_event("UserPromptSubmit", None)
+        register_event("SessionStart", None)
     if apply_to_subagents and needs_stop_hook:
         subagent_hook = dict(hook_def)
         subagent_hook["statusMessage"] = "Checking whether Claude subagent should continue"
@@ -1873,7 +1905,15 @@ def _unregister_claude_hook(client, paths: RemoteAutoContinuePaths) -> None:
 
     changed = False
     if isinstance(hooks, dict):
-        for event_name in ("Stop", "SubagentStop", "PreToolUse", "PermissionRequest", "ResponseError"):
+        for event_name in (
+            "Stop",
+            "SubagentStop",
+            "UserPromptSubmit",
+            "SessionStart",
+            "PreToolUse",
+            "PermissionRequest",
+            "ResponseError",
+        ):
             groups = hooks.get(event_name, [])
             if isinstance(groups, dict):
                 groups = [groups]
@@ -2075,24 +2115,40 @@ def _register_codex_hook(
         raise RuntimeError("Codex hooks 路径缺失")
     data = _read_codex_hooks_json_for_update(client, paths.codex_hooks_path)
     hooks = _codex_hooks_container(data, migrate_legacy=True)
+    needs_git_start_hook = (
+        True
+        if settings_data is None
+        else bool(settings_data.git_auto_snapshot and settings_data.git_snapshot_on_start)
+    )
     needs_stop_hook = (
         True
         if settings_data is None
-        else bool(settings_data.enabled or (settings_data.git_auto_snapshot and settings_data.git_snapshot_on_start))
+        else bool(settings_data.enabled or needs_git_start_hook)
     )
+    hook_def = {
+        "type": "command",
+        "command": command,
+        "timeout": 10,
+        "statusMessage": "Checking whether Codex should continue",
+    }
     if needs_stop_hook:
         _upsert_codex_event_hook(
             hooks,
             "Stop",
-            {
-                "type": "command",
-                "command": command,
-                "timeout": 10,
-                "statusMessage": "Checking whether Codex should continue",
-            },
+            hook_def,
         )
     else:
         _remove_codex_event_hook(hooks, "Stop")
+    if needs_git_start_hook:
+        prompt_hook = dict(hook_def)
+        prompt_hook["statusMessage"] = "Creating Git snapshot before Codex starts work"
+        _upsert_codex_event_hook(hooks, "UserPromptSubmit", prompt_hook)
+        session_hook = dict(hook_def)
+        session_hook["statusMessage"] = "Creating Git snapshot when Codex session starts"
+        _upsert_codex_event_hook(hooks, "SessionStart", session_hook)
+    else:
+        _remove_codex_event_hook(hooks, "UserPromptSubmit")
+        _remove_codex_event_hook(hooks, "SessionStart")
     if settings_data and settings_data.error_recovery_enabled:
         _upsert_codex_event_hook(
             hooks,
@@ -2118,6 +2174,8 @@ def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
     if isinstance(data, dict):
         hooks = _codex_hooks_container(data, migrate_legacy=True)
         changed = _remove_codex_event_hook(hooks, "Stop")
+        changed = _remove_codex_event_hook(hooks, "UserPromptSubmit") or changed
+        changed = _remove_codex_event_hook(hooks, "SessionStart") or changed
         changed = _remove_codex_event_hook(hooks, "Error") or changed
         if changed:
             _write_json(client, paths.codex_hooks_path, data)
@@ -2457,15 +2515,22 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append(f"Claude settings.json 读取失败: {e}")
         if isinstance(provider_config, dict):
             stop_hook_registered = _claude_event_has_our_command(provider_config, "Stop")
+            prompt_hook_registered = _claude_event_has_our_command(provider_config, "UserPromptSubmit")
+            session_hook_registered = _claude_event_has_our_command(provider_config, "SessionStart")
             pre_tool_hook_registered = _claude_event_has_our_command(provider_config, "PreToolUse")
             permission_hook_registered = _claude_event_has_our_command(provider_config, "PermissionRequest")
             error_hook_registered = _claude_event_has_our_command(provider_config, "ResponseError")
             needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
+            needs_prompt_snapshot_hooks = bool(status.git_snapshot_enabled)
             needs_permission_hooks = bool(status.permission_auto_approve_enabled)
             needs_error_hook = bool(status.error_recovery_enabled)
-            if needs_stop_hook or needs_permission_hooks or needs_error_hook:
+            if needs_stop_hook or needs_prompt_snapshot_hooks or needs_permission_hooks or needs_error_hook:
                 status.hook_registered = (
                     (not needs_stop_hook or stop_hook_registered)
+                    and (
+                        not needs_prompt_snapshot_hooks
+                        or (prompt_hook_registered and session_hook_registered)
+                    )
                     and (not needs_permission_hooks or (pre_tool_hook_registered and permission_hook_registered))
                     and (not needs_error_hook or error_hook_registered)
                 )
@@ -2476,6 +2541,18 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                 )
             if needs_stop_hook and not stop_hook_registered:
                 status.issues.append("Stop Hook 未注册；请重新安装/修复远端自动续跑")
+            if needs_prompt_snapshot_hooks:
+                missing_prompt_hooks = []
+                if not prompt_hook_registered:
+                    missing_prompt_hooks.append("UserPromptSubmit")
+                if not session_hook_registered:
+                    missing_prompt_hooks.append("SessionStart")
+                if missing_prompt_hooks:
+                    status.issues.append(
+                        "Git 快照 Hook 未注册: "
+                        + ", ".join(missing_prompt_hooks)
+                        + "；请重新安装/修复远端自动续跑"
+                    )
             if needs_error_hook and not error_hook_registered:
                 status.issues.append("ResponseError Hook 未注册；请重新安装/修复远端自动续跑")
             if needs_permission_hooks:
@@ -2535,16 +2612,46 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.issues.append(f"Codex hooks.json 读取失败: {e}")
         if isinstance(hooks, dict):
             stop_hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Stop"))
+            prompt_hook_registered = any(
+                _is_our_command(command)
+                for command in _iter_codex_hook_commands(hooks, "UserPromptSubmit")
+            )
+            session_hook_registered = any(
+                _is_our_command(command)
+                for command in _iter_codex_hook_commands(hooks, "SessionStart")
+            )
             error_hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Error"))
             needs_stop_hook = bool(status.enabled or status.git_snapshot_enabled)
+            needs_prompt_snapshot_hooks = bool(status.git_snapshot_enabled)
             needs_error_hook = bool(status.error_recovery_enabled)
-            if needs_stop_hook or needs_error_hook:
+            if needs_stop_hook or needs_prompt_snapshot_hooks or needs_error_hook:
                 status.hook_registered = (
                     (not needs_stop_hook or stop_hook_registered)
+                    and (
+                        not needs_prompt_snapshot_hooks
+                        or (prompt_hook_registered and session_hook_registered)
+                    )
                     and (not needs_error_hook or error_hook_registered)
                 )
             else:
-                status.hook_registered = stop_hook_registered or error_hook_registered
+                status.hook_registered = (
+                    stop_hook_registered
+                    or prompt_hook_registered
+                    or session_hook_registered
+                    or error_hook_registered
+                )
+            if needs_prompt_snapshot_hooks:
+                missing_prompt_hooks = []
+                if not prompt_hook_registered:
+                    missing_prompt_hooks.append("UserPromptSubmit")
+                if not session_hook_registered:
+                    missing_prompt_hooks.append("SessionStart")
+                if missing_prompt_hooks:
+                    status.issues.append(
+                        "Git 快照 Hook 未注册: "
+                        + ", ".join(missing_prompt_hooks)
+                        + "；请重新安装/修复远端自动续跑"
+                    )
             if needs_error_hook and not error_hook_registered:
                 status.issues.append("Error Hook 未注册；请重新安装/修复远端自动续跑")
         else:

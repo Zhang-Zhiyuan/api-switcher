@@ -17,6 +17,10 @@ from core.auto_continue.error_recovery_script import generate_error_recovery_scr
 logger = logging.getLogger(__name__)
 
 
+def _is_managed_hook_command(command: str) -> bool:
+    return "auto_continue_stop.ps1" in command or "error_recovery.ps1" in command
+
+
 def _backup_claude_settings_file(path: Path, reason: str) -> Path | None:
     if not path.exists():
         return None
@@ -134,11 +138,33 @@ class ClaudeProvider(AutoContinueProvider):
             "statusMessage": "Checking whether Claude should continue"
         }
 
+        git_snapshot_on_start = (
+            True
+            if auto_settings is None
+            else bool(auto_settings.git_auto_snapshot and auto_settings.git_snapshot_on_start)
+        )
+        needs_stop_hook = (
+            True
+            if auto_settings is None
+            else bool(auto_settings.enabled or git_snapshot_on_start)
+        )
+
         # Register Stop hook
-        self._register_hook_event(claude_settings, "Stop", hook_def)
+        self._register_hook_event(claude_settings, "Stop", hook_def if needs_stop_hook else None)
+
+        if git_snapshot_on_start:
+            prompt_hook = dict(hook_def)
+            prompt_hook["statusMessage"] = "Creating Git snapshot before Claude starts work"
+            self._register_hook_event(claude_settings, "UserPromptSubmit", prompt_hook)
+            session_hook = dict(hook_def)
+            session_hook["statusMessage"] = "Creating Git snapshot when Claude session starts"
+            self._register_hook_event(claude_settings, "SessionStart", session_hook)
+        else:
+            self._register_hook_event(claude_settings, "UserPromptSubmit", None)
+            self._register_hook_event(claude_settings, "SessionStart", None)
 
         # Optionally register SubagentStop
-        if apply_to_subagents:
+        if apply_to_subagents and needs_stop_hook:
             subagent_hook = dict(hook_def)
             subagent_hook["statusMessage"] = "Checking whether Claude subagent should continue"
             self._register_hook_event(claude_settings, "SubagentStop", subagent_hook)
@@ -187,7 +213,7 @@ class ClaudeProvider(AutoContinueProvider):
         filtered = []
         for hook_group in settings["hooks"][event_name]:
             hooks = hook_group.get("hooks", [])
-            filtered_hooks = [h for h in hooks if "auto_continue_stop.ps1" not in h.get("command", "")]
+            filtered_hooks = [h for h in hooks if not _is_managed_hook_command(h.get("command", ""))]
             if filtered_hooks:
                 hook_group["hooks"] = filtered_hooks
                 filtered.append(hook_group)
@@ -211,8 +237,15 @@ class ClaudeProvider(AutoContinueProvider):
 
             hooks = settings.get("hooks", {})
 
-            # Remove from Stop/SubagentStop/PreToolUse/PermissionRequest
-            for event_name in ["Stop", "SubagentStop", "PreToolUse", "PermissionRequest"]:
+            # Remove from all events managed by API Switcher.
+            for event_name in [
+                "Stop",
+                "SubagentStop",
+                "UserPromptSubmit",
+                "SessionStart",
+                "PreToolUse",
+                "PermissionRequest",
+            ]:
                 if event_name in hooks:
                     filtered = []
                     for hook_group in hooks[event_name]:

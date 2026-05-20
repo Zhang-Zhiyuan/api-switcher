@@ -151,7 +151,7 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=False)
         self._git_snapshot_on_start_switch = ctk.CTkSwitch(
             detail,
-            text="\u7eed\u8dd1\u65f6",
+            text="\u624b\u52a8/\u7eed\u8dd1\u65f6",
             variable=self._git_snapshot_on_start_var,
             command=lambda: self._toggle_feature("git_snapshot_on_start"),
             text_color=COLORS["text"],
@@ -235,7 +235,7 @@ class AutoContinueControl(ctk.CTkFrame):
                 )
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
-                    f"开始 {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
+                    f"手动/续跑 {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
                     f"恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
                 )
                 if settings.error_recovery_enabled:

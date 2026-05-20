@@ -384,18 +384,24 @@ try {{
     }}
     $lastMessage = Get-NormalizedText $lastMessage
 
-    # Standalone Git snapshot hooks still run even when auto-continue itself is
-    # disabled. When auto-continue is enabled, snapshot only after a block
-    # decision is confirmed so snapshot failures cannot hide the continuation.
-    if (
-        $hookEvent -ne "PermissionRequest" -and
-        $hookEvent -ne "PreToolUse" -and
-        $gitAutoSnapshot -and
-        $gitSnapshotOnStart -and
-        -not $autoContinueEnabled
-    ) {{
-        Write-Log "Creating standalone git snapshot on stop hook..." "INFO"
+    $gitSnapshotAttempted = $false
+    $promptSnapshotEvents = @("UserPromptSubmit", "SessionStart")
+    if ($promptSnapshotEvents -contains $hookEvent) {{
+        if ($gitAutoSnapshot -and $gitSnapshotOnStart) {{
+            Write-Log "Creating git snapshot on prompt/session start hook..." "INFO"
+            [void](Create-GitSnapshot -Message "git-snapshot")
+            $gitSnapshotAttempted = $true
+        }}
+        exit 0
+    }}
+
+    # Stop hooks are the broadest safety net: they cover normal manual turns,
+    # auto-continue turns, and older Codex builds that do not emit prompt hooks.
+    $stopSnapshotEvents = @("Stop", "SubagentStop")
+    if (($stopSnapshotEvents -contains $hookEvent) -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
+        Write-Log "Creating git snapshot on stop hook..." "INFO"
         [void](Create-GitSnapshot -Message "git-snapshot")
+        $gitSnapshotAttempted = $true
     }}
 
     if ($isClaude -and ($hookEvent -eq "PermissionRequest" -or $hookEvent -eq "PreToolUse")) {{
@@ -812,7 +818,7 @@ try {{
             -Count $count `
             -ContinuationPrompt $settings.continuation_prompt
 
-        if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
+        if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart -and -not $gitSnapshotAttempted) {{
             Write-Log "Creating git snapshot before auto-continue..." "INFO"
             [void](Create-GitSnapshot -Message "git-snapshot")
         }}

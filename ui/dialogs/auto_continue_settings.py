@@ -119,13 +119,13 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             "支持：内容超长自动压缩、429 按 Retry-After 等待、断联/超时/服务繁忙指数退避、认证/权限/配额友好提示。",
         )
 
-        self._add_section(scroll, "Git 快照", "自动创建本地 Git 快照，方便恢复到续跑或错误恢复前的状态。")
+        self._add_section(scroll, "Git 快照", "自动创建本地 Git 快照，方便恢复到手动任务、续跑或错误恢复前后的状态。")
 
         self._git_auto_snapshot_var = ctk.BooleanVar(value=self.settings.git_auto_snapshot)
         self._add_switch(scroll, "启用自动 Git 快照 (推荐)", self._git_auto_snapshot_var)
 
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_start)
-        self._add_switch(scroll, "对话开始时创建快照", self._git_snapshot_on_start_var, padx=(20, 0))
+        self._add_switch(scroll, "手动任务/续跑时创建快照", self._git_snapshot_on_start_var, padx=(20, 0))
 
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_recovery)
         self._add_switch(scroll, "错误恢复前创建快照", self._git_snapshot_on_recovery_var, padx=(20, 0))

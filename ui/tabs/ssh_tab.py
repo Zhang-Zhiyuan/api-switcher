@@ -357,7 +357,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         add_remote_switch("\u81ea\u52a8\u7eed\u8dd1", self._remote_auto_continue_var, "auto_continue", 0, 1)
         add_remote_switch("Git", self._remote_git_snapshot_var, "git_snapshot", 0, 2)
         add_remote_switch("API\u6062\u590d", self._remote_error_recovery_var, "error_recovery", 0, 3)
-        add_remote_switch("\u7eed\u8dd1\u5feb\u7167", self._remote_git_snapshot_on_start_var, "git_snapshot_on_start", 1, 1)
+        add_remote_switch("\u624b\u52a8/\u7eed\u8dd1\u5feb\u7167", self._remote_git_snapshot_on_start_var, "git_snapshot_on_start", 1, 1)
         add_remote_switch("\u6062\u590d\u5feb\u7167", self._remote_git_snapshot_on_recovery_var, "git_snapshot_on_recovery", 1, 2)
         self._remote_permission_auto_approve_switch = add_remote_switch(
             "\u6743\u9650\u786e\u8ba4",

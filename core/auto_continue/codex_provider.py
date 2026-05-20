@@ -227,7 +227,7 @@ class CodexProvider(AutoContinueProvider):
         data = _read_codex_hooks_json(hooks_path)
         return bool(data and _codex_event_has_command(data, "Stop", "auto_continue_stop.ps1"))
 
-    def register_hook(self) -> None:
+    def register_hook(self, settings=None) -> None:
         """Register hook in hooks.json."""
         hooks_path = self.get_hooks_json_path()
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,12 +240,37 @@ class CodexProvider(AutoContinueProvider):
 
         # Register Stop hook
         script_path = str(self.get_hook_script_path()).replace("\\", "\\\\")
-        _upsert_codex_event_hook(hooks, "Stop", {
+        hook_def = {
             "type": "command",
             "command": f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
             "timeout": 10,
             "statusMessage": "Checking whether Codex should continue"
-        }, "auto_continue_stop.ps1")
+        }
+        git_snapshot_on_start = (
+            True
+            if settings is None
+            else bool(settings.git_auto_snapshot and settings.git_snapshot_on_start)
+        )
+        needs_stop_hook = (
+            True
+            if settings is None
+            else bool(settings.enabled or git_snapshot_on_start)
+        )
+        if needs_stop_hook:
+            _upsert_codex_event_hook(hooks, "Stop", hook_def, "auto_continue_stop.ps1")
+        else:
+            _remove_codex_event_hook(hooks, "Stop", "auto_continue_stop.ps1")
+
+        if git_snapshot_on_start:
+            prompt_hook = dict(hook_def)
+            prompt_hook["statusMessage"] = "Creating Git snapshot before Codex starts work"
+            _upsert_codex_event_hook(hooks, "UserPromptSubmit", prompt_hook, "auto_continue_stop.ps1")
+            session_hook = dict(hook_def)
+            session_hook["statusMessage"] = "Creating Git snapshot when Codex session starts"
+            _upsert_codex_event_hook(hooks, "SessionStart", session_hook, "auto_continue_stop.ps1")
+        else:
+            _remove_codex_event_hook(hooks, "UserPromptSubmit", "auto_continue_stop.ps1")
+            _remove_codex_event_hook(hooks, "SessionStart", "auto_continue_stop.ps1")
 
         # Write hooks.json
         atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
@@ -265,8 +290,10 @@ class CodexProvider(AutoContinueProvider):
                 return
             hooks = _codex_hooks_container(data, migrate_legacy=True)
 
-            # Remove Stop hook if it's ours
+            # Remove stop/prompt hooks if they are ours.
             changed = _remove_codex_event_hook(hooks, "Stop", "auto_continue_stop.ps1")
+            changed = _remove_codex_event_hook(hooks, "UserPromptSubmit", "auto_continue_stop.ps1") or changed
+            changed = _remove_codex_event_hook(hooks, "SessionStart", "auto_continue_stop.ps1") or changed
 
             # Write back
             atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))

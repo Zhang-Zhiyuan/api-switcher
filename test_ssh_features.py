@@ -1138,12 +1138,20 @@ def test_remote_codex_registers_error_recovery_hook(monkeypatch):
         remote_auto_continue._iter_codex_hook_commands(hooks, "Stop")
     )
     assert "sh /home/test/.codex/hooks/auto_continue_stop.sh" in list(
+        remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit")
+    )
+    assert "sh /home/test/.codex/hooks/auto_continue_stop.sh" in list(
+        remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart")
+    )
+    assert "sh /home/test/.codex/hooks/auto_continue_stop.sh" in list(
         remote_auto_continue._iter_codex_hook_commands(hooks, "Error")
     )
 
     remote_auto_continue._unregister_codex_hook(client, paths)
     hooks = json.loads(sftp.files[hooks_path].decode("utf-8"))
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
+    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit"))
+    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart"))
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Error"))
 
 
@@ -1476,6 +1484,8 @@ def test_remote_claude_permission_only_registers_permission_hooks_without_stop()
 
     assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("Stop",)))
     assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("SubagentStop",)))
+    assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("UserPromptSubmit",)))
+    assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("SessionStart",)))
     assert list(remote_auto_continue._iter_claude_hook_commands(settings, ("PreToolUse",)))
     assert list(remote_auto_continue._iter_claude_hook_commands(settings, ("PermissionRequest",)))
 
@@ -1602,11 +1612,17 @@ def test_remote_claude_registers_response_error_hook():
     )
 
     settings = json.loads(sftp.files[settings_path].decode("utf-8"))
+    prompt_commands = list(remote_auto_continue._iter_claude_hook_commands(settings, ("UserPromptSubmit",)))
+    session_commands = list(remote_auto_continue._iter_claude_hook_commands(settings, ("SessionStart",)))
     response_error_commands = list(remote_auto_continue._iter_claude_hook_commands(settings, ("ResponseError",)))
+    assert "sh /home/test/.claude/hooks/auto_continue_stop.sh" in prompt_commands
+    assert "sh /home/test/.claude/hooks/auto_continue_stop.sh" in session_commands
     assert "sh /home/test/.claude/hooks/auto_continue_stop.sh" in response_error_commands
 
     remote_auto_continue._unregister_claude_hook(client, paths)
     settings = json.loads(sftp.files[settings_path].decode("utf-8"))
+    assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("UserPromptSubmit",)))
+    assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("SessionStart",)))
     assert not list(remote_auto_continue._iter_claude_hook_commands(settings, ("ResponseError",)))
 
 
