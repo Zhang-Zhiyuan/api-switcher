@@ -2,7 +2,7 @@ import customtkinter as ctk
 from models.auto_continue import AutoContinueSettings, training_prompt_template_by_key
 from core.auto_continue.manager import auto_continue_manager
 from ui.widgets.toast import show_toast
-from ui.theme import COLORS, button_style, card_frame_kwargs, font, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
 
 
 class AutoContinueControl(ctk.CTkFrame):
@@ -38,15 +38,26 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._status_label.pack(side="left", padx=(10, 0))
 
+        self._state_hint_label = ctk.CTkLabel(
+            self,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._state_hint_label.pack(fill="x", padx=10, pady=(0, 4))
+        bind_wraplength(self, self._state_hint_label, padding=28, min_width=280, max_width=1100)
+
         # Controls
         controls = ctk.CTkFrame(self, fg_color="transparent")
-        controls.pack(fill="x", padx=10, pady=5)
+        controls.pack(fill="x", padx=10, pady=(2, 6))
 
         # Enable/Pause button
         self._toggle_btn = ctk.CTkButton(
             controls,
-            text="启用",
-            width=80,
+            text="启用续跑",
+            width=92,
             command=self._toggle,
             **button_style("primary", compact=True),
         )
@@ -96,109 +107,115 @@ class AutoContinueControl(ctk.CTkFrame):
         ).pack(side="left")
 
         quick = ctk.CTkFrame(self, fg_color="transparent")
-        quick.pack(fill="x", padx=10, pady=(2, 4))
+        quick.pack(fill="x", padx=10, pady=(0, 4))
         ctk.CTkLabel(
             quick,
-            text="功能开关",
+            text="独立能力开关",
             text_color=COLORS["muted"],
-            font=font(12),
-        ).pack(side="left", padx=(0, 10))
+            font=font(12, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+
+        feature_row = ctk.CTkFrame(quick, fg_color="transparent")
+        feature_row.pack(fill="x")
 
         self._auto_continue_var = ctk.BooleanVar(value=False)
         self._auto_continue_switch = ctk.CTkSwitch(
-            quick,
-            text="\u81ea\u52a8\u7eed\u8dd1",
+            feature_row,
+            text="Stop 续跑",
             variable=self._auto_continue_var,
             command=lambda: self._toggle_feature("auto_continue"),
             text_color=COLORS["text"],
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._auto_continue_switch.pack(side="left", padx=(0, 12))
+        self._auto_continue_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         self._training_auto_continue_var = ctk.BooleanVar(value=False)
         self._training_auto_continue_switch = ctk.CTkSwitch(
-            quick,
-            text="\u8bad\u7ec3\u7eed\u8dd1",
+            feature_row,
+            text="训练达标续跑",
             variable=self._training_auto_continue_var,
             command=lambda: self._toggle_feature("training_auto_continue"),
             text_color=COLORS["text"],
             progress_color=COLORS["accent"],
             button_color=COLORS["text"],
         )
-        self._training_auto_continue_switch.pack(side="left", padx=(0, 12))
+        self._training_auto_continue_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
-            quick,
-            text="Git快照",
+            feature_row,
+            text="Git 快照总开关",
             variable=self._git_snapshot_var,
             command=lambda: self._toggle_feature("git_snapshot"),
             text_color=COLORS["text"],
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_switch.pack(side="left", padx=(0, 12))
+        self._git_snapshot_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         self._error_recovery_var = ctk.BooleanVar(value=False)
         self._error_recovery_switch = ctk.CTkSwitch(
-            quick,
-            text="API错误恢复",
+            feature_row,
+            text="API 错误恢复",
             variable=self._error_recovery_var,
             command=lambda: self._toggle_feature("error_recovery"),
             text_color=COLORS["text"],
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._error_recovery_switch.pack(side="left", padx=(0, 12))
+        self._error_recovery_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         self._permission_auto_approve_var = None
         self._permission_auto_approve_switch = None
         if self.provider.lower() == "claude":
             self._permission_auto_approve_var = ctk.BooleanVar(value=False)
             self._permission_auto_approve_switch = ctk.CTkSwitch(
-                quick,
-                text="权限确认",
+                feature_row,
+                text="权限自动确认",
                 variable=self._permission_auto_approve_var,
                 command=lambda: self._toggle_feature("permission_auto_approve"),
                 text_color=COLORS["text"],
                 progress_color=COLORS["warning"],
                 button_color=COLORS["text"],
             )
-            self._permission_auto_approve_switch.pack(side="left", padx=(0, 12))
+            self._permission_auto_approve_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         detail = ctk.CTkFrame(self, fg_color="transparent")
         detail.pack(fill="x", padx=10, pady=(0, 4))
         ctk.CTkLabel(
             detail,
-            text="Git \u7ec6\u9879",
+            text="Git 快照触发时机",
             text_color=COLORS["muted"],
-            font=font(12),
-        ).pack(side="left", padx=(0, 10))
+            font=font(12, "bold"),
+        ).pack(anchor="w", pady=(2, 4))
+
+        git_row = ctk.CTkFrame(detail, fg_color="transparent")
+        git_row.pack(fill="x")
 
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_start_switch = ctk.CTkSwitch(
-            detail,
-            text="\u624b\u52a8/\u7eed\u8dd1\u65f6",
+            git_row,
+            text="开新对话/发消息/Stop 时",
             variable=self._git_snapshot_on_start_var,
             command=lambda: self._toggle_feature("git_snapshot_on_start"),
             text_color=COLORS["text"],
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_on_start_switch.pack(side="left", padx=(0, 12))
+        self._git_snapshot_on_start_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_recovery_switch = ctk.CTkSwitch(
-            detail,
-            text="API \u6062\u590d\u65f6",
+            git_row,
+            text="API 恢复前",
             variable=self._git_snapshot_on_recovery_var,
             command=lambda: self._toggle_feature("git_snapshot_on_recovery"),
             text_color=COLORS["text"],
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_on_recovery_switch.pack(side="left", padx=(0, 12))
+        self._git_snapshot_on_recovery_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
         # Info display
         self._info_text = ctk.CTkTextbox(self, height=118, **textbox_style(monospace=True))
@@ -210,23 +227,47 @@ class AutoContinueControl(ctk.CTkFrame):
             status = auto_continue_manager.get_status(self.provider)
             settings = auto_continue_manager.get_settings(self.provider)
 
-            # Update status label
-            if status.enabled:
-                self._status_label.configure(text="已启用", text_color=COLORS["success"])
-                self._toggle_btn.configure(text="暂停", **button_style("warning", compact=True))
-            elif status.hook_script_exists or status.hook_registered:
-                self._status_label.configure(text="已暂停", text_color=COLORS["warning"])
-                self._toggle_btn.configure(text="启用", **button_style("primary", compact=True))
+            display_settings = settings or AutoContinueSettings()
+
+            # Update status label. This describes the hook installation state;
+            # the Stop auto-continue state is shown separately to avoid implying
+            # that Git/API recovery are paused when only Stop continuation is off.
+            if status.hook_registered:
+                self._status_label.configure(text="Hook 运行中", text_color=COLORS["success"])
+            elif status.hook_script_exists:
+                self._status_label.configure(text="脚本已安装", text_color=COLORS["warning"])
             elif status.error_recovery_installed:
-                self._status_label.configure(text="已配置", text_color=COLORS["warning"])
-                self._toggle_btn.configure(text="启用", **button_style("primary", compact=True))
+                self._status_label.configure(text="错误恢复已安装", text_color=COLORS["warning"])
             else:
-                self._status_label.configure(text="未安装", text_color=COLORS["muted_soft"])
-                self._toggle_btn.configure(text="启用", **button_style("primary", compact=True))
+                self._status_label.configure(text="未安装 Hook", text_color=COLORS["muted_soft"])
+
+            if display_settings.enabled:
+                self._toggle_btn.configure(text="暂停续跑", **button_style("warning", compact=True))
+            else:
+                self._toggle_btn.configure(text="启用续跑", **button_style("primary", compact=True))
+
+            stop_state = "ON" if display_settings.enabled else "OFF"
+            training_state = "ON" if display_settings.training_auto_continue_enabled else "OFF"
+            git_state = "ON" if display_settings.git_auto_snapshot else "OFF"
+            recovery_state = "ON" if display_settings.error_recovery_enabled else "OFF"
+            hint_parts = [
+                f"Stop续跑 {stop_state}",
+                f"训练续跑 {training_state}",
+                f"Git快照 {git_state}",
+                f"API恢复 {recovery_state}",
+            ]
+            if self.provider.lower() == "claude":
+                permission_state = (
+                    "ON" if display_settings.auto_approve_permission_requests else "OFF"
+                )
+                hint_parts.append(f"权限确认 {permission_state}")
+            self._state_hint_label.configure(
+                text=" | ".join(hint_parts),
+                text_color=COLORS["muted"] if status.hook_registered else COLORS["muted_soft"],
+            )
 
             self._refreshing = True
             try:
-                display_settings = settings or AutoContinueSettings()
                 self._auto_continue_var.set(bool(display_settings.enabled))
                 self._training_auto_continue_var.set(bool(display_settings.training_auto_continue_enabled))
                 self._git_snapshot_var.set(bool(display_settings.git_auto_snapshot))
@@ -272,8 +313,8 @@ class AutoContinueControl(ctk.CTkFrame):
                     info_lines.append(f"训练模板: {template['name']}")
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
-                    f"手动/续跑 {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
-                    f"恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
+                    f"对话/消息/Stop {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
+                    f"API恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
                 )
                 if settings.error_recovery_enabled:
                     info_lines.append(f"最大恢复次数: {settings.max_error_recoveries}")
@@ -325,7 +366,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     auto_continue_manager.enable(self.provider, settings, apply_to_subagents)
                 else:
                     auto_continue_manager.pause(self.provider)
-                show_toast(self.winfo_toplevel(), "鍔熻兘寮€鍏冲凡鏇存柊")
+                show_toast(self.winfo_toplevel(), "Stop 续跑开关已更新")
                 self.refresh()
                 return
             elif feature == "git_snapshot":
