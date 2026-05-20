@@ -34,6 +34,8 @@ DEFAULT_INCOMPLETE_PATTERNS = [
     r"(?i)(^|\n)\s*(continue|resume|keep\s+going|carry\s+on)\s*[\?\uFF1F]\s*$",
     r"(?i)(type|say|reply(?:\s+with)?).{0,80}continue.{0,80}(to\s+continue|$)\s*$",
     r"(?i)press\s+(enter|return)\s+to\s+continue\s*[:\uFF1A]?\s*$",
+    r"\u8981.{0,40}\u7ee7\u7eed.{0,80}[\?\uFF1F]\s*$",
+    r"(\u56de\u590d|\u8f93\u5165|\u53d1\u9001).{0,50}\u7ee7\u7eed.{0,80}(\u4ee5\u7ee7\u7eed|\u7ee7\u7eed|$)\s*$",
     r"\u8fd8\u6ca1\u5b8c",
     r"\u5c1a\u672a\u5b8c",
     r"\u6ca1\u6709.{0,20}(\u5b8c\u6210|\u7ed3\u675f|\u6536\u5c3e)",

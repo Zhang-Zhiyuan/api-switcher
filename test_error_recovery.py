@@ -432,10 +432,13 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "git config user.email" in local_script
     assert "Ensure-LocalGitIgnore" in local_script
     assert "Get-BoolSetting" in local_script
+    assert "Read-HookInput" in local_script
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
     assert "\n        git add -A 2>&1 | Out-Null\n" in local_script
     assert '$hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse"' in local_script
+    assert "Creating standalone git snapshot on stop hook" in local_script
+    assert "Creating git snapshot before auto-continue" in local_script
     assert 'permissionDecision = "allow"' in local_script
     assert "auto_continue_permission_state.json" in local_script
     assert "node_modules/" in local_script
@@ -444,7 +447,7 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert "DEFAULT_GITIGNORE_LINES" in remote_script
     assert "initialized_repo = False" in remote_script
     assert "if initialized_repo:" in remote_script
-    assert 'if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled:' in remote_script
+    assert 'if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled and not auto_continue_enabled:' in remote_script
     assert '"permissionDecision": "allow"' in remote_script
     assert "auto_continue_permission_state.json" in remote_script
     assert "node_modules/" in remote_script
@@ -509,8 +512,8 @@ def test_remote_stop_hook_treats_context_window_api_error_as_recoverable(tmp_pat
     assert output["decision"] == "block"
     assert output["reason"] == "compact and continue"
     assert output["suppressOutput"] is True
-    assert output["continue"] is True
-    assert output["message"] == "compact and continue"
+    assert "continue" not in output
+    assert "message" not in output
     log_path = state_dir / "auto_continue_stop_log.jsonl"
     assert "recoverable_api_error_detected" in log_path.read_text(encoding="utf-8")
 
@@ -571,8 +574,8 @@ def test_remote_stop_hook_treats_content_length_json_api_error_as_recoverable(tm
     assert output["decision"] == "block"
     assert output["reason"] == "compact and continue"
     assert output["suppressOutput"] is True
-    assert output["continue"] is True
-    assert output["message"] == "compact and continue"
+    assert "continue" not in output
+    assert "message" not in output
     log_path = state_dir / "auto_continue_stop_log.jsonl"
     assert "recoverable_api_error_detected" in log_path.read_text(encoding="utf-8")
 
@@ -637,6 +640,13 @@ def test_remote_stop_hook_handles_bilingual_patterns_and_logs_decisions(tmp_path
     )
     assert chinese_continue.returncode == 0, chinese_continue.stderr
     assert json.loads(chinese_continue.stdout)["decision"] == "block"
+
+    reply_continue = run_hook(
+        "remote-cn-reply-continue",
+        "如果你回复“继续”，我就进入下一步。要继续直接实现吗？",
+    )
+    assert reply_continue.returncode == 0, reply_continue.stderr
+    assert json.loads(reply_continue.stdout)["decision"] == "block"
 
     blocker = run_hook(
         "remote-blocker",
@@ -940,8 +950,8 @@ def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
     assert output["decision"] == "block"
     assert output["reason"] == "continue cleanly"
     assert output["suppressOutput"] is True
-    assert output["continue"] is True
-    assert output["message"] == "continue cleanly"
+    assert "continue" not in output
+    assert "message" not in output
 
     second = subprocess.run(
         [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
@@ -959,6 +969,102 @@ def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
     assert second.returncode == 0, second.stderr
     assert second.stdout.strip() == ""
     assert "AsHashtable" not in second.stderr
+
+
+def test_local_stop_hook_reads_utf8_stdin_bytes(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=True,
+        max_continuations=10,
+        continuation_prompt="continue utf8",
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-utf8-bytes",
+        "hook_event_name": "Stop",
+        "last_assistant_message": "如果你回复“继续”，我就进入下一步。要继续直接实现吗？",
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    output = json.loads(result.stdout.decode("utf-8-sig"))
+    assert output["decision"] == "block"
+    assert output["reason"] == "continue utf8"
+    log_text = (tmp_path / "tmp" / "auto_continue_stop_log.jsonl").read_text(encoding="utf-8")
+    assert "????" not in log_text
+
+
+def test_local_stop_hook_skips_git_snapshot_until_continuation_needed(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=True,
+        max_continuations=10,
+        continuation_prompt="continue after snapshot",
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-no-continuation-no-snapshot",
+        "last_assistant_message": "All implementation and verification are complete.",
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert not (tmp_path / ".git").exists()
+    assert "Creating git snapshot" not in result.stderr
 
 
 def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_path):
@@ -1021,6 +1127,14 @@ def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_pat
     assert chinese_continue.returncode == 0, chinese_continue.stderr
     chinese_output = json.loads(chinese_continue.stdout)
     assert chinese_output["decision"] == "block"
+
+    reply_continue = run_hook(
+        "session-cn-reply-continue",
+        "如果你回复“继续”，我就进入下一步。要继续直接实现吗？",
+    )
+    assert reply_continue.returncode == 0, reply_continue.stderr
+    reply_output = json.loads(reply_continue.stdout)
+    assert reply_output["decision"] == "block"
 
     english_blocker = run_hook(
         "session-en-blocker",

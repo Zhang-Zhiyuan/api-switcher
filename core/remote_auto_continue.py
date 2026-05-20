@@ -1239,11 +1239,30 @@ def run_git_snapshot():
 
     try:
         initialized_repo = False
-        if run(["git", "rev-parse", "--git-dir"]).returncode != 0:
+        git_dir_result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        if git_dir_result.returncode != 0:
             initialized_repo = run(["git", "init"]).returncode == 0
+            git_dir_result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
 
         if initialized_repo:
             ensure_gitignore()
+
+        git_dir = git_dir_result.stdout.strip()
+        if git_dir and os.path.exists(os.path.join(git_dir, "index.lock")):
+            log("Git index lock exists; skipping git snapshot", "WARN")
+            return
 
         status = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -1255,7 +1274,10 @@ def run_git_snapshot():
         if not status.stdout.strip():
             return
 
-        run(["git", "add", "-A"], timeout=30)
+        add_result = run(["git", "add", "-A"], timeout=30)
+        if add_result.returncode != 0:
+            log("Git add did not complete; skipping git snapshot", "WARN")
+            return
         username = subprocess.run(
             ["git", "config", "user.name"],
             stdout=subprocess.PIPE,
@@ -1297,12 +1319,13 @@ def main():
 
     auto_approve_enabled = as_bool(settings.get("auto_approve_permission_requests"), False)
     error_recovery_enabled = as_bool(settings.get("error_recovery_enabled"), False)
+    auto_continue_enabled = as_bool(settings.get("enabled"), False)
     git_snapshot_enabled = as_bool(settings.get("git_auto_snapshot"), True) and as_bool(
         settings.get("git_snapshot_on_start"),
         True,
     )
 
-    if not as_bool(settings.get("enabled"), False) and not auto_approve_enabled and not git_snapshot_enabled and not error_recovery_enabled:
+    if not auto_continue_enabled and not auto_approve_enabled and not git_snapshot_enabled and not error_recovery_enabled:
         return
 
     raw_input = ""
@@ -1356,9 +1379,10 @@ def main():
         if handle_error_recovery(data, settings, state_dir, is_claude, session_id):
             return
 
-    # Permission prompts must be answered quickly. Git snapshots can be slow in
-    # large repositories, so only run them for stop/continue events.
-    if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled:
+    # Standalone Git snapshot hooks still run even when auto-continue itself is
+    # disabled. When auto-continue is enabled, snapshot only after a block
+    # decision is confirmed so snapshot failures cannot hide the continuation.
+    if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled and not auto_continue_enabled:
         run_git_snapshot()
 
     if is_claude and hook_event in {"PermissionRequest", "PreToolUse"}:
@@ -1472,7 +1496,7 @@ def main():
         print(json.dumps(output, ensure_ascii=False))
         return
 
-    if not as_bool(settings.get("enabled"), False):
+    if not auto_continue_enabled:
         return
 
     last_message = pick_text(
@@ -1603,12 +1627,13 @@ def main():
             continuation_prompt,
         )
 
+        if hook_event not in {"PermissionRequest", "PreToolUse"} and git_snapshot_enabled:
+            run_git_snapshot()
+
         output = {
             "decision": "block",
             "reason": continuation_prompt,
             "suppressOutput": True,
-            "continue": True,
-            "message": continuation_prompt,
         }
         print(json.dumps(output, ensure_ascii=False))
     finally:

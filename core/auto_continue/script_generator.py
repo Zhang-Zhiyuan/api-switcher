@@ -69,6 +69,17 @@ function Initialize-Utf8Console {{
 
 Initialize-Utf8Console
 
+function Read-HookInput {{
+    try {{
+        $stdinStream = [Console]::OpenStandardInput()
+        $reader = New-Object System.IO.StreamReader($stdinStream, [System.Text.Encoding]::UTF8, $true)
+        return $reader.ReadToEnd()
+    }} catch {{
+        Write-Log "Failed to read hook input as UTF-8 stream: $_" "WARN"
+        return [Console]::In.ReadToEnd()
+    }}
+}}
+
 function ConvertTo-Hashtable {{
     param($Value)
 
@@ -233,6 +244,8 @@ function Ensure-LocalGitIgnore {{
 function Create-GitSnapshot {{
     param([string]$Message = "Auto snapshot before continue")
 
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {{
         # 检查是否是git仓库
         $isGitRepo = git rev-parse --git-dir 2>$null
@@ -248,6 +261,15 @@ function Create-GitSnapshot {{
             Ensure-LocalGitIgnore
         }}
 
+        $gitDir = git rev-parse --git-dir 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($gitDir)) {{
+            $indexLockPath = Join-Path $gitDir "index.lock"
+            if (Test-Path $indexLockPath) {{
+                Write-Log "Git index lock exists; skipping git snapshot" "WARN"
+                return $false
+            }}
+        }}
+
         # 检查是否有更改
         $status = git status --porcelain 2>$null
         if ([string]::IsNullOrWhiteSpace($status)) {{
@@ -257,6 +279,10 @@ function Create-GitSnapshot {{
 
         # 添加所有更改
         git add -A 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Log "Git add did not complete; skipping git snapshot" "WARN"
+            return $false
+        }}
 
         # 检查git配置
         $userName = git config user.name 2>$null
@@ -280,6 +306,8 @@ function Create-GitSnapshot {{
     }} catch {{
         Write-Log "Failed to create git snapshot: $_" "WARN"
         return $false
+    }} finally {{
+        $ErrorActionPreference = $previousErrorActionPreference
     }}
 }}
 
@@ -315,7 +343,7 @@ try {{
     $autoApprovePermissionRequests = Get-BoolSetting -Settings $settings -Name "auto_approve_permission_requests" -Default $false
 
     # Read stdin (hook input)
-    $stdin = [Console]::In.ReadToEnd()
+    $stdin = Read-HookInput
 
     if ([string]::IsNullOrWhiteSpace($stdin)) {{
         exit 0  # Allow stop if no input
@@ -356,11 +384,18 @@ try {{
     }}
     $lastMessage = Get-NormalizedText $lastMessage
 
-    # Permission prompts must be answered quickly. Git snapshots can be slow in
-    # large repositories, so only run them for stop/continue events.
-    if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
-        Write-Log "Creating git snapshot on stop hook..." "INFO"
-        Create-GitSnapshot -Message "git-snapshot" | Out-Null
+    # Standalone Git snapshot hooks still run even when auto-continue itself is
+    # disabled. When auto-continue is enabled, snapshot only after a block
+    # decision is confirmed so snapshot failures cannot hide the continuation.
+    if (
+        $hookEvent -ne "PermissionRequest" -and
+        $hookEvent -ne "PreToolUse" -and
+        $gitAutoSnapshot -and
+        $gitSnapshotOnStart -and
+        -not $autoContinueEnabled
+    ) {{
+        Write-Log "Creating standalone git snapshot on stop hook..." "INFO"
+        [void](Create-GitSnapshot -Message "git-snapshot")
     }}
 
     if ($isClaude -and ($hookEvent -eq "PermissionRequest" -or $hookEvent -eq "PreToolUse")) {{
@@ -777,14 +812,17 @@ try {{
             -Count $count `
             -ContinuationPrompt $settings.continuation_prompt
 
-        # Output pphoto-style block decision. The legacy continue/message fields
-        # are kept for older Codex builds that used that shape.
+        if ($hookEvent -ne "PermissionRequest" -and $hookEvent -ne "PreToolUse" -and $gitAutoSnapshot -and $gitSnapshotOnStart) {{
+            Write-Log "Creating git snapshot before auto-continue..." "INFO"
+            [void](Create-GitSnapshot -Message "git-snapshot")
+        }}
+
+        # Output pphoto-style block decision. Current Codex/Claude Stop hooks
+        # treat the block reason as the continuation instruction.
         $output = @{{
             decision = "block"
             reason = $settings.continuation_prompt
             suppressOutput = $true
-            continue = $true
-            message = $settings.continuation_prompt
         }} | ConvertTo-Json
         Write-Output $output
 
