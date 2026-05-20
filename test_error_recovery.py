@@ -757,6 +757,77 @@ def test_remote_training_guard_continues_independently_and_stops_when_target_met
     assert "training_target_met" in log_text
 
 
+def test_remote_session_start_hook_uses_payload_cwd_for_initial_git_snapshot(tmp_path):
+    import subprocess
+
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    hook_cwd = tmp_path / "hook-cwd"
+    project_dir = tmp_path / "project"
+    hook_cwd.mkdir()
+    project_dir.mkdir()
+    (project_dir / "model.py").write_text("print('train')\n", encoding="utf-8")
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+        error_recovery_enabled=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-session-start-git-cwd",
+            "hook_event_name": "SessionStart",
+            "cwd": str(project_dir),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=hook_cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert (project_dir / ".git").exists()
+    assert not (hook_cwd / ".git").exists()
+
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=project_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert log.returncode == 0, log.stderr
+    assert "git-snapshot" in log.stdout
+
+
 def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
     import subprocess
 
@@ -1167,6 +1238,75 @@ def test_local_stop_hook_snapshots_completed_manual_turn(tmp_path):
         check=False,
     )
     assert rev_parse.returncode == 0, rev_parse.stderr
+
+
+def test_local_session_start_hook_uses_payload_cwd_for_initial_git_snapshot(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    hook_cwd = tmp_path / "hook-cwd"
+    project_dir = tmp_path / "project"
+    hook_cwd.mkdir()
+    project_dir.mkdir()
+    (project_dir / "train.py").write_text("print('hello')\n", encoding="utf-8")
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=True,
+        git_snapshot_on_start=True,
+        error_recovery_enabled=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "session-start-git-cwd",
+        "hook_event_name": "SessionStart",
+        "cwd": str(project_dir),
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=hook_cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert (project_dir / ".git").exists()
+    assert not (hook_cwd / ".git").exists()
+    assert "Using hook project directory" in result.stderr
+
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=project_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert log.returncode == 0, log.stderr
+    assert "git-snapshot" in log.stdout
 
 
 def test_local_stop_hook_handles_bilingual_continue_and_blocker_patterns(tmp_path):

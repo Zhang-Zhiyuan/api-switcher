@@ -98,6 +98,182 @@ function Read-HookInput {{
     }}
 }}
 
+function Add-HookDirectoryCandidate {{
+    param(
+        [System.Collections.ArrayList]$Candidates,
+        $Value
+    )
+
+    if ($null -eq $Value) {{
+        return
+    }}
+
+    if ($Value -is [System.Array]) {{
+        foreach ($item in $Value) {{
+            Add-HookDirectoryCandidate -Candidates $Candidates -Value $item
+        }}
+        return
+    }}
+
+    if ($Value -is [System.Collections.IDictionary]) {{
+        foreach ($key in @(
+            "cwd",
+            "path",
+            "dir",
+            "directory",
+            "root",
+            "workspace",
+            "workspace_dir",
+            "workspaceDir",
+            "workspace_folders",
+            "workspaceFolders",
+            "project_dir",
+            "projectDir",
+            "project_path",
+            "projectPath",
+            "project_root",
+            "projectRoot",
+            "repo_path",
+            "repoPath",
+            "repo_root",
+            "repoRoot",
+            "repository_path",
+            "repositoryPath",
+            "repository_root",
+            "repositoryRoot",
+            "root_path",
+            "rootPath"
+        )) {{
+            if ($Value.Contains($key)) {{
+                Add-HookDirectoryCandidate -Candidates $Candidates -Value $Value[$key]
+            }}
+        }}
+        return
+    }}
+
+    if ($Value -isnot [string] -and $Value.PSObject -and $Value.PSObject.Properties) {{
+        foreach ($key in @(
+            "cwd",
+            "path",
+            "dir",
+            "directory",
+            "root",
+            "workspace",
+            "workspace_dir",
+            "workspaceDir",
+            "workspace_folders",
+            "workspaceFolders",
+            "project_dir",
+            "projectDir",
+            "project_path",
+            "projectPath",
+            "project_root",
+            "projectRoot",
+            "repo_path",
+            "repoPath",
+            "repo_root",
+            "repoRoot",
+            "repository_path",
+            "repositoryPath",
+            "repository_root",
+            "repositoryRoot",
+            "root_path",
+            "rootPath"
+        )) {{
+            $property = $Value.PSObject.Properties[$key]
+            if ($null -ne $property) {{
+                Add-HookDirectoryCandidate -Candidates $Candidates -Value $property.Value
+            }}
+        }}
+        return
+    }}
+
+    $text = [string]$Value
+    if (-not [string]::IsNullOrWhiteSpace($text)) {{
+        [void]$Candidates.Add($text)
+    }}
+}}
+
+function Resolve-HookProjectDirectory {{
+    param($HookInput)
+
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($fieldName in @(
+        "cwd",
+        "current_directory",
+        "currentDirectory",
+        "current_working_directory",
+        "currentWorkingDirectory",
+        "workspace",
+        "workspace_dir",
+        "workspaceDir",
+        "workspace_folders",
+        "workspaceFolders",
+        "project_dir",
+        "projectDir",
+        "project_path",
+        "projectPath",
+        "project_root",
+        "projectRoot",
+        "repo_path",
+        "repoPath",
+        "repo_root",
+        "repoRoot",
+        "repository_path",
+        "repositoryPath",
+        "repository_root",
+        "repositoryRoot",
+        "root",
+        "root_dir",
+        "rootDir",
+        "root_path",
+        "rootPath"
+    )) {{
+        $property = $HookInput.PSObject.Properties[$fieldName]
+        if ($null -ne $property) {{
+            Add-HookDirectoryCandidate -Candidates $candidates -Value $property.Value
+        }}
+    }}
+
+    foreach ($containerName in @("workspace", "project", "repository", "repo", "context")) {{
+        $property = $HookInput.PSObject.Properties[$containerName]
+        if ($null -ne $property) {{
+            Add-HookDirectoryCandidate -Candidates $candidates -Value $property.Value
+        }}
+    }}
+
+    foreach ($candidate in $candidates) {{
+        try {{
+            $pathText = [Environment]::ExpandEnvironmentVariables(([string]$candidate).Trim().Trim('"'))
+            if ([string]::IsNullOrWhiteSpace($pathText)) {{
+                continue
+            }}
+            if (Test-Path -LiteralPath $pathText -PathType Container) {{
+                return (Resolve-Path -LiteralPath $pathText -ErrorAction Stop).Path
+            }}
+        }} catch {{
+            Write-Log "Ignoring invalid hook project directory candidate: $candidate" "WARN"
+        }}
+    }}
+
+    return ""
+}}
+
+function Use-HookProjectDirectory {{
+    param($HookInput)
+
+    $projectDir = Resolve-HookProjectDirectory -HookInput $HookInput
+    if ([string]::IsNullOrWhiteSpace($projectDir)) {{
+        return
+    }}
+    try {{
+        Set-Location -LiteralPath $projectDir -ErrorAction Stop
+        Write-Log "Using hook project directory for Git snapshot: $projectDir" "INFO"
+    }} catch {{
+        Write-Log ("Failed to switch to hook project directory {{0}}: {{1}}" -f $projectDir, $_) "WARN"
+    }}
+}}
+
 function ConvertTo-Hashtable {{
     param($Value)
 
@@ -402,6 +578,7 @@ try {{
         Write-Log "Failed to parse input JSON: $_" "ERROR"
         exit 0
     }}
+    Use-HookProjectDirectory -HookInput $hookInput
 
     # Get session ID, event name, and the final assistant text. New Codex builds
     # use the same last_assistant_message shape as Claude-style Stop hooks.

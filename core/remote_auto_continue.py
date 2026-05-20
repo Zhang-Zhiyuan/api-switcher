@@ -1204,6 +1204,88 @@ def tool_allowed(tool_name, allowed_tools):
     return False
 
 
+PROJECT_DIR_FIELDS = (
+    "cwd",
+    "current_directory",
+    "currentDirectory",
+    "current_working_directory",
+    "currentWorkingDirectory",
+    "workspace",
+    "workspace_dir",
+    "workspaceDir",
+    "workspace_folders",
+    "workspaceFolders",
+    "project_dir",
+    "projectDir",
+    "project_path",
+    "projectPath",
+    "project_root",
+    "projectRoot",
+    "repo_path",
+    "repoPath",
+    "repo_root",
+    "repoRoot",
+    "repository_path",
+    "repositoryPath",
+    "repository_root",
+    "repositoryRoot",
+    "root",
+    "root_dir",
+    "rootDir",
+    "root_path",
+    "rootPath",
+)
+
+
+def add_project_dir_candidate(candidates, value):
+    if value is None:
+        return
+    if isinstance(value, str):
+        text = value.strip().strip('"')
+        if text:
+            candidates.append(text)
+        return
+    if isinstance(value, dict):
+        for key in PROJECT_DIR_FIELDS + ("path", "dir", "directory"):
+            if key in value:
+                add_project_dir_candidate(candidates, value.get(key))
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            add_project_dir_candidate(candidates, item)
+
+
+def resolve_hook_project_dir(data):
+    candidates = []
+    for key in PROJECT_DIR_FIELDS:
+        add_project_dir_candidate(candidates, data.get(key))
+    for key in ("workspace", "project", "repository", "repo", "context"):
+        add_project_dir_candidate(candidates, data.get(key))
+
+    seen = set()
+    for candidate in candidates:
+        expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(candidate)))
+        if expanded in seen:
+            continue
+        seen.add(expanded)
+        if os.path.isdir(expanded):
+            return expanded
+    return ""
+
+
+def use_hook_project_dir(data):
+    project_dir = resolve_hook_project_dir(data)
+    if not project_dir:
+        return ""
+    try:
+        os.chdir(project_dir)
+        log(f"Using hook project directory for Git snapshot: {project_dir}")
+        return project_dir
+    except Exception as exc:
+        log(f"Failed to switch to hook project directory {project_dir}: {exc}", "WARN")
+        return ""
+
+
 def load_state(path):
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -1482,6 +1564,7 @@ def main():
         return
     if not isinstance(data, dict):
         return
+    use_hook_project_dir(data)
 
     is_claude = data.get("hook_event_name") is not None or data.get("hookEventName") is not None
     hook_event = data.get("hook_event_name") or data.get("hookEventName") or "Stop"
