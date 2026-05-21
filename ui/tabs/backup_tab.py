@@ -1,7 +1,7 @@
 import customtkinter as ctk
 from tkinter import filedialog
 
-from core import backup_manager, portable_migration
+from core import backup_manager, local_config_bundle, portable_migration
 from ui.widgets.toast import show_toast
 from ui.widgets.empty_state import EmptyState
 from ui.dialogs.confirm_dialog import ConfirmDialog
@@ -32,7 +32,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         ctk.CTkLabel(
             title_area,
-            text="创建本机备份，或导出可跨电脑迁移的加密 Profile 包，包含托管浏览器登录数据",
+            text="创建本机备份，导出完整配置 ZIP，或导出可跨电脑迁移的加密 Profile 包",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
@@ -72,6 +72,8 @@ class BackupTab(ctk.CTkScrollableFrame):
             command=self._create_backup,
             **button_style("primary"),
         ).pack(side="right")
+
+        self._build_local_config_zip_panel()
 
         self._list_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
@@ -141,6 +143,47 @@ class BackupTab(ctk.CTkScrollableFrame):
                 **button_style("warning", compact=True),
             ).pack(side="left", padx=(0, 5))
 
+    def _build_local_config_zip_panel(self):
+        panel = ctk.CTkFrame(self, **card_frame_kwargs())
+        panel.pack(fill="x", padx=14, pady=(0, 10))
+
+        text_area = ctk.CTkFrame(panel, fg_color="transparent")
+        text_area.pack(side="left", fill="x", expand=True, padx=14, pady=12)
+
+        ctk.CTkLabel(
+            text_area,
+            text="完整配置 ZIP",
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+        ).pack(anchor="w")
+        desc = ctk.CTkLabel(
+            text_area,
+            text="一键导出/导入本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据和引用密钥；密钥用迁移密码加密。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        desc.pack(fill="x", pady=(3, 0))
+        bind_wraplength(text_area, desc, padding=8, min_width=320, max_width=760)
+
+        actions = ctk.CTkFrame(panel, fg_color="transparent")
+        actions.pack(side="right", padx=14, pady=12)
+        ctk.CTkButton(
+            actions,
+            text="导入 ZIP",
+            width=94,
+            command=self._import_local_config_zip,
+            **button_style("accent", compact=True),
+        ).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            actions,
+            text="导出 ZIP",
+            width=94,
+            command=self._export_local_config_zip,
+            **button_style("success", compact=True),
+        ).pack(side="right")
+
     def _create_backup(self):
         try:
             entry = backup_manager.create_backup("手动备份")
@@ -182,6 +225,80 @@ class BackupTab(ctk.CTkScrollableFrame):
         ConfirmDialog(self.winfo_toplevel(), title="清理备份",
                       message="将保留最近 20 个备份，其余删除。继续？",
                       on_confirm=do_prune)
+
+    def _export_local_config_zip(self):
+        output_path = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            title="导出完整配置 ZIP",
+            defaultextension=".zip",
+            filetypes=[
+                ("API切换器完整配置 ZIP", "*.zip"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not output_path:
+            return
+
+        def do_export(password: str):
+            try:
+                result = local_config_bundle.export_local_config_zip(output_path, password)
+                message = f"完整配置 ZIP 已导出: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                if result.missing_secret_refs:
+                    message += f"，{len(result.missing_secret_refs)} 个密钥缺失"
+                show_toast(self.winfo_toplevel(), message)
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"导出 ZIP 失败: {e}", is_error=True)
+
+        PasswordDialog(
+            self.winfo_toplevel(),
+            title="设置完整配置 ZIP 密码",
+            message="ZIP 会包含本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据，以及这些条目引用的 API Key、账号 token、SSH 密码/私钥口令。请设置强密码。",
+            confirm_password=True,
+            on_confirm=do_export,
+        )
+
+    def _import_local_config_zip(self):
+        input_path = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(),
+            title="导入完整配置 ZIP",
+            filetypes=[
+                ("API切换器完整配置 ZIP", "*.zip"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not input_path:
+            return
+
+        def ask_password():
+            PasswordDialog(
+                self.winfo_toplevel(),
+                title="输入完整配置 ZIP 密码",
+                message="导入会合并 ZIP 中的 API、官方账号快照、SSH 和浏览器 Profile；同名 Profile 会被替换。导入前会自动创建一份配置备份。",
+                confirm_password=False,
+                on_confirm=do_import,
+            )
+
+        def do_import(password: str):
+            try:
+                result = local_config_bundle.import_local_config_zip(input_path, password)
+                message = f"完整配置 ZIP 已导入: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                if result.skipped_secret_refs:
+                    message += f"，{len(result.skipped_secret_refs)} 个密钥跳过"
+                show_toast(self.winfo_toplevel(), message)
+                top = self.winfo_toplevel()
+                if hasattr(top, "refresh_all"):
+                    top.refresh_all()
+                else:
+                    self.refresh()
+            except Exception as e:
+                show_toast(self.winfo_toplevel(), f"导入 ZIP 失败: {e}", is_error=True)
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="导入完整配置 ZIP",
+            message="导入会合并 ZIP 中的本地 API、官方账号、SSH 服务器等配置；同名 Profile 会被替换。继续？",
+            on_confirm=ask_password,
+        )
 
     def _export_portable(self):
         output_path = filedialog.asksaveasfilename(
