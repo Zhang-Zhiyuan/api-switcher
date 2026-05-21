@@ -57,6 +57,16 @@ class LocalConfigImportResult:
     backup_description: str
 
 
+@dataclass(frozen=True)
+class LocalConfigPackageSummary:
+    path: Path
+    profile_count: int
+    profile_counts: dict[str, int]
+    secret_count: int
+    missing_secret_count: int
+    created_at: str
+
+
 def _b64encode(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
@@ -227,6 +237,16 @@ def _apply_imported_active_profiles(target_store: dict[str, Any], imported_store
             target_store[active_key] = imported_active
 
 
+def _delete_unreferenced_replaced_secrets(existing_store: dict[str, Any], new_store: dict[str, Any]) -> list[str]:
+    skipped: list[str] = []
+    for ref in sorted(_collect_secret_refs(existing_store) - _collect_secret_refs(new_store)):
+        try:
+            security.delete_secret(ref)
+        except Exception as e:
+            skipped.append(f"{ref} (旧密钥清理失败: {e})")
+    return skipped
+
+
 def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
     try:
         info = bundle.getinfo(name)
@@ -255,6 +275,50 @@ def _write_profiles_safety_backup(backup_entry: Any, store: dict[str, Any]) -> N
     except Exception:
         # Import can still rely on profile_manager's own profiles.backup file.
         return
+
+
+def inspect_local_config_zip(input_path: str | Path) -> LocalConfigPackageSummary:
+    """Read the unencrypted manifest from a local config ZIP without importing secrets."""
+    path = Path(input_path).expanduser().resolve()
+    if not path.exists():
+        raise ValueError("完整配置 ZIP 不存在")
+    if not path.is_file():
+        raise ValueError("请选择完整配置 ZIP 文件")
+    if path.stat().st_size > MAX_ZIP_BYTES:
+        raise ValueError("完整配置 ZIP 过大，请确认是否选择了正确文件")
+    try:
+        with zipfile.ZipFile(path, "r") as bundle:
+            manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
+    except zipfile.BadZipFile as e:
+        raise ValueError("完整配置 ZIP 文件损坏") from e
+
+    if manifest.get("format") != PACKAGE_FORMAT:
+        raise ValueError("不是 API切换器完整配置 ZIP")
+    if manifest.get("version") != PACKAGE_VERSION:
+        raise ValueError(f"不支持的完整配置 ZIP 版本: {manifest.get('version')}")
+
+    profile_counts = manifest.get("profile_counts", {})
+    if not isinstance(profile_counts, dict):
+        profile_counts = {}
+    try:
+        profile_count = int(manifest.get("profile_count") or 0)
+        secret_count = int(manifest.get("secret_count") or 0)
+        missing_secret_count = int(manifest.get("missing_secret_count") or 0)
+    except (TypeError, ValueError) as e:
+        raise ValueError("完整配置 ZIP manifest 统计字段异常") from e
+
+    return LocalConfigPackageSummary(
+        path=path,
+        profile_count=profile_count,
+        profile_counts={
+            str(key): int(value)
+            for key, value in profile_counts.items()
+            if isinstance(value, int) or (isinstance(value, str) and value.isdigit())
+        },
+        secret_count=secret_count,
+        missing_secret_count=missing_secret_count,
+        created_at=str(manifest.get("created_at") or ""),
+    )
 
 
 def export_local_config_zip(output_path: str | Path, password: str) -> LocalConfigExportResult:
@@ -357,6 +421,10 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
     secrets = payload.get("secrets", {})
     if not isinstance(secrets, dict):
         raise ValueError("完整配置 ZIP 中的密钥数据无效")
+    missing_from_source = [
+        ref for ref in payload.get("missing_secret_refs", [])
+        if isinstance(ref, str) and ref
+    ]
 
     skipped: list[str] = []
     valid_secrets: list[tuple[str, str]] = []
@@ -389,10 +457,12 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     profile_manager._normalize_store(new_store)
     profile_manager._save_store(new_store)
+    skipped.extend(_delete_unreferenced_replaced_secrets(existing_store, new_store))
+    skipped.extend(f"{ref} (源包缺少密钥)" for ref in missing_from_source)
 
     return LocalConfigImportResult(
         profile_count=_profile_count(imported_store),
         secret_count=restored,
-        skipped_secret_refs=skipped,
+        skipped_secret_refs=sorted(set(skipped)),
         backup_description=backup_entry.description,
     )

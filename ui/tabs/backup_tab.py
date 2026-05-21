@@ -269,6 +269,17 @@ class BackupTab(ctk.CTkScrollableFrame):
         if not input_path:
             return
 
+        try:
+            summary = local_config_bundle.inspect_local_config_zip(input_path)
+            summary_text = f"{summary.profile_count} 个 Profile，{summary.secret_count} 个密钥"
+            if summary.missing_secret_count:
+                summary_text += f"，源包缺失 {summary.missing_secret_count} 个密钥"
+            if summary.created_at:
+                summary_text += f"\n创建时间: {summary.created_at}"
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"读取 ZIP 失败: {e}", is_error=True)
+            return
+
         def ask_password():
             PasswordDialog(
                 self.winfo_toplevel(),
@@ -296,7 +307,10 @@ class BackupTab(ctk.CTkScrollableFrame):
         ConfirmDialog(
             self.winfo_toplevel(),
             title="导入完整配置 ZIP",
-            message="导入会合并 ZIP 中的本地 API、官方账号、SSH 服务器等配置；同名 Profile 会被替换。继续？",
+            message=(
+                f"将导入: {summary_text}\n\n"
+                "导入会合并 ZIP 中的本地 API、官方账号、SSH 服务器等配置；同名 Profile 会被替换。继续？"
+            ),
             on_confirm=ask_password,
         )
 

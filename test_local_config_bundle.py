@@ -101,6 +101,10 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
     assert exported.profile_count == 6
     assert exported.secret_count == len(secret_refs)
     assert exported.missing_secret_refs == []
+    summary = local_config_bundle.inspect_local_config_zip(package)
+    assert summary.profile_count == 6
+    assert summary.secret_count == len(secret_refs)
+    assert summary.profile_counts["ssh_profiles"] == 1
     with zipfile.ZipFile(package, "r") as bundle:
         manifest = json.loads(bundle.read("manifest.json").decode("utf-8"))
     assert manifest["format"] == local_config_bundle.PACKAGE_FORMAT
@@ -110,10 +114,17 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
     profile_manager._save_store(profile_manager._get_default_store())
     secrets.clear()
     security.set_secret("codex:Keep:api_key", "keep-secret")
+    security.set_secret("codex:All:old_api_key", "old-secret")
     profile_manager.save_codex_profile(CodexProfile(
         name="Keep",
         api_key_ref="codex:Keep:api_key",
         model="keep-model",
+        model_provider="custom",
+    ))
+    profile_manager.save_codex_profile(CodexProfile(
+        name="All",
+        api_key_ref="codex:All:old_api_key",
+        model="old-model",
         model_provider="custom",
     ))
 
@@ -132,6 +143,7 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
     for name, ref in secret_refs.items():
         assert security.get_secret(ref) == f"{name}-secret"
     assert security.get_secret("codex:Keep:api_key") == "keep-secret"
+    assert security.get_secret("codex:All:old_api_key") is None
 
 
 def test_local_config_zip_rejects_wrong_password(isolated_local_config, tmp_path):
@@ -140,3 +152,27 @@ def test_local_config_zip_rejects_wrong_password(isolated_local_config, tmp_path
 
     with pytest.raises(ValueError, match="迁移密码错误"):
         local_config_bundle.import_local_config_zip(package, "wrong-password")
+
+
+def test_local_config_zip_reports_missing_source_secrets(isolated_local_config, tmp_path):
+    missing_ref = "ssh:Missing:password"
+    profile_manager.save_ssh_profile(SSHProfile(
+        name="Missing",
+        host="missing.example.test",
+        auth_type="password",
+        password_ref=missing_ref,
+    ))
+
+    package = tmp_path / "missing-secret.zip"
+    exported = local_config_bundle.export_local_config_zip(package, "strong-password")
+    assert exported.secret_count == 0
+    assert exported.missing_secret_refs == [missing_ref]
+
+    summary = local_config_bundle.inspect_local_config_zip(package)
+    assert summary.missing_secret_count == 1
+
+    profile_manager._save_store(profile_manager._get_default_store())
+    imported = local_config_bundle.import_local_config_zip(package, "strong-password")
+    assert imported.profile_count == 1
+    assert imported.secret_count == 0
+    assert imported.skipped_secret_refs == [f"{missing_ref} (源包缺少密钥)"]
