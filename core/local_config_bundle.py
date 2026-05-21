@@ -247,7 +247,31 @@ def _delete_unreferenced_replaced_secrets(existing_store: dict[str, Any], new_st
     return skipped
 
 
-def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
+def _disconnect_imported_ssh_profiles(imported_store: dict[str, Any]) -> None:
+    names = {
+        item.get("name")
+        for item in imported_store.get("ssh_profiles", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if not names:
+        return
+    try:
+        from core.ssh_manager import ssh_manager
+
+        for name in names:
+            ssh_manager.disconnect(name)
+    except Exception:
+        return
+
+
+def _payload_name_from_manifest(manifest: dict[str, Any]) -> str:
+    payload_name = str(manifest.get("payload") or PAYLOAD_NAME)
+    if payload_name != PAYLOAD_NAME:
+        raise ValueError("完整配置 ZIP payload 路径异常")
+    return payload_name
+
+
+def _validate_zip_file_entry(bundle: zipfile.ZipFile, name: str) -> zipfile.ZipInfo:
     try:
         info = bundle.getinfo(name)
     except KeyError as e:
@@ -256,6 +280,11 @@ def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
         raise ValueError(f"完整配置 ZIP 条目不是文件: {name}")
     if info.file_size > MAX_ZIP_ENTRY_BYTES:
         raise ValueError(f"完整配置 ZIP 条目过大: {name}")
+    return info
+
+
+def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
+    info = _validate_zip_file_entry(bundle, name)
     try:
         data = json.loads(bundle.read(info).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -289,6 +318,7 @@ def inspect_local_config_zip(input_path: str | Path) -> LocalConfigPackageSummar
     try:
         with zipfile.ZipFile(path, "r") as bundle:
             manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
+            _validate_zip_file_entry(bundle, _payload_name_from_manifest(manifest))
     except zipfile.BadZipFile as e:
         raise ValueError("完整配置 ZIP 文件损坏") from e
 
@@ -408,7 +438,7 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
                 raise ValueError("不是 API切换器完整配置 ZIP")
             if manifest.get("version") != PACKAGE_VERSION:
                 raise ValueError(f"不支持的完整配置 ZIP 版本: {manifest.get('version')}")
-            payload_name = str(manifest.get("payload") or PAYLOAD_NAME)
+            payload_name = _payload_name_from_manifest(manifest)
             payload = _decrypt_payload(_read_json_zip_entry(bundle, payload_name), password)
     except zipfile.BadZipFile as e:
         raise ValueError("完整配置 ZIP 文件损坏") from e
@@ -457,6 +487,7 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     profile_manager._normalize_store(new_store)
     profile_manager._save_store(new_store)
+    _disconnect_imported_ssh_profiles(imported_store)
     skipped.extend(_delete_unreferenced_replaced_secrets(existing_store, new_store))
     skipped.extend(f"{ref} (源包缺少密钥)" for ref in missing_from_source)
 

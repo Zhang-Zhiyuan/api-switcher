@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from core import backup_manager, local_config_bundle, profile_manager, security
+from core.ssh_manager import ssh_manager
 from models.profile import (
     BrowserProfile,
     ClaudeAccountProfile,
@@ -146,12 +147,69 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
     assert security.get_secret("codex:All:old_api_key") is None
 
 
+def test_local_config_zip_disconnects_imported_ssh_profiles(isolated_local_config, tmp_path, monkeypatch):
+    disconnected: list[str] = []
+    monkeypatch.setattr(ssh_manager, "disconnect", lambda name: disconnected.append(name))
+
+    security.set_secret("ssh:Prod:password", "new-password")
+    profile_manager.save_ssh_profile(SSHProfile(
+        name="Prod",
+        host="new.example.test",
+        auth_type="password",
+        password_ref="ssh:Prod:password",
+    ))
+    package = tmp_path / "ssh.zip"
+    local_config_bundle.export_local_config_zip(package, "strong-password")
+
+    profile_manager._save_store(profile_manager._get_default_store())
+    profile_manager.save_ssh_profile(SSHProfile(
+        name="Prod",
+        host="old.example.test",
+        auth_type="password",
+        password_ref="ssh:Prod:old_password",
+    ))
+    disconnected.clear()
+
+    local_config_bundle.import_local_config_zip(package, "strong-password")
+
+    assert disconnected == ["Prod"]
+
+
 def test_local_config_zip_rejects_wrong_password(isolated_local_config, tmp_path):
     package = tmp_path / "local-config.zip"
     local_config_bundle.export_local_config_zip(package, "strong-password")
 
     with pytest.raises(ValueError, match="迁移密码错误"):
         local_config_bundle.import_local_config_zip(package, "wrong-password")
+
+
+def test_local_config_zip_inspect_rejects_missing_or_unexpected_payload(isolated_local_config, tmp_path):
+    missing_payload = tmp_path / "missing-payload.zip"
+    with zipfile.ZipFile(missing_payload, "w") as bundle:
+        bundle.writestr(
+            "manifest.json",
+            json.dumps({
+                "format": local_config_bundle.PACKAGE_FORMAT,
+                "version": local_config_bundle.PACKAGE_VERSION,
+                "payload": local_config_bundle.PAYLOAD_NAME,
+            }),
+        )
+    with pytest.raises(ValueError, match="缺少 payload"):
+        local_config_bundle.inspect_local_config_zip(missing_payload)
+
+    unexpected_payload = tmp_path / "unexpected-payload.zip"
+    with zipfile.ZipFile(unexpected_payload, "w") as bundle:
+        bundle.writestr(
+            "manifest.json",
+            json.dumps({
+                "format": local_config_bundle.PACKAGE_FORMAT,
+                "version": local_config_bundle.PACKAGE_VERSION,
+                "payload": "other.json",
+            }),
+        )
+        bundle.writestr("other.json", "{}")
+    with pytest.raises(ValueError, match="payload 路径异常"):
+        local_config_bundle.inspect_local_config_zip(unexpected_payload)
 
 
 def test_local_config_zip_reports_missing_source_secrets(isolated_local_config, tmp_path):
