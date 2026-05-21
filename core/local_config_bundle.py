@@ -258,8 +258,11 @@ def _disconnect_imported_ssh_profiles(imported_store: dict[str, Any]) -> None:
     try:
         from core.ssh_manager import ssh_manager
 
-        for name in names:
-            ssh_manager.disconnect(name)
+        for name in sorted(names):
+            try:
+                ssh_manager.disconnect(name)
+            except Exception:
+                continue
     except Exception:
         return
 
@@ -281,6 +284,16 @@ def _validate_zip_file_entry(bundle: zipfile.ZipFile, name: str) -> zipfile.ZipI
     if info.file_size > MAX_ZIP_ENTRY_BYTES:
         raise ValueError(f"完整配置 ZIP 条目过大: {name}")
     return info
+
+
+def _ensure_unique_zip_entries(bundle: zipfile.ZipFile, names: set[str]) -> None:
+    counts: dict[str, int] = {}
+    for info in bundle.infolist():
+        if info.filename in names:
+            counts[info.filename] = counts.get(info.filename, 0) + 1
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError("完整配置 ZIP 包含重复关键条目: " + ", ".join(duplicates))
 
 
 def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
@@ -317,6 +330,7 @@ def inspect_local_config_zip(input_path: str | Path) -> LocalConfigPackageSummar
         raise ValueError("完整配置 ZIP 过大，请确认是否选择了正确文件")
     try:
         with zipfile.ZipFile(path, "r") as bundle:
+            _ensure_unique_zip_entries(bundle, {MANIFEST_NAME, PAYLOAD_NAME})
             manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
             _validate_zip_file_entry(bundle, _payload_name_from_manifest(manifest))
     except zipfile.BadZipFile as e:
@@ -433,6 +447,7 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     try:
         with zipfile.ZipFile(path, "r") as bundle:
+            _ensure_unique_zip_entries(bundle, {MANIFEST_NAME, PAYLOAD_NAME})
             manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
             if manifest.get("format") != PACKAGE_FORMAT:
                 raise ValueError("不是 API切换器完整配置 ZIP")

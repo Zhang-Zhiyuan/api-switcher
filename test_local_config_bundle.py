@@ -1,4 +1,5 @@
 import json
+import warnings
 import zipfile
 from types import SimpleNamespace
 
@@ -175,6 +176,38 @@ def test_local_config_zip_disconnects_imported_ssh_profiles(isolated_local_confi
     assert disconnected == ["Prod"]
 
 
+def test_local_config_zip_disconnects_remaining_ssh_profiles_after_one_failure(
+    isolated_local_config,
+    tmp_path,
+    monkeypatch,
+):
+    disconnected: list[str] = []
+
+    def disconnect(name: str) -> None:
+        disconnected.append(name)
+        if name == "A":
+            raise RuntimeError("stale client")
+
+    monkeypatch.setattr(ssh_manager, "disconnect", disconnect)
+    for name in ["A", "B"]:
+        security.set_secret(f"ssh:{name}:password", f"{name}-password")
+        profile_manager.save_ssh_profile(SSHProfile(
+            name=name,
+            host=f"{name.lower()}.example.test",
+            auth_type="password",
+            password_ref=f"ssh:{name}:password",
+        ))
+
+    package = tmp_path / "ssh-multi.zip"
+    local_config_bundle.export_local_config_zip(package, "strong-password")
+    profile_manager._save_store(profile_manager._get_default_store())
+    disconnected.clear()
+
+    local_config_bundle.import_local_config_zip(package, "strong-password")
+
+    assert disconnected == ["A", "B"]
+
+
 def test_local_config_zip_rejects_wrong_password(isolated_local_config, tmp_path):
     package = tmp_path / "local-config.zip"
     local_config_bundle.export_local_config_zip(package, "strong-password")
@@ -210,6 +243,24 @@ def test_local_config_zip_inspect_rejects_missing_or_unexpected_payload(isolated
         bundle.writestr("other.json", "{}")
     with pytest.raises(ValueError, match="payload 路径异常"):
         local_config_bundle.inspect_local_config_zip(unexpected_payload)
+
+
+def test_local_config_zip_rejects_duplicate_critical_entries(isolated_local_config, tmp_path):
+    package = tmp_path / "duplicate.zip"
+    manifest = json.dumps({
+        "format": local_config_bundle.PACKAGE_FORMAT,
+        "version": local_config_bundle.PACKAGE_VERSION,
+        "payload": local_config_bundle.PAYLOAD_NAME,
+    })
+    with zipfile.ZipFile(package, "w") as bundle:
+        bundle.writestr("manifest.json", manifest)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            bundle.writestr("manifest.json", manifest)
+        bundle.writestr(local_config_bundle.PAYLOAD_NAME, "{}")
+
+    with pytest.raises(ValueError, match="重复关键条目"):
+        local_config_bundle.inspect_local_config_zip(package)
 
 
 def test_local_config_zip_reports_missing_source_secrets(isolated_local_config, tmp_path):
