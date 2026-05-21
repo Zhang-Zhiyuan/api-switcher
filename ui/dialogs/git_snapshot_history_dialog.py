@@ -5,7 +5,7 @@ import customtkinter as ctk
 
 from core.git_manager import GitManager
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from ui.theme import COLORS, button_style, card_frame_kwargs, center_window, combo_style, font, input_style, textbox_style
+from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style, textbox_style
 from ui.widgets.toast import show_toast
 
 

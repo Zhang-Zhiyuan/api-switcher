@@ -152,10 +152,10 @@ def format_auto_continue_diagnostics(provider_name: str, limit: int = 100) -> st
 
     lines = [
         f"Provider: {provider_key}",
-        f"Auto continue: {'ON' if settings.enabled else 'OFF'}",
-        f"Training guard: {'ON' if settings.training_auto_continue_enabled else 'OFF'} ({template})",
-        f"Error recovery: {'ON' if settings.error_recovery_enabled else 'OFF'}",
-        f"Git snapshot: {'ON' if settings.git_auto_snapshot else 'OFF'}",
+        f"Stop续跑: {'ON' if settings.enabled else 'OFF'}",
+        f"训练续跑: {'ON' if settings.training_auto_continue_enabled else 'OFF'} ({template})",
+        f"API恢复: {'ON' if settings.error_recovery_enabled else 'OFF'}",
+        f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'}",
         f"Events: {len(events)} | block_stop={block_count} | allow_stop={allow_count} | API恢复={recovery_count}",
         "",
     ]

@@ -209,13 +209,25 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._add_section(scroll, "Git 快照", "自动创建本地 Git 快照，方便恢复到手动任务、续跑或错误恢复前后的状态。")
 
         self._git_auto_snapshot_var = ctk.BooleanVar(value=self.settings.git_auto_snapshot)
-        self._add_switch(scroll, "启用自动 Git 快照 (推荐)", self._git_auto_snapshot_var)
+        self._git_auto_snapshot_switch = self._add_switch(scroll, "启用自动 Git 快照 (推荐)", self._git_auto_snapshot_var)
+        self._git_auto_snapshot_switch.configure(command=self._refresh_git_snapshot_children)
 
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_start)
-        self._add_switch(scroll, "开新对话/发消息/Stop 时创建快照", self._git_snapshot_on_start_var, padx=(20, 0))
+        self._git_snapshot_on_start_switch = self._add_switch(
+            scroll,
+            "开新对话/发消息/Stop 时创建快照",
+            self._git_snapshot_on_start_var,
+            padx=(20, 0),
+        )
 
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_recovery)
-        self._add_switch(scroll, "API 错误恢复前创建快照", self._git_snapshot_on_recovery_var, padx=(20, 0))
+        self._git_snapshot_on_recovery_switch = self._add_switch(
+            scroll,
+            "API 错误恢复前创建快照",
+            self._git_snapshot_on_recovery_var,
+            padx=(20, 0),
+        )
+        self._refresh_git_snapshot_children()
 
         # Git help text
         git_help_frame = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -280,6 +292,15 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         )
         switch.pack(anchor="w", pady=5, padx=padx)
         return switch
+
+    def _refresh_git_snapshot_children(self):
+        state = "normal" if bool(self._git_auto_snapshot_var.get()) else "disabled"
+        for switch in (
+            getattr(self, "_git_snapshot_on_start_switch", None),
+            getattr(self, "_git_snapshot_on_recovery_switch", None),
+        ):
+            if switch is not None:
+                switch.configure(state=state)
 
     def _add_note(self, parent, text):
         ctk.CTkLabel(

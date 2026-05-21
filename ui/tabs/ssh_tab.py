@@ -1174,7 +1174,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             return {"statuses": statuses, "failures": failures, "results": results}
 
         self._run_remote_auto_task(
-            f"\u6b63\u5728\u66f4\u65b0 {server_name} \u7684\u8fdc\u7a0b\u81ea\u52a8\u7eed\u8dd1\u5f00\u5173...",
+            f"正在更新 {server_name} 的远端独立开关...",
             worker,
             lambda payload: self._finish_remote_auto_toggle(
                 payload,
@@ -1230,9 +1230,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             return {"statuses": statuses, "failures": failures, "results": results}
 
         self._run_remote_auto_task(
-            f"Installing Git snapshot hooks on {server_name}...",
+            f"正在修复 {server_name} 的远端 Git 快照 Hook...",
             worker,
-            lambda payload: self._show_remote_auto_result(payload, "Git snapshot hook installed", expect_ready=False),
+            lambda payload: self._show_remote_auto_result(payload, "远端 Git 快照 Hook 已修复", expect_ready=False),
         )
 
     def _install_remote_auto_continue(self):
