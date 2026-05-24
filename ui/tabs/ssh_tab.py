@@ -4,7 +4,7 @@ from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue
+from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue, remote_git_login
 from core.auto_continue.manager import auto_continue_manager
 from models.auto_continue import training_prompt_template_by_key
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
@@ -28,6 +28,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._codex_wire_api_combo = None
         self._codex_wire_api_hint = None
         self._clear_api_combo = None
+        self._git_login_status_label = None
         self._sync_status_label = None
         self._ssh_busy = False
         self._remote_config_candidates = []
@@ -305,6 +306,40 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("danger"),
         ).grid(row=5, column=3, sticky="e", pady=(10, 0))
 
+        ctk.CTkLabel(
+            sync_controls,
+            text="Git 登录",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=6, column=0, sticky="w", pady=(10, 0))
+        self._git_login_status_label = ctk.CTkLabel(
+            sync_controls,
+            text="检查本机 Git 身份和 GitHub CLI 登录，并同步到所选 SSH 服务器。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._git_login_status_label.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
+        bind_wraplength(sync_controls, self._git_login_status_label, padding=20)
+        git_btn_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        git_btn_frame.grid(row=6, column=3, sticky="e", pady=(10, 0))
+        ctk.CTkButton(
+            git_btn_frame,
+            text="检查",
+            width=58,
+            command=self._inspect_git_login,
+            **button_style("secondary", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            git_btn_frame,
+            text="一键同步",
+            width=82,
+            command=self._sync_git_login,
+            **button_style("accent", compact=True),
+        ).pack(side="left")
+
         self._sync_status_label = ctk.CTkLabel(
             sync_controls,
             text="就绪",
@@ -313,7 +348,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._sync_status_label.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._sync_status_label.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -1005,6 +1040,79 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "此操作不会删除本机保存的 Profile。确定继续吗？"
             ),
             on_confirm=do_clear,
+        )
+
+    def _set_git_login_status(self, message: str, severity: str = "info"):
+        if not self._git_login_status_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._git_login_status_label.configure(text=message, text_color=color)
+
+    def _inspect_git_login(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        def done(payload):
+            if not payload["ok"]:
+                message = f"Git 登录检查失败: {payload['error']}"
+                self._set_git_login_status(message, "error")
+                self._set_sync_status(message, "error")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+                return
+
+            status = payload["result"]
+            message = status.summary()
+            severity = "success" if status.remote_git_available else "warning"
+            self._set_git_login_status(message, severity)
+            self._set_sync_status("Git 登录状态已检查", severity)
+            show_toast(self.winfo_toplevel(), "Git 登录状态已检查")
+
+        self._run_ssh_task(
+            f"正在检查 {server_name} 的 Git 登录状态...",
+            lambda: remote_git_login.inspect_git_login(server_name),
+            on_done=done,
+        )
+
+    def _sync_git_login(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        def do_sync():
+            def done(payload):
+                if not payload["ok"]:
+                    message = f"Git 登录同步失败: {payload['error']}"
+                    self._set_git_login_status(message, "error")
+                    self._set_sync_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                message = payload["result"]
+                self._set_git_login_status(message, "success")
+                self._set_sync_status(message, "success")
+                show_toast(self.winfo_toplevel(), message)
+
+            self._run_ssh_task(
+                f"正在同步本机 Git 登录到 {server_name}...",
+                lambda: remote_git_login.sync_git_login_to_server(server_name),
+                on_done=done,
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="同步 Git 登录到 SSH",
+            message=(
+                f"将把本机 Git 用户名/邮箱写入服务器 \"{server_name}\" 的全局 Git 配置。\n"
+                "如果本机已通过 GitHub CLI 登录，并且远端安装了 gh，还会把 GitHub CLI token "
+                "通过 SSH 标准输入发送到远端执行 gh auth login。\n\n"
+                "不会读取或复制 Windows Git Credential Manager 内部凭据。确定继续吗？"
+            ),
+            on_confirm=do_sync,
         )
 
     def _selected_remote_auto_targets(self) -> list[str]:

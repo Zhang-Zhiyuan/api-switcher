@@ -1,9 +1,10 @@
 import json
 from io import BytesIO
+import subprocess
 
 import pytest
 
-from core import persistent_env, profile_manager, remote_auto_continue, remote_config, security, sync_manager
+from core import persistent_env, profile_manager, remote_auto_continue, remote_config, remote_git_login, security, sync_manager
 from core.ssh_manager import SSHManager, ssh_manager
 from core.ssh_profile_builder import build_ssh_profile_from_data
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile, SSHProfile
@@ -823,6 +824,92 @@ def test_pull_official_accounts_from_server(isolated_ssh, monkeypatch):
     assert "Codex 账号" in codex_message
     assert len(profile_manager.list_codex_account_profiles()) == 1
     assert security.get_secret_json(profile_manager.list_codex_account_profiles()[0].auth_json_ref)["auth_mode"] == "chatgpt"
+
+
+def test_remote_git_login_syncs_identity_and_gh_token(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    local_outputs = {
+        ("git", "--version"): "git version 2.45.0\n",
+        ("git", "config", "--global", "--get", "user.name"): "Local User\n",
+        ("git", "config", "--global", "--get", "user.email"): "local@example.com\n",
+        ("gh", "--version"): "gh version 2.0.0\n",
+        ("gh", "api", "user", "--jq", ".login"): "local-user\n",
+        ("gh", "auth", "token"): "gho_secret\n",
+    }
+
+    def fake_run(args, **kwargs):
+        output = local_outputs.get(tuple(args), "")
+        return subprocess.CompletedProcess(args, 0 if output else 1, output, "")
+
+    remote_commands = []
+    remote_inputs = []
+    fake_client = object()
+
+    def fake_execute(client, command, timeout=30, input_data=None, log_command=True, get_pty=False):
+        remote_commands.append(command)
+        remote_inputs.append(input_data)
+        if "__git_available" in command:
+            return 0, "\n".join([
+                "__git_available=1",
+                "__user_name=",
+                "__user_email=",
+                "__gh_available=1",
+                "__gh_logged_in=0",
+                "__gh_summary=not logged in",
+            ]), ""
+        if "gh auth login" in command:
+            return 0, "logged in", ""
+        if "git config --global user.name" in command:
+            return 0, "", ""
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(remote_git_login.subprocess, "run", fake_run)
+    monkeypatch.setattr(remote_git_login.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(remote_git_login.ssh_manager, "execute_command_with_status", fake_execute)
+
+    message = remote_git_login.sync_git_login_to_server("remote")
+
+    assert "已同步 Git 身份" in message
+    assert "已同步 GitHub CLI 登录" in message
+    assert any("git config --global user.name" in command for command in remote_commands)
+    assert any("gh auth login" in command for command in remote_commands)
+    assert "gho_secret\n" in remote_inputs
+
+
+def test_remote_git_login_status_summary(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    def fake_run(args, **kwargs):
+        outputs = {
+            ("git", "--version"): "git version 2.45.0\n",
+            ("git", "config", "--global", "--get", "user.name"): "Local User\n",
+            ("git", "config", "--global", "--get", "user.email"): "local@example.com\n",
+            ("gh", "--version"): "",
+        }
+        output = outputs.get(tuple(args), "")
+        return subprocess.CompletedProcess(args, 0 if output else 1, output, "")
+
+    def fake_execute(client, command, timeout=30, input_data=None, log_command=True, get_pty=False):
+        return 0, "\n".join([
+            "__git_available=1",
+            "__user_name=Remote User",
+            "__user_email=remote@example.com",
+            "__gh_available=0",
+            "__gh_logged_in=0",
+            "__gh_summary=gh not installed",
+        ]), ""
+
+    monkeypatch.setattr(remote_git_login.subprocess, "run", fake_run)
+    monkeypatch.setattr(remote_git_login.ssh_manager, "connect", lambda profile: object())
+    monkeypatch.setattr(remote_git_login.ssh_manager, "execute_command_with_status", fake_execute)
+
+    status = remote_git_login.inspect_git_login("remote")
+
+    assert status.local_user_email == "local@example.com"
+    assert status.remote_user_name == "Remote User"
+    assert status.remote_gh_available is False
+    assert "本机" in status.summary()
 
 
 def test_pull_codex_from_server_skips_empty_api_key(isolated_ssh, monkeypatch):
