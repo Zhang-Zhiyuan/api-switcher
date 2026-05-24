@@ -2124,6 +2124,29 @@ def test_permission_auto_approve_treats_bash_as_regular_tool():
     assert 'tool_name.lower() == "bash"' not in remote_script
 
 
+def test_git_auto_push_is_wired_into_generated_hooks():
+    from core import remote_auto_continue
+    from core.auto_continue.error_recovery_script import generate_error_recovery_script
+    from core.auto_continue.script_generator import generate_hook_script
+
+    local_script = generate_hook_script("C:\\Users\\Test\\.claude\\auto_continue_settings.json")
+    error_script = generate_error_recovery_script("C:\\Users\\Test\\.claude\\auto_continue_settings.json")
+    remote_script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.claude/auto_continue_settings.json",
+        "/home/test/.claude/tmp",
+    )
+
+    assert '$gitAutoPush = Get-BoolSetting -Settings $settings -Name "git_auto_push" -Default $false' in local_script
+    assert "function Push-GitSnapshot" in local_script
+    assert "Push-GitSnapshot" in local_script
+    assert "git push -u $remote $branch" in local_script
+    assert "function Push-GitSnapshot" in error_script
+    assert "git_auto_push" in error_script
+    assert "def push_git_snapshot(auto_push=False):" in remote_script
+    assert 'run_git_snapshot(as_bool(settings.get("git_auto_push"), False))' in remote_script
+    assert '["git", "push", "-u", remote_name, branch_name]' in remote_script
+
+
 def test_auto_continue_settings_coerces_string_boolean_values():
     from models.auto_continue import AutoContinueSettings
 
@@ -2136,6 +2159,7 @@ def test_auto_continue_settings_coerces_string_boolean_values():
         "error_retry_initial_delay_seconds": "8",
         "error_retry_max_delay_seconds": 40.0,
         "git_auto_snapshot": "0",
+        "git_auto_push": "yes",
         "git_snapshot_on_start": "off",
         "git_snapshot_on_recovery": "yes",
         "auto_approve_permission_requests": "on",
@@ -2154,6 +2178,7 @@ def test_auto_continue_settings_coerces_string_boolean_values():
     assert settings.error_retry_initial_delay_seconds == 8
     assert settings.error_retry_max_delay_seconds == 40
     assert settings.git_auto_snapshot is False
+    assert settings.git_auto_push is True
     assert settings.git_snapshot_on_start is False
     assert settings.git_snapshot_on_recovery is True
     assert settings.auto_approve_permission_requests is True

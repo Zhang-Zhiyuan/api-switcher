@@ -236,6 +236,7 @@ BOOL_SETTING_FIELDS = {
     "conservative_mode",
     "error_recovery_enabled",
     "git_auto_snapshot",
+    "git_auto_push",
     "git_snapshot_on_start",
     "git_snapshot_on_recovery",
     "auto_approve_permission_requests",
@@ -368,6 +369,7 @@ class AutoContinueSettings:
     training_prompt_template_key: str = DEFAULT_TRAINING_PROMPT_TEMPLATE_KEY
     training_continue_prompt: str = DEFAULT_TRAINING_CONTINUE_PROMPT
     git_auto_snapshot: bool = True
+    git_auto_push: bool = False
     git_snapshot_on_start: bool = True
     git_snapshot_on_recovery: bool = True
     auto_approve_permission_requests: bool = False

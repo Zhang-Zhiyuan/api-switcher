@@ -101,6 +101,7 @@ class RemoteAutoContinueStatus:
     git_snapshot_master_enabled: bool = False
     git_snapshot_on_start_enabled: bool = False
     git_snapshot_on_recovery_enabled: bool = False
+    git_auto_push_enabled: bool = False
     training_auto_continue_enabled: bool = False
     permission_auto_approve_enabled: bool = False
     error_recovery_enabled: bool = False
@@ -157,6 +158,7 @@ class RemoteAutoContinueStatus:
             f"Hook {'已注册' if self.hook_registered else '未注册'}",
             f"设置 {'有效' if self.settings_valid else '缺失/无效'}",
         ]
+        parts.append(f"Git push {'on' if self.git_auto_push_enabled else 'off'}")
         if self.hook_script_matches_expected is not None:
             parts.append(f"脚本一致性 {'ok' if self.hook_script_matches_expected else 'stale'}")
         if self.settings_matches_expected is not None:
@@ -1129,7 +1131,7 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
 
     git_commit_hash = ""
     if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_recovery"), True):
-        git_commit_hash = run_git_snapshot()
+        git_commit_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
 
     log_entry = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1456,7 +1458,63 @@ def ensure_gitignore():
         log(f"Failed to create local .gitignore: {exc}", "WARN")
 
 
-def run_git_snapshot():
+def push_git_snapshot(auto_push=False):
+    if not auto_push:
+        return
+    try:
+        upstream = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        if upstream.returncode == 0 and upstream.stdout.strip():
+            push = subprocess.run(
+                ["git", "push"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=60,
+            )
+        else:
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+            remotes = subprocess.run(
+                ["git", "remote"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+            remote_names = [line.strip() for line in remotes.stdout.splitlines() if line.strip()]
+            branch_name = branch.stdout.strip()
+            if not branch_name or not remote_names:
+                log("Git auto push skipped: no upstream or remote", "WARN")
+                return
+            remote_name = "origin" if "origin" in remote_names else remote_names[0]
+            push = subprocess.run(
+                ["git", "push", "-u", remote_name, branch_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=60,
+            )
+        if push.returncode != 0:
+            first_line = next((line.strip() for line in push.stdout.splitlines() if line.strip()), "unknown error")
+            log(f"Git auto push failed: {first_line}", "WARN")
+            return
+        log("Git auto push completed")
+    except Exception as exc:
+        log(f"Git auto push failed: {exc}", "WARN")
+
+
+def run_git_snapshot(auto_push=False):
     if not shutil.which("git"):
         return ""
 
@@ -1537,7 +1595,10 @@ def run_git_snapshot():
             text=True,
             timeout=5,
         )
-        return rev.stdout.strip() if rev.returncode == 0 else ""
+        commit_hash = rev.stdout.strip() if rev.returncode == 0 else ""
+        if commit_hash:
+            push_git_snapshot(auto_push)
+        return commit_hash
     except Exception as exc:
         log(f"Git snapshot failed: {exc}", "WARN")
         return ""
@@ -1630,14 +1691,14 @@ def main():
     git_snapshot_hash = ""
     if hook_event in PROMPT_SNAPSHOT_EVENTS:
         if git_snapshot_enabled:
-            git_snapshot_hash = run_git_snapshot()
+            git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
             git_snapshot_attempted = True
         return
 
     # Stop hooks are the broadest safety net: they cover normal manual turns,
     # auto-continue turns, and older Codex builds that do not emit prompt hooks.
     if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:
-        git_snapshot_hash = run_git_snapshot()
+        git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
         git_snapshot_attempted = True
 
     if is_claude and hook_event in {"PermissionRequest", "PreToolUse"}:
@@ -1940,7 +2001,7 @@ def main():
         )
 
         if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:
-            git_snapshot_hash = run_git_snapshot()
+            git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
 
         write_decision_log(
             log_path,
@@ -2779,6 +2840,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             status.git_snapshot_master_enabled = bool(parsed.git_auto_snapshot)
             status.git_snapshot_on_start_enabled = bool(parsed.git_snapshot_on_start)
             status.git_snapshot_on_recovery_enabled = bool(parsed.git_snapshot_on_recovery)
+            status.git_auto_push_enabled = bool(parsed.git_auto_push)
             status.training_auto_continue_enabled = bool(parsed.training_auto_continue_enabled)
             status.git_snapshot_enabled = bool(parsed.git_auto_snapshot and parsed.git_snapshot_on_start)
             status.permission_auto_approve_enabled = bool(

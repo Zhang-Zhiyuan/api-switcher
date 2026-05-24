@@ -407,6 +407,7 @@ function Create-GitSnapshot {{
         # 获取commit hash
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"
+        Push-GitSnapshot
         return [string]$commitHash
 
     }} catch {{
@@ -592,6 +593,40 @@ function Get-FirstTextField {{
     return $null
 }}
 
+function Push-GitSnapshot {{
+    if (-not $script:gitAutoPush) {{
+        return
+    }}
+
+    try {{
+        $pushOutput = ""
+        $upstream = git rev-parse --abbrev-ref --symbolic-full-name "@{{u}}" 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($upstream)) {{
+            $pushOutput = git push 2>&1 | Out-String
+        }} else {{
+            $branch = git branch --show-current 2>$null
+            $remotes = @(git remote 2>$null | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})
+            if ([string]::IsNullOrWhiteSpace($branch) -or $remotes.Count -eq 0) {{
+                Write-Log "Git auto push skipped: no upstream or remote" "WARN"
+                return
+            }}
+            $remote = if ($remotes -contains "origin") {{ "origin" }} else {{ [string]$remotes[0] }}
+            $pushOutput = git push -u $remote $branch 2>&1 | Out-String
+        }}
+
+        if ($LASTEXITCODE -ne 0) {{
+            $summary = (($pushOutput -split "`r?`n") | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }} | Select-Object -First 1)
+            if ([string]::IsNullOrWhiteSpace($summary)) {{ $summary = "unknown error" }}
+            Write-Log "Git auto push failed: $summary" "WARN"
+            return
+        }}
+
+        Write-Log "Git auto push completed" "INFO"
+    }} catch {{
+        Write-Log "Git auto push failed: $_" "WARN"
+    }}
+}}
+
 try {{
     # 读取配置
     $settingsPath = "{settings_path}"
@@ -614,6 +649,8 @@ try {{
 
     $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
     $gitSnapshotOnRecovery = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_recovery" -Default $gitSnapshotEnabled
+    $gitAutoPush = Get-BoolSetting -Settings $settings -Name "git_auto_push" -Default $false
+    $script:gitAutoPush = $gitAutoPush
     $retryInitialDelay = Get-IntSetting -Settings $settings -Name "error_retry_initial_delay_seconds" -Default 5 -Min 1 -Max 300
     $retryMaxDelay = Get-IntSetting -Settings $settings -Name "error_retry_max_delay_seconds" -Default 60 -Min 1 -Max 600
     if ($retryInitialDelay -gt $retryMaxDelay) {{ $retryInitialDelay = $retryMaxDelay }}
@@ -1084,6 +1121,7 @@ function Create-GitSnapshot {{
 
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"
+        Push-GitSnapshot
         return [string]$commitHash
 
     }} catch {{
@@ -1182,6 +1220,40 @@ function Get-FirstTextField {{
     return $null
 }}
 
+function Push-GitSnapshot {{
+    if (-not $script:gitAutoPush) {{
+        return
+    }}
+
+    try {{
+        $pushOutput = ""
+        $upstream = git rev-parse --abbrev-ref --symbolic-full-name "@{{u}}" 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($upstream)) {{
+            $pushOutput = git push 2>&1 | Out-String
+        }} else {{
+            $branch = git branch --show-current 2>$null
+            $remotes = @(git remote 2>$null | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})
+            if ([string]::IsNullOrWhiteSpace($branch) -or $remotes.Count -eq 0) {{
+                Write-Log "Git auto push skipped: no upstream or remote" "WARN"
+                return
+            }}
+            $remote = if ($remotes -contains "origin") {{ "origin" }} else {{ [string]$remotes[0] }}
+            $pushOutput = git push -u $remote $branch 2>&1 | Out-String
+        }}
+
+        if ($LASTEXITCODE -ne 0) {{
+            $summary = (($pushOutput -split "`r?`n") | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }} | Select-Object -First 1)
+            if ([string]::IsNullOrWhiteSpace($summary)) {{ $summary = "unknown error" }}
+            Write-Log "Git auto push failed: $summary" "WARN"
+            return
+        }}
+
+        Write-Log "Git auto push completed" "INFO"
+    }} catch {{
+        Write-Log "Git auto push failed: $_" "WARN"
+    }}
+}}
+
 try {{
     $settingsPath = "{settings_path}"
     if (-not (Test-Path $settingsPath)) {{
@@ -1195,6 +1267,8 @@ try {{
 
     $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
     $gitSnapshotOnRecovery = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_recovery" -Default $gitSnapshotEnabled
+    $gitAutoPush = Get-BoolSetting -Settings $settings -Name "git_auto_push" -Default $false
+    $script:gitAutoPush = $gitAutoPush
     $retryInitialDelay = Get-IntSetting -Settings $settings -Name "error_retry_initial_delay_seconds" -Default 5 -Min 1 -Max 300
     $retryMaxDelay = Get-IntSetting -Settings $settings -Name "error_retry_max_delay_seconds" -Default 60 -Min 1 -Max 600
     if ($retryInitialDelay -gt $retryMaxDelay) {{ $retryInitialDelay = $retryMaxDelay }}

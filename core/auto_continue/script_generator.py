@@ -576,6 +576,7 @@ function Create-GitSnapshot {{
         # 获取commit hash
         $commitHash = git rev-parse --short HEAD 2>$null
         Write-Log "Created git snapshot: $commitHash" "INFO"
+        Push-GitSnapshot
         return [string]$commitHash
 
     }} catch {{
@@ -583,6 +584,40 @@ function Create-GitSnapshot {{
         return ""
     }} finally {{
         $ErrorActionPreference = $previousErrorActionPreference
+    }}
+}}
+
+function Push-GitSnapshot {{
+    if (-not $script:gitAutoPush) {{
+        return
+    }}
+
+    try {{
+        $pushOutput = ""
+        $upstream = git rev-parse --abbrev-ref --symbolic-full-name "@{{u}}" 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($upstream)) {{
+            $pushOutput = git push 2>&1 | Out-String
+        }} else {{
+            $branch = git branch --show-current 2>$null
+            $remotes = @(git remote 2>$null | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})
+            if ([string]::IsNullOrWhiteSpace($branch) -or $remotes.Count -eq 0) {{
+                Write-Log "Git auto push skipped: no upstream or remote" "WARN"
+                return
+            }}
+            $remote = if ($remotes -contains "origin") {{ "origin" }} else {{ [string]$remotes[0] }}
+            $pushOutput = git push -u $remote $branch 2>&1 | Out-String
+        }}
+
+        if ($LASTEXITCODE -ne 0) {{
+            $summary = (($pushOutput -split "`r?`n") | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }} | Select-Object -First 1)
+            if ([string]::IsNullOrWhiteSpace($summary)) {{ $summary = "unknown error" }}
+            Write-Log "Git auto push failed: $summary" "WARN"
+            return
+        }}
+
+        Write-Log "Git auto push completed" "INFO"
+    }} catch {{
+        Write-Log "Git auto push failed: $_" "WARN"
     }}
 }}
 
@@ -616,6 +651,8 @@ try {{
     $trainingAutoContinueEnabled = Get-BoolSetting -Settings $settings -Name "training_auto_continue_enabled" -Default $false
     $gitAutoSnapshot = Get-BoolSetting -Settings $settings -Name "git_auto_snapshot" -Default $gitSnapshotEnabled
     $gitSnapshotOnStart = Get-BoolSetting -Settings $settings -Name "git_snapshot_on_start" -Default $gitSnapshotEnabled
+    $gitAutoPush = Get-BoolSetting -Settings $settings -Name "git_auto_push" -Default $false
+    $script:gitAutoPush = $gitAutoPush
     $autoApprovePermissionRequests = Get-BoolSetting -Settings $settings -Name "auto_approve_permission_requests" -Default $false
 
     if (-not $autoContinueEnabled -and -not $trainingAutoContinueEnabled -and -not $autoApprovePermissionRequests -and -not ($gitAutoSnapshot -and $gitSnapshotOnStart)) {{

@@ -52,12 +52,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_git_snapshot_var = ctk.BooleanVar(value=True)
         self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
+        self._remote_git_auto_push_var = ctk.BooleanVar(value=False)
         self._remote_training_auto_continue_var = ctk.BooleanVar(value=False)
         self._remote_error_recovery_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_var = ctk.BooleanVar(value=False)
         self._remote_permission_auto_approve_switch = None
         self._remote_git_snapshot_on_start_switch = None
         self._remote_git_snapshot_on_recovery_switch = None
+        self._remote_git_auto_push_switch = None
         self._remote_auto_last_statuses = {}
         self._remote_auto_last_payload = None
         self._remote_auto_busy = False
@@ -497,12 +499,20 @@ class SSHTab(ctk.CTkScrollableFrame):
             1,
             2,
         )
+        self._remote_git_auto_push_switch = add_remote_switch(
+            "快照后 push",
+            self._remote_git_auto_push_var,
+            "git_auto_push",
+            1,
+            3,
+            color="accent",
+        )
         self._remote_permission_auto_approve_switch = add_remote_switch(
             "权限自动确认",
             self._remote_permission_auto_approve_var,
             "permission_auto_approve",
             1,
-            3,
+            4,
             color="warning",
         )
 
@@ -936,6 +946,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 f"Git快照总开关 {'ON' if settings.git_auto_snapshot else 'OFF'}",
                 f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
             ]
+            feature_parts.append(f"Git push {'ON' if settings.git_auto_push else 'OFF'}")
             if provider == "claude":
                 feature_parts.append(f"权限自动确认 {'ON' if settings.auto_approve_permission_requests else 'OFF'}")
                 feature_parts.append(f"Subagent {'ON' if settings.apply_to_subagents else 'OFF'}")
@@ -1219,6 +1230,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         for switch in (
             self._remote_git_snapshot_on_start_switch,
             self._remote_git_snapshot_on_recovery_switch,
+            self._remote_git_auto_push_switch,
         ):
             if switch:
                 try:
@@ -1240,6 +1252,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             "git_snapshot": self._remote_git_snapshot_var,
             "git_snapshot_on_start": self._remote_git_snapshot_on_start_var,
             "git_snapshot_on_recovery": self._remote_git_snapshot_on_recovery_var,
+            "git_auto_push": self._remote_git_auto_push_var,
             "error_recovery": self._remote_error_recovery_var,
             "permission_auto_approve": self._remote_permission_auto_approve_var,
         }.get(feature)
@@ -1275,6 +1288,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._remote_git_snapshot_var.set(all_enabled("git_snapshot_master_enabled"))
             self._remote_git_snapshot_on_start_var.set(all_enabled("git_snapshot_on_start_enabled"))
             self._remote_git_snapshot_on_recovery_var.set(all_enabled("git_snapshot_on_recovery_enabled"))
+            self._remote_git_auto_push_var.set(all_enabled("git_auto_push_enabled"))
             self._remote_error_recovery_var.set(all_enabled("error_recovery_enabled"))
             self._remote_permission_auto_approve_var.set(
                 bool(claude_statuses)
@@ -1385,6 +1399,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 f"enabled={status.enabled}",
                 f"training_auto_continue={status.training_auto_continue_enabled}",
                 f"git_snapshot={status.git_snapshot_enabled}",
+                f"git_auto_push={getattr(status, 'git_auto_push_enabled', False)}",
                 f"error_recovery={status.error_recovery_enabled}",
                 f"permission_auto_approve={status.permission_auto_approve_enabled}",
                 f"runtime_ready={status.runtime_ready}",
@@ -1463,6 +1478,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             "git_snapshot": bool(self._remote_git_snapshot_var.get()),
             "git_snapshot_on_start": bool(self._remote_git_snapshot_on_start_var.get()),
             "git_snapshot_on_recovery": bool(self._remote_git_snapshot_on_recovery_var.get()),
+            "git_auto_push": bool(self._remote_git_auto_push_var.get()),
             "error_recovery": bool(self._remote_error_recovery_var.get()),
             "permission_auto_approve": bool(self._remote_permission_auto_approve_var.get()),
         }
@@ -1472,6 +1488,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             "git_snapshot": "git_auto_snapshot",
             "git_snapshot_on_start": "git_snapshot_on_start",
             "git_snapshot_on_recovery": "git_snapshot_on_recovery",
+            "git_auto_push": "git_auto_push",
             "error_recovery": "error_recovery_enabled",
             "permission_auto_approve": "auto_approve_permission_requests",
         }

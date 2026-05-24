@@ -224,6 +224,18 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._git_snapshot_on_recovery_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
 
+        self._git_auto_push_var = ctk.BooleanVar(value=False)
+        self._git_auto_push_switch = ctk.CTkSwitch(
+            git_row,
+            text="快照后 push",
+            variable=self._git_auto_push_var,
+            command=lambda: self._toggle_feature("git_auto_push"),
+            text_color=COLORS["text"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["text"],
+        )
+        self._git_auto_push_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+
         # Info display
         self._info_text = ctk.CTkTextbox(self, height=118, **textbox_style(monospace=True))
         self._info_text.pack(fill="x", padx=10, pady=(5, 8))
@@ -294,6 +306,7 @@ class AutoContinueControl(ctk.CTkFrame):
                 self._auto_continue_var.set(bool(display_settings.enabled))
                 self._training_auto_continue_var.set(bool(display_settings.training_auto_continue_enabled))
                 self._git_snapshot_var.set(bool(display_settings.git_auto_snapshot))
+                self._git_auto_push_var.set(bool(display_settings.git_auto_push))
                 self._git_snapshot_on_start_var.set(bool(display_settings.git_snapshot_on_start))
                 self._git_snapshot_on_recovery_var.set(bool(display_settings.git_snapshot_on_recovery))
                 self._error_recovery_var.set(bool(display_settings.error_recovery_enabled))
@@ -305,6 +318,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     self._auto_continue_switch,
                     self._training_auto_continue_switch,
                     self._git_snapshot_switch,
+                    self._git_auto_push_switch,
                     self._error_recovery_switch,
                     self._permission_auto_approve_switch,
                 ]:
@@ -313,6 +327,7 @@ class AutoContinueControl(ctk.CTkFrame):
                 git_trigger_state = "normal" if display_settings.git_auto_snapshot else "disabled"
                 self._git_snapshot_on_start_switch.configure(state=git_trigger_state)
                 self._git_snapshot_on_recovery_switch.configure(state=git_trigger_state)
+                self._git_auto_push_switch.configure(state=git_trigger_state)
             finally:
                 self._refreshing = False
 
@@ -337,6 +352,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     info_lines.append(f"训练模板: {template['name']}")
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
+                    f"push {'ON' if settings.git_auto_push else 'OFF'} / "
                     f"对话/消息/Stop {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
                     f"API恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
                 )
@@ -395,6 +411,8 @@ class AutoContinueControl(ctk.CTkFrame):
                 return
             elif feature == "git_snapshot":
                 settings.git_auto_snapshot = self._git_snapshot_var.get()
+            elif feature == "git_auto_push":
+                settings.git_auto_push = bool(self._git_auto_push_var.get())
             elif feature == "training_auto_continue":
                 settings.training_auto_continue_enabled = bool(self._training_auto_continue_var.get())
             elif feature == "git_snapshot_on_start":
