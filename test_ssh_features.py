@@ -749,6 +749,60 @@ def test_inspect_remote_configs_marks_importable_and_skipped_configs(isolated_ss
     assert "官方 OpenAI" in candidates[1].reason
 
 
+def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    fake_client = object()
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_claude_settings",
+        lambda client, profile=None: (_ for _ in ()).throw(RuntimeError("permission denied")),
+    )
+    monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_config",
+        lambda client, profile=None: {
+            "model_provider": "layer4",
+            "model": "layer4-model",
+            "model_providers": {"layer4": {"name": "Layer4", "base_url": "https://layer4.example.com/v1"}},
+        },
+    )
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_auth",
+        lambda client, profile=None: {"OPENAI_API_KEY": "sk-layer4"},
+    )
+
+    candidates = sync_manager.inspect_remote_configs("remote")
+
+    assert candidates[0].kind == "claude"
+    assert candidates[0].importable is False
+    assert "读取失败" in candidates[0].reason
+    assert candidates[1].kind == "codex"
+    assert candidates[1].importable is True
+    assert candidates[1].provider_label == "Layer4"
+
+
+def test_pull_codex_from_server_skips_empty_api_key(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    fake_client = object()
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_config",
+        lambda client, profile=None: {"model_provider": "layer4", "model": "layer4-model"},
+    )
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {"OPENAI_API_KEY": "  "})
+
+    message = sync_manager.pull_codex_from_server("remote")
+
+    assert "没有 API Key" in message
+    assert profile_manager.list_codex_profiles() == []
+
+
 def test_ssh_connect_reconnects_when_cached_profile_details_change(isolated_ssh, monkeypatch):
     import core.ssh_manager as ssh_core
 

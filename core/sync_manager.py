@@ -831,12 +831,20 @@ def clear_remote_api_info(ssh_name: str, target: str = "all") -> str:
 
 
 def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
-    settings = remote_config.read_remote_claude_settings(client, ssh_profile)
-    config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     paths = (
         remote_config._remote_path("claude_settings", ssh_profile),
         remote_config._remote_path("claude_config", ssh_profile),
     )
+    try:
+        settings = remote_config.read_remote_claude_settings(client, ssh_profile)
+        config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
+    except Exception as e:
+        return RemoteConfigCandidate(
+            kind="claude",
+            label="Claude API",
+            reason=f"读取失败: {e}",
+            paths=paths,
+        )
     if not settings and not config:
         return RemoteConfigCandidate(
             kind="claude",
@@ -849,7 +857,7 @@ def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
     env = settings.get("env", {})
     if not isinstance(env, dict):
         env = {}
-    token_value = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey", "")
+    token_value = str(env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey", "")).strip()
     provider = profile_manager.detect_claude_provider(settings)
     is_official = provider == "anthropic"
     reason = "可导入为第三方 Claude API Profile"
@@ -872,12 +880,20 @@ def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
 
 
 def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
-    config = remote_config.read_remote_codex_config(client, ssh_profile)
-    auth = remote_config.read_remote_codex_auth(client, ssh_profile)
     paths = (
         remote_config._remote_path("codex_config", ssh_profile),
         remote_config._remote_path("codex_auth", ssh_profile),
     )
+    try:
+        config = remote_config.read_remote_codex_config(client, ssh_profile)
+        auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+    except Exception as e:
+        return RemoteConfigCandidate(
+            kind="codex",
+            label="Codex API",
+            reason=f"读取失败: {e}",
+            paths=paths,
+        )
     if not config and not auth:
         return RemoteConfigCandidate(
             kind="codex",
@@ -890,7 +906,8 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
     if not isinstance(auth, dict):
         auth = {}
     provider_id = str(config.get("model_provider") or "openai")
-    has_key = auth.get("OPENAI_API_KEY") is not None
+    api_key = str(auth.get("OPENAI_API_KEY") or "").strip()
+    has_key = bool(api_key)
     reason = "可导入为第三方 Codex API Profile"
     if provider_id == "openai":
         reason = "官方 OpenAI 配置，当前只导入第三方 API Profile"
@@ -951,10 +968,13 @@ def pull_claude_from_server(ssh_name: str) -> str:
     if not isinstance(env, dict):
         env = {}
     token_value = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey", "")
+    token_value = str(token_value or "").strip()
     primary_key = config.get("primaryApiKey", "")
     provider = profile_manager.detect_claude_provider(settings)
     if provider == "anthropic":
         return "远程 Claude 配置是官方 Anthropic，已跳过；当前只导入第三方 API Profile"
+    if not token_value:
+        return "远程 Claude 配置没有 API Key/Auth Token，已跳过；当前只导入第三方 API Profile"
 
     from models.profile import ClaudeProfile
     token_ref = f"claude:{name}:auth_token"
@@ -1004,7 +1024,8 @@ def pull_codex_from_server(ssh_name: str) -> str:
     provider_id = config.get("model_provider", "openai") if config else "openai"
     if provider_id == "openai":
         return "远程 Codex 配置是官方 OpenAI，已跳过；当前只导入第三方 API Profile"
-    if not auth or auth.get("OPENAI_API_KEY") is None:
+    api_key = str((auth or {}).get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
         return "远程 Codex 配置没有 API Key，已跳过；当前只导入第三方 API Profile"
 
     from models.profile import CodexProfile
@@ -1034,7 +1055,7 @@ def pull_codex_from_server(ssh_name: str) -> str:
             profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
 
     ref = f"codex:{name}:api_key"
-    security.set_secret(ref, auth["OPENAI_API_KEY"])
+    security.set_secret(ref, api_key)
     profile_kwargs["api_key_ref"] = ref
 
     profile = CodexProfile(**profile_kwargs)

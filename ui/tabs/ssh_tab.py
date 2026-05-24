@@ -22,6 +22,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._profile_combo = None
         self._remote_pull_combo = None
         self._remote_pull_hint = None
+        self._remote_inspect_button = None
+        self._remote_pull_button = None
         self._codex_wire_api_combo = None
         self._codex_wire_api_hint = None
         self._clear_api_combo = None
@@ -30,6 +32,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_config_candidates = []
         self._remote_pull_options = {}
         self._remote_pull_all_label = "全部可拉取配置"
+        self._remote_pull_server_name = None
         self._remote_auto_provider_combo = None
         self._remote_auto_feature_label = None
         self._remote_auto_status_label = None
@@ -147,13 +150,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._sync_current,
             **button_style("primary"),
         ).grid(row=0, column=2, sticky="e", padx=(0, 8))
-        ctk.CTkButton(
+        self._remote_inspect_button = ctk.CTkButton(
             sync_controls,
             text="读取远端配置",
             width=126,
             command=self._inspect_remote_configs,
             **button_style("accent"),
-        ).grid(row=0, column=3, sticky="e")
+        )
+        self._remote_inspect_button.grid(row=0, column=3, sticky="e")
 
         ctk.CTkLabel(
             sync_controls,
@@ -199,17 +203,20 @@ class SSHTab(ctk.CTkScrollableFrame):
             sync_controls,
             values=["请先读取远端配置"],
             width=220,
+            state="disabled",
             **combo_style(),
         )
         self._remote_pull_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
         self._remote_pull_combo.set("请先读取远端配置")
-        ctk.CTkButton(
+        self._remote_pull_button = ctk.CTkButton(
             sync_controls,
             text="拉取所选",
             width=126,
             command=self._pull_from_server,
+            state="disabled",
             **button_style("accent"),
-        ).grid(row=2, column=3, sticky="e", pady=(10, 0))
+        )
+        self._remote_pull_button.grid(row=2, column=3, sticky="e", pady=(10, 0))
         self._remote_pull_hint = ctk.CTkLabel(
             sync_controls,
             text="先读取服务器上的 Claude/Codex 配置，再选择要导入的内容。",
@@ -648,10 +655,13 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _reset_remote_pull_options(self, message: str | None = None):
         self._remote_config_candidates = []
         self._remote_pull_options = {}
+        self._remote_pull_server_name = None
         if self._remote_pull_combo:
             value = "请先读取远端配置"
-            self._remote_pull_combo.configure(values=[value])
+            self._remote_pull_combo.configure(values=[value], state="disabled")
             self._remote_pull_combo.set(value)
+        if self._remote_pull_button:
+            self._remote_pull_button.configure(state="disabled")
         if self._remote_pull_hint:
             self._remote_pull_hint.configure(
                 text=message or "先读取服务器上的 Claude/Codex 配置，再选择要导入的内容。",
@@ -662,8 +672,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._reset_remote_pull_options()
         self._on_remote_auto_provider_change()
 
-    def _set_remote_pull_candidates(self, candidates):
+    def _set_remote_pull_candidates(self, candidates, server_name: str):
         self._remote_config_candidates = list(candidates or [])
+        self._remote_pull_server_name = server_name
         importable = [candidate for candidate in self._remote_config_candidates if candidate.importable]
         options = {}
         if len(importable) > 1:
@@ -673,8 +684,10 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         if self._remote_pull_combo:
             values = list(options.keys()) or ["没有可拉取配置"]
-            self._remote_pull_combo.configure(values=values)
+            self._remote_pull_combo.configure(values=values, state="normal" if options else "disabled")
             self._remote_pull_combo.set(values[0])
+        if self._remote_pull_button:
+            self._remote_pull_button.configure(state="normal" if options else "disabled")
         self._remote_pull_options = options
 
         lines = [candidate.summary() for candidate in self._remote_config_candidates]
@@ -682,7 +695,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             lines = ["服务器上未发现可识别的 Claude/Codex 配置。"]
         hint = "远端配置: " + " | ".join(lines)
         if importable:
-            hint += "。请选择后点击“拉取所选”。"
+            hint += f"。已绑定服务器 {server_name}，请选择后点击“拉取所选”。"
         else:
             hint += "。没有符合当前导入规则的第三方 API 配置。"
         if self._remote_pull_hint:
@@ -698,6 +711,10 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._ssh_busy = True
         self._set_sync_status(busy_message)
+        if self._remote_inspect_button:
+            self._remote_inspect_button.configure(state="disabled")
+        if self._remote_pull_button:
+            self._remote_pull_button.configure(state="disabled")
 
         def run():
             try:
@@ -709,6 +726,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._ssh_busy = False
+                if self._remote_inspect_button:
+                    self._remote_inspect_button.configure(state="normal")
                 if on_done:
                     on_done(payload)
                 elif payload["ok"]:
@@ -719,6 +738,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                     message = f"操作失败: {payload['error']}"
                     self._set_sync_status(message, "error")
                     show_toast(self.winfo_toplevel(), message, is_error=True)
+                if self._remote_pull_button and self._remote_pull_options:
+                    self._remote_pull_button.configure(state="normal")
                 if refresh:
                     self.refresh()
 
@@ -1424,7 +1445,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 return
 
             candidates = payload["result"]
-            self._set_remote_pull_candidates(candidates)
+            self._set_remote_pull_candidates(candidates, server_name)
             importable_count = len([candidate for candidate in candidates if candidate.importable])
             message = f"已读取 {server_name} 的远端配置，可拉取 {importable_count} 项"
             self._set_sync_status(message, "success" if importable_count else "warning")
@@ -1450,6 +1471,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not kinds:
             show_toast(self.winfo_toplevel(), "请先读取远端配置，并选择可拉取的项目", is_error=True)
             self._set_sync_status("请先读取远端配置，并选择可拉取的项目", "warning")
+            return
+        if self._remote_pull_server_name != server_name:
+            self._reset_remote_pull_options("服务器选择已变化，请重新读取远端配置。")
+            show_toast(self.winfo_toplevel(), "服务器选择已变化，请重新读取远端配置", is_error=True)
+            self._set_sync_status("服务器选择已变化，请重新读取远端配置", "warning")
             return
 
         def worker():
