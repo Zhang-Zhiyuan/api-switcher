@@ -174,6 +174,20 @@ def test_error_parser():
             "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
         },
         {
+            "name": "Codex official responses reconnect exhausted",
+            "data": {
+                "error_message": (
+                    "Reconnecting... 2/5\nReconnecting... 3/5\nReconnecting... 4/5\n"
+                    "Reconnecting... 5/5\nReconnecting... 1/5\nReconnecting... 2/5\n"
+                    "Reconnecting... 3/5\nReconnecting... 4/5\nReconnecting... 5/5\n"
+                    "stream disconnected before completion: error sending request for url "
+                    "(https://chatgpt.com/backend-api/codex/responses)"
+                )
+            },
+            "expected_type": ErrorType.NETWORK_ERROR,
+            "expected_strategy": RecoveryStrategy.RETRY_WITH_BACKOFF
+        },
+        {
             "name": "配额超限",
             "data": {
                 "error_message": "quota exceeded, insufficient balance",
@@ -967,6 +981,65 @@ def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
     assert third.stdout.strip() == ""
     log_text = (state_dir / "error_recovery_log.jsonl").read_text(encoding="utf-8")
     assert "max_recoveries_reached" in log_text
+
+
+def test_remote_error_hook_retries_official_responses_disconnect_without_compress(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        error_recovery_enabled=True,
+        max_error_recoveries=2,
+        error_retry_initial_delay_seconds=5,
+        error_retry_max_delay_seconds=60,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-codex-official-responses-disconnect",
+            "error_message": (
+                "Reconnecting... 2/5\nReconnecting... 3/5\nReconnecting... 4/5\n"
+                "Reconnecting... 5/5\nReconnecting... 1/5\nReconnecting... 2/5\n"
+                "Reconnecting... 3/5\nReconnecting... 4/5\nReconnecting... 5/5\n"
+                "stream disconnected before completion: error sending request for url "
+                "(https://chatgpt.com/backend-api/codex/responses)"
+            ),
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["recover"] is True
+    assert output["wait"] == 5
+    assert "/compress" not in output["commands"]
 
 
 def test_remote_error_hook_uses_retry_after_for_claude(tmp_path):
