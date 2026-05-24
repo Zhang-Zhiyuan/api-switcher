@@ -728,25 +728,37 @@ def test_inspect_remote_configs_marks_importable_and_skipped_configs(isolated_ss
     monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
     monkeypatch.setattr(
         remote_config,
+        "read_remote_claude_credentials",
+        lambda client, profile=None: {"claudeAiOauth": {"accessToken": "claude-account-token"}},
+    )
+    monkeypatch.setattr(
+        remote_config,
         "read_remote_codex_config",
         lambda client, profile=None: {"model_provider": "openai", "model": "gpt-5.5"},
     )
     monkeypatch.setattr(
         remote_config,
         "read_remote_codex_auth",
-        lambda client, profile=None: {"OPENAI_API_KEY": "sk-openai"},
+        lambda client, profile=None: {
+            "OPENAI_API_KEY": "sk-openai",
+            "tokens": {"id_token": "codex-account-token"},
+        },
     )
 
     candidates = sync_manager.inspect_remote_configs("remote")
 
-    assert [candidate.kind for candidate in candidates] == ["claude", "codex"]
+    assert [candidate.kind for candidate in candidates] == ["claude", "claude_account", "codex", "codex_account"]
     assert candidates[0].importable is True
     assert candidates[0].provider == "custom"
     assert candidates[0].has_api_key is True
     assert "可导入" in candidates[0].reason
-    assert candidates[1].importable is False
-    assert candidates[1].provider == "openai"
-    assert "官方 OpenAI" in candidates[1].reason
+    assert candidates[1].importable is True
+    assert candidates[1].category == "account"
+    assert candidates[2].importable is False
+    assert candidates[2].provider == "openai"
+    assert "官方 OpenAI" in candidates[2].reason
+    assert candidates[3].importable is True
+    assert candidates[3].category == "account"
 
 
 def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isolated_ssh, monkeypatch):
@@ -760,6 +772,7 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
         lambda client, profile=None: (_ for _ in ()).throw(RuntimeError("permission denied")),
     )
     monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
+    monkeypatch.setattr(remote_config, "read_remote_claude_credentials", lambda client, profile=None: {})
     monkeypatch.setattr(
         remote_config,
         "read_remote_codex_config",
@@ -780,9 +793,36 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
     assert candidates[0].kind == "claude"
     assert candidates[0].importable is False
     assert "读取失败" in candidates[0].reason
-    assert candidates[1].kind == "codex"
-    assert candidates[1].importable is True
-    assert candidates[1].provider_label == "Layer4"
+    assert candidates[2].kind == "codex"
+    assert candidates[2].importable is True
+    assert candidates[2].provider_label == "Layer4"
+
+
+def test_pull_official_accounts_from_server(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    fake_client = object()
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_claude_credentials",
+        lambda client, profile=None: {"claudeAiOauth": {"accessToken": "claude-token"}},
+    )
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_auth",
+        lambda client, profile=None: {"tokens": {"id_token": "codex-token"}, "auth_mode": "chatgpt"},
+    )
+
+    claude_message = sync_manager.pull_remote_config_from_server("remote", "claude_account")
+    codex_message = sync_manager.pull_remote_config_from_server("remote", "codex_account")
+
+    assert "Claude 账号" in claude_message
+    assert len(profile_manager.list_claude_account_profiles()) == 1
+    assert security.get_secret_json(profile_manager.list_claude_account_profiles()[0].credentials_ref)["claudeAiOauth"]["accessToken"] == "claude-token"
+    assert "Codex 账号" in codex_message
+    assert len(profile_manager.list_codex_account_profiles()) == 1
+    assert security.get_secret_json(profile_manager.list_codex_account_profiles()[0].auth_json_ref)["auth_mode"] == "chatgpt"
 
 
 def test_pull_codex_from_server_skips_empty_api_key(isolated_ssh, monkeypatch):

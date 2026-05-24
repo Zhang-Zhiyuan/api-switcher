@@ -32,6 +32,8 @@ class RemoteWireBenchmarkResult:
 class RemoteConfigCandidate:
     kind: str
     label: str
+    category: str = "api"
+    product: str = ""
     provider: str = ""
     provider_label: str = ""
     model: str = ""
@@ -52,7 +54,10 @@ class RemoteConfigCandidate:
         return f"{self.label} [{status}]" + (f" - {suffix}" if suffix else "")
 
     def summary(self) -> str:
-        key_state = "有密钥" if self.has_api_key else "无密钥"
+        if self.category == "account":
+            key_state = "有登录态" if self.has_api_key else "无登录态"
+        else:
+            key_state = "有密钥" if self.has_api_key else "无密钥"
         detail = self.reason or key_state
         return f"{self.label}: {detail}"
 
@@ -842,6 +847,7 @@ def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
         return RemoteConfigCandidate(
             kind="claude",
             label="Claude API",
+            product="claude",
             reason=f"读取失败: {e}",
             paths=paths,
         )
@@ -849,6 +855,7 @@ def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
         return RemoteConfigCandidate(
             kind="claude",
             label="Claude API",
+            product="claude",
             reason="服务器上未找到 Claude 配置",
             paths=paths,
         )
@@ -868,6 +875,7 @@ def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
     return RemoteConfigCandidate(
         kind="claude",
         label="Claude API",
+        product="claude",
         provider=provider,
         provider_label=_provider_display_name(provider),
         model=str(settings.get("model") or ""),
@@ -875,6 +883,40 @@ def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
         has_api_key=bool(token_value),
         importable=bool(token_value) and not is_official,
         reason=reason,
+        paths=paths,
+    )
+
+
+def _inspect_remote_claude_account(client, ssh_profile) -> RemoteConfigCandidate:
+    paths = (remote_config._remote_path("claude_credentials", ssh_profile),)
+    try:
+        credentials = remote_config.read_remote_claude_credentials(client, ssh_profile)
+    except Exception as e:
+        return RemoteConfigCandidate(
+            kind="claude_account",
+            label="Claude 账号",
+            category="account",
+            product="claude",
+            reason=f"读取失败: {e}",
+            paths=paths,
+        )
+
+    ok, reason = profile_manager._validate_claude_account_credentials(credentials)
+    identity = ""
+    preferred_name = ""
+    if isinstance(credentials, dict) and credentials:
+        identity = profile_manager._claude_account_identity_from_credentials(credentials)
+        preferred_name = profile_manager._claude_account_preferred_name(credentials)
+    return RemoteConfigCandidate(
+        kind="claude_account",
+        label="Claude 账号",
+        category="account",
+        product="claude",
+        provider="official",
+        provider_label=preferred_name or identity or "官方账号",
+        has_api_key=ok,
+        importable=ok,
+        reason="可导入为 Claude 官方账号快照" if ok else reason,
         paths=paths,
     )
 
@@ -891,6 +933,7 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
         return RemoteConfigCandidate(
             kind="codex",
             label="Codex API",
+            product="codex",
             reason=f"读取失败: {e}",
             paths=paths,
         )
@@ -898,6 +941,7 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
         return RemoteConfigCandidate(
             kind="codex",
             label="Codex API",
+            product="codex",
             reason="服务器上未找到 Codex 配置",
             paths=paths,
         )
@@ -922,6 +966,7 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
     return RemoteConfigCandidate(
         kind="codex",
         label="Codex API",
+        product="codex",
         provider=provider_id,
         provider_label=custom_name or _provider_display_name(provider_id),
         model=str(config.get("model") or ""),
@@ -933,23 +978,94 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
     )
 
 
+def _inspect_remote_codex_account(client, ssh_profile) -> RemoteConfigCandidate:
+    paths = (
+        remote_config._remote_path("codex_auth", ssh_profile),
+        remote_config._remote_path("codex_config", ssh_profile),
+    )
+    try:
+        auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+        config = remote_config.read_remote_codex_config(client, ssh_profile) or {}
+    except Exception as e:
+        return RemoteConfigCandidate(
+            kind="codex_account",
+            label="Codex 账号",
+            category="account",
+            product="codex",
+            reason=f"读取失败: {e}",
+            paths=paths,
+        )
+
+    ok, reason = profile_manager._validate_codex_account_auth(auth)
+    override_active = profile_manager._codex_account_override_active(config, auth or {}) if isinstance(auth, dict) else True
+    identity = ""
+    preferred_name = ""
+    if isinstance(auth, dict) and auth:
+        identity = profile_manager._codex_account_identity_from_auth(auth)
+        preferred_name = profile_manager._codex_account_preferred_name(auth)
+    if ok and override_active:
+        reason = "检测到第三方 API 覆盖；可导入账号快照，但远端当前优先使用 API"
+    return RemoteConfigCandidate(
+        kind="codex_account",
+        label="Codex 账号",
+        category="account",
+        product="codex",
+        provider="official",
+        provider_label=preferred_name or identity or "官方账号",
+        has_api_key=ok,
+        importable=ok,
+        reason=reason if ok and override_active else "可导入为 Codex 官方账号快照" if ok else reason,
+        paths=paths,
+    )
+
+
 def inspect_remote_configs(ssh_name: str) -> list[RemoteConfigCandidate]:
     """Inspect remote Claude/Codex API config before importing anything locally."""
     ssh_profile, client = _connect_ssh(ssh_name)
     return [
         _inspect_remote_claude_config(client, ssh_profile),
+        _inspect_remote_claude_account(client, ssh_profile),
         _inspect_remote_codex_config(client, ssh_profile),
+        _inspect_remote_codex_account(client, ssh_profile),
     ]
 
 
 def pull_remote_config_from_server(ssh_name: str, kind: str) -> str:
     """Pull one inspected remote config kind from an SSH server."""
     kind = str(kind or "").strip().lower()
-    if kind == "claude":
+    if kind in {"claude", "claude_api"}:
         return pull_claude_from_server(ssh_name)
-    if kind == "codex":
+    if kind == "claude_account":
+        return pull_claude_account_from_server(ssh_name)
+    if kind in {"codex", "codex_api"}:
         return pull_codex_from_server(ssh_name)
+    if kind == "codex_account":
+        return pull_codex_account_from_server(ssh_name)
     raise ValueError(f"不支持的远端配置类型: {kind}")
+
+
+def pull_claude_account_from_server(ssh_name: str) -> str:
+    """Pull Claude official account credentials from server and save as an account profile."""
+    ssh_profile, client = _connect_ssh(ssh_name)
+    credentials = remote_config.read_remote_claude_credentials(client, ssh_profile)
+    ok, reason = profile_manager._validate_claude_account_credentials(credentials)
+    if not ok:
+        return f"远程 Claude 账号不可导入: {reason}"
+
+    from models.profile import ClaudeAccountProfile
+
+    identity = profile_manager._claude_account_identity_from_credentials(credentials)
+    preferred_name = profile_manager._claude_account_preferred_name(credentials)
+    name = profile_manager._pick_claude_account_import_name(identity, preferred_name, credentials)
+    ref = f"claude-account:{name}:credentials"
+    security.set_secret_json(ref, credentials)
+    profile_manager.save_claude_account_profile(ClaudeAccountProfile(
+        name=name,
+        credentials_ref=ref,
+        identity=identity,
+        created_at=profile_manager._now_iso(),
+    ))
+    return f"已从 {ssh_profile.host} 拉取 Claude 账号，保存为 '{name}'"
 
 
 def pull_claude_from_server(ssh_name: str) -> str:
@@ -1008,6 +1124,31 @@ def pull_claude_from_server(ssh_name: str) -> str:
     profile_manager.save_claude_profile(profile)
 
     return f"已从 {ssh_profile.host} 拉取 Claude 配置，保存为 '{name}'"
+
+
+def pull_codex_account_from_server(ssh_name: str) -> str:
+    """Pull Codex official account auth from server and save as an account profile."""
+    ssh_profile, client = _connect_ssh(ssh_name)
+    auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+    ok, reason = profile_manager._validate_codex_account_auth(auth)
+    if not ok:
+        return f"远程 Codex 账号不可导入: {reason}"
+    auth = profile_manager._normalize_codex_official_auth(auth)
+
+    from models.profile import CodexAccountProfile
+
+    identity = profile_manager._codex_account_identity_from_auth(auth)
+    preferred_name = profile_manager._codex_account_preferred_name(auth)
+    name = profile_manager._pick_codex_account_import_name(identity, preferred_name, auth)
+    ref = f"codex-account:{name}:auth_json"
+    security.set_secret_json(ref, auth)
+    profile_manager.save_codex_account_profile(CodexAccountProfile(
+        name=name,
+        auth_json_ref=ref,
+        identity=identity,
+        created_at=profile_manager._now_iso(),
+    ))
+    return f"已从 {ssh_profile.host} 拉取 Codex 账号，保存为 '{name}'"
 
 
 def pull_codex_from_server(ssh_name: str) -> str:
