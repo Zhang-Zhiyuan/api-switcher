@@ -35,11 +35,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_all_label = "全部可拉取配置"
         self._remote_pull_server_name = None
         self._remote_pull_type_options = {
-            "全部": "all",
-            "API": "api",
-            "账号": "account",
-            "Claude": "claude",
-            "Codex": "codex",
+            "全部项目": "all",
+            "仅 API": "api",
+            "仅账号": "account",
+            "仅 Claude": "claude",
+            "仅 Codex": "codex",
         }
         self._remote_auto_provider_combo = None
         self._remote_auto_feature_label = None
@@ -216,7 +216,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             **combo_style(),
         )
         self._remote_pull_type_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
-        self._remote_pull_type_combo.set("全部")
+        self._remote_pull_type_combo.set("全部项目")
         self._remote_pull_combo = ctk.CTkComboBox(
             sync_controls,
             values=["请先读取远端配置"],
@@ -237,7 +237,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_button.grid(row=2, column=3, sticky="e", pady=(10, 0))
         self._remote_pull_hint = ctk.CTkLabel(
             sync_controls,
-            text="先读取服务器上的 Claude/Codex 配置，再选择要导入的内容。",
+            text="点击“读取远端配置”后，可以按 API/账号或 Claude/Codex 过滤，再拉取具体项目。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -680,12 +680,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._remote_pull_combo.set(value)
         if self._remote_pull_type_combo:
             self._remote_pull_type_combo.configure(state="disabled")
-            self._remote_pull_type_combo.set("全部")
+            self._remote_pull_type_combo.set("全部项目")
         if self._remote_pull_button:
             self._remote_pull_button.configure(state="disabled")
         if self._remote_pull_hint:
             self._remote_pull_hint.configure(
-                text=message or "先读取服务器上的 Claude/Codex 配置，再选择要导入的内容。",
+                text=message or "点击“读取远端配置”后，可以按 API/账号或 Claude/Codex 过滤，再拉取具体项目。",
                 text_color=COLORS["muted"],
             )
 
@@ -698,23 +698,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_server_name = server_name
         if self._remote_pull_type_combo:
             self._remote_pull_type_combo.configure(state="normal")
-            self._remote_pull_type_combo.set("全部")
+            self._remote_pull_type_combo.set("全部项目")
         self._refresh_remote_pull_combo()
-
-        importable = [candidate for candidate in self._remote_config_candidates if candidate.importable]
-        lines = [candidate.summary() for candidate in self._remote_config_candidates]
-        if not lines:
-            lines = ["服务器上未发现可识别的 Claude/Codex 配置。"]
-        hint = "远端配置: " + " | ".join(lines)
-        if importable:
-            hint += f"。已绑定服务器 {server_name}，可按 API/账号或 Claude/Codex 过滤后拉取。"
-        else:
-            hint += "。没有符合当前导入规则的配置。"
-        if self._remote_pull_hint:
-            self._remote_pull_hint.configure(
-                text=hint,
-                text_color=COLORS["muted"] if importable else COLORS["warning"],
-            )
 
     def _remote_pull_filter(self) -> str:
         if not self._remote_pull_type_combo:
@@ -757,6 +742,42 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._remote_pull_button:
             self._remote_pull_button.configure(state="normal" if options else "disabled")
         self._remote_pull_options = options
+        self._update_remote_pull_hint(filtered)
+
+    def _update_remote_pull_hint(self, filtered=None):
+        if not self._remote_pull_hint:
+            return
+        candidates = self._remote_config_candidates
+        if not candidates:
+            self._remote_pull_hint.configure(
+                text="点击“读取远端配置”后，可以按 API/账号或 Claude/Codex 过滤，再拉取具体项目。",
+                text_color=COLORS["muted"],
+            )
+            return
+
+        importable = [candidate for candidate in candidates if candidate.importable]
+        filtered = self._remote_pull_filtered_candidates() if filtered is None else list(filtered)
+        api_count = len([candidate for candidate in importable if candidate.category == "api"])
+        account_count = len([candidate for candidate in importable if candidate.category == "account"])
+        selected_label = self._remote_pull_type_combo.get() if self._remote_pull_type_combo else "全部项目"
+        server_text = self._remote_pull_server_name or "-"
+
+        lines = [
+            f"已读取 {server_text}: 可拉取 {len(importable)}/{len(candidates)} 项（API {api_count}，账号 {account_count}）。当前范围「{selected_label}」可拉取 {len(filtered)} 项。"
+        ]
+        detail_lines = []
+        for candidate in candidates:
+            marker = "可拉取" if candidate.importable else "跳过"
+            detail = candidate.reason
+            if candidate.provider_label or candidate.model:
+                pieces = [piece for piece in [candidate.provider_label, candidate.model] if piece]
+                detail = " / ".join(pieces) + (f"；{candidate.reason}" if candidate.reason else "")
+            detail_lines.append(f"{candidate.label} [{marker}]: {detail}")
+        lines.extend(detail_lines[:4])
+        self._remote_pull_hint.configure(
+            text="\n".join(lines),
+            text_color=COLORS["muted"] if importable else COLORS["warning"],
+        )
 
     def _run_ssh_task(self, busy_message: str, worker, on_done=None, refresh: bool = False):
         if self._ssh_busy:
