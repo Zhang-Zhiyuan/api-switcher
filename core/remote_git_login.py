@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import platform
 import shlex
 import subprocess
 
@@ -78,6 +79,37 @@ def _local_gh_token() -> str:
     return token.strip()
 
 
+def _install_local_gh_windows() -> str:
+    """Install GitHub CLI on the local Windows machine using common package managers."""
+    if platform.system().lower() != "windows":
+        raise RuntimeError("本机自动安装 GitHub CLI 目前仅支持 Windows")
+
+    installers = [
+        (["winget", "install", "--id", "GitHub.cli", "-e", "--silent", "--accept-package-agreements", "--accept-source-agreements"], "winget"),
+        (["choco", "install", "gh", "-y"], "choco"),
+        (["scoop", "install", "gh"], "scoop"),
+    ]
+    errors = []
+    for command, label in installers:
+        if not _local_output([command[0], "--version"], timeout=8):
+            continue
+        try:
+            result = _run_local(command, timeout=300)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+            continue
+        if result.returncode == 0:
+            version = _local_output(["gh", "--version"], timeout=8)
+            if version:
+                return version.splitlines()[0]
+            errors.append(f"{label}: 安装完成但 gh 仍不可用，请重新打开程序或检查 PATH")
+        else:
+            errors.append(f"{label}: {(result.stderr or result.stdout).strip()}")
+
+    detail = "；".join(error for error in errors if error) or "未找到 winget/choco/scoop"
+    raise RuntimeError(f"本机 GitHub CLI 自动安装失败: {detail}")
+
+
 def _collect_local_status(include_token: bool = False) -> tuple[GitLoginStatus, str]:
     git_version = _local_output(["git", "--version"])
     user_name = _local_output(["git", "config", "--global", "--get", "user.name"]) or _local_output(["git", "config", "--get", "user.name"])
@@ -103,6 +135,15 @@ def _collect_local_status(include_token: bool = False) -> tuple[GitLoginStatus, 
         ),
         token,
     )
+
+
+def _collect_local_status_for_sync() -> tuple[GitLoginStatus, str, str]:
+    status, token = _collect_local_status(include_token=True)
+    install_summary = ""
+    if not status.local_gh_available and platform.system().lower() == "windows":
+        install_summary = _install_local_gh_windows()
+        status, token = _collect_local_status(include_token=True)
+    return status, token, install_summary
 
 
 def _find_ssh_profile(ssh_name: str):
@@ -374,7 +415,7 @@ def inspect_git_login(ssh_name: str) -> GitLoginStatus:
 
 def sync_git_login_to_server(ssh_name: str) -> str:
     """Configure remote Git identity and, when possible, GitHub CLI auth."""
-    local_status, token = _collect_local_status(include_token=True)
+    local_status, token, local_install_summary = _collect_local_status_for_sync()
     if not local_status.local_git_available:
         raise RuntimeError("本机未找到 git 命令")
     if not local_status.local_user_name and not local_status.local_user_email and not token:
@@ -387,6 +428,8 @@ def sync_git_login_to_server(ssh_name: str) -> str:
         raise RuntimeError("远端未安装 git，请先在服务器上安装 git")
 
     parts = []
+    if local_install_summary:
+        parts.append(f"已自动安装本机 GitHub CLI: {local_install_summary}")
     if local_status.local_user_name or local_status.local_user_email:
         _configure_remote_git_identity(
             client,
@@ -409,6 +452,9 @@ def sync_git_login_to_server(ssh_name: str) -> str:
         _remote_gh_login(client, remote, token)
         parts.append("已同步 GitHub CLI 登录")
     else:
-        parts.append("本机未检测到 GitHub CLI 登录 token，已跳过 gh 登录")
+        if local_status.local_gh_available:
+            parts.append("本机未检测到 GitHub CLI 登录 token，请先在本机执行 gh auth login 后再同步")
+        else:
+            parts.append("本机未检测到 GitHub CLI，已跳过 gh 登录")
 
     return "；".join(parts)

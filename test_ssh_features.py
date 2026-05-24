@@ -985,6 +985,63 @@ def test_remote_git_login_installs_gh_on_windows_remote(isolated_ssh, monkeypatc
     assert any("powershell.exe" in command and "gh auth login" in command for command in remote_commands)
 
 
+def test_remote_git_login_installs_local_gh_on_windows(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    installed = False
+    local_commands = []
+
+    def fake_run(args, **kwargs):
+        nonlocal installed
+        local_commands.append(tuple(args))
+        if tuple(args) == ("git", "--version"):
+            return subprocess.CompletedProcess(args, 0, "git version 2.45.0\n", "")
+        if tuple(args) == ("git", "config", "--global", "--get", "user.name"):
+            return subprocess.CompletedProcess(args, 0, "Local User\n", "")
+        if tuple(args) == ("git", "config", "--global", "--get", "user.email"):
+            return subprocess.CompletedProcess(args, 0, "local@example.com\n", "")
+        if tuple(args) == ("gh", "--version"):
+            return subprocess.CompletedProcess(args, 0 if installed else 1, "gh version 2.0.0\n" if installed else "", "")
+        if tuple(args) == ("winget", "--version"):
+            return subprocess.CompletedProcess(args, 0, "v1.9.0\n", "")
+        if args[:5] == ["winget", "install", "--id", "GitHub.cli", "-e"]:
+            installed = True
+            return subprocess.CompletedProcess(args, 0, "installed\n", "")
+        if tuple(args) == ("gh", "api", "user", "--jq", ".login"):
+            return subprocess.CompletedProcess(args, 1, "", "")
+        if tuple(args) == ("gh", "auth", "token"):
+            return subprocess.CompletedProcess(args, 1, "", "")
+        if tuple(args) == ("gh", "auth", "status", "-h", "github.com"):
+            return subprocess.CompletedProcess(args, 1, "", "")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    def fake_execute(client, command, timeout=30, input_data=None, log_command=True, get_pty=False):
+        if "__git_available" in command:
+            return 0, "\n".join([
+                "__git_available=1",
+                "__user_name=",
+                "__user_email=",
+                "__gh_available=1",
+                "__gh_logged_in=0",
+                "__gh_summary=not logged in",
+            ]), ""
+        if "git config --global user.name" in command:
+            return 0, "", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(remote_git_login.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(remote_git_login.subprocess, "run", fake_run)
+    monkeypatch.setattr(remote_git_login.ssh_manager, "connect", lambda profile: object())
+    monkeypatch.setattr(remote_git_login.ssh_manager, "execute_command_with_status", fake_execute)
+
+    message = remote_git_login.sync_git_login_to_server("remote")
+
+    assert installed is True
+    assert any(command[:5] == ("winget", "install", "--id", "GitHub.cli", "-e") for command in local_commands)
+    assert "已自动安装本机 GitHub CLI" in message
+    assert "请先在本机执行 gh auth login" in message
+
+
 def test_remote_git_login_status_summary(isolated_ssh, monkeypatch):
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
 
