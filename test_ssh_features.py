@@ -709,6 +709,46 @@ def test_clear_remote_codex_api_info_removes_active_provider_auth_and_env(isolat
     assert "Codex API 信息已清除" in message
 
 
+def test_inspect_remote_configs_marks_importable_and_skipped_configs(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    fake_client = object()
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_claude_settings",
+        lambda client, profile=None: {
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-remote",
+                "ANTHROPIC_BASE_URL": "https://relay.example.com",
+            },
+            "model": "claude-sonnet-4",
+        },
+    )
+    monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_config",
+        lambda client, profile=None: {"model_provider": "openai", "model": "gpt-5.5"},
+    )
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_auth",
+        lambda client, profile=None: {"OPENAI_API_KEY": "sk-openai"},
+    )
+
+    candidates = sync_manager.inspect_remote_configs("remote")
+
+    assert [candidate.kind for candidate in candidates] == ["claude", "codex"]
+    assert candidates[0].importable is True
+    assert candidates[0].provider == "custom"
+    assert candidates[0].has_api_key is True
+    assert "可导入" in candidates[0].reason
+    assert candidates[1].importable is False
+    assert candidates[1].provider == "openai"
+    assert "官方 OpenAI" in candidates[1].reason
+
+
 def test_ssh_connect_reconnects_when_cached_profile_details_change(isolated_ssh, monkeypatch):
     import core.ssh_manager as ssh_core
 

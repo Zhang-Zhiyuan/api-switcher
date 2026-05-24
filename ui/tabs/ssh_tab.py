@@ -20,11 +20,16 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
+        self._remote_pull_combo = None
+        self._remote_pull_hint = None
         self._codex_wire_api_combo = None
         self._codex_wire_api_hint = None
         self._clear_api_combo = None
         self._sync_status_label = None
         self._ssh_busy = False
+        self._remote_config_candidates = []
+        self._remote_pull_options = {}
+        self._remote_pull_all_label = "全部可拉取配置"
         self._remote_auto_provider_combo = None
         self._remote_auto_feature_label = None
         self._remote_auto_status_label = None
@@ -130,7 +135,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             sync_controls,
             values=["(无)"],
             width=220,
-            command=lambda _value: self._on_remote_auto_provider_change(),
+            command=lambda _value: self._on_server_selection_change(),
             **combo_style(),
         )
         self._server_combo.grid(row=0, column=1, sticky="ew", padx=(8, 12))
@@ -144,9 +149,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).grid(row=0, column=2, sticky="e", padx=(0, 8))
         ctk.CTkButton(
             sync_controls,
-            text="从服务器拉取",
+            text="读取远端配置",
             width=126,
-            command=self._pull_from_server,
+            command=self._inspect_remote_configs,
             **button_style("accent"),
         ).grid(row=0, column=3, sticky="e")
 
@@ -185,18 +190,51 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             sync_controls,
-            text="Codex Wire API",
+            text="远端拉取",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
         ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self._remote_pull_combo = ctk.CTkComboBox(
+            sync_controls,
+            values=["请先读取远端配置"],
+            width=220,
+            **combo_style(),
+        )
+        self._remote_pull_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
+        self._remote_pull_combo.set("请先读取远端配置")
+        ctk.CTkButton(
+            sync_controls,
+            text="拉取所选",
+            width=126,
+            command=self._pull_from_server,
+            **button_style("accent"),
+        ).grid(row=2, column=3, sticky="e", pady=(10, 0))
+        self._remote_pull_hint = ctk.CTkLabel(
+            sync_controls,
+            text="先读取服务器上的 Claude/Codex 配置，再选择要导入的内容。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._remote_pull_hint.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        bind_wraplength(sync_controls, self._remote_pull_hint, padding=20)
+
+        ctk.CTkLabel(
+            sync_controls,
+            text="Codex Wire API",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
         self._codex_wire_api_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._codex_wire_api_options.keys()),
             width=160,
             **combo_style(),
         )
-        self._codex_wire_api_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._codex_wire_api_combo.grid(row=4, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._codex_wire_api_combo.set("远端自测选择")
         self._codex_wire_api_hint = ctk.CTkLabel(
             sync_controls,
@@ -206,7 +244,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._codex_wire_api_hint.grid(row=2, column=2, columnspan=2, sticky="ew", pady=(10, 0))
+        self._codex_wire_api_hint.grid(row=4, column=2, columnspan=2, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._codex_wire_api_hint, padding=20)
 
         ctk.CTkLabel(
@@ -215,14 +253,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(10, 0))
         self._clear_api_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._clear_api_options.keys()),
             width=160,
             **combo_style(),
         )
-        self._clear_api_combo.grid(row=3, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._clear_api_combo.grid(row=5, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._clear_api_combo.set("Claude + Codex")
         clear_hint = ctk.CTkLabel(
             sync_controls,
@@ -232,7 +270,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        clear_hint.grid(row=3, column=2, sticky="ew", pady=(10, 0))
+        clear_hint.grid(row=5, column=2, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, clear_hint, padding=20)
         ctk.CTkButton(
             sync_controls,
@@ -240,7 +278,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             width=126,
             command=self._clear_remote_api_info,
             **button_style("danger"),
-        ).grid(row=3, column=3, sticky="e", pady=(10, 0))
+        ).grid(row=5, column=3, sticky="e", pady=(10, 0))
 
         self._sync_status_label = ctk.CTkLabel(
             sync_controls,
@@ -250,7 +288,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._sync_status_label.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._sync_status_label.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -548,9 +586,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         current_server = self._server_combo.get()
         self._server_combo.configure(values=server_names if server_names else ["(无)"])
         if server_names:
-            self._server_combo.set(current_server if current_server in server_names else server_names[0])
+            selected_server = current_server if current_server in server_names else server_names[0]
+            self._server_combo.set(selected_server)
+            if selected_server != current_server:
+                self._reset_remote_pull_options()
         else:
             self._server_combo.set("(无)")
+            self._reset_remote_pull_options()
         self._refresh_sync_profile_combo()
         self._update_remote_auto_feature_label()
         self._refresh_remote_auto_switch_availability()
@@ -602,6 +644,52 @@ class SSHTab(ctk.CTkScrollableFrame):
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
         self._sync_status_label.configure(text=message, text_color=color)
+
+    def _reset_remote_pull_options(self, message: str | None = None):
+        self._remote_config_candidates = []
+        self._remote_pull_options = {}
+        if self._remote_pull_combo:
+            value = "请先读取远端配置"
+            self._remote_pull_combo.configure(values=[value])
+            self._remote_pull_combo.set(value)
+        if self._remote_pull_hint:
+            self._remote_pull_hint.configure(
+                text=message or "先读取服务器上的 Claude/Codex 配置，再选择要导入的内容。",
+                text_color=COLORS["muted"],
+            )
+
+    def _on_server_selection_change(self):
+        self._reset_remote_pull_options()
+        self._on_remote_auto_provider_change()
+
+    def _set_remote_pull_candidates(self, candidates):
+        self._remote_config_candidates = list(candidates or [])
+        importable = [candidate for candidate in self._remote_config_candidates if candidate.importable]
+        options = {}
+        if len(importable) > 1:
+            options[self._remote_pull_all_label] = tuple(candidate.kind for candidate in importable)
+        for candidate in importable:
+            options[candidate.display_name()] = (candidate.kind,)
+
+        if self._remote_pull_combo:
+            values = list(options.keys()) or ["没有可拉取配置"]
+            self._remote_pull_combo.configure(values=values)
+            self._remote_pull_combo.set(values[0])
+        self._remote_pull_options = options
+
+        lines = [candidate.summary() for candidate in self._remote_config_candidates]
+        if not lines:
+            lines = ["服务器上未发现可识别的 Claude/Codex 配置。"]
+        hint = "远端配置: " + " | ".join(lines)
+        if importable:
+            hint += "。请选择后点击“拉取所选”。"
+        else:
+            hint += "。没有符合当前导入规则的第三方 API 配置。"
+        if self._remote_pull_hint:
+            self._remote_pull_hint.configure(
+                text=hint,
+                text_color=COLORS["muted"] if importable else COLORS["warning"],
+            )
 
     def _run_ssh_task(self, busy_message: str, worker, on_done=None, refresh: bool = False):
         if self._ssh_busy:
@@ -1319,6 +1407,35 @@ class SSHTab(ctk.CTkScrollableFrame):
             on_confirm=do_uninstall,
         )
 
+    def _inspect_remote_configs(self):
+        server_name = self._server_combo.get()
+        if not self._has_selected_server():
+            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
+            return
+        if server_name == "(无)":
+            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+            return
+
+        def done(payload):
+            if not payload["ok"]:
+                self._reset_remote_pull_options(f"读取远端配置失败: {payload['error']}")
+                self._set_sync_status(f"读取远端配置失败: {payload['error']}", "error")
+                show_toast(self.winfo_toplevel(), f"读取远端配置失败: {payload['error']}", is_error=True)
+                return
+
+            candidates = payload["result"]
+            self._set_remote_pull_candidates(candidates)
+            importable_count = len([candidate for candidate in candidates if candidate.importable])
+            message = f"已读取 {server_name} 的远端配置，可拉取 {importable_count} 项"
+            self._set_sync_status(message, "success" if importable_count else "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=not bool(importable_count))
+
+        self._run_ssh_task(
+            f"正在读取 {server_name} 上的远端配置...",
+            lambda: sync_manager.inspect_remote_configs(server_name),
+            on_done=done,
+        )
+
     def _pull_from_server(self):
         server_name = self._server_combo.get()
         if not self._has_selected_server():
@@ -1328,17 +1445,22 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
             return
 
+        selected = self._remote_pull_combo.get() if self._remote_pull_combo else ""
+        kinds = self._remote_pull_options.get(selected)
+        if not kinds:
+            show_toast(self.winfo_toplevel(), "请先读取远端配置，并选择可拉取的项目", is_error=True)
+            self._set_sync_status("请先读取远端配置，并选择可拉取的项目", "warning")
+            return
+
         def worker():
             results = []
             failures = []
-            for label, puller in [
-                ("Claude", sync_manager.pull_claude_from_server),
-                ("Codex", sync_manager.pull_codex_from_server),
-            ]:
+            label_by_kind = {"claude": "Claude", "codex": "Codex"}
+            for kind in kinds:
                 try:
-                    results.append(puller(server_name))
+                    results.append(sync_manager.pull_remote_config_from_server(server_name, kind))
                 except Exception as e:
-                    failures.append(f"{label}: {e}")
+                    failures.append(f"{label_by_kind.get(kind, kind)}: {e}")
             return results, failures
 
         def done(payload):
@@ -1364,7 +1486,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self.refresh()
 
         self._run_ssh_task(
-            f"正在从 {server_name} 拉取配置...",
+            f"正在从 {server_name} 拉取 {selected}...",
             worker,
             on_done=done,
         )

@@ -28,6 +28,35 @@ class RemoteWireBenchmarkResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class RemoteConfigCandidate:
+    kind: str
+    label: str
+    provider: str = ""
+    provider_label: str = ""
+    model: str = ""
+    base_url: str = ""
+    has_api_key: bool = False
+    importable: bool = False
+    reason: str = ""
+    paths: tuple[str, ...] = ()
+
+    def display_name(self) -> str:
+        status = "可拉取" if self.importable else "跳过"
+        details = []
+        if self.provider_label:
+            details.append(self.provider_label)
+        if self.model:
+            details.append(self.model)
+        suffix = " / ".join(details) if details else self.reason
+        return f"{self.label} [{status}]" + (f" - {suffix}" if suffix else "")
+
+    def summary(self) -> str:
+        key_state = "有密钥" if self.has_api_key else "无密钥"
+        detail = self.reason or key_state
+        return f"{self.label}: {detail}"
+
+
 CODEX_WIRE_API_AUTO = "auto"
 CODEX_WIRE_API_PROFILE = "profile"
 CODEX_WIRE_API_VALUES = {"responses"}
@@ -290,6 +319,11 @@ def _find_profile(profiles: list, name: str, label: str):
 def _connect_ssh(ssh_name: str):
     ssh_profile = _find_profile(profile_manager.list_ssh_profiles(), ssh_name, "SSH 服务器")
     return ssh_profile, ssh_manager.connect(ssh_profile)
+
+
+def _provider_display_name(provider_id: str) -> str:
+    provider = ProviderRegistry.get_provider(provider_id)
+    return provider.display_name if provider else (provider_id or "未知")
 
 
 def _is_root_ssh_user(ssh_profile, client=None) -> bool:
@@ -796,14 +830,114 @@ def clear_remote_api_info(ssh_name: str, target: str = "all") -> str:
     return f"已清理 {ssh_profile.host}： " + "；".join(results)
 
 
+def _inspect_remote_claude_config(client, ssh_profile) -> RemoteConfigCandidate:
+    settings = remote_config.read_remote_claude_settings(client, ssh_profile)
+    config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
+    paths = (
+        remote_config._remote_path("claude_settings", ssh_profile),
+        remote_config._remote_path("claude_config", ssh_profile),
+    )
+    if not settings and not config:
+        return RemoteConfigCandidate(
+            kind="claude",
+            label="Claude API",
+            reason="服务器上未找到 Claude 配置",
+            paths=paths,
+        )
+    if not isinstance(settings, dict):
+        settings = {}
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        env = {}
+    token_value = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey", "")
+    provider = profile_manager.detect_claude_provider(settings)
+    is_official = provider == "anthropic"
+    reason = "可导入为第三方 Claude API Profile"
+    if is_official:
+        reason = "官方 Anthropic 配置，当前只导入第三方 API Profile"
+    elif not token_value:
+        reason = "未找到 Anthropic API Key/Auth Token"
+    return RemoteConfigCandidate(
+        kind="claude",
+        label="Claude API",
+        provider=provider,
+        provider_label=_provider_display_name(provider),
+        model=str(settings.get("model") or ""),
+        base_url=str(env.get("ANTHROPIC_BASE_URL") or ""),
+        has_api_key=bool(token_value),
+        importable=bool(token_value) and not is_official,
+        reason=reason,
+        paths=paths,
+    )
+
+
+def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
+    config = remote_config.read_remote_codex_config(client, ssh_profile)
+    auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+    paths = (
+        remote_config._remote_path("codex_config", ssh_profile),
+        remote_config._remote_path("codex_auth", ssh_profile),
+    )
+    if not config and not auth:
+        return RemoteConfigCandidate(
+            kind="codex",
+            label="Codex API",
+            reason="服务器上未找到 Codex 配置",
+            paths=paths,
+        )
+    if not isinstance(config, dict):
+        config = {}
+    if not isinstance(auth, dict):
+        auth = {}
+    provider_id = str(config.get("model_provider") or "openai")
+    has_key = auth.get("OPENAI_API_KEY") is not None
+    reason = "可导入为第三方 Codex API Profile"
+    if provider_id == "openai":
+        reason = "官方 OpenAI 配置，当前只导入第三方 API Profile"
+    elif not has_key:
+        reason = "未找到 OPENAI_API_KEY"
+    custom_name = ""
+    model_providers = config.get("model_providers")
+    if isinstance(model_providers, dict):
+        custom = model_providers.get(provider_id)
+        if isinstance(custom, dict):
+            custom_name = str(custom.get("name") or "")
+    return RemoteConfigCandidate(
+        kind="codex",
+        label="Codex API",
+        provider=provider_id,
+        provider_label=custom_name or _provider_display_name(provider_id),
+        model=str(config.get("model") or ""),
+        base_url=str((model_providers.get(provider_id, {}) if isinstance(model_providers, dict) else {}).get("base_url") or ""),
+        has_api_key=has_key,
+        importable=has_key and provider_id != "openai",
+        reason=reason,
+        paths=paths,
+    )
+
+
+def inspect_remote_configs(ssh_name: str) -> list[RemoteConfigCandidate]:
+    """Inspect remote Claude/Codex API config before importing anything locally."""
+    ssh_profile, client = _connect_ssh(ssh_name)
+    return [
+        _inspect_remote_claude_config(client, ssh_profile),
+        _inspect_remote_codex_config(client, ssh_profile),
+    ]
+
+
+def pull_remote_config_from_server(ssh_name: str, kind: str) -> str:
+    """Pull one inspected remote config kind from an SSH server."""
+    kind = str(kind or "").strip().lower()
+    if kind == "claude":
+        return pull_claude_from_server(ssh_name)
+    if kind == "codex":
+        return pull_codex_from_server(ssh_name)
+    raise ValueError(f"不支持的远端配置类型: {kind}")
+
+
 def pull_claude_from_server(ssh_name: str) -> str:
     """Pull Claude config from server and save as a profile."""
-    ssh_profiles = profile_manager.list_ssh_profiles()
-    ssh_profile = next((p for p in ssh_profiles if p.name == ssh_name), None)
-    if not ssh_profile:
-        raise ValueError(f"SSH server '{ssh_name}' not found")
-
-    client = ssh_manager.connect(ssh_profile)
+    ssh_profile, client = _connect_ssh(ssh_name)
     settings = remote_config.read_remote_claude_settings(client, ssh_profile)
     config = remote_config.read_remote_claude_config(client, ssh_profile) or {}
     if not settings and not config:
@@ -858,12 +992,7 @@ def pull_claude_from_server(ssh_name: str) -> str:
 
 def pull_codex_from_server(ssh_name: str) -> str:
     """Pull Codex config from server and save as a profile."""
-    ssh_profiles = profile_manager.list_ssh_profiles()
-    ssh_profile = next((p for p in ssh_profiles if p.name == ssh_name), None)
-    if not ssh_profile:
-        raise ValueError(f"SSH server '{ssh_name}' not found")
-
-    client = ssh_manager.connect(ssh_profile)
+    ssh_profile, client = _connect_ssh(ssh_name)
 
     config = remote_config.read_remote_codex_config(client, ssh_profile)
     auth = remote_config.read_remote_codex_auth(client, ssh_profile)
