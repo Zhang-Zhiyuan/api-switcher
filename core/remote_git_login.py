@@ -22,6 +22,7 @@ class GitLoginStatus:
     local_gh_logged_in: bool = False
     local_gh_user: str = ""
     remote_git_available: bool = False
+    remote_os: str = "unknown"
     remote_user_name: str = ""
     remote_user_email: str = ""
     remote_gh_available: bool = False
@@ -49,7 +50,7 @@ class GitLoginStatus:
             if self.remote_gh_available
             else "gh 不可用"
         )
-        return f"本机: {local_identity}，{local_gh} | 远端: {remote_identity}，{remote_gh}"
+        return f"本机: {local_identity}，{local_gh} | 远端({self.remote_os or 'unknown'}): {remote_identity}，{remote_gh}"
 
 
 def _run_local(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess:
@@ -111,9 +112,14 @@ def _find_ssh_profile(ssh_name: str):
     return profile
 
 
-def _remote_probe(client) -> dict[str, str]:
+def _ps_single_quote(value: str) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def _remote_probe_posix(client) -> dict[str, str]:
     command = r"""
 set +e
+echo "__os=$(uname -s 2>/dev/null || echo unknown)"
 echo "__git_available=$(command -v git >/dev/null 2>&1 && echo 1 || echo 0)"
 echo "__user_name=$(git config --global --get user.name 2>/dev/null)"
 echo "__user_email=$(git config --global --get user.email 2>/dev/null)"
@@ -132,6 +138,41 @@ fi
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=20)
     if status != 0 and not stdout:
         raise RuntimeError(stderr.strip() or f"远端 Git 状态检查失败: exit {status}")
+    return _parse_probe_output(stdout)
+
+
+def _remote_probe_windows(client) -> dict[str, str]:
+    ps_script = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+Write-Output '__os=windows'
+$git = Get-Command git -ErrorAction SilentlyContinue
+Write-Output ('__git_available=' + ($(if ($git) {'1'} else {'0'})))
+if ($git) {
+  Write-Output ('__user_name=' + ((git config --global --get user.name) 2>$null))
+  Write-Output ('__user_email=' + ((git config --global --get user.email) 2>$null))
+} else {
+  Write-Output '__user_name='
+  Write-Output '__user_email='
+}
+$gh = Get-Command gh -ErrorAction SilentlyContinue
+Write-Output ('__gh_available=' + ($(if ($gh) {'1'} else {'0'})))
+if ($gh) {
+  $statusText = (gh auth status -h github.com 2>&1 | Select-Object -First 1) -join ' '
+  Write-Output ('__gh_logged_in=' + ($(if ($LASTEXITCODE -eq 0) {'1'} else {'0'})))
+  Write-Output ('__gh_summary=' + $statusText)
+} else {
+  Write-Output '__gh_logged_in=0'
+  Write-Output '__gh_summary=gh not installed'
+}
+"""
+    command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + _ps_single_quote(ps_script)
+    status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=25)
+    if status != 0 and not stdout:
+        raise RuntimeError(stderr.strip() or f"远端 Windows Git 状态检查失败: exit {status}")
+    return _parse_probe_output(stdout)
+
+
+def _parse_probe_output(stdout: str) -> dict[str, str]:
     data = {}
     for line in stdout.splitlines():
         if line.startswith("__") and "=" in line:
@@ -140,7 +181,21 @@ fi
     return data
 
 
-def _install_remote_gh(client) -> str:
+def _remote_probe(client) -> dict[str, str]:
+    try:
+        data = _remote_probe_posix(client)
+        if data.get("git_available") or data.get("gh_available") or data.get("os"):
+            return data
+    except Exception as e:
+        logger.debug("POSIX remote Git probe failed, trying Windows probe: %s", e)
+    return _remote_probe_windows(client)
+
+
+def _is_windows_remote(remote: dict[str, str]) -> bool:
+    return str(remote.get("os") or "").strip().lower().startswith(("windows", "mingw", "msys"))
+
+
+def _install_remote_gh_posix(client) -> str:
     """Install GitHub CLI on common Linux distributions when it is missing."""
     command = r"""
 set -e
@@ -197,6 +252,103 @@ gh --version | head -n 1
     return (stdout.strip().splitlines() or ["gh 已安装"])[-1]
 
 
+def _install_remote_gh_windows(client) -> str:
+    """Install GitHub CLI on Windows SSH hosts using common package managers."""
+    ps_script = r"""
+$ErrorActionPreference = 'Stop'
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+  gh --version | Select-Object -First 1
+  exit 0
+}
+
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+  winget install --id GitHub.cli -e --silent --accept-package-agreements --accept-source-agreements
+} elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+  choco install gh -y
+} elseif (Get-Command scoop -ErrorAction SilentlyContinue) {
+  scoop install gh
+} else {
+  Write-Error 'unsupported Windows package manager: need winget, choco, or scoop'
+  exit 91
+}
+
+$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User') + ';' + $env:Path
+if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+  Write-Error 'gh installed but not available in PATH'
+  exit 92
+}
+gh --version | Select-Object -First 1
+"""
+    command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + _ps_single_quote(ps_script)
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=300,
+        log_command=False,
+    )
+    if status != 0:
+        raise RuntimeError((stderr or stdout or f"远端 Windows gh 安装失败: exit {status}").strip())
+    return (stdout.strip().splitlines() or ["gh 已安装"])[-1]
+
+
+def _install_remote_gh(client, remote: dict[str, str]) -> str:
+    if _is_windows_remote(remote):
+        return _install_remote_gh_windows(client)
+    return _install_remote_gh_posix(client)
+
+
+def _configure_remote_git_identity(client, remote: dict[str, str], user_name: str, user_email: str) -> None:
+    if _is_windows_remote(remote):
+        commands = []
+        if user_name:
+            commands.append(f"git config --global user.name {_ps_single_quote(user_name)}")
+        if user_email:
+            commands.append(f"git config --global user.email {_ps_single_quote(user_email)}")
+        if not commands:
+            return
+        ps_script = "\n".join(commands)
+        command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + _ps_single_quote(ps_script)
+    else:
+        commands = []
+        if user_name:
+            commands.append(f"git config --global user.name {shlex.quote(user_name)}")
+        if user_email:
+            commands.append(f"git config --global user.email {shlex.quote(user_email)}")
+        if not commands:
+            return
+        command = " && ".join(commands)
+
+    status, _stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=20,
+        log_command=False,
+    )
+    if status != 0:
+        raise RuntimeError(stderr.strip() or "远端 Git 身份配置失败")
+
+
+def _remote_gh_login(client, remote: dict[str, str], token: str) -> None:
+    if _is_windows_remote(remote):
+        ps_script = (
+            "gh auth login --hostname github.com --git-protocol https --with-token\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+            "gh auth setup-git --hostname github.com"
+        )
+        command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + _ps_single_quote(ps_script)
+    else:
+        command = "gh auth login --hostname github.com --git-protocol https --with-token && gh auth setup-git --hostname github.com"
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=60,
+        input_data=token + "\n",
+        log_command=False,
+    )
+    if status != 0:
+        raise RuntimeError((stderr or stdout or "远端 GitHub CLI 登录失败").strip())
+
+
 def inspect_git_login(ssh_name: str) -> GitLoginStatus:
     """Inspect local and remote Git identity plus GitHub CLI login state."""
     local_status, _token = _collect_local_status(include_token=False)
@@ -211,6 +363,7 @@ def inspect_git_login(ssh_name: str) -> GitLoginStatus:
         local_gh_logged_in=local_status.local_gh_logged_in,
         local_gh_user=local_status.local_gh_user,
         remote_git_available=remote.get("git_available") == "1",
+        remote_os=remote.get("os", "unknown"),
         remote_user_name=remote.get("user_name", ""),
         remote_user_email=remote.get("user_email", ""),
         remote_gh_available=remote.get("gh_available") == "1",
@@ -233,45 +386,27 @@ def sync_git_login_to_server(ssh_name: str) -> str:
     if remote.get("git_available") != "1":
         raise RuntimeError("远端未安装 git，请先在服务器上安装 git")
 
-    commands = []
-    if local_status.local_user_name:
-        commands.append(f"git config --global user.name {shlex.quote(local_status.local_user_name)}")
-    if local_status.local_user_email:
-        commands.append(f"git config --global user.email {shlex.quote(local_status.local_user_email)}")
-    if commands:
-        status, _stdout, stderr = ssh_manager.execute_command_with_status(
-            client,
-            " && ".join(commands),
-            timeout=20,
-            log_command=False,
-        )
-        if status != 0:
-            raise RuntimeError(stderr.strip() or "远端 Git 身份配置失败")
-
     parts = []
-    if commands:
+    if local_status.local_user_name or local_status.local_user_email:
+        _configure_remote_git_identity(
+            client,
+            remote,
+            local_status.local_user_name,
+            local_status.local_user_email,
+        )
         parts.append(f"已同步 Git 身份 {local_status.local_user_name or '-'} <{local_status.local_user_email or '-'}>")
     else:
         parts.append("本机未配置 Git 用户名/邮箱，已跳过身份同步")
 
     if token:
         if remote.get("gh_available") != "1":
-            install_summary = _install_remote_gh(client)
+            install_summary = _install_remote_gh(client, remote)
             parts.append(f"已自动安装 GitHub CLI: {install_summary}")
             remote = _remote_probe(client)
             if remote.get("gh_available") != "1":
                 raise RuntimeError("远端 GitHub CLI 安装后仍不可用")
 
-        command = "gh auth login --hostname github.com --git-protocol https --with-token && gh auth setup-git --hostname github.com"
-        status, stdout, stderr = ssh_manager.execute_command_with_status(
-            client,
-            command,
-            timeout=60,
-            input_data=token + "\n",
-            log_command=False,
-        )
-        if status != 0:
-            raise RuntimeError((stderr or stdout or "远端 GitHub CLI 登录失败").strip())
+        _remote_gh_login(client, remote, token)
         parts.append("已同步 GitHub CLI 登录")
     else:
         parts.append("本机未检测到 GitHub CLI 登录 token，已跳过 gh 登录")
