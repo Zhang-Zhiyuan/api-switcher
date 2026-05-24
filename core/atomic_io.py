@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import os
 from pathlib import Path
 
 
@@ -38,7 +39,10 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = temp_path_for(path)
     try:
-        tmp.write_text(content, encoding=encoding)
+        with tmp.open("w", encoding=encoding) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         replace_with_retry(tmp, path)
     except Exception:
         tmp.unlink(missing_ok=True)
@@ -51,7 +55,10 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = temp_path_for(path)
     try:
-        tmp.write_bytes(content)
+        with tmp.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         replace_with_retry(tmp, path)
     except Exception:
         tmp.unlink(missing_ok=True)

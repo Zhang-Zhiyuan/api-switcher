@@ -123,6 +123,25 @@ def _normalize_store(store: dict) -> bool:
     return changed
 
 
+def _restore_store_from_backup(backup_file) -> dict | None:
+    """Load, normalize, and restore a profile store backup without clobbering it."""
+    if not backup_file.exists():
+        return None
+    try:
+        logger.info("Attempting to restore profiles from backup")
+        content = backup_file.read_text(encoding="utf-8")
+        store = json.loads(content)
+        if not isinstance(store, dict):
+            raise ValueError("Backup store is not a dictionary")
+        _normalize_store(store)
+        logger.info("Successfully restored profiles from backup")
+        _save_store(store, create_backup=False)
+        return store
+    except Exception as backup_error:
+        logger.error(f"Failed to restore profiles from backup: {backup_error}")
+        return None
+
+
 def _load_store() -> dict:
     """Load profiles store with backup and recovery mechanism."""
     if not PROFILES_FILE.exists():
@@ -221,40 +240,23 @@ def _load_store() -> dict:
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error in profiles file: {e}")
-        # Try to load from backup
-        if backup_file.exists():
-            try:
-                logger.info("Attempting to restore from backup")
-                content = backup_file.read_text(encoding="utf-8")
-                store = json.loads(content)
-                logger.info("Successfully restored from backup")
-                # Save restored backup as main file
-                _save_store(store)
-                return store
-            except Exception as backup_error:
-                logger.error(f"Failed to restore from backup: {backup_error}")
+        restored = _restore_store_from_backup(backup_file)
+        if restored is not None:
+            return restored
 
         logger.warning("Returning default store due to corrupted profiles file")
         return _get_default_store()
 
     except Exception as e:
         logger.error(f"Failed to load profiles: {e}")
-        # Try backup
-        if backup_file.exists():
-            try:
-                logger.info("Attempting to restore from backup")
-                content = backup_file.read_text(encoding="utf-8")
-                store = json.loads(content)
-                logger.info("Successfully restored from backup")
-                _save_store(store)
-                return store
-            except Exception:
-                pass
+        restored = _restore_store_from_backup(backup_file)
+        if restored is not None:
+            return restored
 
         return _get_default_store()
 
 
-def _save_store(store: dict) -> None:
+def _save_store(store: dict, create_backup: bool = True) -> None:
     """Save profiles store with atomic write and backup."""
     try:
         # Ensure parent directory exists
@@ -269,7 +271,7 @@ def _save_store(store: dict) -> None:
 
         # Create backup of existing file
         backup_file = PROFILES_FILE.with_suffix(".backup")
-        if PROFILES_FILE.exists():
+        if create_backup and PROFILES_FILE.exists():
             try:
                 shutil.copy2(PROFILES_FILE, backup_file)
                 logger.debug(f"Created backup: {backup_file}")

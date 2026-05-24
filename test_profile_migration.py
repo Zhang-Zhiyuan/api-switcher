@@ -21,6 +21,49 @@ def _restore(path, content):
         path.write_bytes(content)
 
 
+def test_corrupted_profiles_restore_preserves_valid_backup(tmp_path, monkeypatch):
+    profiles_file = tmp_path / "profiles.json"
+    backup_file = profiles_file.with_suffix(".backup")
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+
+    backup_store = {
+        "version": 3,
+        "claude_profiles": [
+            {
+                "name": "Backup Claude",
+                "auth_token_ref": "claude:Backup Claude:auth_token",
+                "base_url": "https://api.anthropic.com",
+                "model": "claude-sonnet-4",
+                "effort_level": "high",
+                "permissions_mode": "default",
+                "skip_dangerous_prompt": False,
+            }
+        ],
+        "codex_profiles": [],
+        "ssh_profiles": [],
+        "browser_profiles": [],
+        "active_claude_profile": "Backup Claude",
+        "active_codex_profile": None,
+        "active_ssh_profile": None,
+        "active_browser_profile": None,
+    }
+    profiles_file.write_text("{not valid json", encoding="utf-8")
+    backup_file.write_text(json.dumps(backup_store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    restored = profile_manager._load_store()
+
+    assert restored["active_claude_profile"] == "Backup Claude"
+    assert restored["version"] == profile_manager._get_default_store()["version"]
+    assert restored["claude_profiles"][0]["provider"] == "anthropic"
+    assert "claude_account_profiles" in restored
+
+    persisted = json.loads(profiles_file.read_text(encoding="utf-8"))
+    backup_after = json.loads(backup_file.read_text(encoding="utf-8"))
+    assert persisted["active_claude_profile"] == "Backup Claude"
+    assert backup_after["active_claude_profile"] == "Backup Claude"
+    assert backup_after["version"] == 3
+
+
 def main():
     backup_file = PROFILES_FILE.with_suffix(".backup")
     original_profiles = _read_bytes(PROFILES_FILE)
@@ -58,7 +101,8 @@ def main():
             raise AssertionError(f"Expected provider=anthropic, got {profiles[0].provider!r}")
 
         persisted = json.loads(PROFILES_FILE.read_text(encoding="utf-8"))
-        if persisted.get("version") != 4:
+        expected_version = profile_manager._get_default_store()["version"]
+        if persisted.get("version") != expected_version:
             raise AssertionError(f"Migration was not persisted: version={persisted.get('version')!r}")
         migrated_profile = persisted["claude_profiles"][0]
         if migrated_profile.get("provider") != "anthropic":

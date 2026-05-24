@@ -1343,6 +1343,32 @@ def test_ssh_remote_file_io_uses_binary_sftp_modes():
     assert all("\\" not in path for path in sftp.mkdir_calls)
 
 
+def test_ssh_remote_file_replace_preserves_existing_file_during_fallback():
+    class NoOverwriteSFTP(_FakeSFTP):
+        def posix_rename(self, source, target):
+            self.posix_rename_calls.append((source, target))
+            error = OSError("Operation unsupported")
+            error.errno = 95
+            raise error
+
+        def rename(self, source, target):
+            self.rename_calls.append((source, target))
+            if target in self.files:
+                raise OSError("Failure")
+            self.files[target] = self.files.pop(source)
+
+    manager = SSHManager()
+    sftp = NoOverwriteSFTP()
+    sftp.files["/written.json"] = b'{"old": true}'
+    client = _FakeClient(sftp)
+
+    manager.write_remote_file(client, "/written.json", '{"new": true}')
+
+    assert sftp.files["/written.json"] == b'{"new": true}'
+    assert not any(path.startswith("/written.json.bak.") for path in sftp.files)
+    assert any(source == "/written.json" and target.startswith("/written.json.bak.") for source, target in sftp.rename_calls)
+
+
 def test_remote_config_reads_json_with_utf8_bom():
     sftp = _FakeSFTP()
     sftp.files["/bom.json"] = b'\xef\xbb\xbf{"ok": true}'

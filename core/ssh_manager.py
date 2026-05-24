@@ -226,12 +226,34 @@ class SSHManager:
             sftp.rename(source, target)
         except Exception:
             # Older SFTP servers often refuse rename-over-existing. This fallback
-            # keeps compatibility when posix_rename is unavailable.
+            # keeps compatibility when posix_rename is unavailable while keeping
+            # the previous target recoverable if the final rename fails.
+            backup_path = f"{target}.bak.{uuid.uuid4().hex}"
+            target_moved = False
             try:
-                sftp.remove(target)
+                sftp.rename(target, backup_path)
+                target_moved = True
+            except Exception as move_error:
+                if not self._is_not_found_error(move_error):
+                    logger.debug(f"Could not move existing remote file aside before replace: {move_error}")
+                    try:
+                        sftp.remove(target)
+                    except Exception:
+                        pass
+            try:
+                sftp.rename(source, target)
             except Exception:
-                pass
-            sftp.rename(source, target)
+                if target_moved:
+                    try:
+                        sftp.rename(backup_path, target)
+                    except Exception as restore_error:
+                        logger.warning(f"Failed to restore remote file {target} after replace failure: {restore_error}")
+                raise
+            if target_moved:
+                try:
+                    sftp.remove(backup_path)
+                except Exception:
+                    pass
 
     def read_remote_file(self, client: paramiko.SSHClient, path: str, timeout: int = 30) -> str | None:
         """Read a file from the remote server with timeout."""
