@@ -140,6 +140,63 @@ fi
     return data
 
 
+def _install_remote_gh(client) -> str:
+    """Install GitHub CLI on common Linux distributions when it is missing."""
+    command = r"""
+set -e
+if command -v gh >/dev/null 2>&1; then
+  gh --version | head -n 1
+  exit 0
+fi
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "sudo is required to install gh for non-root users" >&2
+    exit 90
+  fi
+  SUDO="sudo"
+fi
+
+if command -v apt >/dev/null 2>&1; then
+  $SUDO apt update
+  $SUDO apt install -y curl ca-certificates
+  $SUDO install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | $SUDO tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+  $SUDO chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | $SUDO tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+  $SUDO apt update
+  $SUDO apt install -y gh
+elif command -v dnf >/dev/null 2>&1; then
+  $SUDO dnf install -y 'dnf-command(config-manager)' || true
+  $SUDO dnf config-manager addrepo --from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo || $SUDO dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+  $SUDO dnf install -y gh
+elif command -v yum >/dev/null 2>&1; then
+  $SUDO yum install -y yum-utils
+  $SUDO yum-config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+  $SUDO yum install -y gh
+elif command -v pacman >/dev/null 2>&1; then
+  $SUDO pacman -Sy --noconfirm github-cli
+elif command -v zypper >/dev/null 2>&1; then
+  $SUDO zypper --non-interactive install gh
+else
+  echo "unsupported package manager: need apt, dnf, yum, pacman, or zypper" >&2
+  exit 91
+fi
+
+gh --version | head -n 1
+"""
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=240,
+        log_command=False,
+    )
+    if status != 0:
+        raise RuntimeError((stderr or stdout or f"远端 gh 安装失败: exit {status}").strip())
+    return (stdout.strip().splitlines() or ["gh 已安装"])[-1]
+
+
 def inspect_git_login(ssh_name: str) -> GitLoginStatus:
     """Inspect local and remote Git identity plus GitHub CLI login state."""
     local_status, _token = _collect_local_status(include_token=False)
@@ -199,19 +256,23 @@ def sync_git_login_to_server(ssh_name: str) -> str:
 
     if token:
         if remote.get("gh_available") != "1":
-            parts.append("远端未安装 GitHub CLI，已跳过 gh 登录")
-        else:
-            command = "gh auth login --hostname github.com --git-protocol https --with-token && gh auth setup-git --hostname github.com"
-            status, stdout, stderr = ssh_manager.execute_command_with_status(
-                client,
-                command,
-                timeout=60,
-                input_data=token + "\n",
-                log_command=False,
-            )
-            if status != 0:
-                raise RuntimeError((stderr or stdout or "远端 GitHub CLI 登录失败").strip())
-            parts.append("已同步 GitHub CLI 登录")
+            install_summary = _install_remote_gh(client)
+            parts.append(f"已自动安装 GitHub CLI: {install_summary}")
+            remote = _remote_probe(client)
+            if remote.get("gh_available") != "1":
+                raise RuntimeError("远端 GitHub CLI 安装后仍不可用")
+
+        command = "gh auth login --hostname github.com --git-protocol https --with-token && gh auth setup-git --hostname github.com"
+        status, stdout, stderr = ssh_manager.execute_command_with_status(
+            client,
+            command,
+            timeout=60,
+            input_data=token + "\n",
+            log_command=False,
+        )
+        if status != 0:
+            raise RuntimeError((stderr or stdout or "远端 GitHub CLI 登录失败").strip())
+        parts.append("已同步 GitHub CLI 登录")
     else:
         parts.append("本机未检测到 GitHub CLI 登录 token，已跳过 gh 登录")
 

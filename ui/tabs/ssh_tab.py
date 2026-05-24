@@ -1108,8 +1108,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             title="同步 Git 登录到 SSH",
             message=(
                 f"将把本机 Git 用户名/邮箱写入服务器 \"{server_name}\" 的全局 Git 配置。\n"
-                "如果本机已通过 GitHub CLI 登录，并且远端安装了 gh，还会把 GitHub CLI token "
-                "通过 SSH 标准输入发送到远端执行 gh auth login。\n\n"
+                "如果本机已通过 GitHub CLI 登录，会在远端没有 gh 时尝试自动安装 GitHub CLI，"
+                "然后把 token 通过 SSH 标准输入发送到远端执行 gh auth login。\n\n"
                 "不会读取或复制 Windows Git Credential Manager 内部凭据。确定继续吗？"
             ),
             on_confirm=do_sync,

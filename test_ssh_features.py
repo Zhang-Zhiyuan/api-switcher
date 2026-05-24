@@ -877,6 +877,57 @@ def test_remote_git_login_syncs_identity_and_gh_token(isolated_ssh, monkeypatch)
     assert "gho_secret\n" in remote_inputs
 
 
+def test_remote_git_login_installs_gh_when_missing(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    local_outputs = {
+        ("git", "--version"): "git version 2.45.0\n",
+        ("git", "config", "--global", "--get", "user.name"): "Local User\n",
+        ("git", "config", "--global", "--get", "user.email"): "local@example.com\n",
+        ("gh", "--version"): "gh version 2.0.0\n",
+        ("gh", "api", "user", "--jq", ".login"): "local-user\n",
+        ("gh", "auth", "token"): "gho_secret\n",
+    }
+
+    def fake_run(args, **kwargs):
+        output = local_outputs.get(tuple(args), "")
+        return subprocess.CompletedProcess(args, 0 if output else 1, output, "")
+
+    probe_count = 0
+    remote_commands = []
+
+    def fake_execute(client, command, timeout=30, input_data=None, log_command=True, get_pty=False):
+        nonlocal probe_count
+        remote_commands.append(command)
+        if "__git_available" in command:
+            probe_count += 1
+            gh_available = "0" if probe_count == 1 else "1"
+            return 0, "\n".join([
+                "__git_available=1",
+                "__user_name=",
+                "__user_email=",
+                f"__gh_available={gh_available}",
+                "__gh_logged_in=0",
+                "__gh_summary=not logged in",
+            ]), ""
+        if "gh --version" in command and "apt install" in command:
+            return 0, "gh version 2.0.0", ""
+        if "gh auth login" in command:
+            assert input_data == "gho_secret\n"
+            return 0, "logged in", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(remote_git_login.subprocess, "run", fake_run)
+    monkeypatch.setattr(remote_git_login.ssh_manager, "connect", lambda profile: object())
+    monkeypatch.setattr(remote_git_login.ssh_manager, "execute_command_with_status", fake_execute)
+
+    message = remote_git_login.sync_git_login_to_server("remote")
+
+    assert "已自动安装 GitHub CLI" in message
+    assert "已同步 GitHub CLI 登录" in message
+    assert any("apt install -y gh" in command for command in remote_commands)
+
+
 def test_remote_git_login_status_summary(isolated_ssh, monkeypatch):
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
 
