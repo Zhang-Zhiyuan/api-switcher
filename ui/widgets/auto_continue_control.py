@@ -124,6 +124,9 @@ class AutoContinueControl(ctk.CTkFrame):
         feature_row.pack(fill="x")
         feature_row_extra = ctk.CTkFrame(quick, fg_color="transparent")
         feature_row_extra.pack(fill="x", pady=(2, 0))
+        for row_frame in (feature_row, feature_row_extra):
+            for column in range(3):
+                row_frame.grid_columnconfigure(column, weight=0)
 
         self._auto_continue_var = ctk.BooleanVar(value=False)
         self._auto_continue_switch = ctk.CTkSwitch(
@@ -135,7 +138,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._auto_continue_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._auto_continue_switch.grid(row=0, column=0, sticky="w", padx=(0, 14), pady=(0, 4))
 
         self._training_auto_continue_var = ctk.BooleanVar(value=False)
         self._training_auto_continue_switch = ctk.CTkSwitch(
@@ -147,7 +150,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["accent"],
             button_color=COLORS["text"],
         )
-        self._training_auto_continue_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._training_auto_continue_switch.grid(row=0, column=0, sticky="w", padx=(0, 14), pady=(0, 4))
 
         self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
@@ -159,7 +162,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._git_snapshot_switch.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=(0, 4))
 
         self._error_recovery_var = ctk.BooleanVar(value=False)
         self._error_recovery_switch = ctk.CTkSwitch(
@@ -171,7 +174,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._error_recovery_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._error_recovery_switch.grid(row=0, column=2, sticky="w", padx=(0, 14), pady=(0, 4))
 
         self._permission_auto_approve_var = None
         self._permission_auto_approve_switch = None
@@ -186,7 +189,7 @@ class AutoContinueControl(ctk.CTkFrame):
                 progress_color=COLORS["warning"],
                 button_color=COLORS["text"],
             )
-            self._permission_auto_approve_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+            self._permission_auto_approve_switch.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=(0, 4))
 
         detail = ctk.CTkFrame(self, fg_color="transparent")
         detail.pack(fill="x", padx=10, pady=(0, 4))
@@ -199,6 +202,8 @@ class AutoContinueControl(ctk.CTkFrame):
 
         git_row = ctk.CTkFrame(detail, fg_color="transparent")
         git_row.pack(fill="x")
+        for column in range(3):
+            git_row.grid_columnconfigure(column, weight=0)
 
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_start_switch = ctk.CTkSwitch(
@@ -210,7 +215,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_on_start_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._git_snapshot_on_start_switch.grid(row=0, column=0, sticky="w", padx=(0, 14), pady=(0, 4))
 
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_recovery_switch = ctk.CTkSwitch(
@@ -222,7 +227,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_on_recovery_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._git_snapshot_on_recovery_switch.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=(0, 4))
 
         self._git_auto_push_var = ctk.BooleanVar(value=False)
         self._git_auto_push_switch = ctk.CTkSwitch(
@@ -234,7 +239,7 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["accent"],
             button_color=COLORS["text"],
         )
-        self._git_auto_push_switch.pack(side="left", padx=(0, 16), pady=(0, 3))
+        self._git_auto_push_switch.grid(row=0, column=2, sticky="w", padx=(0, 14), pady=(0, 4))
 
         # Info display
         self._info_text = ctk.CTkTextbox(self, height=118, **textbox_style(monospace=True))

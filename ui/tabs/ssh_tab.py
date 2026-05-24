@@ -399,54 +399,59 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_provider_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
         self._remote_auto_provider_combo.set("Claude + Codex")
 
+        action_bar = ctk.CTkFrame(auto_controls, fg_color="transparent")
+        action_bar.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(10, 0))
+        for column in range(3):
+            action_bar.grid_columnconfigure(column, weight=0)
+
         check_button = ctk.CTkButton(
-            auto_controls,
+            action_bar,
             text="一致性检查",
             width=104,
             command=self._check_remote_auto_continue,
             **button_style("secondary"),
         )
-        check_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
+        check_button.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
         git_snapshot_button = ctk.CTkButton(
-            auto_controls,
+            action_bar,
             text="修复 Git",
             width=86,
             command=self._install_remote_git_snapshot,
             **button_style("secondary"),
         )
-        git_snapshot_button.grid(row=0, column=3, sticky="e", padx=(0, 8))
+        git_snapshot_button.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
         install_button = ctk.CTkButton(
-            auto_controls,
+            action_bar,
             text="一键修复",
             width=102,
             command=self._install_remote_auto_continue,
             **button_style("primary"),
         )
-        install_button.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        install_button.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=(0, 4))
         pause_button = ctk.CTkButton(
-            auto_controls,
+            action_bar,
             text="暂停续跑",
             width=90,
             command=self._pause_remote_auto_continue,
             **button_style("warning"),
         )
-        pause_button.grid(row=0, column=5, sticky="e", padx=(0, 8))
+        pause_button.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
         uninstall_button = ctk.CTkButton(
-            auto_controls,
+            action_bar,
             text="卸载",
             width=78,
             command=self._uninstall_remote_auto_continue,
             **button_style("danger"),
         )
-        uninstall_button.grid(row=0, column=6, sticky="e", padx=(0, 8))
+        uninstall_button.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
         copy_diag_button = ctk.CTkButton(
-            auto_controls,
+            action_bar,
             text="复制诊断",
             width=96,
             command=self._copy_remote_auto_diagnostics,
             **button_style("secondary"),
         )
-        copy_diag_button.grid(row=0, column=7, sticky="e")
+        copy_diag_button.grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 4))
         self._remote_auto_buttons = [
             check_button,
             git_snapshot_button,
@@ -457,7 +462,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ]
 
         remote_switch_frame = ctk.CTkFrame(auto_controls, fg_color="transparent")
-        remote_switch_frame.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(10, 0))
+        remote_switch_frame.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         for col in range(1, 5):
             remote_switch_frame.grid_columnconfigure(col, weight=0)
         ctk.CTkLabel(
@@ -465,7 +470,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="远端开关",
             text_color=COLORS["muted"],
             font=font(12, "bold"),
-        ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 10))
+        ).grid(row=0, column=0, rowspan=3, sticky="w", padx=(0, 10))
 
         def add_remote_switch(text, variable, feature, row, column, color="success"):
             switch = ctk.CTkSwitch(
@@ -511,8 +516,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             "权限自动确认",
             self._remote_permission_auto_approve_var,
             "permission_auto_approve",
+            2,
             1,
-            4,
             color="warning",
         )
 
@@ -524,7 +529,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_feature_label.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(10, 0))
+        self._remote_auto_feature_label.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(10, 0))
         bind_wraplength(auto_controls, self._remote_auto_feature_label, padding=20)
 
         self._remote_auto_status_label = ctk.CTkLabel(
@@ -535,7 +540,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._remote_auto_status_label.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+        self._remote_auto_status_label.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
