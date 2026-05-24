@@ -1042,6 +1042,62 @@ def test_remote_git_login_installs_local_gh_on_windows(isolated_ssh, monkeypatch
     assert "请先在本机执行 gh auth login" in message
 
 
+def test_remote_git_login_imports_from_server_to_local(isolated_ssh, monkeypatch):
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
+
+    local_commands = []
+    local_inputs = []
+
+    def fake_run(args, **kwargs):
+        local_commands.append(tuple(args))
+        if tuple(args) == ("git", "--version"):
+            return subprocess.CompletedProcess(args, 0, "git version 2.45.0\n", "")
+        if tuple(args) == ("gh", "--version"):
+            return subprocess.CompletedProcess(args, 0, "gh version 2.0.0\n", "")
+        if tuple(args) == ("git", "config", "--global", "user.name", "Remote User"):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if tuple(args) == ("git", "config", "--global", "user.email", "remote@example.com"):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if tuple(args) == ("gh", "auth", "setup-git", "--hostname", "github.com"):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    def fake_run_with_input(args, input_data, timeout=60):
+        local_commands.append(tuple(args))
+        local_inputs.append(input_data)
+        if tuple(args) == ("gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 1, "", "unexpected")
+
+    def fake_execute(client, command, timeout=30, input_data=None, log_command=True, get_pty=False):
+        if "__git_available" in command:
+            return 0, "\n".join([
+                "__os=Linux",
+                "__git_available=1",
+                "__user_name=Remote User",
+                "__user_email=remote@example.com",
+                "__gh_available=1",
+                "__gh_logged_in=1",
+                "__gh_summary=Logged in",
+            ]), ""
+        if command.strip() == "gh auth token":
+            return 0, "gho_remote_secret\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(remote_git_login.subprocess, "run", fake_run)
+    monkeypatch.setattr(remote_git_login, "_run_local_with_input", fake_run_with_input)
+    monkeypatch.setattr(remote_git_login.ssh_manager, "connect", lambda profile: object())
+    monkeypatch.setattr(remote_git_login.ssh_manager, "execute_command_with_status", fake_execute)
+
+    message = remote_git_login.sync_git_login_from_server("remote")
+
+    assert "已导入 Git 身份" in message
+    assert "已导入远端 GitHub CLI 登录" in message
+    assert ("git", "config", "--global", "user.name", "Remote User") in local_commands
+    assert ("git", "config", "--global", "user.email", "remote@example.com") in local_commands
+    assert "gho_remote_secret\n" in local_inputs
+
+
 def test_remote_git_login_status_summary(isolated_ssh, monkeypatch):
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
 

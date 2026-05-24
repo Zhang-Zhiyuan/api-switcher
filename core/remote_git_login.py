@@ -65,6 +65,18 @@ def _run_local(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess
     )
 
 
+def _run_local_with_input(args: list[str], input_data: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        input=input_data,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
 def _local_output(args: list[str], timeout: int = 8) -> str:
     try:
         result = _run_local(args, timeout=timeout)
@@ -110,6 +122,15 @@ def _install_local_gh_windows() -> str:
     raise RuntimeError(f"本机 GitHub CLI 自动安装失败: {detail}")
 
 
+def _ensure_local_gh_for_sync() -> tuple[GitLoginStatus, str]:
+    status, token = _collect_local_status(include_token=True)
+    install_summary = ""
+    if not status.local_gh_available and platform.system().lower() == "windows":
+        install_summary = _install_local_gh_windows()
+        status, token = _collect_local_status(include_token=True)
+    return status, install_summary
+
+
 def _collect_local_status(include_token: bool = False) -> tuple[GitLoginStatus, str]:
     git_version = _local_output(["git", "--version"])
     user_name = _local_output(["git", "config", "--global", "--get", "user.name"]) or _local_output(["git", "config", "--get", "user.name"])
@@ -144,6 +165,30 @@ def _collect_local_status_for_sync() -> tuple[GitLoginStatus, str, str]:
         install_summary = _install_local_gh_windows()
         status, token = _collect_local_status(include_token=True)
     return status, token, install_summary
+
+
+def _configure_local_git_identity(user_name: str, user_email: str) -> None:
+    if user_name:
+        result = _run_local(["git", "config", "--global", "user.name", user_name], timeout=8)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "本机 Git 用户名配置失败").strip())
+    if user_email:
+        result = _run_local(["git", "config", "--global", "user.email", user_email], timeout=8)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "本机 Git 邮箱配置失败").strip())
+
+
+def _local_gh_login(token: str) -> None:
+    login = _run_local_with_input(
+        ["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"],
+        token + "\n",
+        timeout=60,
+    )
+    if login.returncode != 0:
+        raise RuntimeError((login.stderr or login.stdout or "本机 GitHub CLI 登录失败").strip())
+    setup = _run_local(["gh", "auth", "setup-git", "--hostname", "github.com"], timeout=30)
+    if setup.returncode != 0:
+        raise RuntimeError((setup.stderr or setup.stdout or "本机 gh auth setup-git 失败").strip())
 
 
 def _find_ssh_profile(ssh_name: str):
@@ -390,6 +435,26 @@ def _remote_gh_login(client, remote: dict[str, str], token: str) -> None:
         raise RuntimeError((stderr or stdout or "远端 GitHub CLI 登录失败").strip())
 
 
+def _remote_gh_token(client, remote: dict[str, str]) -> str:
+    if remote.get("gh_available") != "1":
+        return ""
+    if _is_windows_remote(remote):
+        ps_script = "gh auth token"
+        command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + _ps_single_quote(ps_script)
+    else:
+        command = "gh auth token"
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=30,
+        log_command=False,
+    )
+    if status != 0:
+        logger.debug("Remote gh auth token failed: %s", stderr or stdout)
+        return ""
+    return stdout.strip()
+
+
 def inspect_git_login(ssh_name: str) -> GitLoginStatus:
     """Inspect local and remote Git identity plus GitHub CLI login state."""
     local_status, _token = _collect_local_status(include_token=False)
@@ -456,5 +521,48 @@ def sync_git_login_to_server(ssh_name: str) -> str:
             parts.append("本机未检测到 GitHub CLI 登录 token，请先在本机执行 gh auth login 后再同步")
         else:
             parts.append("本机未检测到 GitHub CLI，已跳过 gh 登录")
+
+    return "；".join(parts)
+
+
+def sync_git_login_from_server(ssh_name: str) -> str:
+    """Import remote Git identity and GitHub CLI auth back to the local machine."""
+    profile = _find_ssh_profile(ssh_name)
+    client = ssh_manager.connect(profile)
+    remote = _remote_probe(client)
+    if remote.get("git_available") != "1":
+        raise RuntimeError("远端未安装 git，无法导入 Git 身份")
+
+    local_status, _local_token = _collect_local_status(include_token=False)
+    if not local_status.local_git_available:
+        raise RuntimeError("本机未找到 git 命令")
+
+    remote_user_name = remote.get("user_name", "")
+    remote_user_email = remote.get("user_email", "")
+    token = _remote_gh_token(client, remote)
+    if not remote_user_name and not remote_user_email and not token:
+        raise RuntimeError("远端没有可导入的 Git 身份或 GitHub CLI 登录")
+
+    parts = []
+
+    if remote_user_name or remote_user_email:
+        _configure_local_git_identity(remote_user_name, remote_user_email)
+        parts.append(f"已导入 Git 身份 {remote_user_name or '-'} <{remote_user_email or '-'}>")
+    else:
+        parts.append("远端未配置 Git 用户名/邮箱，已跳过身份导入")
+
+    if token:
+        if not _local_output(["gh", "--version"], timeout=8):
+            if platform.system().lower() != "windows":
+                raise RuntimeError("本机未安装 GitHub CLI，无法导入远端 gh 登录")
+            install_summary = _install_local_gh_windows()
+            parts.append(f"已自动安装本机 GitHub CLI: {install_summary}")
+        _local_gh_login(token)
+        parts.append("已导入远端 GitHub CLI 登录")
+    else:
+        if remote.get("gh_available") == "1":
+            parts.append("远端 gh 未登录或无法读取 token，已跳过 gh 登录导入")
+        else:
+            parts.append("远端未安装 GitHub CLI，已跳过 gh 登录导入")
 
     return "；".join(parts)

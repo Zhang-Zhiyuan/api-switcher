@@ -315,7 +315,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).grid(row=6, column=0, sticky="w", pady=(10, 0))
         self._git_login_status_label = ctk.CTkLabel(
             sync_controls,
-            text="检查本机 Git 身份和 GitHub CLI 登录，并同步到所选 SSH 服务器。",
+            text="检查本机/远端 Git 身份和 GitHub CLI 登录；支持同步到 SSH，也可从 SSH 导入本机。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -334,10 +334,17 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             git_btn_frame,
-            text="一键同步",
+            text="同步到远端",
             width=82,
             command=self._sync_git_login,
             **button_style("accent", compact=True),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            git_btn_frame,
+            text="导入本机",
+            width=78,
+            command=self._import_git_login,
+            **button_style("secondary", compact=True),
         ).pack(side="left")
 
         self._sync_status_label = ctk.CTkLabel(
@@ -1113,6 +1120,43 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "不会读取或复制 Windows Git Credential Manager 内部凭据。确定继续吗？"
             ),
             on_confirm=do_sync,
+        )
+
+    def _import_git_login(self):
+        server_name = self._selected_server_name()
+        if not server_name:
+            return
+
+        def do_import():
+            def done(payload):
+                if not payload["ok"]:
+                    message = f"Git 登录导入失败: {payload['error']}"
+                    self._set_git_login_status(message, "error")
+                    self._set_sync_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                message = payload["result"]
+                self._set_git_login_status(message, "success")
+                self._set_sync_status(message, "success")
+                show_toast(self.winfo_toplevel(), message)
+
+            self._run_ssh_task(
+                f"正在从 {server_name} 导入 Git 登录到本机...",
+                lambda: remote_git_login.sync_git_login_from_server(server_name),
+                on_done=done,
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="从 SSH 导入 Git 登录",
+            message=(
+                f"将读取服务器 \"{server_name}\" 的 Git 用户名/邮箱并写入本机全局 Git 配置。\n"
+                "如果远端 gh 已登录，还会读取远端 gh auth token，并在本机执行 gh auth login。"
+                "本机没有 gh 时会尝试自动安装；不会读取 Windows Git Credential Manager 内部凭据。\n\n"
+                "确定继续吗？"
+            ),
+            on_confirm=do_import,
         )
 
     def _selected_remote_auto_targets(self) -> list[str]:
