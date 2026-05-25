@@ -11,6 +11,8 @@ DEFAULT_INCOMPLETE_PATTERNS = [
     r"(?i)(?=.*\b(project|task|work|implementation|feature|change|repo|repository)\b)(?=.*\b(?:actually|really|truly|fully|completely)\b.{0,80}\b(?:not|isn't|is not|hasn't|has not|haven't|have not)\b.{0,80}\b(?:complete|completed|done|finished|ready)\b)(?=.*\b(?:continue|resume|keep\s+going|keep\s+running|carry\s+on|run\s+again|keep\s+working)\b).*",
     r"(?i)(will|need to|should|must).{0,80}(implement|add|create|fix|test|verify|wire|integrate|finish|complete|clean up)",
     r"(?i)(next|following|follow-up|remaining) steps?:",
+    r"(?is)<task-notification>.*<status>\s*(killed|stopped|failed|terminated)\s*</status>.*</task-notification>",
+    r"(?i)background command .{0,160}\b(was )?(stopped|killed|terminated|interrupted)\b",
     r"(?i)to be (done|completed|implemented)",
     r"(?i)(stub|placeholder|scaffold)(s)? remain",
     r"(?i)(only partially|partially implemented)",
