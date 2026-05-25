@@ -1,13 +1,16 @@
 import threading
+from pathlib import Path
+from tkinter import filedialog
+
 import customtkinter as ctk
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue, remote_git_login
+from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue, remote_git_login, remote_proxy
 from core.auto_continue.manager import auto_continue_manager
 from models.auto_continue import training_prompt_template_by_key
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, textbox_style
 
 
 class SSHTab(ctk.CTkScrollableFrame):
@@ -39,6 +42,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._batch_target_label = None
         self._batch_select_all_button = None
         self._batch_clear_button = None
+        self._proxy_node_text = None
+        self._proxy_status_label = None
         self._remote_pull_type_options = {
             "全部项目": "all",
             "仅 API": "api",
@@ -387,6 +392,76 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._sync_status_label.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
+
+        proxy_header = ctk.CTkFrame(self, fg_color="transparent")
+        proxy_header.pack(fill="x", padx=14, pady=(4, 5))
+        ctk.CTkLabel(
+            proxy_header,
+            text="远端 AI 代理",
+            text_color=COLORS["text"],
+            font=font(16, "bold"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            proxy_header,
+            text="把 Clash/mihomo 节点部署到已选 SSH；仅 AI 服务域名走代理，其余直连",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(side="left", padx=(10, 0))
+
+        proxy_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
+        proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
+        proxy_controls.pack(fill="x", padx=14, pady=14)
+        proxy_controls.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            proxy_controls,
+            text="代理节点",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="nw", pady=(2, 0))
+        self._proxy_node_text = ctk.CTkTextbox(
+            proxy_controls,
+            height=96,
+            **textbox_style(monospace=True),
+        )
+        self._proxy_node_text.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(8, 8))
+
+        proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
+        proxy_button_frame.grid(row=0, column=3, sticky="ne")
+        ctk.CTkButton(
+            proxy_button_frame,
+            text="选择文件",
+            width=86,
+            command=self._load_proxy_node_file,
+            **button_style("secondary", compact=True),
+        ).pack(anchor="e", pady=(0, 6))
+        ctk.CTkButton(
+            proxy_button_frame,
+            text="部署代理",
+            width=86,
+            command=self._deploy_ai_proxy,
+            **button_style("accent", compact=True),
+        ).pack(anchor="e", pady=(0, 6))
+        ctk.CTkButton(
+            proxy_button_frame,
+            text="检查状态",
+            width=86,
+            command=self._inspect_ai_proxy,
+            **button_style("secondary", compact=True),
+        ).pack(anchor="e")
+
+        self._proxy_status_label = ctk.CTkLabel(
+            proxy_controls,
+            text="粘贴 Clash 节点或选择 YAML/TXT 文件；部署会安装/复用 mihomo，并写入受管 shell 代理环境。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._proxy_status_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
         auto_header.pack(fill="x", padx=14, pady=(4, 5))
@@ -861,6 +936,110 @@ class SSHTab(ctk.CTkScrollableFrame):
             severity = "success"
         self._set_sync_status(message, severity)
         show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
+
+    def _set_proxy_status(self, message: str, severity: str = "info"):
+        if not self._proxy_status_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._proxy_status_label.configure(text=message, text_color=color)
+
+    def _proxy_node_input(self) -> str:
+        if not self._proxy_node_text:
+            return ""
+        return self._proxy_node_text.get("1.0", "end").strip()
+
+    def _load_proxy_node_file(self):
+        path = filedialog.askopenfilename(
+            title="选择 Clash 节点文件",
+            filetypes=[
+                ("配置文件", "*.yaml *.yml *.txt *.json"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            content = Path(path).read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"读取代理文件失败: {e}", is_error=True)
+            return
+        if self._proxy_node_text:
+            self._proxy_node_text.delete("1.0", "end")
+            self._proxy_node_text.insert("1.0", content.strip())
+        self._set_proxy_status(f"已载入代理文件: {Path(path).name}")
+
+    def _deploy_ai_proxy(self):
+        server_names = self._selected_sync_server_names()
+        if not server_names:
+            return
+        proxy_text = self._proxy_node_input()
+        try:
+            remote_proxy.parse_proxy_node(proxy_text)
+        except Exception as e:
+            message = f"代理节点格式不正确: {e}"
+            self._set_proxy_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        target_label = self._format_server_target(server_names)
+
+        def do_deploy():
+            def done(payload):
+                self._show_server_batch_result(payload, "AI 代理部署完成")
+                if payload["ok"]:
+                    result = payload.get("result") or {}
+                    failures = result.get("failures", [])
+                    severity = "warning" if failures and result.get("results") else "error" if failures else "success"
+                    self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+
+            self._run_ssh_task(
+                f"正在部署 AI 代理到 {target_label}...",
+                lambda: self._run_server_batch(
+                    server_names,
+                    lambda server_name: remote_proxy.install_ai_proxy(server_name, proxy_text),
+                ),
+                on_done=done,
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="部署远端 AI 代理",
+            message=(
+                f"将把当前 Clash 节点写入 {target_label}，安装/复用 mihomo，"
+                "并写入受管 shell 代理环境。\n"
+                "规则只代理 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名，其余 DIRECT。确定继续吗？"
+            ),
+            on_confirm=do_deploy,
+        )
+
+    def _inspect_ai_proxy(self):
+        server_names = self._selected_sync_server_names()
+        if not server_names:
+            return
+        target_label = self._format_server_target(server_names)
+
+        def done(payload):
+            self._show_server_batch_result(payload, "AI 代理状态检查完成")
+            if payload["ok"]:
+                result = payload.get("result") or {}
+                failures = result.get("failures", [])
+                severity = "warning" if failures and result.get("results") else "error" if failures else "success"
+                self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+
+        self._run_ssh_task(
+            f"正在检查 {target_label} 的 AI 代理状态...",
+            lambda: self._run_server_batch(
+                server_names,
+                lambda server_name: remote_proxy.inspect_ai_proxy(server_name).summary(),
+            ),
+            on_done=done,
+        )
 
     def _reset_remote_pull_options(self, message: str | None = None):
         self._remote_config_candidates = []
