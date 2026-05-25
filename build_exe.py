@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -48,7 +49,30 @@ def _utf8_subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    dll_dirs = [str(path) for path in _pyinstaller_dll_search_dirs()]
+    if dll_dirs:
+        current_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(dll_dirs + ([current_path] if current_path else []))
     return env
+
+
+def _pyinstaller_dll_search_dirs() -> list[Path]:
+    """Return Python/Conda DLL directories PyInstaller needs on PATH."""
+    candidates: list[Path] = []
+    prefixes = [
+        os.environ.get("CONDA_PREFIX"),
+        sys.prefix,
+        sys.base_prefix,
+    ]
+    for raw_prefix in prefixes:
+        if not raw_prefix:
+            continue
+        prefix = Path(raw_prefix)
+        for relative in ("Library/bin", "DLLs", "bin"):
+            path = prefix / relative
+            if path.is_dir() and path not in candidates:
+                candidates.append(path)
+    return candidates
 
 
 def check_pyinstaller() -> bool:
@@ -306,11 +330,76 @@ def build_exe(bundle_mode: str = DEFAULT_BUNDLE_MODE, clean_intermediates: bool 
     if not _remove_stale_artifact(bundle_mode):
         return False
 
+    if not smoke_test_exe(exe_path):
+        return False
+
     if clean_intermediates and not clean_intermediate_files():
         return False
 
     print(f"\nBuild complete: {exe_path.resolve()}", flush=True)
     return True
+
+
+def smoke_test_exe(exe_path: Path, timeout_seconds: float = 8.0) -> bool:
+    """Launch the packaged app briefly and fail fast if it exits with an error."""
+    if os.name != "nt":
+        return True
+    startupinfo = None
+    creationflags = 0
+    if hasattr(subprocess, "STARTUPINFO"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.Popen(
+            [str(exe_path.resolve())],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+    except Exception as exc:
+        print(f"Smoke test failed: could not launch {exe_path}: {exc}", flush=True)
+        return False
+
+    try:
+        output, _ = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        print("Smoke test passed: packaged app stayed running.", flush=True)
+        return True
+
+    if proc.returncode == 0:
+        print("Smoke test passed: packaged app exited cleanly.", flush=True)
+        return True
+
+    print(f"Smoke test failed: packaged app exited with code {proc.returncode}.", flush=True)
+    if output:
+        print(output[-4000:], flush=True)
+    return False
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """Terminate a smoke-test process and any PyInstaller child process."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        proc.terminate()
+    for _ in range(10):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    if proc.poll() is None:
+        proc.kill()
 
 
 def main(argv: list[str] | None = None) -> int:

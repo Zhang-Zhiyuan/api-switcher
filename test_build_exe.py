@@ -105,6 +105,7 @@ def test_build_exe_onedir_checks_folder_artifact(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
     monkeypatch.setattr(build_exe.subprocess, "check_call", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(build_exe, "smoke_test_exe", lambda *args, **kwargs: True)
     exe_path = tmp_path / "dist" / "ApiSwitcher" / "ApiSwitcher.exe"
     exe_path.parent.mkdir(parents=True)
     exe_path.write_bytes(b"exe")
@@ -116,6 +117,7 @@ def test_build_exe_onedir_removes_stale_onefile_artifact(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
     monkeypatch.setattr(build_exe.subprocess, "check_call", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(build_exe, "smoke_test_exe", lambda *args, **kwargs: True)
     folder_exe = tmp_path / "dist" / "ApiSwitcher" / "ApiSwitcher.exe"
     folder_exe.parent.mkdir(parents=True)
     folder_exe.write_bytes(b"exe")
@@ -130,6 +132,7 @@ def test_build_exe_onefile_removes_stale_onedir_artifact(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
     monkeypatch.setattr(build_exe.subprocess, "check_call", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(build_exe, "smoke_test_exe", lambda *args, **kwargs: True)
     onefile_exe = tmp_path / "dist" / "ApiSwitcher.exe"
     onefile_exe.parent.mkdir(parents=True)
     onefile_exe.write_bytes(b"exe")
@@ -146,6 +149,7 @@ def test_build_exe_cleans_intermediate_files(monkeypatch, tmp_path):
     monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
     monkeypatch.setattr(build_exe, "SPEC_PATH", tmp_path / "ApiSwitcher.spec")
     monkeypatch.setattr(build_exe.subprocess, "check_call", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(build_exe, "smoke_test_exe", lambda *args, **kwargs: True)
     onefile_exe = tmp_path / "dist" / "ApiSwitcher.exe"
     onefile_exe.parent.mkdir(parents=True)
     onefile_exe.write_bytes(b"exe")
@@ -155,3 +159,23 @@ def test_build_exe_cleans_intermediate_files(monkeypatch, tmp_path):
     assert build_exe.build_exe("onefile") is True
     assert not (tmp_path / "build").exists()
     assert not build_exe.SPEC_PATH.exists()
+
+
+def test_pyinstaller_env_prepends_conda_dll_dirs(monkeypatch, tmp_path):
+    prefix = tmp_path / "conda"
+    for relative in ("Library/bin", "DLLs", "bin"):
+        (prefix / relative).mkdir(parents=True)
+    monkeypatch.setenv("CONDA_PREFIX", str(prefix))
+    monkeypatch.setenv("PATH", "ORIGINAL_PATH")
+    monkeypatch.setattr(build_exe.sys, "prefix", str(prefix))
+    monkeypatch.setattr(build_exe.sys, "base_prefix", str(prefix))
+
+    env = build_exe._utf8_subprocess_env()
+
+    path_parts = env["PATH"].split(build_exe.os.pathsep)
+    assert path_parts[:3] == [
+        str(prefix / "Library/bin"),
+        str(prefix / "DLLs"),
+        str(prefix / "bin"),
+    ]
+    assert path_parts[3] == "ORIGINAL_PATH"
