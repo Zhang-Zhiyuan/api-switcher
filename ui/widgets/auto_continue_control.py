@@ -59,7 +59,7 @@ class AutoContinueControl(ctk.CTkFrame):
         # Enable/Pause button
         self._toggle_btn = ctk.CTkButton(
             controls,
-            text="启用续跑",
+            text="启用 Stop",
             width=92,
             command=self._toggle,
             **button_style("primary", compact=True),
@@ -105,8 +105,8 @@ class AutoContinueControl(ctk.CTkFrame):
         # Uninstall button
         ctk.CTkButton(
             controls,
-            text="卸载",
-            width=60,
+            text="卸载 Hook",
+            width=78,
             command=self._uninstall,
             **button_style("danger", compact=True),
         ).pack(side="left")
@@ -115,7 +115,7 @@ class AutoContinueControl(ctk.CTkFrame):
         quick.pack(fill="x", padx=10, pady=(0, 4))
         ctk.CTkLabel(
             quick,
-            text="独立能力开关",
+            text="能力开关（互不依赖）",
             text_color=COLORS["muted"],
             font=font(12, "bold"),
         ).pack(anchor="w", pady=(0, 4))
@@ -155,7 +155,7 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
             feature_row,
-            text="Git 快照总开关",
+            text="Git 快照开关",
             variable=self._git_snapshot_var,
             command=lambda: self._toggle_feature("git_snapshot"),
             text_color=COLORS["text"],
@@ -232,7 +232,7 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_auto_push_var = ctk.BooleanVar(value=False)
         self._git_auto_push_switch = ctk.CTkSwitch(
             git_row,
-            text="快照后 push",
+            text="快照后推送",
             variable=self._git_auto_push_var,
             command=lambda: self._toggle_feature("git_auto_push"),
             text_color=COLORS["text"],
@@ -292,9 +292,9 @@ class AutoContinueControl(ctk.CTkFrame):
                 self._status_label.configure(text="未安装 Hook", text_color=COLORS["muted_soft"])
 
             if display_settings.enabled:
-                self._toggle_btn.configure(text="暂停续跑", **button_style("warning", compact=True))
+                self._toggle_btn.configure(text="暂停 Stop", **button_style("warning", compact=True))
             else:
-                self._toggle_btn.configure(text="启用续跑", **button_style("primary", compact=True))
+                self._toggle_btn.configure(text="启用 Stop", **button_style("primary", compact=True))
 
             self._set_state_chip("stop", bool(display_settings.enabled))
             self._set_state_chip("training", bool(display_settings.training_auto_continue_enabled))
@@ -357,7 +357,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     info_lines.append(f"训练模板: {template['name']}")
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
-                    f"push {'ON' if settings.git_auto_push else 'OFF'} / "
+                    f"推送远端 {'ON' if settings.git_auto_push else 'OFF'} / "
                     f"对话/消息/Stop {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
                     f"API恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
                 )
@@ -482,13 +482,13 @@ class AutoContinueControl(ctk.CTkFrame):
         def do_uninstall():
             try:
                 auto_continue_manager.uninstall(self.provider)
-                show_toast(self.winfo_toplevel(), f"{self.provider} 自动续跑已卸载")
+                show_toast(self.winfo_toplevel(), f"{self.provider} Hook 已卸载")
                 self.refresh()
             except Exception as e:
                 show_toast(self.winfo_toplevel(), f"卸载失败: {e}", is_error=True)
 
-        ConfirmDialog(self.winfo_toplevel(), title="确认卸载",
-                      message=f"确定要卸载 {self.provider} 的自动续跑功能吗？\n这将删除 hook 脚本和配置文件。",
+        ConfirmDialog(self.winfo_toplevel(), title="确认卸载 Hook",
+                      message=f"确定要卸载 {self.provider} 的 Hook 功能吗？\n这将删除 Stop 续跑、Git 快照和错误恢复相关脚本与配置。",
                       on_confirm=do_uninstall)
 
     def _show_error_stats(self):

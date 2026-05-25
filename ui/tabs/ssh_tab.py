@@ -101,7 +101,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         ctk.CTkLabel(
             title_area,
-            text="连接远程服务器，并把本机 API 或账号配置推送到远程环境",
+            text="连接远程服务器，双向同步 API、账号、Git 登录和 Hook 设置",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
@@ -240,7 +240,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_button.grid(row=2, column=3, sticky="e", pady=(10, 0))
         self._remote_pull_hint = ctk.CTkLabel(
             sync_controls,
-            text="点击“读取远端配置”后，可以按 API/账号或 Claude/Codex 过滤，再拉取具体项目。",
+            text="先读取服务器上实际存在的配置；随后可按 API/账号或 Claude/Codex 过滤，并选择全部或具体项目拉取到本机。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -317,7 +317,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).grid(row=6, column=0, sticky="w", pady=(10, 0))
         self._git_login_status_label = ctk.CTkLabel(
             sync_controls,
-            text="检查本机/远端 Git 身份和 GitHub CLI 登录；支持同步到 SSH，也可从 SSH 导入本机。",
+            text="检查本机/远端 Git 身份和 GitHub CLI 登录；可同步 gh token，无法读取 Windows 凭据库内部密码。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -336,15 +336,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             git_btn_frame,
-            text="同步到远端",
-            width=82,
+            text="同步到 SSH",
+            width=84,
             command=self._sync_git_login,
             **button_style("accent", compact=True),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             git_btn_frame,
-            text="导入本机",
-            width=78,
+            text="从 SSH 导入",
+            width=86,
             command=self._import_git_login,
             **button_style("secondary", compact=True),
         ).pack(side="left")
@@ -414,32 +414,32 @@ class SSHTab(ctk.CTkScrollableFrame):
         check_button.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
         git_snapshot_button = ctk.CTkButton(
             action_bar,
-            text="修复 Git",
-            width=86,
+            text="修复 Git 快照",
+            width=116,
             command=self._install_remote_git_snapshot,
             **button_style("secondary"),
         )
         git_snapshot_button.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
         install_button = ctk.CTkButton(
             action_bar,
-            text="一键修复",
-            width=102,
+            text="安装/修复全部",
+            width=124,
             command=self._install_remote_auto_continue,
             **button_style("primary"),
         )
         install_button.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=(0, 4))
         pause_button = ctk.CTkButton(
             action_bar,
-            text="暂停续跑",
-            width=90,
+            text="暂停 Stop 续跑",
+            width=118,
             command=self._pause_remote_auto_continue,
             **button_style("warning"),
         )
         pause_button.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
         uninstall_button = ctk.CTkButton(
             action_bar,
-            text="卸载",
-            width=78,
+            text="卸载 Hook",
+            width=88,
             command=self._uninstall_remote_auto_continue,
             **button_style("danger"),
         )
@@ -488,7 +488,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         add_remote_switch("Stop 续跑", self._remote_auto_continue_var, "auto_continue", 0, 1)
         add_remote_switch("训练达标续跑", self._remote_training_auto_continue_var, "training_auto_continue", 0, 2, color="accent")
-        add_remote_switch("Git 总开关", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
+        add_remote_switch("Git 快照开关", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
         add_remote_switch("API 恢复", self._remote_error_recovery_var, "error_recovery", 0, 4)
         self._remote_git_snapshot_on_start_switch = add_remote_switch(
             "对话/消息/Stop 快照",
@@ -505,7 +505,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             2,
         )
         self._remote_git_auto_push_switch = add_remote_switch(
-            "快照后 push",
+            "快照后推送远端",
             self._remote_git_auto_push_var,
             "git_auto_push",
             1,
@@ -534,7 +534,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._remote_auto_status_label = ctk.CTkLabel(
             auto_controls,
-            text="未检查。安装时会同步本机自动续跑设置，并要求远端具备 sh 和 Python 3.6+。",
+            text="未检查。安装/修复会写入远端 hook 与设置；远端需具备 sh 和 Python 3.6+。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -742,7 +742,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._remote_pull_button.configure(state="disabled")
         if self._remote_pull_hint:
             self._remote_pull_hint.configure(
-                text=message or "点击“读取远端配置”后，可以按 API/账号或 Claude/Codex 过滤，再拉取具体项目。",
+                text=message
+                or "先读取服务器上实际存在的配置；随后可按 API/账号或 Claude/Codex 过滤，并选择全部或具体项目拉取到本机。",
                 text_color=COLORS["muted"],
             )
 
@@ -807,7 +808,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         candidates = self._remote_config_candidates
         if not candidates:
             self._remote_pull_hint.configure(
-                text="点击“读取远端配置”后，可以按 API/账号或 Claude/Codex 过滤，再拉取具体项目。",
+                text="先读取服务器上实际存在的配置；随后可按 API/账号或 Claude/Codex 过滤，并选择全部或具体项目拉取到本机。",
                 text_color=COLORS["muted"],
             )
             return
@@ -948,18 +949,18 @@ class SSHTab(ctk.CTkScrollableFrame):
                 f"Stop续跑 {'ON' if settings.enabled else 'OFF'}",
                 f"训练续跑 {'ON' if settings.training_auto_continue_enabled else 'OFF'}",
                 f"训练模板 {training_prompt_template_by_key(settings.training_prompt_template_key)['name']}",
-                f"Git快照总开关 {'ON' if settings.git_auto_snapshot else 'OFF'}",
+                f"Git快照开关 {'ON' if settings.git_auto_snapshot else 'OFF'}",
                 f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
             ]
-            feature_parts.append(f"Git push {'ON' if settings.git_auto_push else 'OFF'}")
+            feature_parts.append(f"快照后推送 {'ON' if settings.git_auto_push else 'OFF'}")
             if provider == "claude":
                 feature_parts.append(f"权限自动确认 {'ON' if settings.auto_approve_permission_requests else 'OFF'}")
                 feature_parts.append(f"Subagent {'ON' if settings.apply_to_subagents else 'OFF'}")
             parts.append(f"{label}: " + " / ".join(feature_parts))
         self._remote_auto_feature_label.configure(
             text=(
-                "\u5b89\u88c5/\u4fee\u590d\u4f1a\u540c\u6b65\u672c\u673a\u8bbe\u7f6e\u548c\u8bad\u7ec3 Prompt \u6a21\u677f\uff1b"
-                "\u4e0a\u65b9\u8fdc\u7a0b\u5f00\u5173\u4f1a\u76f4\u63a5\u5199\u5165\u5df2\u9009 SSH \u670d\u52a1\u5668\u3002"
+                "安装/修复会把本机设置和训练 Prompt 模板同步到远端；"
+                "上方开关会立即写入已选 SSH 服务器。暂停只关闭 Stop 续跑，不影响 Git 快照、API 恢复或权限自动确认。"
                 + (" | " if parts else "")
                 + " | ".join(parts)
             )
@@ -1691,6 +1692,12 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._reset_remote_pull_options(f"读取远端配置失败: {payload['error']}")
                 self._set_sync_status(f"读取远端配置失败: {payload['error']}", "error")
                 show_toast(self.winfo_toplevel(), f"读取远端配置失败: {payload['error']}", is_error=True)
+                return
+            if self._server_combo.get() != server_name:
+                message = "读取完成，但当前服务器已变化；请重新读取远端配置。"
+                self._reset_remote_pull_options(message)
+                self._set_sync_status(message, "warning")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
                 return
 
             candidates = payload["result"]

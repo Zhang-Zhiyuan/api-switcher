@@ -212,14 +212,6 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._git_auto_snapshot_switch = self._add_switch(scroll, "启用自动 Git 快照 (推荐)", self._git_auto_snapshot_var)
         self._git_auto_snapshot_switch.configure(command=self._refresh_git_snapshot_children)
 
-        self._git_auto_push_var = ctk.BooleanVar(value=self.settings.git_auto_push)
-        self._git_auto_push_switch = self._add_switch(
-            scroll,
-            "快照后自动 push 到 Git 远端",
-            self._git_auto_push_var,
-            padx=(20, 0),
-        )
-
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=self.settings.git_snapshot_on_start)
         self._git_snapshot_on_start_switch = self._add_switch(
             scroll,
@@ -235,6 +227,13 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             self._git_snapshot_on_recovery_var,
             padx=(20, 0),
         )
+        self._git_auto_push_var = ctk.BooleanVar(value=self.settings.git_auto_push)
+        self._git_auto_push_switch = self._add_switch(
+            scroll,
+            "快照提交后自动推送到 Git 远端",
+            self._git_auto_push_var,
+            padx=(20, 0),
+        )
         self._refresh_git_snapshot_children()
 
         # Git help text
@@ -245,7 +244,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             git_help_frame,
             text="自动为项目创建本地 Git 快照，方便回滚到任意版本。\n"
                  "已有仓库会保留 remote 和实名身份；没有仓库时才自动初始化。\n"
-                 "自动 push 仅在仓库已有远端或上游分支时尝试，失败只记录日志，不阻断续跑。",
+                 "自动推送仅在仓库已有远端或上游分支时尝试；失败只记录日志，不阻断续跑。",
             font=font(11),
             text_color=COLORS["muted"],
             justify="left",
