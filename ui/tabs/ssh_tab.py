@@ -35,6 +35,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_options = {}
         self._remote_pull_all_label = "全部可拉取配置"
         self._remote_pull_server_name = None
+        self._selected_server_names: set[str] = set()
+        self._batch_target_label = None
+        self._batch_select_all_button = None
+        self._batch_clear_button = None
         self._remote_pull_type_options = {
             "全部项目": "all",
             "仅 API": "api",
@@ -127,6 +131,30 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(side="left")
+        self._batch_target_label = ctk.CTkLabel(
+            sync_header,
+            text="批量目标: 未勾选（使用下方单台目标）",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._batch_target_label.pack(side="left", padx=(12, 0))
+        ctk.CTkFrame(sync_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
+        self._batch_select_all_button = ctk.CTkButton(
+            sync_header,
+            text="全选服务器",
+            width=86,
+            command=self._select_all_batch_servers,
+            **button_style("secondary", compact=True),
+        )
+        self._batch_select_all_button.pack(side="right", padx=(6, 0))
+        self._batch_clear_button = ctk.CTkButton(
+            sync_header,
+            text="清空批量",
+            width=78,
+            command=self._clear_batch_servers,
+            **button_style("secondary", compact=True),
+        )
+        self._batch_clear_button.pack(side="right")
 
         self._sync_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         self._sync_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -593,6 +621,17 @@ class SSHTab(ctk.CTkScrollableFrame):
                 top = ctk.CTkFrame(card_frame, fg_color="transparent")
                 top.pack(fill="x", padx=14, pady=(12, 4))
 
+                selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
+                ctk.CTkCheckBox(
+                    top,
+                    text="",
+                    width=20,
+                    checkbox_width=18,
+                    checkbox_height=18,
+                    variable=selected_var,
+                    command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
+                ).pack(side="left", padx=(0, 6))
+
                 indicator = ctk.CTkLabel(top, text="●", text_color=status_color, font=font(15))
                 indicator.pack(side="left")
 
@@ -665,6 +704,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         # Update server combo
         server_names = [p.name for p in profiles]
+        self._selected_server_names.intersection_update(server_names)
+        self._update_batch_target_label(server_names)
         current_server = self._server_combo.get()
         self._server_combo.configure(values=server_names if server_names else ["(无)"])
         if server_names:
@@ -726,6 +767,100 @@ class SSHTab(ctk.CTkScrollableFrame):
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
         self._sync_status_label.configure(text=message, text_color=color)
+
+    def _profile_server_names(self) -> list[str]:
+        return [p.name for p in profile_manager.list_ssh_profiles()]
+
+    def _ordered_server_names(self, selected_names: set[str] | list[str] | tuple[str, ...]) -> list[str]:
+        selected = set(selected_names)
+        return [name for name in self._profile_server_names() if name in selected]
+
+    def _format_server_target(self, server_names: list[str]) -> str:
+        if len(server_names) == 1:
+            return server_names[0]
+        preview = "、".join(server_names[:3])
+        suffix = "..." if len(server_names) > 3 else ""
+        return f"{len(server_names)} 台服务器（{preview}{suffix}）"
+
+    def _update_batch_target_label(self, server_names: list[str] | None = None):
+        all_names = server_names if server_names is not None else self._profile_server_names()
+        self._selected_server_names.intersection_update(all_names)
+        selected = [name for name in all_names if name in self._selected_server_names]
+        if self._batch_target_label:
+            if selected:
+                self._batch_target_label.configure(
+                    text=f"批量目标: {self._format_server_target(selected)}",
+                    text_color=COLORS["accent"],
+                )
+            else:
+                self._batch_target_label.configure(
+                    text="批量目标: 未勾选（使用下方单台目标）",
+                    text_color=COLORS["muted"],
+                )
+        action_state = "normal" if all_names else "disabled"
+        for button in (self._batch_select_all_button, self._batch_clear_button):
+            if button:
+                try:
+                    button.configure(state=action_state)
+                except Exception:
+                    pass
+
+    def _toggle_batch_server(self, server_name: str, selected: bool):
+        if selected:
+            self._selected_server_names.add(server_name)
+        else:
+            self._selected_server_names.discard(server_name)
+        self._update_batch_target_label()
+
+    def _select_all_batch_servers(self):
+        self._selected_server_names = set(self._profile_server_names())
+        self._update_batch_target_label()
+        self.refresh()
+
+    def _clear_batch_servers(self):
+        self._selected_server_names.clear()
+        self._update_batch_target_label()
+        self.refresh()
+
+    def _selected_sync_server_names(self) -> list[str]:
+        selected = self._ordered_server_names(self._selected_server_names)
+        if selected:
+            return selected
+        server_name = self._selected_server_name()
+        return [server_name] if server_name else []
+
+    def _run_server_batch(self, server_names: list[str], action):
+        results = []
+        failures = []
+        for server_name in server_names:
+            try:
+                result = action(server_name)
+                results.append(f"{server_name}: {result}")
+            except Exception as e:
+                failures.append(f"{server_name}: {e}")
+        return {"results": results, "failures": failures, "server_names": server_names}
+
+    def _show_server_batch_result(self, payload, success_message: str):
+        if not payload["ok"]:
+            message = f"批量操作失败: {payload['error']}"
+            self._set_sync_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        result = payload.get("result") or {}
+        results = result.get("results", [])
+        failures = result.get("failures", [])
+        if failures and results:
+            message = " | ".join(results) + " | 部分失败: " + "；".join(failures)
+            severity = "warning"
+        elif failures:
+            message = "批量操作失败: " + "；".join(failures)
+            severity = "error"
+        else:
+            message = " | ".join(results) if results else success_message
+            severity = "success"
+        self._set_sync_status(message, severity)
+        show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
 
     def _reset_remote_pull_options(self, message: str | None = None):
         self._remote_config_candidates = []
@@ -902,18 +1037,22 @@ class SSHTab(ctk.CTkScrollableFrame):
         self.refresh()
 
     def _sync_current(self):
-        server_name = self._server_combo.get()
-        if not self._has_selected_server():
-            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
-            return
-        if server_name == "(无)":
-            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+        server_names = self._selected_sync_server_names()
+        if not server_names:
             return
 
         wire_api_mode = self._selected_codex_wire_api_mode()
+        target_label = self._format_server_target(server_names)
         self._run_ssh_task(
-            f"正在推送当前生效配置到 {server_name}...",
-            lambda: sync_manager.sync_all_to_server(server_name, codex_wire_api_mode=wire_api_mode),
+            f"正在推送当前生效配置到 {target_label}...",
+            lambda: self._run_server_batch(
+                server_names,
+                lambda server_name: sync_manager.sync_all_to_server(
+                    server_name,
+                    codex_wire_api_mode=wire_api_mode,
+                ),
+            ),
+            on_done=lambda payload: self._show_server_batch_result(payload, "当前生效配置推送完成"),
         )
 
     def _selected_sync_kind(self) -> str:
@@ -999,12 +1138,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._update_codex_wire_hint()
 
     def _sync_selected(self):
-        server_name = self._server_combo.get()
-        if not self._has_selected_server():
-            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
-            return
-        if server_name == "(无)":
-            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+        server_names = self._selected_sync_server_names()
+        if not server_names:
             return
 
         profile_name = self._profile_combo.get()
@@ -1014,23 +1149,28 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         kind = self._selected_sync_kind()
         wire_api_mode = self._selected_codex_wire_api_mode()
+        target_label = self._format_server_target(server_names)
 
         def do_sync():
             self._run_ssh_task(
-                f"正在推送 {profile_name} 到 {server_name}...",
-                lambda: sync_manager.sync_selected_to_server(
-                    server_name,
-                    kind,
-                    profile_name,
-                    codex_wire_api_mode=wire_api_mode,
+                f"正在推送 {profile_name} 到 {target_label}...",
+                lambda: self._run_server_batch(
+                    server_names,
+                    lambda server_name: sync_manager.sync_selected_to_server(
+                        server_name,
+                        kind,
+                        profile_name,
+                        codex_wire_api_mode=wire_api_mode,
+                    ),
                 ),
+                on_done=lambda payload: self._show_server_batch_result(payload, f"{profile_name} 推送完成"),
             )
 
         if kind in {"claude_account", "codex_account"}:
             ConfirmDialog(
                 self.winfo_toplevel(),
                 title="确认推送账号",
-                message=f"将把 \"{profile_name}\" 的官方登录凭据写入服务器 \"{server_name}\"。\n确定继续吗？",
+                message=f"将把 \"{profile_name}\" 的官方登录凭据写入 {target_label}。\n确定继续吗？",
                 on_confirm=do_sync,
             )
             return
@@ -1038,28 +1178,29 @@ class SSHTab(ctk.CTkScrollableFrame):
         do_sync()
 
     def _clear_remote_api_info(self):
-        server_name = self._server_combo.get()
-        if not self._has_selected_server():
-            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
-            return
-        if server_name == "(无)":
-            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+        server_names = self._selected_sync_server_names()
+        if not server_names:
             return
 
         target = self._selected_clear_api_target()
         target_label = self._clear_api_combo.get() if self._clear_api_combo else "Claude + Codex"
+        server_label = self._format_server_target(server_names)
 
         def do_clear():
             self._run_ssh_task(
-                f"正在清除 {server_name} 上的 {target_label} 信息...",
-                lambda: sync_manager.clear_remote_api_info(server_name, target),
+                f"正在清除 {server_label} 上的 {target_label} 信息...",
+                lambda: self._run_server_batch(
+                    server_names,
+                    lambda server_name: sync_manager.clear_remote_api_info(server_name, target),
+                ),
+                on_done=lambda payload: self._show_server_batch_result(payload, f"{target_label} 信息已清除"),
             )
 
         ConfirmDialog(
             self.winfo_toplevel(),
             title="清除远端 API 信息",
             message=(
-                f"将清除服务器 \"{server_name}\" 上当前 {target_label} 的 API Key/Token、"
+                f"将清除 {server_label} 上当前 {target_label} 的 API Key/Token、"
                 "Base URL 覆盖和相关远端环境变量。\n"
                 "此操作不会删除本机保存的 Profile。确定继续吗？"
             ),
@@ -1103,9 +1244,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _sync_git_login(self):
-        server_name = self._selected_server_name()
-        if not server_name:
+        server_names = self._selected_sync_server_names()
+        if not server_names:
             return
+        target_label = self._format_server_target(server_names)
 
         def do_sync():
             def done(payload):
@@ -1116,14 +1258,28 @@ class SSHTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
-                message = payload["result"]
-                self._set_git_login_status(message, "success")
-                self._set_sync_status(message, "success")
-                show_toast(self.winfo_toplevel(), message)
+                result = payload.get("result") or {}
+                failures = result.get("failures", [])
+                results = result.get("results", [])
+                if failures and results:
+                    message = " | ".join(results) + " | 部分失败: " + "；".join(failures)
+                    severity = "warning"
+                elif failures:
+                    message = "Git 登录同步失败: " + "；".join(failures)
+                    severity = "error"
+                else:
+                    message = " | ".join(results) if results else "Git 登录同步完成"
+                    severity = "success"
+                self._set_git_login_status(message, severity)
+                self._set_sync_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
 
             self._run_ssh_task(
-                f"正在同步本机 Git 登录到 {server_name}...",
-                lambda: remote_git_login.sync_git_login_to_server(server_name),
+                f"正在同步本机 Git 登录到 {target_label}...",
+                lambda: self._run_server_batch(
+                    server_names,
+                    lambda server_name: remote_git_login.sync_git_login_to_server(server_name),
+                ),
                 on_done=done,
             )
 
@@ -1131,7 +1287,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self.winfo_toplevel(),
             title="同步 Git 登录到 SSH",
             message=(
-                f"将把本机 Git 用户名/邮箱写入服务器 \"{server_name}\" 的全局 Git 配置。\n"
+                f"将把本机 Git 用户名/邮箱写入 {target_label} 的全局 Git 配置。\n"
                 "如果本机或远端没有 GitHub CLI，会尝试自动安装 gh；本机安装后仍需要已完成 gh auth login，"
                 "才能把 token 通过 SSH 标准输入发送到远端执行 gh auth login。\n\n"
                 "不会读取或复制 Windows Git Credential Manager 内部凭据。确定继续吗？"
