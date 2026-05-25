@@ -175,6 +175,8 @@ def test_auto_continue_patterns_match_chinese_unfinished_work():
         "下一步：继续验证打包后的 exe。",
         "后续步骤：添加更多回归测试。",
         "这个功能仍然需要优化错误提示。",
+        "如果你同意，我下一步就直接开始这个抓取前缀专项重训。",
+        "接下来直接开始 VL-geometry 抓取前缀专项实验。",
     ]
 
     for message in examples:
@@ -205,6 +207,7 @@ def test_auto_continue_blocker_patterns_do_not_match_finished_chinese_summary():
     assert not _matches_blocker("已经确认完成，测试通过。")
     assert not _matches_blocker("已提供完整结果，无需用户继续操作。")
     assert not _matches_blocker("不存在问题，所有检查都已经通过。")
+    assert not _matches_blocker("如果你同意，我下一步就直接开始这个抓取前缀专项重训。")
 
 
 def test_auto_continue_patterns_match_english_unfinished_work():
