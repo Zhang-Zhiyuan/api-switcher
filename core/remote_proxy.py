@@ -47,7 +47,7 @@ def parse_proxy_node(text: str) -> dict:
     if not raw:
         raise ValueError("请先粘贴 Clash 代理节点")
 
-    candidate = raw
+    candidate = _extract_first_proxy_entry(raw) or raw
     if candidate.startswith("-"):
         candidate = candidate[1:].strip()
     inline_candidate = _extract_first_inline_map(candidate)
@@ -64,20 +64,38 @@ def parse_proxy_node(text: str) -> dict:
 
     if not isinstance(parsed, dict):
         raise ValueError("代理节点格式不正确")
-    parsed = {str(k).strip(): v for k, v in parsed.items() if str(k).strip()}
+    parsed = _normalize_proxy_node(parsed)
+    return parsed
+
+
+def describe_proxy_node(node: dict) -> str:
+    normalized = _normalize_proxy_node(node)
+    return (
+        f"{normalized['name']} "
+        f"({normalized['type']}://{normalized['server']}:{normalized['port']})"
+    )
+
+
+def _normalize_proxy_node(node: dict) -> dict:
+    parsed = {str(k).strip(): v for k, v in node.items() if str(k).strip()}
     required = ["name", "type", "server", "port"]
-    missing = [key for key in required if not str(parsed.get(key, "")).strip()]
+    missing = [key for key in required if not _has_value(parsed.get(key))]
     if missing:
         raise ValueError("代理节点缺少字段: " + "、".join(missing))
+    for key in ("name", "type", "server"):
+        parsed[key] = str(parsed[key]).strip()
+    parsed["port"] = _normalize_port(parsed["port"], "代理节点端口")
     return parsed
 
 
 def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
     node = dict(proxy_node)
+    node["port"] = _normalize_port(node.get("port"), "代理节点端口")
     proxy_name = str(node.get("name") or "AI_PROXY").strip()
     node["name"] = proxy_name
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
     config = {
-        "mixed-port": int(mixed_port),
+        "mixed-port": mixed_port,
         "allow-lan": False,
         "bind-address": "127.0.0.1",
         "mode": "rule",
@@ -100,6 +118,7 @@ def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
 
 
 def install_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> str:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_node = parse_proxy_node(proxy_text)
     ssh_profile, client = _connect_ssh(ssh_name)
     home = remote_config._remote_home(client)
@@ -134,28 +153,48 @@ def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStat
     _ssh_profile, client = _connect_ssh(ssh_name)
     home = remote_config._remote_home(client)
     config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
+    pid_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.pid")
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
     command = f"""
 CONFIG={shlex.quote(config_path)}
-PORT={int(mixed_port)}
+PID_FILE={shlex.quote(pid_path)}
+PORT={mixed_port}
 installed=no
 running=no
+pid_running=no
+port_listening=unknown
 [ -s "$CONFIG" ] && installed=yes
-if command -v ss >/dev/null 2>&1; then
-  ss -ltn 2>/dev/null | grep -q ":$PORT " && running=yes || true
-elif command -v netstat >/dev/null 2>&1; then
-  netstat -ltn 2>/dev/null | grep -q ":$PORT " && running=yes || true
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    pid_running=yes
+    running=yes
+  fi
 fi
-printf 'installed=%s\\nrunning=%s\\nconfig=%s\\n' "$installed" "$running" "$CONFIG"
+if command -v ss >/dev/null 2>&1; then
+  port_listening=no
+  ss -ltn 2>/dev/null | grep -q ":$PORT " && port_listening=yes && running=yes || true
+elif command -v netstat >/dev/null 2>&1; then
+  port_listening=no
+  netstat -ltn 2>/dev/null | grep -q ":$PORT " && port_listening=yes && running=yes || true
+fi
+printf 'installed=%s\\nrunning=%s\\npid_running=%s\\nport_listening=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$port_listening" "$CONFIG"
 """
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=20)
     if status != 0:
         raise RuntimeError((stderr or stdout or "远端 AI 代理状态检查失败").strip())
     values = _parse_key_values(stdout)
+    detail = ""
+    if values.get("pid_running") == "yes" and values.get("port_listening") == "no":
+        detail = "进程存在，但端口未监听"
+    elif values.get("pid_running") == "no" and values.get("port_listening") == "yes":
+        detail = "端口已监听，但 pid 文件未更新"
     return RemoteAIProxyStatus(
         installed=values.get("installed") == "yes",
         running=values.get("running") == "yes",
         config_path=values.get("config") or config_path,
         proxy_url=f"http://127.0.0.1:{mixed_port}",
+        detail=detail,
     )
 
 
@@ -185,9 +224,52 @@ def _parse_block_map(text: str) -> dict:
             continue
         if line.startswith("-"):
             line = line[1:].strip()
+        if ":" not in line:
+            continue
         key, value = _split_key_value(line)
         result[key] = _coerce_scalar(value)
     return result
+
+
+def _extract_first_proxy_entry(text: str) -> str:
+    lines = text.splitlines()
+    in_proxies = False
+    base_indent = 0
+    proxy_indent = 0
+    collected: list[str] = []
+    for raw_line in lines:
+        if not raw_line.strip() or raw_line.strip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = raw_line.strip()
+        if not in_proxies:
+            inline_match = re.fullmatch(r"proxies\s*:\s*(.+)", stripped)
+            if inline_match:
+                inline_value = inline_match.group(1).strip()
+                if inline_value.startswith("["):
+                    return _extract_first_inline_map(inline_value)
+                return inline_value
+            if re.fullmatch(r"proxies\s*:\s*", stripped):
+                in_proxies = True
+                base_indent = indent
+            continue
+
+        if not collected:
+            if indent <= base_indent and not stripped.startswith("-"):
+                break
+            if stripped.startswith("-"):
+                proxy_indent = indent
+                item = stripped[1:].strip()
+                if item:
+                    collected.append(item)
+            continue
+
+        if stripped.startswith("-") and indent <= proxy_indent:
+            break
+        if indent <= base_indent and re.fullmatch(r"[A-Za-z0-9_-]+\s*:.*", stripped):
+            break
+        collected.append(stripped)
+    return "\n".join(collected).strip()
 
 
 def _extract_first_inline_map(text: str) -> str:
@@ -302,6 +384,26 @@ def _coerce_scalar(value: str):
     return value
 
 
+def _has_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _normalize_port(value, label: str) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{label}必须是 1-65535 的整数")
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}必须是 1-65535 的整数") from exc
+    if port < 1 or port > 65535:
+        raise ValueError(f"{label}必须在 1-65535 之间")
+    return port
+
+
 def _dump_yaml(value, indent: int = 0) -> str:
     prefix = " " * indent
     if isinstance(value, dict):
@@ -336,7 +438,8 @@ def _yaml_scalar(value) -> str:
 
 
 def _build_env_file(mixed_port: int) -> str:
-    proxy_url = f"http://127.0.0.1:{int(mixed_port)}"
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    proxy_url = f"http://127.0.0.1:{mixed_port}"
     no_proxy = "127.0.0.1,localhost,::1,*.local"
     return "\n".join([
         "# Managed by API切换器. Non-AI domains are DIRECT in mihomo rules.",
@@ -354,6 +457,7 @@ def _build_env_file(mixed_port: int) -> str:
 
 
 def _build_start_script(config_dir: str, app_dir: str, local_bin_dir: str, mixed_port: int) -> str:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
     return f"""#!/bin/sh
 set -eu
 CONFIG_DIR={shlex.quote(config_dir)}
@@ -361,7 +465,7 @@ APP_DIR={shlex.quote(app_dir)}
 LOCAL_BIN_DIR={shlex.quote(local_bin_dir)}
 PID_FILE="$APP_DIR/ai-proxy.pid"
 LOG_FILE="$APP_DIR/ai-proxy.log"
-PORT={int(mixed_port)}
+PORT={mixed_port}
 RESTART="${{1:-}}"
 BIN="$LOCAL_BIN_DIR/mihomo"
 if [ ! -x "$BIN" ]; then
@@ -398,6 +502,13 @@ if command -v ss >/dev/null 2>&1; then
   done
   echo "mihomo is running but port $PORT is not listening yet; see $LOG_FILE" >&2
   exit 3
+elif command -v netstat >/dev/null 2>&1; then
+  for _ in 1 2 3 4 5; do
+    netstat -ltn 2>/dev/null | grep -q ":$PORT " && exit 0
+    sleep 1
+  done
+  echo "mihomo is running but port $PORT is not listening yet; see $LOG_FILE" >&2
+  exit 3
 fi
 """
 
@@ -410,20 +521,17 @@ def _build_install_command(
     start_path: str,
     mixed_port: int,
 ) -> str:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
     return f"""set -eu
 HOME_DIR={shlex.quote(home)}
 CONFIG_DIR={shlex.quote(config_dir)}
 APP_DIR={shlex.quote(app_dir)}
 LOCAL_BIN_DIR={shlex.quote(local_bin_dir)}
 START_SCRIPT={shlex.quote(start_path)}
-PORT={int(mixed_port)}
+PORT={mixed_port}
 BIN="$LOCAL_BIN_DIR/mihomo"
 mkdir -p "$CONFIG_DIR" "$APP_DIR" "$LOCAL_BIN_DIR"
-if [ ! -x "$BIN" ] && ! command -v mihomo >/dev/null 2>&1 && ! command -v clash >/dev/null 2>&1; then
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "远端未安装 python3，且未找到 mihomo/clash，无法自动下载 mihomo" >&2
-    exit 2
-  fi
+if [ ! -x "$BIN" ] && ! command -v mihomo >/dev/null 2>&1; then
   arch="$(uname -m 2>/dev/null || echo unknown)"
   case "$arch" in
     x86_64|amd64) pattern="linux-amd64" ;;
@@ -431,7 +539,8 @@ if [ ! -x "$BIN" ] && ! command -v mihomo >/dev/null 2>&1 && ! command -v clash 
     armv7l|armv7*) pattern="linux-armv7" ;;
     *) echo "不支持的远端架构: $arch" >&2; exit 3 ;;
   esac
-  python3 - "$pattern" "$BIN" <<'PY'
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 - "$pattern" "$BIN" <<'PY'
 import gzip
 import json
 import os
@@ -464,6 +573,19 @@ with open(target, "wb") as handle:
 os.chmod(target, 0o755)
 print("downloaded=" + url)
 PY
+    then
+      if command -v clash >/dev/null 2>&1; then
+        echo "mihomo 下载失败，回退使用远端已有 clash" >&2
+      else
+        exit 4
+      fi
+    fi
+  elif command -v clash >/dev/null 2>&1; then
+    echo "远端未安装 python3，回退使用已有 clash" >&2
+  else
+    echo "远端未安装 python3，且未找到 mihomo/clash，无法自动下载 mihomo" >&2
+    exit 2
+  fi
 fi
 "$START_SCRIPT" restart
 printf 'config=%s\\nproxy=http://127.0.0.1:%s\\n' "$CONFIG_DIR/config.yaml" "$PORT"

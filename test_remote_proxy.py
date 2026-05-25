@@ -57,6 +57,74 @@ rules:
     assert node["alpn"] == ["h2", "http/1.1"]
 
 
+def test_parse_proxy_node_prefers_first_proxy_block_in_full_yaml():
+    node = remote_proxy.parse_proxy_node(
+        """
+mixed-port: 7890
+proxies:
+  - name: first
+    type: vless
+    server: first.example.com
+    port: "443"
+    uuid: token
+  - name: second
+    type: ss
+    server: second.example.com
+    port: 8388
+rules:
+  - MATCH,DIRECT
+"""
+    )
+
+    assert node["name"] == "first"
+    assert node["server"] == "first.example.com"
+    assert node["port"] == 443
+
+
+def test_parse_proxy_node_supports_inline_proxy_list_in_full_yaml():
+    node = remote_proxy.parse_proxy_node(
+        """
+mixed-port: 7890
+proxies: [{ name: inline, type: vless, server: inline.example.com, port: "8443", uuid: token }]
+rules:
+  - MATCH,DIRECT
+"""
+    )
+
+    assert node["name"] == "inline"
+    assert node["server"] == "inline.example.com"
+    assert node["port"] == 8443
+
+
+def test_describe_proxy_node_uses_normalized_endpoint():
+    node = remote_proxy.parse_proxy_node("{ name: node, type: vless, server: example.com, port: '443' }")
+
+    assert remote_proxy.describe_proxy_node(node) == "node (vless://example.com:443)"
+
+
 def test_parse_proxy_node_rejects_missing_required_fields():
     with pytest.raises(ValueError, match="缺少字段"):
         remote_proxy.parse_proxy_node("{ name: bad, type: vless }")
+
+
+def test_parse_proxy_node_rejects_invalid_port():
+    with pytest.raises(ValueError, match="端口"):
+        remote_proxy.parse_proxy_node("{ name: bad, type: vless, server: example.com, port: 70000 }")
+
+
+def test_inspect_status_summary_mentions_partial_running_state():
+    status = remote_proxy.RemoteAIProxyStatus(
+        installed=True,
+        running=True,
+        config_path="/home/me/.config/mihomo/config.yaml",
+        proxy_url="http://127.0.0.1:7890",
+        detail="进程存在，但端口未监听",
+    )
+
+    assert "端口未监听" in status.summary()
+
+
+def test_start_script_checks_port_with_netstat_when_ss_is_missing():
+    script = remote_proxy._build_start_script("/home/me/.config/mihomo", "/home/me/.config/api-switcher", "/home/me/bin", 7890)
+
+    assert "command -v netstat" in script

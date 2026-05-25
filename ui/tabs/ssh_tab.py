@@ -972,7 +972,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_node_text:
             self._proxy_node_text.delete("1.0", "end")
             self._proxy_node_text.insert("1.0", content.strip())
-        self._set_proxy_status(f"已载入代理文件: {Path(path).name}")
+        try:
+            node_summary = remote_proxy.describe_proxy_node(remote_proxy.parse_proxy_node(content))
+            self._set_proxy_status(f"已载入代理文件: {Path(path).name}；将使用节点 {node_summary}", "success")
+        except Exception as e:
+            self._set_proxy_status(f"已载入代理文件: {Path(path).name}；暂未识别到可用节点: {e}", "warning")
 
     def _deploy_ai_proxy(self):
         server_names = self._selected_sync_server_names()
@@ -980,7 +984,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         proxy_text = self._proxy_node_input()
         try:
-            remote_proxy.parse_proxy_node(proxy_text)
+            proxy_node = remote_proxy.parse_proxy_node(proxy_text)
+            node_summary = remote_proxy.describe_proxy_node(proxy_node)
         except Exception as e:
             message = f"代理节点格式不正确: {e}"
             self._set_proxy_status(message, "error")
@@ -1013,6 +1018,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             message=(
                 f"将把当前 Clash 节点写入 {target_label}，安装/复用 mihomo，"
                 "并写入受管 shell 代理环境。\n"
+                f"识别到节点: {node_summary}\n"
                 "规则只代理 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名，其余 DIRECT。确定继续吗？"
             ),
             on_confirm=do_deploy,
