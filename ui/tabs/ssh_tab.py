@@ -73,6 +73,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_deploy_button = None
         self._proxy_inspect_button = None
         self._proxy_remote_test_button = None
+        self._proxy_remote_cleanup_button = None
         self._proxy_local_start_button = None
         self._proxy_local_inspect_button = None
         self._proxy_local_test_button = None
@@ -645,7 +646,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._probe_ai_proxy,
             **button_style("secondary", compact=True),
         )
-        self._proxy_remote_test_button.pack(anchor="e", pady=(0, 10))
+        self._proxy_remote_test_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_remote_cleanup_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="清理 SSH",
+            width=96,
+            command=self._cleanup_ai_proxy,
+            **button_style("danger", compact=True),
+        )
+        self._proxy_remote_cleanup_button.pack(anchor="e", pady=(0, 10))
         ctk.CTkLabel(
             proxy_button_frame,
             text="Windows 本机",
@@ -1269,6 +1278,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_deploy_button,
             self._proxy_inspect_button,
             self._proxy_remote_test_button,
+            self._proxy_remote_cleanup_button,
             self._proxy_local_start_button,
             self._proxy_local_inspect_button,
             self._proxy_local_test_button,
@@ -1591,6 +1601,44 @@ class SSHTab(ctk.CTkScrollableFrame):
                 lambda server_name: remote_proxy.probe_ai_proxy(server_name),
             ),
             on_done=done,
+        )
+
+    def _cleanup_ai_proxy(self):
+        server_names = self._selected_sync_server_names()
+        if not server_names:
+            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        target_label = self._format_server_target(server_names)
+
+        def do_cleanup():
+            def done(payload):
+                self._show_server_batch_result(payload, "AI 代理清理完成")
+                if payload["ok"]:
+                    result = payload.get("result") or {}
+                    failures = result.get("failures", [])
+                    severity = "warning" if failures and result.get("results") else "error" if failures else "success"
+                    self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+
+            self._run_proxy_ssh_task(
+                f"正在清理 {target_label} 的 AI 代理配置...",
+                lambda: self._run_server_batch(
+                    server_names,
+                    lambda server_name: remote_proxy.cleanup_ai_proxy(server_name),
+                ),
+                on_done=done,
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="清理远端 AI 代理",
+            message=(
+                f"将清理 {target_label} 上由本工具写入的远端 AI 代理入口，"
+                "停止识别为 mihomo/clash 的代理进程，并移除 VS Code Remote 代理设置。\n"
+                "检测到的旧 mihomo/clash 配置会先备份到 ~/.config/api-switcher/proxy-cleanup-backup-* 再移走。确定继续吗？"
+            ),
+            on_confirm=do_cleanup,
         )
 
     def _run_proxy_ssh_task(self, busy_message: str, worker, on_done=None):

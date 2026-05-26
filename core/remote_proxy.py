@@ -50,6 +50,8 @@ REMOTE_AI_PROBE_TARGETS = (
     ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
 )
 
+AI_PROXY_CONFIG_MARKER = "# Managed by API切换器 AI proxy"
+
 PROXY_ENV_KEYS = (
     "API_SWITCHER_AI_PROXY_URL",
     "HTTP_PROXY",
@@ -388,7 +390,7 @@ def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
             "MATCH,DIRECT",
         ],
     }
-    return _dump_yaml(config)
+    return AI_PROXY_CONFIG_MARKER + "\n" + _dump_yaml(config)
 
 
 def install_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> str:
@@ -451,7 +453,18 @@ running=no
 pid_running=no
 pid_managed=unknown
 port_listening=unknown
-[ -s "$CONFIG" ] && installed=yes
+config_present=no
+config_owned=no
+config_legacy=no
+if [ -s "$CONFIG" ]; then
+  config_present=yes
+  if grep -q "{AI_PROXY_CONFIG_MARKER}" "$CONFIG" 2>/dev/null || (grep -q "AI-PROXY" "$CONFIG" 2>/dev/null && grep -q "chatgpt.com" "$CONFIG" 2>/dev/null); then
+    config_owned=yes
+    installed=yes
+  elif grep -Eq "^[[:space:]]*(port|socks-port|mixed-port|proxies|proxy-groups|rules):" "$CONFIG" 2>/dev/null || grep -q "chatgpt.com" "$CONFIG" 2>/dev/null; then
+    config_legacy=yes
+  fi
+fi
 if [ -s "$PID_FILE" ]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -486,7 +499,7 @@ done
 for file in {vscode_paths}; do
   [ -f "$file" ] && grep -q "{VSCODE_ENV_BLOCK_START}" "$file" 2>/dev/null && vscode_entrypoints=$((vscode_entrypoints + 1))
 done
-printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$CONFIG"
+printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig_present=%s\\nconfig_owned=%s\\nconfig_legacy=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$config_present" "$config_owned" "$config_legacy" "$CONFIG"
 """
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=20)
     if status != 0:
@@ -499,6 +512,13 @@ printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_liste
         detail_parts.append("进程存在，但端口未监听")
     elif values.get("pid_running") == "no" and values.get("port_listening") == "yes":
         detail_parts.append("端口已监听，但 pid 文件未更新")
+    if values.get("installed") != "yes" and values.get("port_listening") == "yes":
+        detail_parts.append("端口正在监听，但不是本工具配置")
+    if values.get("config_present") == "yes" and values.get("config_owned") != "yes":
+        if values.get("config_legacy") == "yes":
+            detail_parts.append("检测到旧/非本工具 mihomo 配置，未计入 AI 代理")
+        else:
+            detail_parts.append("检测到非本工具 mihomo 配置，未计入 AI 代理")
     if values.get("installed") == "yes":
         if values.get("env_file") != "yes":
             detail_parts.append("远端代理环境文件缺失或端口不匹配")
@@ -542,6 +562,49 @@ def probe_ai_proxy(ssh_name: str, mixed_port: int = 7890, timeout: int = 8) -> s
         f"{ssh_name}: {proxy_status.summary()}；AI 连通性 {ok_count}/{len(results)} 可达；"
         + "；".join(item.summary() for item in results)
     )
+
+
+def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_config: bool = True) -> str:
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    command = _build_cleanup_command(home, mixed_port, include_legacy_config)
+    status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=180, log_command=False)
+    if status != 0:
+        detail = (stderr or stdout or "").strip()
+        raise RuntimeError(f"远端 AI 代理清理失败: {detail or status}")
+
+    values = _parse_key_values(stdout)
+    pieces = []
+    stopped_pids = values.get("stopped_pids", "")
+    if stopped_pids:
+        pieces.append(f"已停止进程 {stopped_pids}")
+    removed_files = _int_or_default(values.get("removed_files"), 0)
+    removed_blocks = _int_or_default(values.get("removed_blocks"), 0)
+    removed_settings = _int_or_default(values.get("removed_settings"), 0)
+    backed_up_configs = _int_or_default(values.get("backed_up_configs"), 0)
+    if removed_files:
+        pieces.append(f"移除受管文件 {removed_files} 个")
+    if removed_blocks:
+        pieces.append(f"移除 shell/VS Code Remote 入口 {removed_blocks} 处")
+    if removed_settings:
+        pieces.append(f"清理 VS Code settings {removed_settings} 处")
+    if backed_up_configs:
+        backup_dir = values.get("backup_dir") or ""
+        pieces.append(f"备份并移走旧代理配置 {backed_up_configs} 个" + (f"到 {backup_dir}" if backup_dir else ""))
+    if values.get("still_listening") == "yes":
+        pieces.append("清理后端口仍在监听，请检查非本工具代理进程")
+    else:
+        pieces.append("代理端口未监听")
+    skipped_pids = values.get("skipped_pids", "")
+    if skipped_pids:
+        pieces.append(f"跳过非 mihomo/clash 进程 {skipped_pids}")
+    notes = values.get("notes", "")
+    if notes:
+        pieces.append(notes)
+    if not pieces:
+        pieces.append("未发现需要清理的远端 AI 代理")
+    return f"{ssh_name}: AI 代理清理完成；" + "；".join(pieces)
 
 
 def _connect_ssh(ssh_name: str):
@@ -1652,6 +1715,281 @@ exit 0
 """
 
 
+def _build_cleanup_command(home: str, mixed_port: int, include_legacy_config: bool = True) -> str:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    env = _proxy_env_values(mixed_port)
+    template = r'''set +e
+HOME_DIR=__HOME_DIR__
+PORT=__PORT__
+INCLUDE_LEGACY_CONFIG=__INCLUDE_LEGACY_CONFIG__
+CONFIG_MARKER=__CONFIG_MARKER__
+PROXY_URL=__PROXY_URL__
+NO_PROXY_VALUE=__NO_PROXY_VALUE__
+APP_DIR="$HOME_DIR/.config/api-switcher"
+CONFIG_DIR="$HOME_DIR/.config/mihomo"
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
+ENV_FILE="$APP_DIR/ai-proxy.env"
+START_SCRIPT="$APP_DIR/start-ai-proxy.sh"
+PID_FILE="$APP_DIR/ai-proxy.pid"
+LOG_FILE="$APP_DIR/ai-proxy.log"
+removed_files=0
+removed_blocks=0
+removed_settings=0
+backed_up_configs=0
+stopped_pids=""
+skipped_pids=""
+notes=""
+backup_dir=""
+
+append_note() {
+  if [ -n "$notes" ]; then
+    notes="$notes; $1"
+  else
+    notes="$1"
+  fi
+}
+
+is_proxy_pid() {
+  pid="$1"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  if ! command -v ps >/dev/null 2>&1; then
+    return 1
+  fi
+  cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+  case "$cmd" in
+    *mihomo*|*clash*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stop_pid_if_proxy() {
+  pid="$1"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if is_proxy_pid "$pid"; then
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    stopped_pids="$stopped_pids $pid"
+  elif kill -0 "$pid" 2>/dev/null; then
+    skipped_pids="$skipped_pids $pid"
+  fi
+}
+
+if [ -s "$PID_FILE" ]; then
+  stop_pid_if_proxy "$(cat "$PID_FILE" 2>/dev/null | tr -cd '0-9' | head -c 20)"
+fi
+if command -v lsof >/dev/null 2>&1; then
+  for pid in $(lsof -nP -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | sort -u); do
+    stop_pid_if_proxy "$pid"
+  done
+fi
+if command -v ss >/dev/null 2>&1; then
+  for pid in $(ss -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $0}' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u); do
+    stop_pid_if_proxy "$pid"
+  done
+fi
+if command -v netstat >/dev/null 2>&1; then
+  for pid in $(netstat -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $7}' | sed -n 's#/.*##p' | sort -u); do
+    stop_pid_if_proxy "$pid"
+  done
+fi
+if command -v fuser >/dev/null 2>&1; then
+  for pid in $(fuser -n tcp "$PORT" 2>/dev/null | tr ' ' '\n' | sort -u); do
+    stop_pid_if_proxy "$pid"
+  done
+fi
+
+for file in "$ENV_FILE" "$START_SCRIPT" "$PID_FILE" "$LOG_FILE"; do
+  if [ -e "$file" ]; then
+    rm -f "$file" && removed_files=$((removed_files + 1))
+  fi
+done
+
+backup_file() {
+  file="$1"
+  [ -f "$file" ] || return 0
+  stamp="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%d%H%M%S')"
+  if [ -z "$backup_dir" ]; then
+    backup_dir="$APP_DIR/proxy-cleanup-backup-$stamp"
+  fi
+  mkdir -p "$backup_dir" || return 1
+  relative="$(printf '%s' "$file" | sed "s#^$HOME_DIR/##; s#/#_#g")"
+  target="$backup_dir/$relative"
+  mv "$file" "$target" && backed_up_configs=$((backed_up_configs + 1))
+}
+
+clean_config() {
+  file="$1"
+  [ -f "$file" ] || return 0
+  if grep -q "$CONFIG_MARKER" "$file" 2>/dev/null || (grep -q "AI-PROXY" "$file" 2>/dev/null && grep -q "chatgpt.com" "$file" 2>/dev/null); then
+    rm -f "$file" && removed_files=$((removed_files + 1))
+    return 0
+  fi
+  if [ "$INCLUDE_LEGACY_CONFIG" = "1" ] && (grep -Eq '^[[:space:]]*(port|socks-port|mixed-port|proxies|proxy-groups|rules):' "$file" 2>/dev/null || grep -q "chatgpt.com" "$file" 2>/dev/null); then
+    backup_file "$file"
+  else
+    append_note "保留 $file（不像本工具 AI 代理配置）"
+  fi
+}
+
+clean_config "$CONFIG_FILE"
+clean_config "$HOME_DIR/.config/clash/config.yaml"
+clean_config "$HOME_DIR/.config/clash/config.yml"
+rmdir "$CONFIG_DIR" "$HOME_DIR/.config/clash" "$APP_DIR" 2>/dev/null || true
+
+remove_block() {
+  file="$1"
+  start="$2"
+  end="$3"
+  [ -f "$file" ] || return 0
+  grep -qF "$start" "$file" 2>/dev/null || return 0
+  tmp="$file.api-switcher-clean.$$"
+  awk -v start="$start" -v end="$end" '
+    $0 == start {skip=1; changed=1; next}
+    $0 == end {skip=0; next}
+    skip != 1 {print}
+    END {if (skip == 1) exit 2; if (changed != 1) exit 3}
+  ' "$file" > "$tmp"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    mv "$tmp" "$file" && removed_blocks=$((removed_blocks + 1))
+  else
+    rm -f "$tmp"
+    append_note "未能安全移除 $file 的 managed block"
+  fi
+}
+
+for file in "$HOME_DIR/.profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bash_login" "$HOME_DIR/.zprofile" "$HOME_DIR/.zshrc"; do
+  remove_block "$file" "# >>> API切换器 AI proxy >>>" "# <<< API切换器 AI proxy <<<"
+done
+if [ -e "$HOME_DIR/.config/fish/conf.d/api-switcher-ai-proxy.fish" ]; then
+  rm -f "$HOME_DIR/.config/fish/conf.d/api-switcher-ai-proxy.fish" && removed_files=$((removed_files + 1))
+fi
+for file in "$HOME_DIR/.vscode-server/server-env-setup" "$HOME_DIR/.vscode-server-insiders/server-env-setup" "$HOME_DIR/.cursor-server/server-env-setup"; do
+  remove_block "$file" "# >>> API切换器 AI proxy VS Code >>>" "# <<< API切换器 AI proxy VS Code <<<"
+done
+
+if command -v python3 >/dev/null 2>&1; then
+  settings_count="$(python3 - "$PROXY_URL" "$NO_PROXY_VALUE" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+proxy_url = sys.argv[1]
+no_proxy = sys.argv[2]
+paths = [
+    "~/.vscode-server/data/Machine/settings.json",
+    "~/.vscode-server-insiders/data/Machine/settings.json",
+    "~/.cursor-server/data/Machine/settings.json",
+]
+proxy_keys = {
+    "API_SWITCHER_AI_PROXY_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+}
+changed_count = 0
+for raw_path in paths:
+    path = os.path.expanduser(raw_path)
+    if not os.path.isfile(path):
+        continue
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except Exception:
+        continue
+    if not isinstance(data, dict):
+        continue
+    changed = False
+    removed_http_proxy = False
+    if data.get("http.proxy") == proxy_url:
+        data.pop("http.proxy", None)
+        changed = True
+        removed_http_proxy = True
+    if removed_http_proxy and data.get("http.proxySupport") == "override":
+        data.pop("http.proxySupport", None)
+        changed = True
+    env = data.get("terminal.integrated.env.linux")
+    if isinstance(env, dict):
+        updated_env = dict(env)
+        for key in proxy_keys:
+            value = updated_env.get(key)
+            if value == proxy_url or value == no_proxy:
+                updated_env.pop(key, None)
+                changed = True
+        if changed:
+            if updated_env:
+                data["terminal.integrated.env.linux"] = updated_env
+            else:
+                data.pop("terminal.integrated.env.linux", None)
+    if changed:
+        directory = os.path.dirname(path)
+        fd, temp_path = tempfile.mkstemp(prefix="settings.json.", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temp_path, path)
+            changed_count += 1
+        finally:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+print(changed_count)
+PY
+)"
+  case "$settings_count" in ''|*[!0-9]*) settings_count=0 ;; esac
+  removed_settings="$settings_count"
+else
+  append_note "远端无 python3，跳过 VS Code settings JSON 清理"
+fi
+
+still_listening=no
+listener_detail=""
+if command -v ss >/dev/null 2>&1; then
+  listener_detail="$(ss -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $0}' | head -n 3)"
+  [ -n "$listener_detail" ] && still_listening=yes
+elif command -v netstat >/dev/null 2>&1; then
+  listener_detail="$(netstat -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $0}' | head -n 3)"
+  [ -n "$listener_detail" ] && still_listening=yes
+else
+  still_listening=unknown
+fi
+
+printf 'removed_files=%s\nremoved_blocks=%s\nremoved_settings=%s\nbacked_up_configs=%s\nbackup_dir=%s\nstopped_pids=%s\nskipped_pids=%s\nstill_listening=%s\n' "$removed_files" "$removed_blocks" "$removed_settings" "$backed_up_configs" "$backup_dir" "$(echo "$stopped_pids" | xargs 2>/dev/null)" "$(echo "$skipped_pids" | xargs 2>/dev/null)" "$still_listening"
+if [ -n "$listener_detail" ]; then
+  printf 'listener_detail=%s\n' "$(echo "$listener_detail" | tr '\n' ' ' | cut -c 1-500)"
+fi
+if [ -n "$notes" ]; then
+  printf 'notes=%s\n' "$notes"
+fi
+'''
+    replacements = {
+        "__HOME_DIR__": shlex.quote(home),
+        "__PORT__": str(mixed_port),
+        "__INCLUDE_LEGACY_CONFIG__": "1" if include_legacy_config else "0",
+        "__CONFIG_MARKER__": shlex.quote(AI_PROXY_CONFIG_MARKER),
+        "__PROXY_URL__": shlex.quote(env["API_SWITCHER_AI_PROXY_URL"]),
+        "__NO_PROXY_VALUE__": shlex.quote(env["NO_PROXY"]),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
 def _build_probe_command(mixed_port: int, timeout: int = 8) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     try:
@@ -2023,6 +2361,40 @@ def _apply_vscode_proxy_settings(settings: dict, mixed_port: int) -> tuple[dict,
     if updated.get("terminal.integrated.env.linux") != terminal_env:
         updated["terminal.integrated.env.linux"] = terminal_env
         changed = True
+    return updated, changed
+
+
+def _remove_vscode_proxy_settings(settings: dict, mixed_port: int) -> tuple[dict, bool]:
+    env_values = _proxy_env_values(mixed_port)
+    proxy_url = env_values["API_SWITCHER_AI_PROXY_URL"]
+    no_proxy = env_values["NO_PROXY"]
+    updated = dict(settings or {})
+    changed = False
+    removed_http_proxy = False
+
+    if updated.get("http.proxy") == proxy_url:
+        updated.pop("http.proxy", None)
+        changed = True
+        removed_http_proxy = True
+    if removed_http_proxy and updated.get("http.proxySupport") == "override":
+        updated.pop("http.proxySupport", None)
+        changed = True
+
+    terminal_env = updated.get("terminal.integrated.env.linux")
+    if isinstance(terminal_env, dict):
+        next_env = dict(terminal_env)
+        for key in PROXY_ENV_KEYS:
+            value = next_env.get(key)
+            if value == proxy_url or value == no_proxy:
+                next_env.pop(key, None)
+                changed = True
+        if next_env:
+            if next_env != terminal_env:
+                updated["terminal.integrated.env.linux"] = next_env
+        elif "terminal.integrated.env.linux" in updated:
+            updated.pop("terminal.integrated.env.linux", None)
+            changed = True
+
     return updated, changed
 
 

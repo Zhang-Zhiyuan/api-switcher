@@ -36,6 +36,7 @@ def test_build_mihomo_config_routes_only_ai_domains_to_proxy():
         }
     )
 
+    assert config.startswith(remote_proxy.AI_PROXY_CONFIG_MARKER)
     assert 'name: "node-a"' in config
     assert 'server: "example.com"' in config
     assert 'DOMAIN-SUFFIX,chatgpt.com,AI-PROXY' in config
@@ -469,6 +470,43 @@ def test_remote_install_command_retries_mihomo_downloads_with_user_agent():
     assert "API-Switcher/1.0" in command
     assert "for attempt in range(1, 4)" in command
     assert "download failed after 3 attempts" in command
+
+
+def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_managed_blocks():
+    command = remote_proxy._build_cleanup_command("/home/me", 7890, include_legacy_config=True)
+
+    assert "proxy-cleanup-backup" in command
+    assert remote_proxy.AI_PROXY_CONFIG_MARKER in command
+    assert "start-ai-proxy.sh" in command
+    assert "server-env-setup" in command
+    assert "VS Code settings JSON" in command
+    assert "kill -9" in command
+    assert "backed_up_configs" in command
+
+
+def test_remove_vscode_proxy_settings_only_removes_managed_values():
+    settings = {
+        "http.proxy": "http://127.0.0.1:7890",
+        "http.proxySupport": "override",
+        "terminal.integrated.env.linux": {
+            "HTTP_PROXY": "http://127.0.0.1:7890",
+            "HTTPS_PROXY": "http://other.proxy:8080",
+            "NO_PROXY": "127.0.0.1,localhost,::1,*.local",
+            "KEEP": "1",
+        },
+        "editor.fontSize": 14,
+    }
+
+    updated, changed = remote_proxy._remove_vscode_proxy_settings(settings, 7890)
+
+    assert changed is True
+    assert "http.proxy" not in updated
+    assert "http.proxySupport" not in updated
+    assert "HTTP_PROXY" not in updated["terminal.integrated.env.linux"]
+    assert "NO_PROXY" not in updated["terminal.integrated.env.linux"]
+    assert updated["terminal.integrated.env.linux"]["HTTPS_PROXY"] == "http://other.proxy:8080"
+    assert updated["terminal.integrated.env.linux"]["KEEP"] == "1"
+    assert updated["editor.fontSize"] == 14
 
 
 def test_build_remote_probe_command_covers_python_and_curl_fallbacks():
