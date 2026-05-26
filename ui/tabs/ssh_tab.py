@@ -21,6 +21,13 @@ from models.auto_continue import training_prompt_template_by_key
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
 
 
+def _format_server_batch_item(server_name: str, result) -> str:
+    text = str(result or "操作完成")
+    if text.startswith(f"{server_name}:") or text.startswith(f"{server_name}："):
+        return text
+    return f"{server_name}: {text}"
+
+
 class SSHTab(ctk.CTkScrollableFrame):
     """Tab for managing SSH servers and syncing configs."""
 
@@ -173,7 +180,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
         self._batch_target_label = ctk.CTkLabel(
             sync_header,
-            text="批量目标: 未勾选（当前为单台模式）",
+            text="远端批量: 未勾选（单台模式）",
             text_color=COLORS["muted"],
             font=font(12),
         )
@@ -181,7 +188,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ctk.CTkFrame(sync_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
         self._batch_select_all_button = ctk.CTkButton(
             sync_header,
-            text="全选服务器",
+            text="全选远端",
             width=86,
             command=self._select_all_batch_servers,
             **button_style("secondary", compact=True),
@@ -233,7 +240,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._target_summary_label.grid(row=0, column=2, columnspan=2, sticky="ew")
         self._target_hint_label = ctk.CTkLabel(
             sync_controls,
-            text="未勾选批量目标时，推送/清理/Git 同步/AI 代理使用单台目标；远端拉取始终只读取单台目标。",
+            text="单台模式下，推送/清理/Git 同步/SSH AI 代理使用单台目标；勾选服务器卡片后这些操作改为远端批量。远端拉取始终只读取单台目标。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -272,7 +279,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_current_button = ctk.CTkButton(
             push_button_frame,
             text="推送当前",
-            width=104,
+            width=118,
             command=self._sync_current,
             **button_style("primary", compact=True),
         )
@@ -280,7 +287,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_selected_button = ctk.CTkButton(
             push_button_frame,
             text="推送所选",
-            width=104,
+            width=118,
             command=self._sync_selected,
             **button_style("primary", compact=True),
         )
@@ -410,7 +417,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).grid(row=7, column=0, sticky="w", pady=(10, 0))
         self._git_login_status_label = ctk.CTkLabel(
             sync_controls,
-            text="检查/从 SSH 导入使用单台目标；同步到 SSH 使用当前操作目标（有批量勾选则同步到批量）。",
+            text="检查/从 SSH 导入只使用单台目标；同步到 SSH 使用远端批量目标，未勾选时使用单台目标。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -457,20 +464,20 @@ class SSHTab(ctk.CTkScrollableFrame):
         proxy_header.pack(fill="x", padx=14, pady=(4, 5))
         ctk.CTkLabel(
             proxy_header,
-            text="远端 AI 代理",
+            text="AI 代理",
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(side="left")
         ctk.CTkLabel(
             proxy_header,
-            text="给 VS Code Remote-SSH/Codex/Claude Code 写入远端代理；仅 AI 域名走代理，其余直连",
+            text="SSH 远端用于 VS Code Remote/Codex/Claude Code；Windows 本机用于本机程序；仅 AI 域名走代理",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(side="left", padx=(10, 0))
         ctk.CTkFrame(proxy_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
         self._proxy_target_label = ctk.CTkLabel(
             proxy_header,
-            text="目标: 未选择服务器",
+            text="SSH 目标: 未选择服务器",
             text_color=COLORS["warning"],
             font=font(12, "bold"),
         )
@@ -618,14 +625,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_load_file_button.pack(anchor="e", pady=(0, 10))
         ctk.CTkLabel(
             proxy_button_frame,
-            text="SSH 服务器",
+            text="SSH 远端",
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="e",
         ).pack(anchor="e", pady=(0, 4))
         self._proxy_deploy_button = ctk.CTkButton(
             proxy_button_frame,
-            text="部署 SSH",
+            text="部署远端",
             width=96,
             command=self._deploy_ai_proxy,
             **button_style("accent", compact=True),
@@ -633,7 +640,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_deploy_button.pack(anchor="e", pady=(0, 6))
         self._proxy_inspect_button = ctk.CTkButton(
             proxy_button_frame,
-            text="检查 SSH",
+            text="检查远端",
             width=96,
             command=self._inspect_ai_proxy,
             **button_style("secondary", compact=True),
@@ -641,7 +648,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_inspect_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_test_button = ctk.CTkButton(
             proxy_button_frame,
-            text="测试 SSH",
+            text="测试远端",
             width=96,
             command=self._probe_ai_proxy,
             **button_style("secondary", compact=True),
@@ -649,7 +656,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_remote_test_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_cleanup_button = ctk.CTkButton(
             proxy_button_frame,
-            text="清理 SSH",
+            text="清理远端",
             width=96,
             command=self._cleanup_ai_proxy,
             **button_style("danger", compact=True),
@@ -697,7 +704,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
-            text="待部署节点不会自动生效；请选择 SSH 服务器或 Windows 本机执行。SSH 影响远端；Windows 本机会托管当前用户系统代理、环境变量和 VS Code 本机设置。",
+            text="待部署节点不会自动生效；部署远端使用 SSH 目标（远端批量优先），启动本机只影响 Windows 当前用户系统代理、环境变量和 VS Code 本机设置。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -944,8 +951,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
                 ctk.CTkCheckBox(
                     top,
-                    text="批量目标",
-                    width=76,
+                    text="批量操作",
+                    width=84,
                     checkbox_width=18,
                     checkbox_height=18,
                     text_color=COLORS["muted"],
@@ -1116,20 +1123,20 @@ class SSHTab(ctk.CTkScrollableFrame):
         selected = selected if selected is not None else self._ordered_server_names(self._selected_server_names)
         single_target = self._single_target_name_for_ui()
         if selected:
-            summary = f"当前批量模式: {self._format_server_target(selected)}"
+            summary = f"远端批量模式: {self._format_server_target(selected)}"
             hint = (
-                "推送当前/所选、远端清理、Git 同步到 SSH、AI 代理会使用批量目标；"
-                f"远端拉取、Git 检查/导入、远端自动续跑仍使用单台目标 {single_target or '-'}。"
+                "推送当前/所选、远端清理、Git 同步到 SSH、SSH AI 代理使用远端批量；"
+                f"远端拉取、Git 检查/从 SSH 导入、远端自动续跑仍使用单台目标 {single_target or '未选择'}。"
             )
             summary_color = COLORS["accent"]
-            current_text = "批量推送当前"
-            selected_text = "批量推送所选"
+            current_text = "推送当前到批量"
+            selected_text = "推送所选到批量"
         else:
-            summary = f"当前单台模式: {single_target or '未选择服务器'}"
-            hint = "要同时操作多台，请在上方服务器卡片勾选“批量目标”；远端拉取始终只读取单台目标。"
+            summary = f"单台模式: {single_target or '未选择服务器'}"
+            hint = "推送/清理/Git 同步到 SSH/SSH AI 代理使用单台目标；要同时操作多台，请勾选服务器卡片里的“批量操作”。远端拉取始终只读取单台目标。"
             summary_color = COLORS["muted"] if single_target else COLORS["warning"]
-            current_text = "推送当前"
-            selected_text = "推送所选"
+            current_text = "推送当前到单台"
+            selected_text = "推送所选到单台"
 
         if self._target_summary_label:
             self._target_summary_label.configure(text=summary, text_color=summary_color)
@@ -1148,12 +1155,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._batch_target_label:
             if selected:
                 self._batch_target_label.configure(
-                    text=f"批量目标: {self._format_server_target(selected)}",
+                    text=f"远端批量: {self._format_server_target(selected)}",
                     text_color=COLORS["accent"],
                 )
             else:
                 self._batch_target_label.configure(
-                    text="批量目标: 未勾选（当前为单台模式）",
+                    text="远端批量: 未勾选（单台模式）",
                     text_color=COLORS["muted"],
                 )
         action_state = "normal" if all_names else "disabled"
@@ -1195,26 +1202,28 @@ class SSHTab(ctk.CTkScrollableFrame):
         for server_name in server_names:
             try:
                 result = action(server_name)
-                results.append(f"{server_name}: {result}")
+                results.append(_format_server_batch_item(server_name, result))
             except Exception as e:
                 failures.append(f"{server_name}: {e}")
         return {"results": results, "failures": failures, "server_names": server_names}
 
     def _show_server_batch_result(self, payload, success_message: str):
+        result = payload.get("result") or {}
+        server_count = len(result.get("server_names", []) or [])
+        operation_label = "批量操作" if server_count > 1 else "操作"
         if not payload["ok"]:
-            message = f"批量操作失败: {payload['error']}"
+            message = f"{operation_label}失败: {payload['error']}"
             self._set_sync_status(message, "error")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
-        result = payload.get("result") or {}
         results = result.get("results", [])
         failures = result.get("failures", [])
         if failures and results:
             message = " | ".join(results) + " | 部分失败: " + "；".join(failures)
             severity = "warning"
         elif failures:
-            message = "批量操作失败: " + "；".join(failures)
+            message = f"{operation_label}失败: " + "；".join(failures)
             severity = "error"
         else:
             message = " | ".join(results) if results else success_message
@@ -1258,15 +1267,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         selected = self._ordered_server_names(self._selected_server_names)
         if selected:
             self._proxy_target_label.configure(
-                text=f"目标: {self._format_server_target(selected)}",
+                text=f"SSH 目标: {self._format_server_target(selected)}",
                 text_color=COLORS["accent"],
             )
             return
         single_target = self._single_target_name_for_ui()
         if single_target:
-            self._proxy_target_label.configure(text=f"目标: {single_target}", text_color=COLORS["muted"])
+            self._proxy_target_label.configure(text=f"SSH 目标: {single_target}", text_color=COLORS["muted"])
         else:
-            self._proxy_target_label.configure(text="目标: 未选择服务器", text_color=COLORS["warning"])
+            self._proxy_target_label.configure(text="SSH 目标: 未选择服务器", text_color=COLORS["warning"])
 
     def _set_proxy_busy(self, busy: bool):
         self._proxy_busy = busy

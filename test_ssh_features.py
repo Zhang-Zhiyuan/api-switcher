@@ -8,6 +8,7 @@ from core import persistent_env, profile_manager, remote_auto_continue, remote_c
 from core.ssh_manager import SSHManager, ssh_manager
 from core.ssh_profile_builder import build_ssh_profile_from_data
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile, SSHProfile
+from ui.tabs.ssh_tab import _format_server_batch_item
 
 
 @pytest.fixture()
@@ -53,6 +54,11 @@ def test_ssh_builder_preserves_password_when_editing_metadata(isolated_ssh):
     assert profile.host == "new.example.com"
     assert profile.port == 2200
     assert security.get_secret(profile.password_ref) == "secret-password"
+
+
+def test_format_server_batch_item_avoids_duplicate_server_prefix():
+    assert _format_server_batch_item("4090", "4090: AI 代理已清理") == "4090: AI 代理已清理"
+    assert _format_server_batch_item("4090", "已同步配置") == "4090: 已同步配置"
 
 
 def test_ssh_rename_copies_secret_and_removes_old_ref(isolated_ssh, monkeypatch):
