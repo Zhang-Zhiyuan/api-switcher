@@ -473,7 +473,33 @@ def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     assert ". /home/me/.config/api-switcher/ai-proxy.env" in profile_block
     assert vscode_setup.startswith("#!/bin/sh")
     assert "Loaded by VS Code Remote Server" in vscode_setup
+    assert remote_proxy.VSCODE_ENV_BLOCK_START in vscode_setup
     assert "set -gx HTTP_PROXY http://127.0.0.1:7890" in fish_config
+
+
+def test_vscode_server_env_setup_preserves_custom_content_and_replaces_managed_block():
+    existing = """#!/bin/sh
+export KEEP_ME=1
+
+# >>> API切换器 AI proxy VS Code >>>
+old managed content
+# <<< API切换器 AI proxy VS Code <<<
+
+export AFTER=2
+"""
+
+    merged = remote_proxy._merge_vscode_server_env_setup(
+        existing,
+        "/home/me/.config/api-switcher/ai-proxy.env",
+        "/home/me/.config/api-switcher/start-ai-proxy.sh",
+    )
+
+    assert merged.startswith("#!/bin/sh\n")
+    assert "export KEEP_ME=1" in merged
+    assert "export AFTER=2" in merged
+    assert "old managed content" not in merged
+    assert merged.count(remote_proxy.VSCODE_ENV_BLOCK_START) == 1
+    assert ". /home/me/.config/api-switcher/ai-proxy.env" in merged
 
 
 def test_apply_vscode_proxy_settings_preserves_existing_terminal_env():

@@ -1398,6 +1398,9 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _deploy_ai_proxy(self):
         server_names = self._selected_sync_server_names()
         if not server_names:
+            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         proxy_text = self._proxy_node_input()
         try:
@@ -1445,6 +1448,9 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _inspect_ai_proxy(self):
         server_names = self._selected_sync_server_names()
         if not server_names:
+            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         target_label = self._format_server_target(server_names)
 

@@ -9,6 +9,7 @@ import posixpath
 import re
 import shlex
 import time
+import uuid
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +61,9 @@ VSCODE_SERVER_ENV_SETUP_PATHS = (
     "~/.vscode-server-insiders/server-env-setup",
     "~/.cursor-server/server-env-setup",
 )
+
+VSCODE_ENV_BLOCK_START = "# >>> API切换器 AI proxy VS Code >>>"
+VSCODE_ENV_BLOCK_END = "# <<< API切换器 AI proxy VS Code <<<"
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -261,9 +265,12 @@ def save_proxy_subscription_state(**updates) -> dict:
         state[key] = value
     state["updated_at"] = _now_iso()
     path = _proxy_subscription_state_path()
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(path)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return state
 
 
@@ -391,7 +398,7 @@ def install_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> 
         detail = (stderr or stdout or "").strip()
         raise RuntimeError(f"远端 AI 代理配置失败: {detail or status}")
     _write_shell_profile_block(client, home, env_path, start_path, mixed_port)
-    vscode_targets = _write_vscode_proxy_entrypoints(client, home, env_path, start_path, mixed_port)
+    vscode_targets = _write_vscode_proxy_entrypoints(client, env_path, start_path, mixed_port)
     result = (stdout or "").strip().splitlines()
     suffix = f"；{result[-1]}" if result else ""
     return (
@@ -1162,7 +1169,12 @@ def _save_proxy_subscription(url: str, payload: bytes, content_type: str) -> Pat
     directory = _proxy_subscription_dir()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"subscription-{digest}{extension}"
-    path.write_bytes(payload)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_bytes(payload)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return Path(path)
 
 
@@ -1645,27 +1657,54 @@ done
 
 
 def _build_vscode_server_env_setup(env_path: str, start_path: str) -> str:
-    block = "\n".join([
-        "#!/bin/sh",
+    return _merge_vscode_server_env_setup("", env_path, start_path)
+
+
+def _build_vscode_server_env_block(env_path: str, start_path: str) -> str:
+    return "\n".join([
+        VSCODE_ENV_BLOCK_START,
         "# Managed by API切换器. Loaded by VS Code Remote Server when supported.",
         f"if [ -x {shlex.quote(start_path)} ]; then {shlex.quote(start_path)} >/dev/null 2>&1 & fi",
         f"if [ -f {shlex.quote(env_path)} ]; then . {shlex.quote(env_path)}; fi",
+        VSCODE_ENV_BLOCK_END,
         "",
     ])
-    return block
+
+
+def _merge_vscode_server_env_setup(existing: str, env_path: str, start_path: str) -> str:
+    block = _build_vscode_server_env_block(env_path, start_path).rstrip()
+    existing = (existing or "").replace("\r\n", "\n")
+    lines = existing.splitlines()
+    output = []
+    skipping = False
+    for line in lines:
+        if line.strip() == VSCODE_ENV_BLOCK_START:
+            skipping = True
+            continue
+        if line.strip() == VSCODE_ENV_BLOCK_END:
+            skipping = False
+            continue
+        if not skipping:
+            output.append(line)
+
+    while output and not output[-1].strip():
+        output.pop()
+    if output:
+        return "\n".join(output) + "\n\n" + block + "\n"
+    return "#!/bin/sh\n" + block + "\n"
 
 
 def _write_vscode_proxy_entrypoints(
     client,
-    home: str,
     env_path: str,
     start_path: str,
     mixed_port: int,
 ) -> int:
-    setup_content = _build_vscode_server_env_setup(env_path, start_path)
     written = 0
     for raw_path in VSCODE_SERVER_ENV_SETUP_PATHS:
         path = remote_config._expand_remote_path(client, raw_path)
+        existing = ssh_manager.read_remote_file(client, path) or ""
+        setup_content = _merge_vscode_server_env_setup(existing, env_path, start_path)
         ssh_manager.write_remote_file(client, path, setup_content, file_mode=0o700)
         written += 1
     written += _write_vscode_proxy_settings(client, mixed_port)
