@@ -58,6 +58,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_busy = False
         self._proxy_saved_subscription_loaded = False
         self._proxy_node_text = None
+        self._proxy_target_label = None
+        self._proxy_cache_label = None
+        self._proxy_selected_label = None
+        self._proxy_load_file_button = None
+        self._proxy_deploy_button = None
+        self._proxy_inspect_button = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
             "全部项目": "all",
@@ -447,6 +453,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(side="left", padx=(10, 0))
+        ctk.CTkFrame(proxy_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
+        self._proxy_target_label = ctk.CTkLabel(
+            proxy_header,
+            text="目标: 未选择服务器",
+            text_color=COLORS["warning"],
+            font=font(12, "bold"),
+        )
+        self._proxy_target_label.pack(side="right")
 
         proxy_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -457,19 +471,26 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             proxy_controls,
+            text="1 订阅来源",
+            text_color=COLORS["text"],
+            font=font(13, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=4, sticky="ew")
+        ctk.CTkLabel(
+            proxy_controls,
             text="订阅链接",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_entry = ctk.CTkEntry(
             proxy_controls,
             placeholder_text="粘贴 Clash/mihomo 订阅链接；只保存在本机缓存，不写入远端",
             **input_style(),
         )
-        self._proxy_subscription_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(8, 8))
+        self._proxy_subscription_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         proxy_sub_action_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_sub_action_frame.grid(row=0, column=3, sticky="e")
+        proxy_sub_action_frame.grid(row=1, column=3, sticky="e", pady=(8, 0))
         self._proxy_fetch_button = ctk.CTkButton(
             proxy_sub_action_frame,
             text="拉取订阅",
@@ -490,80 +511,118 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
         )
         self._proxy_auto_refresh_check.pack(side="left")
+        self._proxy_cache_label = ctk.CTkLabel(
+            proxy_controls,
+            text="本机缓存: 未加载",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._proxy_cache_label.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        bind_wraplength(proxy_controls, self._proxy_cache_label, padding=20)
 
+        ctk.CTkLabel(
+            proxy_controls,
+            text="2 节点选择",
+            text_color=COLORS["text"],
+            font=font(13, "bold"),
+            anchor="w",
+        ).grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ctk.CTkLabel(
             proxy_controls,
             text="订阅节点",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_combo = ctk.CTkComboBox(
             proxy_controls,
             values=["请先拉取订阅"],
             state="disabled",
             **combo_style(),
         )
-        self._proxy_subscription_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
+        self._proxy_subscription_combo.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._proxy_subscription_combo.set("请先拉取订阅")
         self._proxy_use_node_button = ctk.CTkButton(
             proxy_controls,
-            text="使用节点",
-            width=86,
+            text="填入待部署",
+            width=98,
             command=self._use_selected_proxy_subscription_node,
             state="disabled",
             **button_style("accent", compact=True),
         )
-        self._proxy_use_node_button.grid(row=1, column=3, sticky="e", pady=(10, 0))
-
-        ctk.CTkLabel(
+        self._proxy_use_node_button.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
-            text="部署节点",
-            text_color=COLORS["muted"],
-            width=82,
-            anchor="w",
-        ).grid(row=2, column=0, sticky="nw", pady=(12, 0))
-        self._proxy_node_text = ctk.CTkTextbox(
-            proxy_controls,
-            height=96,
-            **textbox_style(monospace=True),
-        )
-        self._proxy_node_text.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(12, 0))
-
-        proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_button_frame.grid(row=2, column=3, sticky="ne", pady=(12, 0))
-        ctk.CTkButton(
-            proxy_button_frame,
-            text="选择文件",
-            width=86,
-            command=self._load_proxy_node_file,
-            **button_style("secondary", compact=True),
-        ).pack(anchor="e", pady=(0, 6))
-        ctk.CTkButton(
-            proxy_button_frame,
-            text="部署代理",
-            width=86,
-            command=self._deploy_ai_proxy,
-            **button_style("accent", compact=True),
-        ).pack(anchor="e", pady=(0, 6))
-        ctk.CTkButton(
-            proxy_button_frame,
-            text="检查状态",
-            width=86,
-            command=self._inspect_ai_proxy,
-            **button_style("secondary", compact=True),
-        ).pack(anchor="e")
-
-        self._proxy_status_label = ctk.CTkLabel(
-            proxy_controls,
-            text="可从订阅链接拉取节点列表，也可粘贴单个 Clash 节点或选择 YAML/TXT 文件；部署只会把当前“部署节点”写入远端。",
+            text="待部署节点: 未选择",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._proxy_status_label.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._proxy_selected_label.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        bind_wraplength(proxy_controls, self._proxy_selected_label, padding=20)
+
+        ctk.CTkLabel(
+            proxy_controls,
+            text="3 远端部署",
+            text_color=COLORS["text"],
+            font=font(13, "bold"),
+            anchor="w",
+        ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        ctk.CTkLabel(
+            proxy_controls,
+            text="待部署节点",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=7, column=0, sticky="nw", pady=(8, 0))
+        self._proxy_node_text = ctk.CTkTextbox(
+            proxy_controls,
+            height=96,
+            **textbox_style(monospace=True),
+        )
+        self._proxy_node_text.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+
+        proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
+        proxy_button_frame.grid(row=7, column=3, sticky="ne", pady=(8, 0))
+        self._proxy_load_file_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="导入文件",
+            width=86,
+            command=self._load_proxy_node_file,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_load_file_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_deploy_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="部署到远端",
+            width=86,
+            command=self._deploy_ai_proxy,
+            **button_style("accent", compact=True),
+        )
+        self._proxy_deploy_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_inspect_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="检查远端",
+            width=86,
+            command=self._inspect_ai_proxy,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_inspect_button.pack(anchor="e")
+
+        self._proxy_status_label = ctk.CTkLabel(
+            proxy_controls,
+            text="本机订阅只用于选择节点；点击“部署到远端”后才会改服务器。已部署后请重连 VS Code Remote 或新开远端终端。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._proxy_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
+        self._update_proxy_target_label()
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
         auto_header.pack(fill="x", padx=14, pady=(4, 5))
@@ -997,6 +1056,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._sync_current_button.configure(text=current_text)
         if self._sync_selected_button:
             self._sync_selected_button.configure(text=selected_text)
+        self._update_proxy_target_label()
 
     def _update_batch_target_label(self, server_names: list[str] | None = None):
         all_names = server_names if server_names is not None else self._profile_server_names()
@@ -1089,6 +1149,42 @@ class SSHTab(ctk.CTkScrollableFrame):
         }.get(severity, COLORS["muted"])
         self._proxy_status_label.configure(text=message, text_color=color)
 
+    def _set_proxy_cache_status(self, message: str, severity: str = "info"):
+        if not self._proxy_cache_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._proxy_cache_label.configure(text=message, text_color=color)
+
+    def _set_proxy_selected_summary(self, message: str, severity: str = "info"):
+        if not self._proxy_selected_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._proxy_selected_label.configure(text=message, text_color=color)
+
+    def _update_proxy_target_label(self):
+        if not self._proxy_target_label:
+            return
+        selected = self._ordered_server_names(self._selected_server_names)
+        if selected:
+            self._proxy_target_label.configure(
+                text=f"目标: {self._format_server_target(selected)}",
+                text_color=COLORS["accent"],
+            )
+            return
+        single_target = self._single_target_name_for_ui()
+        if single_target:
+            self._proxy_target_label.configure(text=f"目标: {single_target}", text_color=COLORS["muted"])
+        else:
+            self._proxy_target_label.configure(text="目标: 未选择服务器", text_color=COLORS["warning"])
+
     def _set_proxy_busy(self, busy: bool):
         self._proxy_busy = busy
         state = "disabled" if busy else "normal"
@@ -1121,10 +1217,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_subscription_nodes(cached.nodes)
             self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
             self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+            self._set_proxy_cache_status(
+                f"本机缓存: {len(cached.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}",
+                "success",
+            )
             self._set_proxy_status(
                 f"已加载本机缓存订阅: {len(cached.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}"
             )
         elif url:
+            self._set_proxy_cache_status("本机缓存: 未找到可用节点", "warning")
             self._set_proxy_status("已恢复订阅链接；尚未找到可用本机缓存，可手动拉取订阅。", "warning")
 
         if url and auto_refresh:
@@ -1143,7 +1244,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         enabled = bool(self._proxy_auto_refresh_var.get())
         remote_proxy.set_proxy_subscription_auto_refresh(enabled)
         if enabled:
-            self._set_proxy_status("已开启启动自动刷新；下次打开会自动重新拉取订阅。", "success")
+            self._set_proxy_status("已开启启动自动刷新；下次打开会自动重新拉取订阅并保留可用缓存。", "success")
             if self._proxy_subscription_url_input():
                 self._fetch_proxy_subscription(auto=True, show_message=False)
         else:
@@ -1186,6 +1287,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         self._set_proxy_busy(True)
+        self._set_proxy_cache_status("本机缓存: 正在刷新订阅..." if auto else "本机缓存: 正在拉取订阅...")
         self._set_proxy_status("正在自动刷新订阅..." if auto else "正在拉取订阅并解析节点...")
 
         def run():
@@ -1202,9 +1304,11 @@ class SSHTab(ctk.CTkScrollableFrame):
                     if auto and self._proxy_subscription_options:
                         message = f"自动刷新失败，已保留本机缓存: {payload['error']}"
                         severity = "warning"
+                        self._set_proxy_cache_status("本机缓存: 自动刷新失败，继续使用已有节点", "warning")
                     else:
                         message = f"订阅拉取失败: {payload['error']}"
                         severity = "error"
+                        self._set_proxy_cache_status("本机缓存: 拉取失败", "error")
                     self._set_proxy_status(message, severity)
                     if show_message:
                         show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -1217,6 +1321,10 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._use_selected_proxy_subscription_node(show_message=False)
                 else:
                     self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+                self._set_proxy_cache_status(
+                    f"本机缓存: 已保存 {len(result.nodes)} 个节点；刚刚拉取",
+                    "success",
+                )
                 message = f"订阅已保存到本机缓存；识别到 {len(result.nodes)} 个节点，已填入当前选择。"
                 self._set_proxy_status(message, "success")
                 if show_message:
@@ -1247,7 +1355,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_node_text.insert("1.0", node_text)
         if persist_selection:
             remote_proxy.set_proxy_subscription_selected_node(item.node)
-        message = f"已选择订阅节点: {remote_proxy.describe_proxy_node(item.node)}"
+        node_summary = remote_proxy.describe_proxy_node(item.node)
+        self._set_proxy_selected_summary(f"待部署节点: {node_summary}", "success")
+        message = f"已填入待部署节点: {node_summary}"
         self._set_proxy_status(message, "success")
         if show_message:
             show_toast(self.winfo_toplevel(), message)
@@ -1279,8 +1389,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_node_text.insert("1.0", content.strip())
         try:
             node_summary = remote_proxy.describe_proxy_node(remote_proxy.parse_proxy_node(content))
+            self._set_proxy_selected_summary(f"待部署节点: {node_summary}", "success")
             self._set_proxy_status(f"已载入代理文件: {Path(path).name}；将使用节点 {node_summary}", "success")
         except Exception as e:
+            self._set_proxy_selected_summary("待部署节点: 文件内容暂未识别", "warning")
             self._set_proxy_status(f"已载入代理文件: {Path(path).name}；暂未识别到可用节点: {e}", "warning")
 
     def _deploy_ai_proxy(self):
@@ -1291,6 +1403,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         try:
             proxy_node = remote_proxy.parse_proxy_node(proxy_text)
             node_summary = remote_proxy.describe_proxy_node(proxy_node)
+            self._set_proxy_selected_summary(f"待部署节点: {node_summary}", "success")
         except Exception as e:
             message = f"代理节点格式不正确: {e}"
             self._set_proxy_status(message, "error")
@@ -1322,7 +1435,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             title="部署远端 AI 代理",
             message=(
                 f"将把当前 Clash 节点写入 {target_label}，安装/复用 mihomo，"
-                "并写入受管 shell 代理环境。\n"
+                "并写入 VS Code Remote/Codex/Claude Code 远端环境入口。\n"
                 f"识别到节点: {node_summary}\n"
                 "规则只代理 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名，其余 DIRECT。确定继续吗？"
             ),
