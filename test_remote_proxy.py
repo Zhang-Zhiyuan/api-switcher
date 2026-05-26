@@ -449,6 +449,104 @@ def test_start_script_checks_port_with_netstat_when_ss_is_missing():
     script = remote_proxy._build_start_script("/home/me/.config/mihomo", "/home/me/.config/api-switcher", "/home/me/bin", 7890)
 
     assert "command -v netstat" in script
+    assert "pid_managed()" in script
+    assert "kill -9" in script
+    assert "pid file points to unmanaged process" in script
+    assert "port $PORT is already listening before starting mihomo" in script
+
+
+def test_remote_install_command_retries_mihomo_downloads_with_user_agent():
+    command = remote_proxy._build_install_command(
+        "/home/me",
+        "/home/me/.config/mihomo",
+        "/home/me/.config/api-switcher",
+        "/home/me/.local/bin",
+        "/home/me/.config/api-switcher/start-ai-proxy.sh",
+        7890,
+    )
+
+    assert "User-Agent" in command
+    assert "API-Switcher/1.0" in command
+    assert "for attempt in range(1, 4)" in command
+    assert "download failed after 3 attempts" in command
+
+
+def test_build_remote_probe_command_covers_python_and_curl_fallbacks():
+    command = remote_proxy._build_probe_command(7890, timeout=9)
+
+    assert "PROXY=http://127.0.0.1:7890" in command
+    assert "TIMEOUT=9" in command
+    assert "urllib.request.ProxyHandler" in command
+    assert "command -v curl" in command
+    assert "OpenAI/ChatGPT" in command
+    assert "Gemini/Google AI" in command
+
+
+def test_parse_remote_probe_output_formats_result_summaries():
+    results = remote_proxy._parse_remote_probe_output(
+        "noise\n"
+        "probe\tOpenAI/ChatGPT\t1\tHTTP 403\t11\n"
+        "probe\tGemini/Google AI\t0\ttimeout\t13\n"
+    )
+
+    assert len(results) == 2
+    assert results[0].ok is True
+    assert results[0].summary() == "OpenAI/ChatGPT: 可达 / HTTP 403 / 11ms"
+    assert results[1].summary() == "Gemini/Google AI: 失败 / timeout / 13ms"
+
+
+def test_probe_ai_proxy_skips_network_probe_when_remote_proxy_is_not_running(monkeypatch):
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=True,
+            running=False,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+        ),
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "_connect_ssh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not connect")),
+    )
+
+    summary = remote_proxy.probe_ai_proxy("server-a")
+
+    assert "代理未运行，跳过 AI 连通性探测" in summary
+
+
+def test_probe_ai_proxy_combines_status_and_remote_probe_results(monkeypatch):
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+        ),
+    )
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, object()))
+
+    def fake_execute(_client, command, **kwargs):
+        assert "PROXY=http://127.0.0.1:7890" in command
+        assert kwargs["log_command"] is False
+        return (
+            0,
+            "probe\tOpenAI/ChatGPT\t1\tHTTP 403\t11\n"
+            "probe\tGemini/Google AI\t0\ttimeout\t13\n",
+            "",
+        )
+
+    monkeypatch.setattr(remote_proxy.ssh_manager, "execute_command_with_status", fake_execute)
+
+    summary = remote_proxy.probe_ai_proxy("server-a")
+
+    assert "AI 代理已配置，运行中" in summary
+    assert "AI 连通性 1/2 可达" in summary
+    assert "OpenAI/ChatGPT: 可达 / HTTP 403 / 11ms" in summary
 
 
 def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():

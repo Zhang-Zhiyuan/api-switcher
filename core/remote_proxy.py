@@ -44,6 +44,12 @@ AI_PROXY_DOMAINS = (
     "makersuite.google.com",
 )
 
+REMOTE_AI_PROBE_TARGETS = (
+    ("OpenAI/ChatGPT", "https://chatgpt.com/cdn-cgi/trace"),
+    ("Claude/Anthropic", "https://api.anthropic.com/"),
+    ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
+)
+
 PROXY_ENV_KEYS = (
     "API_SWITCHER_AI_PROXY_URL",
     "HTTP_PROXY",
@@ -96,6 +102,20 @@ class RemoteAIProxyStatus:
         installed = "已配置" if self.installed else "未配置"
         detail = f"；{self.detail}" if self.detail else ""
         return f"AI 代理{installed}，{state}: {self.proxy_url}{detail}"
+
+
+@dataclass(frozen=True)
+class RemoteAIProxyProbeResult:
+    label: str
+    ok: bool
+    detail: str = ""
+    elapsed_ms: int = 0
+
+    def summary(self) -> str:
+        prefix = "可达" if self.ok else "失败"
+        elapsed = f"{self.elapsed_ms}ms" if self.elapsed_ms else ""
+        pieces = [piece for piece in (prefix, self.detail, elapsed) if piece]
+        return f"{self.label}: {' / '.join(pieces)}"
 
 
 @dataclass(frozen=True)
@@ -411,22 +431,40 @@ def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStat
     _ssh_profile, client = _connect_ssh(ssh_name)
     home = remote_config._remote_home(client)
     config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
+    env_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.env")
+    start_path = posixpath.join(home, ".config", "api-switcher", "start-ai-proxy.sh")
     pid_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.pid")
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    shell_paths = " ".join(shlex.quote(path) for path in _shell_proxy_profile_paths(home))
+    vscode_paths = " ".join(
+        shlex.quote(remote_config._expand_remote_path(client, path))
+        for path in VSCODE_SERVER_ENV_SETUP_PATHS
+    )
     command = f"""
 CONFIG={shlex.quote(config_path)}
+ENV_FILE={shlex.quote(env_path)}
+START_SCRIPT={shlex.quote(start_path)}
 PID_FILE={shlex.quote(pid_path)}
 PORT={mixed_port}
 installed=no
 running=no
 pid_running=no
+pid_managed=unknown
 port_listening=unknown
 [ -s "$CONFIG" ] && installed=yes
 if [ -s "$PID_FILE" ]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     pid_running=yes
-    running=yes
+    if command -v ps >/dev/null 2>&1; then
+      cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+      case "$cmd" in
+        *mihomo*|*clash*) pid_managed=yes; running=yes ;;
+        *) pid_managed=no ;;
+      esac
+    else
+      running=yes
+    fi
   fi
 fi
 if command -v ss >/dev/null 2>&1; then
@@ -436,23 +474,73 @@ elif command -v netstat >/dev/null 2>&1; then
   port_listening=no
   netstat -ltn 2>/dev/null | grep -q ":$PORT " && port_listening=yes && running=yes || true
 fi
-printf 'installed=%s\\nrunning=%s\\npid_running=%s\\nport_listening=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$port_listening" "$CONFIG"
+env_file=no
+start_script=no
+shell_entrypoints=0
+vscode_entrypoints=0
+[ -s "$ENV_FILE" ] && grep -q "HTTP_PROXY=http://127.0.0.1:$PORT" "$ENV_FILE" 2>/dev/null && env_file=yes
+[ -x "$START_SCRIPT" ] && start_script=yes
+for file in {shell_paths}; do
+  [ -f "$file" ] && grep -q "# >>> API切换器 AI proxy >>>" "$file" 2>/dev/null && shell_entrypoints=$((shell_entrypoints + 1))
+done
+for file in {vscode_paths}; do
+  [ -f "$file" ] && grep -q "{VSCODE_ENV_BLOCK_START}" "$file" 2>/dev/null && vscode_entrypoints=$((vscode_entrypoints + 1))
+done
+printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$CONFIG"
 """
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=20)
     if status != 0:
         raise RuntimeError((stderr or stdout or "远端 AI 代理状态检查失败").strip())
     values = _parse_key_values(stdout)
-    detail = ""
+    detail_parts = []
+    if values.get("pid_running") == "yes" and values.get("pid_managed") == "no":
+        detail_parts.append("pid 文件指向非 mihomo/clash 进程")
     if values.get("pid_running") == "yes" and values.get("port_listening") == "no":
-        detail = "进程存在，但端口未监听"
+        detail_parts.append("进程存在，但端口未监听")
     elif values.get("pid_running") == "no" and values.get("port_listening") == "yes":
-        detail = "端口已监听，但 pid 文件未更新"
+        detail_parts.append("端口已监听，但 pid 文件未更新")
+    if values.get("installed") == "yes":
+        if values.get("env_file") != "yes":
+            detail_parts.append("远端代理环境文件缺失或端口不匹配")
+        if values.get("start_script") != "yes":
+            detail_parts.append("远端启动脚本缺失或不可执行")
+        if _int_or_default(values.get("shell_entrypoints"), 0) <= 0:
+            detail_parts.append("shell 启动入口未检测到")
+        if _int_or_default(values.get("vscode_entrypoints"), 0) <= 0:
+            detail_parts.append("VS Code Remote 启动入口未检测到")
     return RemoteAIProxyStatus(
         installed=values.get("installed") == "yes",
         running=values.get("running") == "yes",
         config_path=values.get("config") or config_path,
         proxy_url=f"http://127.0.0.1:{mixed_port}",
-        detail=detail,
+        detail="；".join(detail_parts),
+    )
+
+
+def probe_ai_proxy(ssh_name: str, mixed_port: int = 7890, timeout: int = 8) -> str:
+    proxy_status = inspect_ai_proxy(ssh_name, mixed_port)
+    if not proxy_status.running:
+        return f"{ssh_name}: {proxy_status.summary()}；代理未运行，跳过 AI 连通性探测"
+
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    command = _build_probe_command(mixed_port, timeout)
+    exit_status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=max(30, timeout * 5),
+        log_command=False,
+    )
+    if exit_status != 0:
+        detail = (stderr or stdout or "").strip()
+        raise RuntimeError(f"远端 AI 代理连通性测试失败: {detail or exit_status}")
+    results = _parse_remote_probe_output(stdout)
+    if not results:
+        return f"{ssh_name}: 未得到连通性测试结果"
+    ok_count = sum(1 for item in results if item.ok)
+    return (
+        f"{ssh_name}: {proxy_status.summary()}；AI 连通性 {ok_count}/{len(results)} 可达；"
+        + "；".join(item.summary() for item in results)
     )
 
 
@@ -1479,18 +1567,64 @@ if [ -z "$BIN" ]; then
   echo "mihomo/clash not found" >&2
   exit 1
 fi
+pid_managed() {{
+  pid="$1"
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  if ! command -v ps >/dev/null 2>&1; then
+    return 0
+  fi
+  cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+  case "$cmd" in
+    *mihomo*|*clash*) return 0 ;;
+    *) return 1 ;;
+  esac
+}}
+port_listening() {{
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q ":$PORT "
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -q ":$PORT "
+    return $?
+  fi
+  return 2
+}}
 if [ -f "$PID_FILE" ]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    if [ "$RESTART" = "restart" ]; then
-      kill "$old_pid" 2>/dev/null || true
-      sleep 1
+    if pid_managed "$old_pid"; then
+      if [ "$RESTART" = "restart" ]; then
+        kill "$old_pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+          kill -0 "$old_pid" 2>/dev/null || break
+          sleep 1
+        done
+        if kill -0 "$old_pid" 2>/dev/null; then
+          kill -9 "$old_pid" 2>/dev/null || true
+        fi
+      else
+        exit 0
+      fi
     else
-      exit 0
+      rm -f "$PID_FILE"
+      if port_listening; then
+        echo "port $PORT is already listening, but pid file points to unmanaged process $old_pid" >&2
+        exit 5
+      fi
     fi
+  else
+    rm -f "$PID_FILE"
   fi
 fi
+if port_listening; then
+  echo "port $PORT is already listening before starting mihomo; please choose another port or stop the existing process" >&2
+  exit 6
+fi
 mkdir -p "$APP_DIR"
+printf '\\n--- API-Switcher AI proxy start %s ---\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date 2>/dev/null || true)" >>"$LOG_FILE"
 nohup "$BIN" -d "$CONFIG_DIR" >>"$LOG_FILE" 2>&1 &
 echo "$!" > "$PID_FILE"
 sleep 2
@@ -1499,21 +1633,117 @@ if [ -z "$new_pid" ] || ! kill -0 "$new_pid" 2>/dev/null; then
   echo "mihomo failed to stay running; see $LOG_FILE" >&2
   exit 2
 fi
-if command -v ss >/dev/null 2>&1; then
-  for _ in 1 2 3 4 5; do
-    ss -ltn 2>/dev/null | grep -q ":$PORT " && exit 0
-    sleep 1
-  done
-  echo "mihomo is running but port $PORT is not listening yet; see $LOG_FILE" >&2
-  exit 3
-elif command -v netstat >/dev/null 2>&1; then
-  for _ in 1 2 3 4 5; do
-    netstat -ltn 2>/dev/null | grep -q ":$PORT " && exit 0
-    sleep 1
-  done
+if ! pid_managed "$new_pid"; then
+  echo "started process is not recognized as mihomo/clash; see $LOG_FILE" >&2
+  exit 7
+fi
+for _ in 1 2 3 4 5; do
+  if port_listening; then
+    exit 0
+  fi
+  sleep 1
+done
+if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
   echo "mihomo is running but port $PORT is not listening yet; see $LOG_FILE" >&2
   exit 3
 fi
+echo "mihomo is running; ss/netstat not found, skipped port listening verification"
+exit 0
+"""
+
+
+def _build_probe_command(mixed_port: int, timeout: int = 8) -> str:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    try:
+        timeout = max(1, min(60, int(timeout)))
+    except (TypeError, ValueError):
+        timeout = 8
+    targets_json = json.dumps(REMOTE_AI_PROBE_TARGETS, ensure_ascii=False)
+    curl_probes = "\n".join(
+        f"probe_curl {shlex.quote(label)} {shlex.quote(url)}"
+        for label, url in REMOTE_AI_PROBE_TARGETS
+    )
+    return f"""set -u
+PROXY=http://127.0.0.1:{mixed_port}
+TIMEOUT={timeout}
+TARGETS_JSON={shlex.quote(targets_json)}
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$PROXY" "$TIMEOUT" "$TARGETS_JSON" <<'PY'
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+
+proxy_url = sys.argv[1]
+timeout = float(sys.argv[2])
+targets = json.loads(sys.argv[3])
+opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({{"http": proxy_url, "https": proxy_url}})
+)
+
+def clean(value):
+    return str(value or "").replace("\\t", " ").replace("\\r", " ").replace("\\n", " ")[:180]
+
+for label, url in targets:
+    started = time.monotonic()
+    ok = 0
+    detail = ""
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={{"Accept": "*/*", "User-Agent": "API-Switcher/1.0"}},
+        )
+        with opener.open(request, timeout=timeout) as response:
+            code = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+            ok = 1 if 0 < code < 500 else 0
+            detail = f"HTTP {{code}}" if code else "no status"
+    except urllib.error.HTTPError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        ok = 1 if 0 < code < 500 else 0
+        detail = f"HTTP {{code}}" if code else clean(exc)
+    except Exception as exc:
+        detail = clean(exc)
+    elapsed = max(0, int((time.monotonic() - started) * 1000))
+    print(f"probe\\t{{clean(label)}}\\t{{ok}}\\t{{clean(detail)}}\\t{{elapsed}}", flush=True)
+PY
+  exit $?
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "远端未安装 python3/curl，无法测试代理连通性" >&2
+  exit 11
+fi
+TMP_ERR="${{TMPDIR:-/tmp}}/api-switcher-ai-proxy-probe.$$.err"
+cleanup() {{
+  rm -f "$TMP_ERR"
+}}
+trap cleanup EXIT HUP INT TERM
+probe_curl() {{
+  label="$1"
+  url="$2"
+  http_code=""
+  rc=0
+  http_code="$(curl -x "$PROXY" -m "$TIMEOUT" -sS -o /dev/null -w "%{{http_code}}" "$url" 2>"$TMP_ERR")" || rc=$?
+  ok=0
+  detail=""
+  case "$http_code" in
+    ''|*[!0-9]*)
+      detail="$(head -n 1 "$TMP_ERR" 2>/dev/null | tr '\\t\\r\\n' '   ' | cut -c 1-180)"
+      [ -n "$detail" ] || detail="curl exit $rc"
+      ;;
+    *)
+      detail="HTTP $http_code"
+      if [ "$http_code" -gt 0 ] && [ "$http_code" -lt 500 ]; then
+        ok=1
+      elif [ "$rc" -ne 0 ]; then
+        err="$(head -n 1 "$TMP_ERR" 2>/dev/null | tr '\\t\\r\\n' '   ' | cut -c 1-180)"
+        [ -n "$err" ] && detail="$detail $err"
+      fi
+      ;;
+  esac
+  printf 'probe\\t%s\\t%s\\t%s\\t\\n' "$label" "$ok" "$detail"
+}}
+{curl_probes}
 """
 
 
@@ -1549,11 +1779,31 @@ import gzip
 import json
 import os
 import sys
+import time
 import urllib.request
 
 pattern, target = sys.argv[1], sys.argv[2]
-with urllib.request.urlopen("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest", timeout=45) as response:
-    data = json.loads(response.read().decode("utf-8"))
+
+def read_url(url, timeout):
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={{
+                    "Accept": "application/vnd.github+json, application/octet-stream, */*",
+                    "User-Agent": "API-Switcher/1.0",
+                }},
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(attempt)
+    raise RuntimeError(f"download failed after 3 attempts: {{last_error}}") from last_error
+
+data = json.loads(read_url("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest", 45).decode("utf-8"))
 assets = data.get("assets") or []
 
 def usable(asset):
@@ -1568,8 +1818,7 @@ if not candidates:
 if not candidates:
     raise SystemExit(f"no mihomo asset matched {{pattern}}")
 url = candidates[0]["browser_download_url"]
-with urllib.request.urlopen(url, timeout=120) as response:
-    payload = response.read()
+payload = read_url(url, 180)
 if url.lower().endswith(".gz"):
     payload = gzip.decompress(payload)
 with open(target, "wb") as handle:
@@ -1785,3 +2034,20 @@ def _parse_key_values(text: str) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
     return values
+
+
+def _parse_remote_probe_output(text: str) -> tuple[RemoteAIProxyProbeResult, ...]:
+    results: list[RemoteAIProxyProbeResult] = []
+    for line in (text or "").splitlines():
+        if not line.startswith("probe\t"):
+            continue
+        _prefix, label, ok, detail, elapsed = (line.split("\t", 4) + ["", "", "", "", ""])[:5]
+        results.append(
+            RemoteAIProxyProbeResult(
+                label=(label or "unknown").strip(),
+                ok=ok == "1",
+                detail=(detail or "").strip(),
+                elapsed_ms=_int_or_default((elapsed or "").strip(), 0),
+            )
+        )
+    return tuple(results)
