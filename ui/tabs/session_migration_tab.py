@@ -1,11 +1,13 @@
 import logging
+import tempfile
 import threading
 from datetime import datetime
+from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core import session_migration
+from core import profile_manager, session_migration
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
@@ -29,6 +31,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._cards_frame = None
         self._stats_label = None
         self._filter_combo = None
+        self._source_location_combo = None
+        self._target_location_combo = None
+        self._location_options: dict[str, str] = {"本机": ""}
         self._provider_filter = "all"
         self._records: list[session_migration.SessionRecord] = []
         self._selected_keys: set[str] = set()
@@ -49,7 +54,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="读取 Claude Code / Codex CLI 本地历史会话，导出指定会话并在另一台机器导入。",
+            text="读取本机或 SSH 服务器上的 Claude Code / Codex CLI 历史会话，导出迁移包并导入到本机或其他 SSH 服务器。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -62,8 +67,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         actions.pack(side="right", padx=(12, 0))
         ctk.CTkButton(
             actions,
-            text="导入到项目",
-            width=112,
+            text="导入到目标项目",
+            width=128,
             command=self._import_package_to_project,
             **button_style("primary"),
         ).pack(side="left", padx=(8, 0))
@@ -83,6 +88,13 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         ).pack(side="left", padx=(8, 0))
         ctk.CTkButton(
             actions,
+            text="迁移到目标",
+            width=112,
+            command=self._transfer_selected_to_target,
+            **button_style("primary"),
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            actions,
             text="刷新",
             width=82,
             command=self.refresh,
@@ -97,11 +109,34 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             border_color=COLORS["border_soft"],
         )
         filter_bar.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(filter_bar, text="来源", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        self._refresh_location_options()
+        location_values = list(self._location_options.keys())
+        ctk.CTkLabel(filter_bar, text="读取位置", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        self._source_location_combo = ctk.CTkComboBox(
+            filter_bar,
+            values=location_values,
+            width=150,
+            command=self._on_source_location_change,
+            **combo_style(),
+        )
+        self._source_location_combo.set(location_values[0])
+        self._source_location_combo.pack(side="left", padx=(8, 0), pady=9)
+
+        ctk.CTkLabel(filter_bar, text="导入目标", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        self._target_location_combo = ctk.CTkComboBox(
+            filter_bar,
+            values=location_values,
+            width=150,
+            **combo_style(),
+        )
+        self._target_location_combo.set(location_values[0])
+        self._target_location_combo.pack(side="left", padx=(8, 0), pady=9)
+
+        ctk.CTkLabel(filter_bar, text="会话类型", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
         self._filter_combo = ctk.CTkComboBox(
             filter_bar,
             values=list(self.FILTER_OPTIONS.keys()),
-            width=140,
+            width=120,
             command=self._on_filter_change,
             **combo_style(),
         )
@@ -128,7 +163,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
         warning = ctk.CTkLabel(
             self,
-            text="会话迁移包会包含完整对话内容和工具记录，可能包含敏感信息；跨机器导入不会迁移账号登录态或 API Key。",
+            text="会话迁移包会包含完整对话内容和工具记录，可能包含敏感信息；导入本机或 SSH 服务器只迁移历史会话，不迁移账号登录态或 API Key。",
             text_color=COLORS["warning"],
             font=font(12),
             anchor="w",
@@ -145,17 +180,20 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def refresh(self):
         if not self._cards_frame:
             return
+        self._refresh_location_options()
         self._refresh_generation += 1
         generation = self._refresh_generation
         provider_filter = self._provider_filter
+        source_ssh_name = self._current_source_ssh_name()
+        source_label = self._endpoint_label(source_ssh_name)
         for widget in self._cards_frame.winfo_children():
             widget.destroy()
 
         if self._stats_label:
-            self._stats_label.configure(text="正在读取本机会话...")
+            self._stats_label.configure(text=f"正在读取{source_label}会话...")
         ctk.CTkLabel(
             self._cards_frame,
-            text="正在读取本机会话...",
+            text=f"正在读取{source_label}会话...",
             text_color=COLORS["muted"],
             font=font(13),
         ).pack(fill="x", pady=(22, 6))
@@ -163,7 +201,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         def worker():
             try:
                 payload = {
-                    "records": session_migration.list_sessions(provider_filter),
+                    "records": session_migration.list_sessions(provider_filter, ssh_name=source_ssh_name),
                     "error": None,
                 }
             except Exception as exc:
@@ -205,7 +243,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             EmptyState(
                 self._cards_frame,
                 "没有找到本机会话",
-                "Claude Code 会话通常在 ~/.claude/projects，Codex CLI 会话通常在 ~/.codex/sessions。",
+                "本机或 SSH 上的 Claude Code 会话通常在 ~/.claude/projects，Codex CLI 会话通常在 ~/.codex/sessions。",
                 "刷新",
                 self.refresh,
             ).pack(fill="x", pady=(12, 4))
@@ -245,6 +283,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         info_frame = ctk.CTkFrame(card, fg_color="transparent")
         info_frame.pack(fill="x", padx=14, pady=(0, 10))
         info_lines = [
+            f"位置: {'SSH ' + record.ssh_name if record.origin == 'ssh' else '本机'}",
             f"更新时间: {self._display_time(record.updated_at)}  |  消息数: {record.message_count}  |  大小: {session_migration.format_size(record.size_bytes)}",
             f"会话 ID: {record.session_id}",
             f"项目: {record.project_path or record.project_key or '(未知)'}",
@@ -269,6 +308,10 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     def _on_filter_change(self, label: str):
         self._provider_filter = self.FILTER_OPTIONS.get(label, "all")
+        self.refresh()
+
+    def _on_source_location_change(self, _label: str):
+        self._selected_keys.clear()
         self.refresh()
 
     def _toggle_selected(self, key: str, selected: bool):
@@ -302,7 +345,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         if not output_path:
             return
         try:
-            result = session_migration.export_sessions(output_path, self._selected_keys)
+            source_ssh_name = self._current_source_ssh_name()
+            result = self._export_current_selection_to_package(output_path, source_ssh_name)
             message = (
                 f"会话迁移包已导出: {result.session_count} 个会话, "
                 f"{result.file_count} 个文件, {session_migration.format_size(result.total_bytes)}"
@@ -317,10 +361,12 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         input_path = self._choose_package()
         if not input_path:
             return
+        target_ssh_name = self._current_target_ssh_name()
+        target_label = self._endpoint_label(target_ssh_name)
 
         def do_import():
             try:
-                result = session_migration.import_sessions(input_path, overwrite=False)
+                result = self._import_package_to_endpoint(input_path, target_ssh_name)
                 self._show_import_result(result)
             except Exception as exc:
                 show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
@@ -330,7 +376,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             title="确认导入会话",
             message=(
                 self._package_summary_text(input_path)
-                + "\n\n导入会把迁移包中的 Claude/Codex 会话写入本机对应历史目录；已有文件默认跳过，不会覆盖。"
+                + f"\n\n导入会把迁移包中的 Claude/Codex 会话写入{target_label}对应历史目录；已有文件默认跳过，不会覆盖。"
             ),
             on_confirm=do_import,
         )
@@ -339,20 +385,25 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         input_path = self._choose_package()
         if not input_path:
             return
-        target_project = filedialog.askdirectory(
-            parent=self.winfo_toplevel(),
-            title="选择新机器上的项目目录",
-        )
+        target_ssh_name = self._current_target_ssh_name()
+        target_label = self._endpoint_label(target_ssh_name)
+        if target_ssh_name:
+            dialog = ctk.CTkInputDialog(
+                title="输入远端项目目录",
+                text=f"请输入 {target_label} 上的新项目目录，例如 /home/user/project",
+            )
+            target_project = (dialog.get_input() or "").strip()
+        else:
+            target_project = filedialog.askdirectory(
+                parent=self.winfo_toplevel(),
+                title="选择新机器上的项目目录",
+            )
         if not target_project:
             return
 
         def do_import():
             try:
-                result = session_migration.import_sessions(
-                    input_path,
-                    overwrite=False,
-                    target_project_path=target_project,
-                )
+                result = self._import_package_to_endpoint(input_path, target_ssh_name, target_project)
                 self._show_import_result(result)
             except Exception as exc:
                 show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
@@ -362,7 +413,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             title="确认导入并重映射项目",
             message=(
                 self._package_summary_text(input_path)
-                + f"\n\n会话中的 cwd 会改写为:\n{target_project}\n\n"
+                + f"\n\n会话会导入到{target_label}；会话中的 cwd 会改写为:\n{target_project}\n\n"
                 "Claude 会话也会写入该项目对应的 projects 目录；已有文件默认跳过，不会覆盖。"
             ),
             on_confirm=do_import,
@@ -405,6 +456,147 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             message += f"，跳过无效条目 {result.skipped_invalid} 个"
         show_toast(self.winfo_toplevel(), message)
         self.refresh()
+
+    def _transfer_selected_to_target(self):
+        if not self._selected_keys:
+            show_toast(self.winfo_toplevel(), "请先选择要迁移的会话", is_error=True)
+            return
+        source_ssh_name = self._current_source_ssh_name()
+        target_ssh_name = self._current_target_ssh_name()
+        source_label = self._endpoint_label(source_ssh_name)
+        target_label = self._endpoint_label(target_ssh_name)
+        if source_ssh_name == target_ssh_name:
+            show_toast(self.winfo_toplevel(), "读取位置和导入目标相同，请选择不同目标", is_error=True)
+            return
+
+        def do_transfer():
+            self._run_transfer_task(source_ssh_name, target_ssh_name)
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="迁移选中会话",
+            message=(
+                f"将把已选 {len(self._selected_keys)} 个会话从{source_label}迁移到{target_label}。\n"
+                "会先生成临时会话包再导入目标；已有文件默认跳过，不会覆盖。"
+            ),
+            on_confirm=do_transfer,
+        )
+
+    def _run_transfer_task(self, source_ssh_name: str, target_ssh_name: str):
+        selected_keys = set(self._selected_keys)
+        provider_filter = self._provider_filter
+        if self._stats_label:
+            self._stats_label.configure(text="正在迁移选中会话...")
+
+        def worker():
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=session_migration.PACKAGE_EXTENSION) as handle:
+                    temp_path = Path(handle.name)
+                exported = self._export_current_selection_to_package(
+                    temp_path,
+                    source_ssh_name,
+                    selected_keys=selected_keys,
+                    provider_filter=provider_filter,
+                )
+                imported = self._import_package_to_endpoint(temp_path, target_ssh_name)
+                payload = {"ok": True, "exported": exported, "imported": imported, "error": None}
+            except Exception as exc:
+                payload = {"ok": False, "exported": None, "imported": None, "error": str(exc)}
+            finally:
+                if temp_path:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                if not payload["ok"]:
+                    show_toast(self.winfo_toplevel(), f"迁移失败: {payload['error']}", is_error=True)
+                    self.refresh()
+                    return
+                imported = payload["imported"]
+                message = f"会话已迁移到目标: {imported.session_count} 个会话, {imported.file_count} 个文件"
+                if imported.skipped_existing:
+                    message += f"，跳过已有文件 {imported.skipped_existing} 个"
+                if imported.skipped_invalid:
+                    message += f"，跳过无效条目 {imported.skipped_invalid} 个"
+                show_toast(self.winfo_toplevel(), message)
+                self.refresh()
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                logger.exception("Failed to schedule session transfer result")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_current_selection_to_package(
+        self,
+        output_path,
+        source_ssh_name: str,
+        selected_keys: set[str] | None = None,
+        provider_filter: str | None = None,
+    ):
+        keys = selected_keys or self._selected_keys
+        provider = provider_filter or self._provider_filter
+        if source_ssh_name:
+            return session_migration.export_remote_sessions(
+                source_ssh_name,
+                output_path,
+                keys,
+                provider=provider,
+            )
+        return session_migration.export_sessions(output_path, keys)
+
+    @staticmethod
+    def _import_package_to_endpoint(input_path, target_ssh_name: str, target_project_path: str | None = None):
+        if target_ssh_name:
+            return session_migration.import_sessions_to_ssh(
+                target_ssh_name,
+                input_path,
+                overwrite=False,
+                target_project_path=target_project_path,
+            )
+        return session_migration.import_sessions(
+            input_path,
+            overwrite=False,
+            target_project_path=target_project_path,
+        )
+
+    def _refresh_location_options(self):
+        current_source = self._source_location_combo.get() if self._source_location_combo else "本机"
+        current_target = self._target_location_combo.get() if self._target_location_combo else "本机"
+        options = {"本机": ""}
+        try:
+            for profile in profile_manager.list_ssh_profiles():
+                options[f"SSH: {profile.name}"] = profile.name
+        except Exception:
+            pass
+        self._location_options = options
+        values = list(options.keys())
+        for combo, current in ((self._source_location_combo, current_source), (self._target_location_combo, current_target)):
+            if not combo:
+                continue
+            try:
+                combo.configure(values=values)
+                combo.set(current if current in options else "本机")
+            except Exception:
+                pass
+
+    def _current_source_ssh_name(self) -> str:
+        label = self._source_location_combo.get() if self._source_location_combo else "本机"
+        return self._location_options.get(label, "")
+
+    def _current_target_ssh_name(self) -> str:
+        label = self._target_location_combo.get() if self._target_location_combo else "本机"
+        return self._location_options.get(label, "")
+
+    @staticmethod
+    def _endpoint_label(ssh_name: str | None) -> str:
+        return f" SSH: {ssh_name} " if ssh_name else "本机"
 
     def _display_time(self, value: str) -> str:
         if not value:

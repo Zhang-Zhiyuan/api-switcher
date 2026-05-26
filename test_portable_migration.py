@@ -1,7 +1,10 @@
 """Regression checks for password-protected portable profile migration."""
 import json
+import posixpath
+import stat
 import tempfile
 import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from config import paths
@@ -205,6 +208,243 @@ def test_session_migration_skips_invalid_package_entries(tmp_path):
     assert imported.skipped_invalid == 2
     assert (tmp_path / "codex" / "sessions" / "2026" / "05" / "01" / "good.jsonl").exists()
     assert not (tmp_path / "bad.jsonl").exists()
+
+
+class _RemoteAttr:
+    def __init__(self, filename: str, mode: int, size: int = 0, mtime: int = 1_779_000_000):
+        self.filename = filename
+        self.st_mode = mode
+        self.st_size = size
+        self.st_mtime = mtime
+
+
+class _RemoteReader(BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+
+class _RemoteWriter:
+    def __init__(self, sftp, path: str):
+        self.sftp = sftp
+        self.path = path
+        self.buffer = bytearray()
+
+    def write(self, data):
+        self.buffer.extend(data)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb):
+        if exc_type is None:
+            self.sftp.add_file(self.path, bytes(self.buffer))
+
+
+class _SessionSFTP:
+    def __init__(self, home: str = "/home/test"):
+        self.home = home
+        self.files: dict[str, bytes] = {}
+        self.dirs = {"/"}
+        self.mkdir_calls = []
+        self.chmod_calls = []
+        self.closed = False
+        self._ensure_dir(home)
+
+    def _ensure_dir(self, path: str):
+        normalized = posixpath.normpath(path)
+        parts = [part for part in normalized.split("/") if part]
+        current = "/"
+        self.dirs.add(current)
+        for part in parts:
+            current = posixpath.join(current, part)
+            self.dirs.add(current)
+
+    def add_file(self, path: str, data: bytes | str):
+        path = posixpath.normpath(path)
+        self._ensure_dir(posixpath.dirname(path))
+        self.files[path] = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+
+    def get_channel(self):
+        class Channel:
+            def settimeout(self, _timeout):
+                pass
+
+        return Channel()
+
+    def normalize(self, path):
+        return self.home if path == "." else posixpath.normpath(path)
+
+    def listdir_attr(self, path: str):
+        path = posixpath.normpath(path)
+        prefix = path.rstrip("/") + "/"
+        children = {}
+        for directory in self.dirs:
+            if directory == path or not directory.startswith(prefix):
+                continue
+            name = directory[len(prefix):].split("/", 1)[0]
+            children[name] = _RemoteAttr(name, stat.S_IFDIR | 0o700)
+        for file_path, data in self.files.items():
+            if not file_path.startswith(prefix):
+                continue
+            name = file_path[len(prefix):].split("/", 1)[0]
+            if "/" in file_path[len(prefix):]:
+                continue
+            children[name] = _RemoteAttr(name, stat.S_IFREG | 0o600, len(data))
+        return list(children.values())
+
+    def stat(self, path: str):
+        path = posixpath.normpath(path)
+        if path in self.files:
+            return _RemoteAttr(posixpath.basename(path), stat.S_IFREG | 0o600, len(self.files[path]))
+        if path in self.dirs:
+            return _RemoteAttr(posixpath.basename(path), stat.S_IFDIR | 0o700)
+        raise FileNotFoundError(path)
+
+    def open(self, path: str, mode: str):
+        path = posixpath.normpath(path)
+        if "r" in mode:
+            if path not in self.files:
+                raise FileNotFoundError(path)
+            return _RemoteReader(self.files[path])
+        return _RemoteWriter(self, path)
+
+    def mkdir(self, path: str):
+        self._ensure_dir(path)
+        self.mkdir_calls.append(posixpath.normpath(path))
+
+    def chmod(self, path: str, mode: int):
+        self.chmod_calls.append((posixpath.normpath(path), mode))
+
+    def rename(self, source: str, target: str):
+        self.files[posixpath.normpath(target)] = self.files.pop(posixpath.normpath(source))
+
+    def posix_rename(self, source: str, target: str):
+        self.rename(source, target)
+
+    def remove(self, path: str):
+        self.files.pop(posixpath.normpath(path), None)
+
+    def close(self):
+        self.closed = True
+
+
+class _SessionSSHClient:
+    def __init__(self, sftp: _SessionSFTP):
+        self.sftp = sftp
+
+    def open_sftp(self):
+        return self.sftp
+
+    def exec_command(self, _command, timeout=None):
+        return None, _RemoteReader(self.sftp.home.encode("utf-8")), _RemoteReader(b"")
+
+
+def _patch_session_ssh(monkeypatch, sftp: _SessionSFTP, name: str = "gpu"):
+    profile = SSHProfile(name=name, host="gpu.example.com", auth_type="password", password_ref="ssh:gpu:password")
+    client = _SessionSSHClient(sftp)
+    monkeypatch.setattr(session_migration.profile_manager, "list_ssh_profiles", lambda: [profile])
+    monkeypatch.setattr(session_migration.ssh_manager, "connect", lambda _profile: client)
+    return client
+
+
+def test_session_migration_supports_ssh_export_and_import(monkeypatch, tmp_path):
+    source_sftp = _SessionSFTP()
+    claude_file = "/home/test/.claude/projects/-home-test-proj/claude-session-remote.jsonl"
+    source_sftp.add_file(
+        claude_file,
+        "\n".join([
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:00Z",
+                "sessionId": "claude-session-remote",
+                "cwd": "/home/test/proj",
+                "message": {"content": [{"type": "text", "text": "远端 Claude 会话"}]},
+            }, ensure_ascii=False),
+            json.dumps({
+                "type": "assistant",
+                "timestamp": "2026-05-01T00:01:00Z",
+                "sessionId": "claude-session-remote",
+                "message": {"model": "opus", "content": "ok"},
+            }, ensure_ascii=False),
+        ]) + "\n",
+    )
+    source_sftp.add_file("/home/test/.claude/projects/-home-test-proj/claude-session-remote/tool-results/result.txt", "remote tool")
+    codex_file = "/home/test/.codex/sessions/2026/05/01/rollout-remote.jsonl"
+    source_sftp.add_file(
+        codex_file,
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-remote",
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "cwd": "/home/test/proj",
+                    "model_provider": "openai",
+                },
+            }, ensure_ascii=False),
+            json.dumps({
+                "timestamp": "2026-05-01T00:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "远端 Codex 会话"}],
+                },
+            }, ensure_ascii=False),
+        ]) + "\n",
+    )
+    source_sftp.add_file(
+        "/home/test/.codex/session_index.jsonl",
+        json.dumps({"id": "codex-remote", "thread_name": "远端 Codex 标题", "updated_at": "2026-05-01T00:02:00Z"}, ensure_ascii=False) + "\n",
+    )
+    _patch_session_ssh(monkeypatch, source_sftp)
+
+    records = session_migration.list_sessions("all", ssh_name="gpu")
+
+    assert {record.provider for record in records} == {"claude", "codex"}
+    assert all(record.origin == "ssh" and record.ssh_name == "gpu" for record in records)
+    assert any(record.summary == "远端 Claude 会话" for record in records)
+    assert any(record.title == "远端 Codex 标题" for record in records)
+
+    bundle = tmp_path / "remote.asxsession"
+    exported = session_migration.export_remote_sessions("gpu", bundle, {record.key for record in records})
+
+    assert exported.session_count == 2
+    assert exported.file_count == 3
+
+    imported = session_migration.import_sessions(
+        bundle,
+        claude_home=tmp_path / "local_claude",
+        codex_home=tmp_path / "local_codex",
+    )
+    assert imported.session_count == 2
+    assert (tmp_path / "local_claude" / "projects" / "-home-test-proj" / "claude-session-remote.jsonl").exists()
+    assert (
+        tmp_path
+        / "local_claude"
+        / "projects"
+        / "-home-test-proj"
+        / "claude-session-remote"
+        / "tool-results"
+        / "result.txt"
+    ).read_text(encoding="utf-8") == "remote tool"
+
+    target_sftp = _SessionSFTP()
+    _patch_session_ssh(monkeypatch, target_sftp)
+    remote_import = session_migration.import_sessions_to_ssh("gpu", bundle, target_project_path="/workspace/new")
+
+    assert remote_import.session_count == 2
+    remapped_claude = "/home/test/.claude/projects/-workspace-new/claude-session-remote.jsonl"
+    assert remapped_claude in target_sftp.files
+    assert json.loads(target_sftp.files[remapped_claude].decode("utf-8").splitlines()[0])["cwd"] == "/workspace/new"
+    assert "/home/test/.codex/sessions/2026/05/01/rollout-remote.jsonl" in target_sftp.files
+    codex_meta = json.loads(target_sftp.files["/home/test/.codex/sessions/2026/05/01/rollout-remote.jsonl"].decode("utf-8").splitlines()[0])
+    assert codex_meta["payload"]["cwd"] == "/workspace/new"
+    assert "远端 Codex 标题" in target_sftp.files["/home/test/.codex/session_index.jsonl"].decode("utf-8")
 
 
 def _reset_store() -> None:
