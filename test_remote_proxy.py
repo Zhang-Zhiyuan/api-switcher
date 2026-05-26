@@ -587,6 +587,7 @@ def test_inspect_local_proxy_reports_setting_drift(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "_is_managed_mihomo_pid", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
     monkeypatch.setattr(local_proxy, "_local_env_matches", lambda _port: False)
+    monkeypatch.setattr(local_proxy, "_windows_system_proxy_matches", lambda _port: False)
     monkeypatch.setattr(local_proxy, "_local_vscode_proxy_match_detail", lambda _port: "VS Code 本机设置未完全指向本机代理")
 
     status = local_proxy.inspect_local_ai_proxy()
@@ -594,7 +595,45 @@ def test_inspect_local_proxy_reports_setting_drift(monkeypatch, tmp_path):
     assert status.running is True
     assert "pid 文件指向非本工具代理进程" in status.detail
     assert "Windows 环境变量未完全指向本机代理" in status.detail
+    assert "Windows 系统代理未指向本机代理" in status.detail
     assert "VS Code 本机设置未完全指向本机代理" in status.detail
+
+
+def test_windows_system_proxy_expected_values_match_managed_proxy():
+    values = local_proxy._windows_system_proxy_expected_values(17897)
+
+    assert values["ProxyEnable"] == 1
+    assert values["ProxyServer"] == "127.0.0.1:17897"
+    assert local_proxy._windows_system_proxy_matches_values(values, 17897) is True
+    assert local_proxy._windows_system_proxy_matches_values({**values, "ProxyServer": "127.0.0.1:18000"}, 17897) is False
+
+
+def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("mixed-port: 17897", encoding="utf-8")
+    probes = [
+        local_proxy.LocalAIProxyProbeResult("OpenAI/ChatGPT", True, status=403, elapsed_ms=11),
+        local_proxy.LocalAIProxyProbeResult("Claude/Anthropic", True, status=405, elapsed_ms=12),
+        local_proxy.LocalAIProxyProbeResult("Gemini/Google AI", False, detail="timeout", elapsed_ms=13),
+    ]
+
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path=str(config_path),
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+    monkeypatch.setattr(local_proxy, "_probe_url_through_proxy", lambda *_args, **_kwargs: probes.pop(0))
+
+    summary = local_proxy.probe_local_ai_proxy()
+
+    assert "AI 连通性 2/3 可达" in summary
+    assert "OpenAI/ChatGPT: 可达 / HTTP 403 / 11ms" in summary
+    assert "Gemini/Google AI: 失败 / timeout / 13ms" in summary
 
 
 def test_read_url_with_retries_retries_transient_failure(monkeypatch):
@@ -639,10 +678,12 @@ def test_install_local_proxy_failure_reports_restore_errors(monkeypatch, tmp_pat
     monkeypatch.setattr(local_proxy, "_ensure_mihomo_binary", lambda: tmp_path / "mihomo.exe")
     monkeypatch.setattr(local_proxy, "_capture_previous_env", lambda: {})
     monkeypatch.setattr(local_proxy, "_capture_vscode_proxy_state", lambda _settings: {})
+    monkeypatch.setattr(local_proxy, "_capture_windows_system_proxy_state", lambda: {})
     monkeypatch.setattr(local_proxy.vscode_parser, "read_vscode_settings", lambda: {})
     monkeypatch.setattr(local_proxy, "_start_local_mihomo", lambda *_args: (_ for _ in ()).throw(RuntimeError("start failed")))
     monkeypatch.setattr(local_proxy, "_restore_local_env", lambda *_args: (_ for _ in ()).throw(RuntimeError("env restore failed")))
     monkeypatch.setattr(local_proxy, "_restore_local_vscode_proxy", lambda *_args: None)
+    monkeypatch.setattr(local_proxy, "_restore_windows_system_proxy", lambda *_args: None)
     monkeypatch.setattr(local_proxy, "_cleanup_managed_process", lambda *_args: None)
 
     with pytest.raises(RuntimeError) as excinfo:

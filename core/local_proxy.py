@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -29,6 +30,14 @@ LOCAL_PROXY_STATE_PATH = LOCAL_PROXY_DIR / "state.json"
 LOCAL_PROXY_LOG_PATH = LOCAL_PROXY_DIR / "mihomo.log"
 LOCAL_PROXY_PID_PATH = LOCAL_PROXY_DIR / "mihomo.pid"
 MIHOMO_DOWNLOAD_RETRIES = 3
+WINDOWS_SYSTEM_PROXY_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+WINDOWS_SYSTEM_PROXY_KEYS = ("ProxyEnable", "ProxyServer", "ProxyOverride")
+WINDOWS_SYSTEM_PROXY_OVERRIDE = "<local>;127.0.0.1;localhost;::1"
+LOCAL_AI_PROBE_TARGETS = (
+    ("OpenAI/ChatGPT", "https://chatgpt.com/cdn-cgi/trace"),
+    ("Claude/Anthropic", "https://api.anthropic.com/"),
+    ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +55,22 @@ class LocalAIProxyStatus:
         return f"本机 AI 代理{installed}，{state}: {self.proxy_url}{detail}"
 
 
+@dataclass(frozen=True)
+class LocalAIProxyProbeResult:
+    label: str
+    ok: bool
+    status: int | None = None
+    detail: str = ""
+    elapsed_ms: int = 0
+
+    def summary(self) -> str:
+        prefix = "可达" if self.ok else "失败"
+        status = f"HTTP {self.status}" if self.status else self.detail
+        elapsed = f"{self.elapsed_ms}ms" if self.elapsed_ms else ""
+        pieces = [piece for piece in (prefix, status, elapsed) if piece]
+        return f"{self.label}: {' / '.join(pieces)}"
+
+
 def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
@@ -61,12 +86,15 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         state["previous_env"] = _capture_previous_env()
     if not isinstance(state.get("previous_vscode"), dict):
         state["previous_vscode"] = _capture_vscode_proxy_state(vscode_parser.read_vscode_settings())
+    if not isinstance(state.get("previous_system_proxy"), dict):
+        state["previous_system_proxy"] = _capture_windows_system_proxy_state()
 
     config_path.write_text(remote_proxy.build_mihomo_config(proxy_node, mixed_port), encoding="utf-8")
     try:
         _start_local_mihomo(binary_path, mixed_port)
         _apply_local_env(mixed_port)
         _apply_local_vscode_proxy(mixed_port)
+        _apply_windows_system_proxy(mixed_port)
     except Exception as exc:
         restore_errors = _restore_managed_settings(state, mixed_port)
         _cleanup_managed_process(binary_path, state)
@@ -89,7 +117,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     _save_state(state)
     return (
         f"本机 AI 代理已启动: {proxy_url}；"
-        "已写入 Windows 用户环境变量和 VS Code 本机代理设置，新终端生效"
+        "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，新终端生效"
     )
 
 
@@ -116,12 +144,15 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         details.append("默认端口被其他程序占用，本工具启动时会自动选择空闲端口")
     if managed_pid_running or port_listening:
         details.append("Windows 环境变量已指向本机代理" if _local_env_matches(mixed_port) else "Windows 环境变量未完全指向本机代理")
+        details.append("Windows 系统代理已指向本机代理" if _windows_system_proxy_matches(mixed_port) else "Windows 系统代理未指向本机代理")
         vscode_status = _local_vscode_proxy_match_detail(mixed_port)
         if vscode_status:
             details.append(vscode_status)
     elif installed:
         if _local_env_matches(mixed_port):
             details.append("代理未运行，但 Windows 环境变量仍指向本机代理")
+        if _windows_system_proxy_matches(mixed_port):
+            details.append("代理未运行，但 Windows 系统代理仍指向本机代理")
         vscode_status = _local_vscode_proxy_match_detail(mixed_port)
         if vscode_status.startswith("VS Code 本机设置已"):
             details.append("代理未运行，但 VS Code 本机设置仍指向本机代理")
@@ -159,6 +190,20 @@ def stop_local_ai_proxy(restore_settings: bool = True) -> str:
     if skipped_unmanaged:
         return f"本机 AI 代理未停止：pid 文件指向的进程不是本工具启动的代理，已跳过{restore_suffix}"
     return f"本机 AI 代理未发现运行中的受管进程{restore_suffix}"
+
+
+def probe_local_ai_proxy(timeout: int = 8) -> str:
+    status = inspect_local_ai_proxy()
+    if not status.running:
+        return f"{status.summary()}；代理未运行，跳过 AI 连通性探测"
+
+    results = [
+        _probe_url_through_proxy(status.proxy_url, label, url, timeout=timeout)
+        for label, url in LOCAL_AI_PROBE_TARGETS
+    ]
+    ok_count = sum(1 for item in results if item.ok)
+    details = "；".join(item.summary() for item in results)
+    return f"{status.summary()}；AI 连通性 {ok_count}/{len(results)} 可达；{details}"
 
 
 def _ensure_local_dirs() -> None:
@@ -255,6 +300,10 @@ def _restore_managed_settings(state: dict, mixed_port: int) -> list[str]:
         _restore_local_vscode_proxy(state, mixed_port)
     except Exception as exc:
         errors.append(f"VS Code 设置: {exc}")
+    try:
+        _restore_windows_system_proxy(state, mixed_port)
+    except Exception as exc:
+        errors.append(f"Windows 系统代理: {exc}")
     return errors
 
 
@@ -266,6 +315,117 @@ def _local_env_matches(mixed_port: int) -> bool:
         if persistent_env._local_user_env_value(key) != expected.get(key):
             return False
     return True
+
+
+def _windows_system_proxy_expected_values(mixed_port: int) -> dict[str, object]:
+    mixed_port = remote_proxy._normalize_port(mixed_port, "本机代理端口")
+    return {
+        "ProxyEnable": 1,
+        "ProxyServer": f"127.0.0.1:{mixed_port}",
+        "ProxyOverride": WINDOWS_SYSTEM_PROXY_OVERRIDE,
+    }
+
+
+def _windows_system_proxy_matches_values(values: dict, mixed_port: int) -> bool:
+    expected = _windows_system_proxy_expected_values(mixed_port)
+    return (
+        int(values.get("ProxyEnable") or 0) == expected["ProxyEnable"]
+        and str(values.get("ProxyServer") or "") == expected["ProxyServer"]
+        and str(values.get("ProxyOverride") or "") == expected["ProxyOverride"]
+    )
+
+
+def _windows_system_proxy_matches(mixed_port: int) -> bool:
+    if os.name != "nt":
+        return False
+    return _windows_system_proxy_matches_values(_read_windows_system_proxy_values(), mixed_port)
+
+
+def _capture_windows_system_proxy_state() -> dict:
+    if os.name != "nt":
+        return {}
+    previous = {}
+    for name in WINDOWS_SYSTEM_PROXY_KEYS:
+        exists, value, value_type = _read_windows_system_proxy_value(name)
+        previous[name] = {"exists": exists, "value": value, "type": value_type}
+    return previous
+
+
+def _read_windows_system_proxy_value(name: str) -> tuple[bool, object, int | None]:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WINDOWS_SYSTEM_PROXY_REG_PATH, 0, winreg.KEY_READ) as key:
+            value, value_type = winreg.QueryValueEx(key, name)
+            return True, value, value_type
+    except FileNotFoundError:
+        return False, "", None
+
+
+def _read_windows_system_proxy_values() -> dict[str, object]:
+    values = {}
+    for name in WINDOWS_SYSTEM_PROXY_KEYS:
+        exists, value, _value_type = _read_windows_system_proxy_value(name)
+        if exists:
+            values[name] = value
+    return values
+
+
+def _apply_windows_system_proxy(mixed_port: int) -> None:
+    if os.name != "nt":
+        return
+    import winreg
+
+    expected = _windows_system_proxy_expected_values(mixed_port)
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WINDOWS_SYSTEM_PROXY_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, int(expected["ProxyEnable"]))
+        winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, str(expected["ProxyServer"]))
+        winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, str(expected["ProxyOverride"]))
+    _notify_windows_proxy_change()
+
+
+def _restore_windows_system_proxy(state: dict, mixed_port: int) -> None:
+    if os.name != "nt":
+        return
+    previous = state.get("previous_system_proxy")
+    if not isinstance(previous, dict):
+        return
+    if not _windows_system_proxy_matches(mixed_port):
+        return
+
+    import winreg
+
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WINDOWS_SYSTEM_PROXY_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
+        for name in WINDOWS_SYSTEM_PROXY_KEYS:
+            item = previous.get(name)
+            if isinstance(item, dict) and item.get("exists"):
+                value = item.get("value")
+                value_type = item.get("type") or (winreg.REG_DWORD if name == "ProxyEnable" else winreg.REG_SZ)
+                if name == "ProxyEnable":
+                    value = int(value or 0)
+                else:
+                    value = str(value or "")
+                winreg.SetValueEx(key, name, 0, value_type, value)
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+    _notify_windows_proxy_change()
+
+
+def _notify_windows_proxy_change() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        internet_option_refresh = 37
+        internet_option_settings_changed = 39
+        ctypes.windll.Wininet.InternetSetOptionW(0, internet_option_settings_changed, 0, 0)
+        ctypes.windll.Wininet.InternetSetOptionW(0, internet_option_refresh, 0, 0)
+    except Exception:
+        return
 
 
 def _capture_vscode_proxy_state(settings: dict) -> dict:
@@ -468,6 +628,51 @@ def _read_url_with_retries(
                 time.sleep(delay)
     suffix = f"（已重试 {attempts} 次）" if attempts > 1 else ""
     raise RuntimeError(f"{label}失败{suffix}: {last_error}") from last_error
+
+
+def _probe_url_through_proxy(proxy_url: str, label: str, url: str, timeout: int = 8) -> LocalAIProxyProbeResult:
+    started = time.monotonic()
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "*/*",
+                "User-Agent": "API-Switcher/1.0",
+            },
+        )
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({
+                "http": proxy_url,
+                "https": proxy_url,
+            })
+        )
+        with opener.open(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+            return LocalAIProxyProbeResult(
+                label=label,
+                ok=0 < status < 500,
+                status=status,
+                elapsed_ms=_elapsed_ms(started),
+            )
+    except urllib.error.HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
+        return LocalAIProxyProbeResult(
+            label=label,
+            ok=0 < status < 500,
+            status=status,
+            elapsed_ms=_elapsed_ms(started),
+        )
+    except Exception as exc:
+        return LocalAIProxyProbeResult(
+            label=label,
+            ok=False,
+            detail=str(exc).splitlines()[0][:120],
+            elapsed_ms=_elapsed_ms(started),
+        )
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
 
 
 def _write_mihomo_payload(target: Path, url: str, payload: bytes) -> None:

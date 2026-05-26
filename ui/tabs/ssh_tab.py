@@ -74,6 +74,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_inspect_button = None
         self._proxy_local_start_button = None
         self._proxy_local_inspect_button = None
+        self._proxy_local_test_button = None
         self._proxy_local_stop_button = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
@@ -659,6 +660,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_local_inspect_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_local_test_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="测试本机",
+            width=96,
+            command=self._probe_local_ai_proxy,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_local_test_button.pack(anchor="e", pady=(0, 6))
         self._proxy_local_stop_button = ctk.CTkButton(
             proxy_button_frame,
             text="停止本机",
@@ -670,7 +679,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
-            text="待部署节点不会自动生效；请选择 SSH 服务器或 Windows 本机执行。SSH 影响远端，Windows 本机只影响当前 Win 用户和 VS Code 本机设置。",
+            text="待部署节点不会自动生效；请选择 SSH 服务器或 Windows 本机执行。SSH 影响远端；Windows 本机会托管当前用户系统代理、环境变量和 VS Code 本机设置。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1252,6 +1261,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_inspect_button,
             self._proxy_local_start_button,
             self._proxy_local_inspect_button,
+            self._proxy_local_test_button,
             self._proxy_local_stop_button,
         ):
             if not button:
@@ -1624,7 +1634,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             title="启动本机 AI 代理",
             message=(
                 "将使用当前待部署节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
-                "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 与 VS Code 本机代理设置。\n"
+                "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY、VS Code 本机代理设置，以及 Win11 当前用户系统代理。\n"
                 f"识别到节点: {node_summary}\n"
                 "mihomo 规则只让 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名走代理，其余 DIRECT。"
             ),
@@ -1636,6 +1646,13 @@ class SSHTab(ctk.CTkScrollableFrame):
             "正在检查 Windows 本机 AI 代理状态...",
             lambda: local_proxy.inspect_local_ai_proxy().summary(),
             "检查本机 AI 代理",
+        )
+
+    def _probe_local_ai_proxy(self):
+        self._run_local_proxy_task(
+            "正在通过本机 AI 代理测试 OpenAI/Claude/Gemini 连通性...",
+            local_proxy.probe_local_ai_proxy,
+            "测试本机 AI 代理",
         )
 
     def _stop_local_ai_proxy(self):
@@ -1650,7 +1667,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self.winfo_toplevel(),
             title="停止本机 AI 代理",
             message=(
-                "将停止本工具启动的本机 mihomo，并尽量恢复启动前的 Windows 用户代理环境变量和 VS Code 代理设置。"
+                "将停止本工具启动的本机 mihomo，并尽量恢复启动前的 Windows 用户代理环境变量、Win11 系统代理和 VS Code 代理设置。"
             ),
             on_confirm=do_stop,
         )
