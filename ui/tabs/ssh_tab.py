@@ -51,9 +51,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_combo = None
         self._proxy_fetch_button = None
         self._proxy_use_node_button = None
+        self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
+        self._proxy_auto_refresh_check = None
         self._proxy_subscription_nodes = []
         self._proxy_subscription_options = {}
         self._proxy_busy = False
+        self._proxy_saved_subscription_loaded = False
         self._proxy_node_text = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
@@ -465,14 +468,28 @@ class SSHTab(ctk.CTkScrollableFrame):
             **input_style(),
         )
         self._proxy_subscription_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(8, 8))
+        proxy_sub_action_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
+        proxy_sub_action_frame.grid(row=0, column=3, sticky="e")
         self._proxy_fetch_button = ctk.CTkButton(
-            proxy_controls,
+            proxy_sub_action_frame,
             text="拉取订阅",
             width=86,
             command=self._fetch_proxy_subscription,
             **button_style("secondary", compact=True),
         )
-        self._proxy_fetch_button.grid(row=0, column=3, sticky="e")
+        self._proxy_fetch_button.pack(side="left", padx=(0, 6))
+        self._proxy_auto_refresh_check = ctk.CTkCheckBox(
+            proxy_sub_action_frame,
+            text="启动刷新",
+            width=84,
+            checkbox_width=16,
+            checkbox_height=16,
+            variable=self._proxy_auto_refresh_var,
+            command=self._on_proxy_auto_refresh_toggle,
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._proxy_auto_refresh_check.pack(side="left")
 
         ctk.CTkLabel(
             proxy_controls,
@@ -732,6 +749,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self.refresh()
+        self._load_saved_proxy_subscription_ui()
 
     def refresh(self):
         if not self._cards_frame:
@@ -1085,6 +1103,52 @@ class SSHTab(ctk.CTkScrollableFrame):
             except Exception:
                 pass
 
+    def _load_saved_proxy_subscription_ui(self):
+        if self._proxy_saved_subscription_loaded:
+            return
+        self._proxy_saved_subscription_loaded = True
+        state = remote_proxy.load_proxy_subscription_state()
+        url = str(state.get("url") or "").strip()
+        auto_refresh = bool(state.get("auto_refresh"))
+        self._proxy_auto_refresh_var.set(auto_refresh)
+
+        if url and self._proxy_subscription_entry:
+            self._proxy_subscription_entry.delete(0, "end")
+            self._proxy_subscription_entry.insert(0, url)
+
+        cached = remote_proxy.load_cached_proxy_subscription()
+        if cached and cached.nodes:
+            self._set_proxy_subscription_nodes(cached.nodes)
+            self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
+            self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+            self._set_proxy_status(
+                f"已加载本机缓存订阅: {len(cached.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}"
+            )
+        elif url:
+            self._set_proxy_status("已恢复订阅链接；尚未找到可用本机缓存，可手动拉取订阅。", "warning")
+
+        if url and auto_refresh:
+            self.after(800, lambda: self._fetch_proxy_subscription(auto=True, show_message=False))
+
+    def _select_proxy_subscription_node_by_key(self, node_key: str) -> bool:
+        if not node_key or not self._proxy_subscription_combo:
+            return False
+        for label, item in self._proxy_subscription_options.items():
+            if remote_proxy.proxy_node_key(item.node) == node_key:
+                self._proxy_subscription_combo.set(label)
+                return True
+        return False
+
+    def _on_proxy_auto_refresh_toggle(self):
+        enabled = bool(self._proxy_auto_refresh_var.get())
+        remote_proxy.set_proxy_subscription_auto_refresh(enabled)
+        if enabled:
+            self._set_proxy_status("已开启启动自动刷新；下次打开会自动重新拉取订阅。", "success")
+            if self._proxy_subscription_url_input():
+                self._fetch_proxy_subscription(auto=True, show_message=False)
+        else:
+            self._set_proxy_status("已关闭启动自动刷新。")
+
     def _proxy_subscription_url_input(self) -> str:
         if not self._proxy_subscription_entry:
             return ""
@@ -1108,19 +1172,21 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_use_node_button:
             self._proxy_use_node_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
 
-    def _fetch_proxy_subscription(self):
+    def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
-            show_toast(self.winfo_toplevel(), "订阅正在拉取中，请稍等", is_error=True)
+            if show_message:
+                show_toast(self.winfo_toplevel(), "订阅正在拉取中，请稍等", is_error=True)
             return
         url = self._proxy_subscription_url_input()
         if not url:
             message = "请先粘贴订阅链接"
             self._set_proxy_status(message, "warning")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
+            if show_message:
+                show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
         self._set_proxy_busy(True)
-        self._set_proxy_status("正在拉取订阅并解析节点...")
+        self._set_proxy_status("正在自动刷新订阅..." if auto else "正在拉取订阅并解析节点...")
 
         def run():
             try:
@@ -1135,15 +1201,21 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not payload["ok"]:
                     message = f"订阅拉取失败: {payload['error']}"
                     self._set_proxy_status(message, "error")
-                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    if show_message:
+                        show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
                 result = payload["result"]
+                state = remote_proxy.load_proxy_subscription_state()
                 self._set_proxy_subscription_nodes(result.nodes)
-                self._use_selected_proxy_subscription_node(show_message=False)
-                message = f"订阅已保存到本机缓存；识别到 {len(result.nodes)} 个节点，已填入第一个节点。"
+                if not self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or "")):
+                    self._use_selected_proxy_subscription_node(show_message=False)
+                else:
+                    self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+                message = f"订阅已保存到本机缓存；识别到 {len(result.nodes)} 个节点，已填入当前选择。"
                 self._set_proxy_status(message, "success")
-                show_toast(self.winfo_toplevel(), message)
+                if show_message:
+                    show_toast(self.winfo_toplevel(), message)
 
             try:
                 self.after(0, finish)
@@ -1152,7 +1224,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _use_selected_proxy_subscription_node(self, show_message: bool = True):
+    def _use_selected_proxy_subscription_node(self, show_message: bool = True, persist_selection: bool = True):
         if not self._proxy_subscription_combo:
             return
         selected = self._proxy_subscription_combo.get()
@@ -1168,6 +1240,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_node_text:
             self._proxy_node_text.delete("1.0", "end")
             self._proxy_node_text.insert("1.0", node_text)
+        if persist_selection:
+            remote_proxy.set_proxy_subscription_selected_node(item.node)
         message = f"已选择订阅节点: {remote_proxy.describe_proxy_node(item.node)}"
         self._set_proxy_status(message, "success")
         if show_message:

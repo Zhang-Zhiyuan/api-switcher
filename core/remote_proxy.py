@@ -8,6 +8,7 @@ import posixpath
 import re
 import shlex
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -64,6 +65,8 @@ class ProxySubscriptionNode:
 class ProxySubscriptionResult:
     nodes: tuple[ProxySubscriptionNode, ...]
     saved_path: str
+    url: str = ""
+    last_fetched_at: str = ""
 
 
 def parse_proxy_node(text: str) -> dict:
@@ -121,13 +124,19 @@ def parse_proxy_subscription_content(text: str) -> tuple[ProxySubscriptionNode, 
     )
 
 
-def fetch_proxy_subscription(url: str, timeout: int = 45, max_bytes: int = 5 * 1024 * 1024) -> ProxySubscriptionResult:
+def fetch_proxy_subscription(
+    url: str,
+    timeout: int = 45,
+    max_bytes: int = 5 * 1024 * 1024,
+    persist: bool = True,
+) -> ProxySubscriptionResult:
     parsed_url = urlparse.urlparse((url or "").strip())
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError("订阅链接必须是 http 或 https 地址")
+    normalized_url = urlparse.urlunparse(parsed_url)
 
     request = urlrequest.Request(
-        urlparse.urlunparse(parsed_url),
+        normalized_url,
         headers={
             "User-Agent": "API-Switcher/1.0",
             "Accept": "text/plain, application/yaml, application/json, */*",
@@ -145,12 +154,91 @@ def fetch_proxy_subscription(url: str, timeout: int = 45, max_bytes: int = 5 * 1
     except Exception as exc:
         raise RuntimeError(f"订阅下载失败: {exc}") from exc
 
-    saved_path = _save_proxy_subscription(urlparse.urlunparse(parsed_url), payload, content_type)
+    saved_path = _save_proxy_subscription(normalized_url, payload, content_type)
     text = payload.decode(charset, errors="replace")
+    nodes = parse_proxy_subscription_content(text)
+    fetched_at = _now_iso()
+    if persist:
+        save_proxy_subscription_state(
+            url=normalized_url,
+            saved_path=str(saved_path),
+            last_fetched_at=fetched_at,
+            node_count=len(nodes),
+        )
     return ProxySubscriptionResult(
-        nodes=parse_proxy_subscription_content(text),
+        nodes=nodes,
         saved_path=str(saved_path),
+        url=normalized_url,
+        last_fetched_at=fetched_at,
     )
+
+
+def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
+    state = load_proxy_subscription_state()
+    saved_path = str(state.get("saved_path") or "").strip()
+    if not saved_path:
+        return None
+    path = Path(saved_path)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        text = path.read_bytes().decode("utf-8-sig", errors="replace")
+        nodes = parse_proxy_subscription_content(text)
+    except Exception:
+        return None
+    return ProxySubscriptionResult(
+        nodes=nodes,
+        saved_path=str(path),
+        url=str(state.get("url") or ""),
+        last_fetched_at=str(state.get("last_fetched_at") or ""),
+    )
+
+
+def load_proxy_subscription_state() -> dict:
+    path = _proxy_subscription_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_proxy_subscription_state(**updates) -> dict:
+    directory = _proxy_subscription_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    state = load_proxy_subscription_state()
+    for key, value in updates.items():
+        if value is None:
+            continue
+        state[key] = value
+    state["updated_at"] = _now_iso()
+    path = _proxy_subscription_state_path()
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+    return state
+
+
+def set_proxy_subscription_auto_refresh(enabled: bool) -> dict:
+    return save_proxy_subscription_state(auto_refresh=bool(enabled))
+
+
+def set_proxy_subscription_selected_node(node: dict | None) -> dict:
+    if not node:
+        return save_proxy_subscription_state(selected_node_key="", selected_node_display="")
+    normalized = _normalize_proxy_node(node)
+    return save_proxy_subscription_state(
+        selected_node_key=proxy_node_key(normalized),
+        selected_node_display=describe_proxy_node(normalized),
+    )
+
+
+def proxy_node_key(node: dict) -> str:
+    normalized = _normalize_proxy_node(node)
+    payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def describe_proxy_node(node: dict) -> str:
@@ -617,11 +705,23 @@ def _dedupe_proxy_nodes(nodes: list[dict]) -> list[dict]:
     return unique
 
 
+def _proxy_subscription_dir() -> Path:
+    return STORAGE_DIR / "proxy_subscriptions"
+
+
+def _proxy_subscription_state_path() -> Path:
+    return _proxy_subscription_dir() / "subscription_state.json"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
 def _save_proxy_subscription(url: str, payload: bytes, content_type: str) -> Path:
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     raw_start = payload.lstrip()[:80].lower()
     extension = ".yaml" if "yaml" in content_type or raw_start.startswith((b"proxies:", b"proxy-groups:")) else ".txt"
-    directory = STORAGE_DIR / "proxy_subscriptions"
+    directory = _proxy_subscription_dir()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"subscription-{digest}{extension}"
     path.write_bytes(payload)

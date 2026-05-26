@@ -192,6 +192,46 @@ def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, t
     assert result.nodes[0].node["name"] == "fetched"
     assert (tmp_path / "proxy_subscriptions").exists()
     assert result.saved_path.endswith(".yaml")
+    state = remote_proxy.load_proxy_subscription_state()
+    assert state["url"] == "https://example.com/sub"
+    assert state["node_count"] == 1
+    assert state["saved_path"] == result.saved_path
+
+
+def test_load_cached_proxy_subscription_reads_saved_content(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    cache_dir = tmp_path / "proxy_subscriptions"
+    cache_dir.mkdir()
+    content_path = cache_dir / "subscription-test.yaml"
+    content_path.write_text(
+        "proxies:\n  - { name: cached, type: vless, server: example.com, port: 443 }\n",
+        encoding="utf-8",
+    )
+    remote_proxy.save_proxy_subscription_state(
+        url="https://example.com/sub",
+        saved_path=str(content_path),
+        last_fetched_at="2026-05-26T00:00:00+00:00",
+        node_count=1,
+    )
+
+    cached = remote_proxy.load_cached_proxy_subscription()
+
+    assert cached is not None
+    assert cached.url == "https://example.com/sub"
+    assert cached.nodes[0].node["name"] == "cached"
+
+
+def test_proxy_subscription_state_persists_auto_refresh_and_selection(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    node = remote_proxy.parse_proxy_node("{ name: picked, type: vless, server: example.com, port: 443 }")
+
+    remote_proxy.set_proxy_subscription_auto_refresh(True)
+    remote_proxy.set_proxy_subscription_selected_node(node)
+
+    state = remote_proxy.load_proxy_subscription_state()
+    assert state["auto_refresh"] is True
+    assert state["selected_node_display"] == "picked (vless://example.com:443)"
+    assert state["selected_node_key"] == remote_proxy.proxy_node_key(node)
 
 
 def test_describe_proxy_node_uses_normalized_endpoint():
