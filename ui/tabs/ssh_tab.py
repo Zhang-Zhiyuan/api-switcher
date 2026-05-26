@@ -443,7 +443,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
         ctk.CTkLabel(
             proxy_header,
-            text="把 Clash/mihomo 节点部署到已选 SSH；仅 AI 服务域名走代理，其余直连",
+            text="给 VS Code Remote-SSH/Codex/Claude Code 写入远端代理；仅 AI 域名走代理，其余直连",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(side="left", padx=(10, 0))

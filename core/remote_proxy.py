@@ -43,6 +43,24 @@ AI_PROXY_DOMAINS = (
     "makersuite.google.com",
 )
 
+PROXY_ENV_KEYS = (
+    "API_SWITCHER_AI_PROXY_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+
+VSCODE_SERVER_ENV_SETUP_PATHS = (
+    "~/.vscode-server/server-env-setup",
+    "~/.vscode-server-insiders/server-env-setup",
+    "~/.cursor-server/server-env-setup",
+)
+
 
 @dataclass(frozen=True)
 class RemoteAIProxyStatus:
@@ -355,10 +373,14 @@ def install_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> 
     if status != 0:
         detail = (stderr or stdout or "").strip()
         raise RuntimeError(f"远端 AI 代理配置失败: {detail or status}")
-    _write_shell_profile_block(client, home, env_path, start_path)
+    _write_shell_profile_block(client, home, env_path, start_path, mixed_port)
+    vscode_targets = _write_vscode_proxy_entrypoints(client, home, env_path, start_path, mixed_port)
     result = (stdout or "").strip().splitlines()
     suffix = f"；{result[-1]}" if result else ""
-    return f"AI 代理已部署到 {ssh_name}: http://127.0.0.1:{mixed_port}{suffix}"
+    return (
+        f"AI 代理已部署到 {ssh_name}: http://127.0.0.1:{mixed_port}"
+        f"{suffix}；已写入 VS Code Remote/Codex/Claude Code 环境入口 {vscode_targets} 处"
+    )
 
 
 def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStatus:
@@ -1373,21 +1395,28 @@ def _yaml_scalar(value) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def _build_env_file(mixed_port: int) -> str:
+def _proxy_env_values(mixed_port: int) -> dict[str, str]:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_url = f"http://127.0.0.1:{mixed_port}"
     no_proxy = "127.0.0.1,localhost,::1,*.local"
+    return {
+        "API_SWITCHER_AI_PROXY_URL": proxy_url,
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "ALL_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "all_proxy": proxy_url,
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
+    }
+
+
+def _build_env_file(mixed_port: int) -> str:
+    env = _proxy_env_values(mixed_port)
     return "\n".join([
         "# Managed by API切换器. Non-AI domains are DIRECT in mihomo rules.",
-        f"export API_SWITCHER_AI_PROXY_URL={shlex.quote(proxy_url)}",
-        f"export HTTP_PROXY={shlex.quote(proxy_url)}",
-        f"export HTTPS_PROXY={shlex.quote(proxy_url)}",
-        f"export ALL_PROXY={shlex.quote(proxy_url)}",
-        f"export http_proxy={shlex.quote(proxy_url)}",
-        f"export https_proxy={shlex.quote(proxy_url)}",
-        f"export all_proxy={shlex.quote(proxy_url)}",
-        f"export NO_PROXY={shlex.quote(no_proxy)}",
-        f"export no_proxy={shlex.quote(no_proxy)}",
+        *(f"export {key}={shlex.quote(env[key])}" for key in PROXY_ENV_KEYS),
         "",
     ])
 
@@ -1528,19 +1557,44 @@ printf 'config=%s\\nproxy=http://127.0.0.1:%s\\n' "$CONFIG_DIR/config.yaml" "$PO
 """
 
 
-def _write_shell_profile_block(client, home: str, env_path: str, start_path: str) -> None:
-    block = "\n".join([
+def _build_shell_profile_block(env_path: str, start_path: str) -> str:
+    return "\n".join([
         "# >>> API切换器 AI proxy >>>",
         f"if [ -f {shlex.quote(env_path)} ]; then . {shlex.quote(env_path)}; fi",
         f"if [ -x {shlex.quote(start_path)} ]; then {shlex.quote(start_path)} >/dev/null 2>&1 & fi",
         "# <<< API切换器 AI proxy <<<",
     ])
+
+
+def _build_fish_proxy_config(start_path: str, mixed_port: int) -> str:
+    env = _proxy_env_values(mixed_port)
+    return "\n".join([
+        "# Managed by API切换器. Non-AI domains are DIRECT in mihomo rules.",
+        f"if test -x {shlex.quote(start_path)}",
+        f"    {shlex.quote(start_path)} >/dev/null 2>&1 &",
+        "end",
+        *(f"set -gx {key} {shlex.quote(env[key])}" for key in PROXY_ENV_KEYS),
+        "",
+    ])
+
+
+def _write_shell_profile_block(client, home: str, env_path: str, start_path: str, mixed_port: int) -> None:
+    block = _build_shell_profile_block(env_path, start_path)
+    profile_paths = (
+        posixpath.join(home, ".profile"),
+        posixpath.join(home, ".bashrc"),
+        posixpath.join(home, ".zprofile"),
+        posixpath.join(home, ".zshrc"),
+    )
+    fish_path = posixpath.join(home, ".config", "fish", "conf.d", "api-switcher-ai-proxy.fish")
+    ssh_manager.write_remote_file(client, fish_path, _build_fish_proxy_config(start_path, mixed_port), file_mode=0o600)
+    quoted_paths = " ".join(shlex.quote(path) for path in profile_paths)
     script = f"""
 set -eu
 BLOCK_START="# >>> API切换器 AI proxy >>>"
 BLOCK_END="# <<< API切换器 AI proxy <<<"
 BLOCK={shlex.quote(block)}
-for file in {shlex.quote(posixpath.join(home, ".profile"))} {shlex.quote(posixpath.join(home, ".bashrc"))}; do
+for file in {quoted_paths}; do
   touch "$file"
   tmp="$file.tmp.$$"
   awk -v start="$BLOCK_START" -v end="$BLOCK_END" '
@@ -1555,6 +1609,94 @@ done
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, script, timeout=30, log_command=False)
     if status != 0:
         raise RuntimeError((stderr or stdout or "写入 shell 代理环境失败").strip())
+
+
+def _build_vscode_server_env_setup(env_path: str, start_path: str) -> str:
+    block = "\n".join([
+        "#!/bin/sh",
+        "# Managed by API切换器. Loaded by VS Code Remote Server when supported.",
+        f"if [ -x {shlex.quote(start_path)} ]; then {shlex.quote(start_path)} >/dev/null 2>&1 & fi",
+        f"if [ -f {shlex.quote(env_path)} ]; then . {shlex.quote(env_path)}; fi",
+        "",
+    ])
+    return block
+
+
+def _write_vscode_proxy_entrypoints(
+    client,
+    home: str,
+    env_path: str,
+    start_path: str,
+    mixed_port: int,
+) -> int:
+    setup_content = _build_vscode_server_env_setup(env_path, start_path)
+    written = 0
+    for raw_path in VSCODE_SERVER_ENV_SETUP_PATHS:
+        path = remote_config._expand_remote_path(client, raw_path)
+        ssh_manager.write_remote_file(client, path, setup_content, file_mode=0o700)
+        written += 1
+    written += _write_vscode_proxy_settings(client, mixed_port)
+    return written
+
+
+def _write_vscode_proxy_settings(client, mixed_port: int) -> int:
+    targets = []
+    for raw_path in remote_config.REMOTE_VSCODE_SETTINGS_PATHS:
+        expanded = remote_config._expand_remote_path(client, raw_path)
+        content = ssh_manager.read_remote_file(client, expanded)
+        if content is not None:
+            targets.append((expanded, content))
+
+    if not targets:
+        targets = [(remote_config._expand_remote_path(client, remote_config.REMOTE_VSCODE_SETTINGS_PATHS[0]), "")]
+
+    written = 0
+    for path, content in targets:
+        settings = _parse_vscode_settings_for_proxy(content)
+        if settings is None:
+            continue
+        updated, changed = _apply_vscode_proxy_settings(settings, mixed_port)
+        if changed:
+            remote_config.write_remote_json(client, path, updated, file_mode=0o600)
+            written += 1
+    return written
+
+
+def _parse_vscode_settings_for_proxy(content: str) -> dict | None:
+    if not (content or "").strip():
+        return {}
+    try:
+        parsed = json.loads(content.lstrip("\ufeff"))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _apply_vscode_proxy_settings(settings: dict, mixed_port: int) -> tuple[dict, bool]:
+    env = _proxy_env_values(mixed_port)
+    updated = dict(settings or {})
+    changed = False
+    proxy_url = env["API_SWITCHER_AI_PROXY_URL"]
+
+    if updated.get("http.proxy") != proxy_url:
+        updated["http.proxy"] = proxy_url
+        changed = True
+
+    terminal_env = updated.get("terminal.integrated.env.linux")
+    if not isinstance(terminal_env, dict):
+        terminal_env = {}
+    else:
+        terminal_env = dict(terminal_env)
+
+    for key in PROXY_ENV_KEYS:
+        if terminal_env.get(key) != env[key]:
+            terminal_env[key] = env[key]
+            changed = True
+
+    if updated.get("terminal.integrated.env.linux") != terminal_env:
+        updated["terminal.integrated.env.linux"] = terminal_env
+        changed = True
+    return updated, changed
 
 
 def _parse_key_values(text: str) -> dict[str, str]:

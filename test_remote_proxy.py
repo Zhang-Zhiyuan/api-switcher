@@ -434,3 +434,47 @@ def test_start_script_checks_port_with_netstat_when_ss_is_missing():
     script = remote_proxy._build_start_script("/home/me/.config/mihomo", "/home/me/.config/api-switcher", "/home/me/bin", 7890)
 
     assert "command -v netstat" in script
+
+
+def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
+    env_file = remote_proxy._build_env_file(7890)
+    profile_block = remote_proxy._build_shell_profile_block(
+        "/home/me/.config/api-switcher/ai-proxy.env",
+        "/home/me/.config/api-switcher/start-ai-proxy.sh",
+    )
+    vscode_setup = remote_proxy._build_vscode_server_env_setup(
+        "/home/me/.config/api-switcher/ai-proxy.env",
+        "/home/me/.config/api-switcher/start-ai-proxy.sh",
+    )
+    fish_config = remote_proxy._build_fish_proxy_config(
+        "/home/me/.config/api-switcher/start-ai-proxy.sh",
+        7890,
+    )
+
+    assert "export HTTP_PROXY=http://127.0.0.1:7890" in env_file
+    assert ". /home/me/.config/api-switcher/ai-proxy.env" in profile_block
+    assert vscode_setup.startswith("#!/bin/sh")
+    assert "Loaded by VS Code Remote Server" in vscode_setup
+    assert "set -gx HTTP_PROXY http://127.0.0.1:7890" in fish_config
+
+
+def test_apply_vscode_proxy_settings_preserves_existing_terminal_env():
+    settings = {
+        "editor.fontSize": 14,
+        "terminal.integrated.env.linux": {"EXISTING": "1"},
+    }
+
+    updated, changed = remote_proxy._apply_vscode_proxy_settings(settings, 7890)
+
+    assert changed is True
+    assert updated["editor.fontSize"] == 14
+    assert updated["http.proxy"] == "http://127.0.0.1:7890"
+    assert updated["terminal.integrated.env.linux"]["EXISTING"] == "1"
+    assert updated["terminal.integrated.env.linux"]["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert updated["terminal.integrated.env.linux"]["NO_PROXY"] == "127.0.0.1,localhost,::1,*.local"
+    assert settings["terminal.integrated.env.linux"] == {"EXISTING": "1"}
+
+
+def test_parse_vscode_settings_for_proxy_skips_invalid_json():
+    assert remote_proxy._parse_vscode_settings_for_proxy("{bad json") is None
+    assert remote_proxy._parse_vscode_settings_for_proxy("") == {}
