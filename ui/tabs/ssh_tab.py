@@ -10,7 +10,7 @@ from ui.dialogs.confirm_dialog import ConfirmDialog
 from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue, remote_git_login, remote_proxy
 from core.auto_continue.manager import auto_continue_manager
 from models.auto_continue import training_prompt_template_by_key
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
 
 
 class SSHTab(ctk.CTkScrollableFrame):
@@ -47,6 +47,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._batch_target_label = None
         self._batch_select_all_button = None
         self._batch_clear_button = None
+        self._proxy_subscription_entry = None
+        self._proxy_subscription_combo = None
+        self._proxy_fetch_button = None
+        self._proxy_use_node_button = None
+        self._proxy_subscription_nodes = []
+        self._proxy_subscription_options = {}
+        self._proxy_busy = False
         self._proxy_node_text = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
@@ -443,23 +450,71 @@ class SSHTab(ctk.CTkScrollableFrame):
         proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
         proxy_controls.pack(fill="x", padx=14, pady=14)
         proxy_controls.grid_columnconfigure(1, weight=1)
+        proxy_controls.grid_columnconfigure(2, weight=1)
 
         ctk.CTkLabel(
             proxy_controls,
-            text="代理节点",
+            text="订阅链接",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=0, column=0, sticky="nw", pady=(2, 0))
+        ).grid(row=0, column=0, sticky="w")
+        self._proxy_subscription_entry = ctk.CTkEntry(
+            proxy_controls,
+            placeholder_text="粘贴 Clash/mihomo 订阅链接；只保存在本机缓存，不写入远端",
+            **input_style(),
+        )
+        self._proxy_subscription_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(8, 8))
+        self._proxy_fetch_button = ctk.CTkButton(
+            proxy_controls,
+            text="拉取订阅",
+            width=86,
+            command=self._fetch_proxy_subscription,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_fetch_button.grid(row=0, column=3, sticky="e")
+
+        ctk.CTkLabel(
+            proxy_controls,
+            text="订阅节点",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self._proxy_subscription_combo = ctk.CTkComboBox(
+            proxy_controls,
+            values=["请先拉取订阅"],
+            state="disabled",
+            **combo_style(),
+        )
+        self._proxy_subscription_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
+        self._proxy_subscription_combo.set("请先拉取订阅")
+        self._proxy_use_node_button = ctk.CTkButton(
+            proxy_controls,
+            text="使用节点",
+            width=86,
+            command=self._use_selected_proxy_subscription_node,
+            state="disabled",
+            **button_style("accent", compact=True),
+        )
+        self._proxy_use_node_button.grid(row=1, column=3, sticky="e", pady=(10, 0))
+
+        ctk.CTkLabel(
+            proxy_controls,
+            text="部署节点",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="nw", pady=(12, 0))
         self._proxy_node_text = ctk.CTkTextbox(
             proxy_controls,
             height=96,
             **textbox_style(monospace=True),
         )
-        self._proxy_node_text.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(8, 8))
+        self._proxy_node_text.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(12, 0))
 
         proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_button_frame.grid(row=0, column=3, sticky="ne")
+        proxy_button_frame.grid(row=2, column=3, sticky="ne", pady=(12, 0))
         ctk.CTkButton(
             proxy_button_frame,
             text="选择文件",
@@ -484,13 +539,13 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
-            text="粘贴 Clash 节点或选择 YAML/TXT 文件；部署会安装/复用 mihomo，并写入受管 shell 代理环境。",
+            text="可从订阅链接拉取节点列表，也可粘贴单个 Clash 节点或选择 YAML/TXT 文件；部署只会把当前“部署节点”写入远端。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._proxy_status_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._proxy_status_label.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
 
         auto_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -1015,6 +1070,108 @@ class SSHTab(ctk.CTkScrollableFrame):
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
         self._proxy_status_label.configure(text=message, text_color=color)
+
+    def _set_proxy_busy(self, busy: bool):
+        self._proxy_busy = busy
+        state = "disabled" if busy else "normal"
+        for button in (self._proxy_fetch_button, self._proxy_use_node_button):
+            if not button:
+                continue
+            try:
+                if button is self._proxy_use_node_button and not self._proxy_subscription_options:
+                    button.configure(state="disabled")
+                else:
+                    button.configure(state=state)
+            except Exception:
+                pass
+
+    def _proxy_subscription_url_input(self) -> str:
+        if not self._proxy_subscription_entry:
+            return ""
+        return self._proxy_subscription_entry.get().strip()
+
+    def _set_proxy_subscription_nodes(self, nodes):
+        self._proxy_subscription_nodes = list(nodes or [])
+        options = {}
+        for item in self._proxy_subscription_nodes:
+            label = item.display_name()
+            if label in options:
+                label = f"{label} #{item.index}"
+            options[label] = item
+        self._proxy_subscription_options = options
+
+        if not self._proxy_subscription_combo:
+            return
+        values = list(options.keys()) or ["没有识别到可用节点"]
+        self._proxy_subscription_combo.configure(values=values, state="normal" if options else "disabled")
+        self._proxy_subscription_combo.set(values[0])
+        if self._proxy_use_node_button:
+            self._proxy_use_node_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+
+    def _fetch_proxy_subscription(self):
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "订阅正在拉取中，请稍等", is_error=True)
+            return
+        url = self._proxy_subscription_url_input()
+        if not url:
+            message = "请先粘贴订阅链接"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        self._set_proxy_busy(True)
+        self._set_proxy_status("正在拉取订阅并解析节点...")
+
+        def run():
+            try:
+                payload = {"ok": True, "result": remote_proxy.fetch_proxy_subscription(url), "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_proxy_busy(False)
+                if not payload["ok"]:
+                    message = f"订阅拉取失败: {payload['error']}"
+                    self._set_proxy_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                result = payload["result"]
+                self._set_proxy_subscription_nodes(result.nodes)
+                self._use_selected_proxy_subscription_node(show_message=False)
+                message = f"订阅已保存到本机缓存；识别到 {len(result.nodes)} 个节点，已填入第一个节点。"
+                self._set_proxy_status(message, "success")
+                show_toast(self.winfo_toplevel(), message)
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _use_selected_proxy_subscription_node(self, show_message: bool = True):
+        if not self._proxy_subscription_combo:
+            return
+        selected = self._proxy_subscription_combo.get()
+        item = self._proxy_subscription_options.get(selected)
+        if not item:
+            message = "请先拉取订阅并选择一个节点"
+            self._set_proxy_status(message, "warning")
+            if show_message:
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        node_text = remote_proxy.format_proxy_node(item.node)
+        if self._proxy_node_text:
+            self._proxy_node_text.delete("1.0", "end")
+            self._proxy_node_text.insert("1.0", node_text)
+        message = f"已选择订阅节点: {remote_proxy.describe_proxy_node(item.node)}"
+        self._set_proxy_status(message, "success")
+        if show_message:
+            show_toast(self.winfo_toplevel(), message)
 
     def _proxy_node_input(self) -> str:
         if not self._proxy_node_text:

@@ -21,6 +21,7 @@ RUNTIME_DEPENDENCY_IMPORTS = (
     "paramiko",
     "pystray",
     "cryptography",
+    "yaml",
 )
 
 APP_NAME = "API切换器"
