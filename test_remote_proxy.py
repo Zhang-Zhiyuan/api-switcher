@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core import remote_proxy
+from core import local_proxy, remote_proxy
 
 
 def test_parse_proxy_node_accepts_clash_inline_map():
@@ -523,3 +523,69 @@ def test_apply_vscode_proxy_settings_preserves_existing_terminal_env():
 def test_parse_vscode_settings_for_proxy_skips_invalid_json():
     assert remote_proxy._parse_vscode_settings_for_proxy("{bad json") is None
     assert remote_proxy._parse_vscode_settings_for_proxy("") == {}
+
+
+def test_local_vscode_proxy_settings_preserve_existing_windows_env():
+    settings = {
+        "http.proxy": "http://old.proxy:8080",
+        "terminal.integrated.env.windows": {"EXISTING": "1", "HTTP_PROXY": "http://old.proxy:8080"},
+    }
+
+    previous = local_proxy._capture_vscode_proxy_state(settings)
+    updated, changed = local_proxy._apply_local_vscode_proxy_settings(settings, 17897)
+    restored, restored_changed = local_proxy._restore_vscode_proxy_settings(updated, previous, 17897)
+
+    assert changed is True
+    assert updated["http.proxy"] == "http://127.0.0.1:17897"
+    assert updated["http.proxySupport"] == "override"
+    assert updated["terminal.integrated.env.windows"]["HTTPS_PROXY"] == "http://127.0.0.1:17897"
+    assert restored_changed is True
+    assert restored["http.proxy"] == "http://old.proxy:8080"
+    assert "http.proxySupport" not in restored
+    assert restored["terminal.integrated.env.windows"]["HTTP_PROXY"] == "http://old.proxy:8080"
+    assert restored["terminal.integrated.env.windows"]["EXISTING"] == "1"
+
+
+def test_pick_mihomo_windows_asset_prefers_non_compatible_archive():
+    assets = [
+        {"name": "mihomo-windows-amd64-compatible.zip", "browser_download_url": "compatible"},
+        {"name": "mihomo-windows-amd64.zip", "browser_download_url": "regular"},
+        {"name": "mihomo-linux-amd64.gz", "browser_download_url": "linux"},
+    ]
+
+    picked = local_proxy._pick_mihomo_asset(assets, "windows-amd64")
+
+    assert picked["browser_download_url"] == "regular"
+
+
+def test_select_local_mixed_port_skips_busy_default(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: None)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda port: port == 17897)
+
+    assert local_proxy._select_local_mixed_port(17897) == 17898
+
+
+def test_stop_local_proxy_does_not_terminate_unmanaged_pid(monkeypatch, tmp_path):
+    pid_path = tmp_path / "mihomo.pid"
+    pid_path.write_text("12345", encoding="utf-8")
+    terminated = []
+    saved_states = []
+
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", pid_path)
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897})
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 12345 if pid_path.exists() else None)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda pid: pid == 12345)
+    monkeypatch.setattr(local_proxy, "_is_managed_mihomo_pid", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_terminate_pid", lambda pid: terminated.append(pid))
+    monkeypatch.setattr(local_proxy, "_restore_local_env", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(local_proxy, "_restore_local_vscode_proxy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(local_proxy, "_save_state", lambda state: saved_states.append(state))
+
+    message = local_proxy.stop_local_ai_proxy()
+
+    assert "不是本工具启动" in message
+    assert terminated == []
+    assert not pid_path.exists()
+    assert saved_states[-1] == {}

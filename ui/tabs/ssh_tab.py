@@ -7,7 +7,15 @@ from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from core import profile_manager, ssh_manager, sync_manager, remote_auto_continue, remote_git_login, remote_proxy
+from core import (
+    local_proxy,
+    profile_manager,
+    remote_auto_continue,
+    remote_git_login,
+    remote_proxy,
+    ssh_manager,
+    sync_manager,
+)
 from core.auto_continue.manager import auto_continue_manager
 from models.auto_continue import training_prompt_template_by_key
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
@@ -64,6 +72,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_load_file_button = None
         self._proxy_deploy_button = None
         self._proxy_inspect_button = None
+        self._proxy_local_start_button = None
+        self._proxy_local_inspect_button = None
+        self._proxy_local_stop_button = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
             "全部项目": "all",
@@ -566,7 +577,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             proxy_controls,
-            text="3 远端部署",
+            text="3 应用到目标",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -587,34 +598,79 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_button_frame.grid(row=7, column=3, sticky="ne", pady=(8, 0))
+        ctk.CTkLabel(
+            proxy_button_frame,
+            text="节点来源",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
         self._proxy_load_file_button = ctk.CTkButton(
             proxy_button_frame,
             text="导入文件",
-            width=86,
+            width=96,
             command=self._load_proxy_node_file,
             **button_style("secondary", compact=True),
         )
-        self._proxy_load_file_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_load_file_button.pack(anchor="e", pady=(0, 10))
+        ctk.CTkLabel(
+            proxy_button_frame,
+            text="SSH 服务器",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
         self._proxy_deploy_button = ctk.CTkButton(
             proxy_button_frame,
-            text="部署到远端",
-            width=86,
+            text="部署 SSH",
+            width=96,
             command=self._deploy_ai_proxy,
             **button_style("accent", compact=True),
         )
         self._proxy_deploy_button.pack(anchor="e", pady=(0, 6))
         self._proxy_inspect_button = ctk.CTkButton(
             proxy_button_frame,
-            text="检查远端",
-            width=86,
+            text="检查 SSH",
+            width=96,
             command=self._inspect_ai_proxy,
             **button_style("secondary", compact=True),
         )
-        self._proxy_inspect_button.pack(anchor="e")
+        self._proxy_inspect_button.pack(anchor="e", pady=(0, 10))
+        ctk.CTkLabel(
+            proxy_button_frame,
+            text="Windows 本机",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
+        self._proxy_local_start_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="启动本机",
+            width=96,
+            command=self._start_local_ai_proxy,
+            **button_style("accent", compact=True),
+        )
+        self._proxy_local_start_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_local_inspect_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="检查本机",
+            width=96,
+            command=self._inspect_local_ai_proxy,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_local_inspect_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_local_stop_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="停止本机",
+            width=96,
+            command=self._stop_local_ai_proxy,
+            **button_style("danger", compact=True),
+        )
+        self._proxy_local_stop_button.pack(anchor="e")
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
-            text="本机订阅只用于选择节点；点击“部署到远端”后才会改服务器。已部署后请重连 VS Code Remote 或新开远端终端。",
+            text="待部署节点不会自动生效；请选择 SSH 服务器或 Windows 本机执行。SSH 影响远端，Windows 本机只影响当前 Win 用户和 VS Code 本机设置。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1188,7 +1244,16 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _set_proxy_busy(self, busy: bool):
         self._proxy_busy = busy
         state = "disabled" if busy else "normal"
-        for button in (self._proxy_fetch_button, self._proxy_use_node_button):
+        for button in (
+            self._proxy_fetch_button,
+            self._proxy_use_node_button,
+            self._proxy_load_file_button,
+            self._proxy_deploy_button,
+            self._proxy_inspect_button,
+            self._proxy_local_start_button,
+            self._proxy_local_inspect_button,
+            self._proxy_local_stop_button,
+        ):
             if not button:
                 continue
             try:
@@ -1469,6 +1534,94 @@ class SSHTab(ctk.CTkScrollableFrame):
                 lambda server_name: remote_proxy.inspect_ai_proxy(server_name).summary(),
             ),
             on_done=done,
+        )
+
+    def _run_local_proxy_task(self, busy_message: str, worker, success_prefix: str):
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "AI 代理操作正在进行中，请稍等", is_error=True)
+            return
+        self._set_proxy_busy(True)
+        self._set_proxy_status(busy_message)
+
+        def run():
+            try:
+                payload = {"ok": True, "result": worker(), "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_proxy_busy(False)
+                if not payload["ok"]:
+                    message = f"{success_prefix}失败: {payload['error']}"
+                    self._set_proxy_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+                message = str(payload["result"])
+                self._set_proxy_status(message, "success")
+                show_toast(self.winfo_toplevel(), message)
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_local_ai_proxy(self):
+        proxy_text = self._proxy_node_input()
+        try:
+            proxy_node = remote_proxy.parse_proxy_node(proxy_text)
+            node_summary = remote_proxy.describe_proxy_node(proxy_node)
+            self._set_proxy_selected_summary(f"待部署节点: {node_summary}", "success")
+        except Exception as e:
+            message = f"代理节点格式不正确: {e}"
+            self._set_proxy_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        def do_start():
+            self._run_local_proxy_task(
+                "正在启动 Windows 本机 AI 代理，首次运行可能需要下载 mihomo...",
+                lambda: local_proxy.install_local_ai_proxy(proxy_text),
+                "启动本机 AI 代理",
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="启动本机 AI 代理",
+            message=(
+                "将使用当前待部署节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
+                "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 与 VS Code 本机代理设置。\n"
+                f"识别到节点: {node_summary}\n"
+                "mihomo 规则只让 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名走代理，其余 DIRECT。"
+            ),
+            on_confirm=do_start,
+        )
+
+    def _inspect_local_ai_proxy(self):
+        self._run_local_proxy_task(
+            "正在检查 Windows 本机 AI 代理状态...",
+            lambda: local_proxy.inspect_local_ai_proxy().summary(),
+            "检查本机 AI 代理",
+        )
+
+    def _stop_local_ai_proxy(self):
+        def do_stop():
+            self._run_local_proxy_task(
+                "正在停止 Windows 本机 AI 代理并恢复本工具写入的代理环境...",
+                local_proxy.stop_local_ai_proxy,
+                "停止本机 AI 代理",
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="停止本机 AI 代理",
+            message=(
+                "将停止本工具启动的本机 mihomo，并尽量恢复启动前的 Windows 用户代理环境变量和 VS Code 代理设置。"
+            ),
+            on_confirm=do_stop,
         )
 
     def _reset_remote_pull_options(self, message: str | None = None):
