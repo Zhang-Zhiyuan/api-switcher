@@ -15,6 +15,7 @@ TAB_SPECS = [
     ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
     ("会话迁移", "_session_migration_tab", "ui.tabs.session_migration_tab", "SessionMigrationTab", False),
     ("SSH 服务器", "_ssh_tab", "ui.tabs.ssh_tab", "SSHTab", False),
+    ("Win11 代理", "_local_proxy_tab", "ui.tabs.local_proxy_tab", "LocalProxyTab", False),
     ("通用设置", "_common_tab", "ui.tabs.common_tab", "CommonTab", False),
     ("使用统计", "_usage_stats_tab", "ui.tabs.usage_stats_tab", "UsageStatsTab", False),
     ("备份管理", "_backup_tab", "ui.tabs.backup_tab", "BackupTab", False),

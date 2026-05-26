@@ -23,6 +23,7 @@ UI_TAB_HIDDEN_IMPORTS = [
     "ui.tabs.browser_tab",
     "ui.tabs.session_migration_tab",
     "ui.tabs.ssh_tab",
+    "ui.tabs.local_proxy_tab",
     "ui.tabs.common_tab",
     "ui.tabs.usage_stats_tab",
     "ui.tabs.backup_tab",

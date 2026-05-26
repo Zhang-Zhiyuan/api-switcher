@@ -8,7 +8,6 @@ from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from core import (
-    local_proxy,
     profile_manager,
     remote_auto_continue,
     remote_git_login,
@@ -81,10 +80,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_inspect_button = None
         self._proxy_remote_test_button = None
         self._proxy_remote_cleanup_button = None
-        self._proxy_local_start_button = None
-        self._proxy_local_inspect_button = None
-        self._proxy_local_test_button = None
-        self._proxy_local_stop_button = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
             "全部项目": "all",
@@ -464,13 +459,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         proxy_header.pack(fill="x", padx=14, pady=(4, 5))
         ctk.CTkLabel(
             proxy_header,
-            text="AI 代理",
+            text="SSH 远端 AI 代理",
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(side="left")
         ctk.CTkLabel(
             proxy_header,
-            text="SSH 远端用于 VS Code Remote/Codex/Claude Code；Windows 本机用于本机程序；仅 AI 域名走代理",
+            text="写入 VS Code Remote/Codex/Claude Code 的远端代理入口；Win11 本机代理已移到单独标签页",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(side="left", padx=(10, 0))
@@ -662,49 +657,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("danger", compact=True),
         )
         self._proxy_remote_cleanup_button.pack(anchor="e", pady=(0, 10))
-        ctk.CTkLabel(
-            proxy_button_frame,
-            text="Windows 本机",
-            text_color=COLORS["muted"],
-            font=font(11, "bold"),
-            anchor="e",
-        ).pack(anchor="e", pady=(0, 4))
-        self._proxy_local_start_button = ctk.CTkButton(
-            proxy_button_frame,
-            text="启动本机",
-            width=96,
-            command=self._start_local_ai_proxy,
-            **button_style("accent", compact=True),
-        )
-        self._proxy_local_start_button.pack(anchor="e", pady=(0, 6))
-        self._proxy_local_inspect_button = ctk.CTkButton(
-            proxy_button_frame,
-            text="检查本机",
-            width=96,
-            command=self._inspect_local_ai_proxy,
-            **button_style("secondary", compact=True),
-        )
-        self._proxy_local_inspect_button.pack(anchor="e", pady=(0, 6))
-        self._proxy_local_test_button = ctk.CTkButton(
-            proxy_button_frame,
-            text="测试本机",
-            width=96,
-            command=self._probe_local_ai_proxy,
-            **button_style("secondary", compact=True),
-        )
-        self._proxy_local_test_button.pack(anchor="e", pady=(0, 6))
-        self._proxy_local_stop_button = ctk.CTkButton(
-            proxy_button_frame,
-            text="停止本机",
-            width=96,
-            command=self._stop_local_ai_proxy,
-            **button_style("danger", compact=True),
-        )
-        self._proxy_local_stop_button.pack(anchor="e")
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
-            text="待部署节点不会自动生效；部署远端使用 SSH 目标（远端批量优先），启动本机只影响 Windows 当前用户系统代理、环境变量和 VS Code 本机设置。",
+            text="本页只影响 SSH 服务器；部署远端使用 SSH 目标（远端批量优先）。Win11 本机代理请使用“Win11 代理”标签页。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1288,10 +1244,6 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_inspect_button,
             self._proxy_remote_test_button,
             self._proxy_remote_cleanup_button,
-            self._proxy_local_start_button,
-            self._proxy_local_inspect_button,
-            self._proxy_local_test_button,
-            self._proxy_local_stop_button,
         ):
             if not button:
                 continue
@@ -1666,104 +1618,6 @@ class SSHTab(ctk.CTkScrollableFrame):
                 on_done(payload)
 
         self._run_ssh_task(busy_message, worker, on_done=finish)
-
-    def _run_local_proxy_task(self, busy_message: str, worker, success_prefix: str):
-        if self._proxy_busy:
-            show_toast(self.winfo_toplevel(), "AI 代理操作正在进行中，请稍等", is_error=True)
-            return
-        if self._ssh_busy:
-            show_toast(self.winfo_toplevel(), "SSH 操作正在进行中，请稍等", is_error=True)
-            return
-        self._set_proxy_busy(True)
-        self._set_proxy_status(busy_message)
-
-        def run():
-            try:
-                payload = {"ok": True, "result": worker(), "error": None}
-            except Exception as e:
-                payload = {"ok": False, "result": None, "error": str(e)}
-
-            def finish():
-                if not self.winfo_exists():
-                    return
-                self._set_proxy_busy(False)
-                if not payload["ok"]:
-                    message = f"{success_prefix}失败: {payload['error']}"
-                    self._set_proxy_status(message, "error")
-                    show_toast(self.winfo_toplevel(), message, is_error=True)
-                    return
-                message = str(payload["result"])
-                self._set_proxy_status(message, "success")
-                show_toast(self.winfo_toplevel(), message)
-
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _start_local_ai_proxy(self):
-        proxy_text = self._proxy_node_input()
-        try:
-            proxy_node = remote_proxy.parse_proxy_node(proxy_text)
-            node_summary = remote_proxy.describe_proxy_node(proxy_node)
-            self._set_proxy_selected_summary(f"待部署节点: {node_summary}", "success")
-        except Exception as e:
-            message = f"代理节点格式不正确: {e}"
-            self._set_proxy_status(message, "error")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
-
-        def do_start():
-            self._run_local_proxy_task(
-                "正在启动 Windows 本机 AI 代理，首次运行可能需要下载 mihomo...",
-                lambda: local_proxy.install_local_ai_proxy(proxy_text),
-                "启动本机 AI 代理",
-            )
-
-        ConfirmDialog(
-            self.winfo_toplevel(),
-            title="启动本机 AI 代理",
-            message=(
-                "将使用当前待部署节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
-                "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY、VS Code 本机代理设置，以及 Win11 当前用户系统代理。\n"
-                f"识别到节点: {node_summary}\n"
-                "mihomo 规则只让 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名走代理，其余 DIRECT。"
-            ),
-            on_confirm=do_start,
-        )
-
-    def _inspect_local_ai_proxy(self):
-        self._run_local_proxy_task(
-            "正在检查 Windows 本机 AI 代理状态...",
-            lambda: local_proxy.inspect_local_ai_proxy().summary(),
-            "检查本机 AI 代理",
-        )
-
-    def _probe_local_ai_proxy(self):
-        self._run_local_proxy_task(
-            "正在通过本机 AI 代理测试 OpenAI/Claude/Gemini 连通性...",
-            local_proxy.probe_local_ai_proxy,
-            "测试本机 AI 代理",
-        )
-
-    def _stop_local_ai_proxy(self):
-        def do_stop():
-            self._run_local_proxy_task(
-                "正在停止 Windows 本机 AI 代理并恢复本工具写入的代理环境...",
-                local_proxy.stop_local_ai_proxy,
-                "停止本机 AI 代理",
-            )
-
-        ConfirmDialog(
-            self.winfo_toplevel(),
-            title="停止本机 AI 代理",
-            message=(
-                "将停止本工具启动的本机 mihomo，并尽量恢复启动前的 Windows 用户代理环境变量、Win11 系统代理和 VS Code 代理设置。"
-            ),
-            on_confirm=do_stop,
-        )
 
     def _reset_remote_pull_options(self, message: str | None = None):
         self._remote_config_candidates = []

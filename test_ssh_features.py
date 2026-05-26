@@ -1,4 +1,5 @@
 import json
+import importlib
 from io import BytesIO
 import subprocess
 
@@ -59,6 +60,17 @@ def test_ssh_builder_preserves_password_when_editing_metadata(isolated_ssh):
 def test_format_server_batch_item_avoids_duplicate_server_prefix():
     assert _format_server_batch_item("4090", "4090: AI 代理已清理") == "4090: AI 代理已清理"
     assert _format_server_batch_item("4090", "已同步配置") == "4090: 已同步配置"
+
+
+def test_win11_proxy_tab_is_registered_and_importable():
+    app_module = importlib.import_module("ui.app")
+    specs = {label: spec for label, *spec in app_module.TAB_SPECS}
+
+    assert "Win11 代理" in specs
+    _attr, module_name, class_name, _eager = specs["Win11 代理"]
+    tab_module = importlib.import_module(module_name)
+
+    assert hasattr(tab_module, class_name)
 
 
 def test_ssh_rename_copies_secret_and_removes_old_ref(isolated_ssh, monkeypatch):
