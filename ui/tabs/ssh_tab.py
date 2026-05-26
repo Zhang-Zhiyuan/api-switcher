@@ -31,6 +31,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._codex_wire_api_combo = None
         self._codex_wire_api_hint = None
         self._clear_api_combo = None
+        self._server_combo_label = None
+        self._target_summary_label = None
+        self._target_hint_label = None
+        self._sync_current_button = None
+        self._sync_selected_button = None
         self._git_login_status_label = None
         self._sync_status_label = None
         self._ssh_busy = False
@@ -138,7 +143,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
         self._batch_target_label = ctk.CTkLabel(
             sync_header,
-            text="批量目标: 未勾选（使用下方单台目标）",
+            text="批量目标: 未勾选（当前为单台模式）",
             text_color=COLORS["muted"],
             font=font(12),
         )
@@ -170,14 +175,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         sync_controls.grid_columnconfigure(1, weight=1)
         sync_controls.grid_columnconfigure(2, weight=1)
 
-        # Server selector
-        ctk.CTkLabel(
+        # Target selector
+        self._server_combo_label = ctk.CTkLabel(
             sync_controls,
-            text="目标服务器",
+            text="单台目标",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self._server_combo_label.grid(row=0, column=0, sticky="w")
         self._server_combo = ctk.CTkComboBox(
             sync_controls,
             values=["(无)"],
@@ -186,22 +192,25 @@ class SSHTab(ctk.CTkScrollableFrame):
             **combo_style(),
         )
         self._server_combo.grid(row=0, column=1, sticky="ew", padx=(8, 12))
-
-        ctk.CTkButton(
+        self._target_summary_label = ctk.CTkLabel(
             sync_controls,
-            text="推送当前生效",
-            width=126,
-            command=self._sync_current,
-            **button_style("primary"),
-        ).grid(row=0, column=2, sticky="e", padx=(0, 8))
-        self._remote_inspect_button = ctk.CTkButton(
-            sync_controls,
-            text="读取远端配置",
-            width=126,
-            command=self._inspect_remote_configs,
-            **button_style("accent"),
+            text="单台模式",
+            text_color=COLORS["muted"],
+            font=font(12, "bold"),
+            anchor="w",
+            justify="left",
         )
-        self._remote_inspect_button.grid(row=0, column=3, sticky="e")
+        self._target_summary_label.grid(row=0, column=2, columnspan=2, sticky="ew")
+        self._target_hint_label = ctk.CTkLabel(
+            sync_controls,
+            text="未勾选批量目标时，推送/清理/Git 同步/AI 代理使用单台目标；远端拉取始终只读取单台目标。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._target_hint_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        bind_wraplength(sync_controls, self._target_hint_label, padding=20)
 
         ctk.CTkLabel(
             sync_controls,
@@ -209,7 +218,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
         self._sync_kind_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._sync_kind_options.keys()),
@@ -217,7 +226,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=lambda _value: self._on_sync_kind_change(),
             **combo_style(),
         )
-        self._sync_kind_combo.grid(row=1, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._sync_kind_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(12, 0))
         self._sync_kind_combo.set("Claude API")
 
         self._profile_combo = ctk.CTkComboBox(
@@ -226,15 +235,26 @@ class SSHTab(ctk.CTkScrollableFrame):
             width=220,
             **combo_style(),
         )
-        self._profile_combo.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
+        self._profile_combo.grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(12, 0))
 
-        ctk.CTkButton(
-            sync_controls,
+        push_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        push_button_frame.grid(row=2, column=3, sticky="e", pady=(12, 0))
+        self._sync_current_button = ctk.CTkButton(
+            push_button_frame,
+            text="推送当前",
+            width=104,
+            command=self._sync_current,
+            **button_style("primary", compact=True),
+        )
+        self._sync_current_button.pack(side="left", padx=(0, 6))
+        self._sync_selected_button = ctk.CTkButton(
+            push_button_frame,
             text="推送所选",
-            width=126,
+            width=104,
             command=self._sync_selected,
-            **button_style("primary"),
-        ).grid(row=1, column=3, sticky="e", pady=(10, 0))
+            **button_style("primary", compact=True),
+        )
+        self._sync_selected_button.pack(side="left")
 
         ctk.CTkLabel(
             sync_controls,
@@ -242,7 +262,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
         self._remote_pull_type_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._remote_pull_type_options.keys()),
@@ -251,7 +271,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             state="disabled",
             **combo_style(),
         )
-        self._remote_pull_type_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._remote_pull_type_combo.grid(row=3, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._remote_pull_type_combo.set("全部项目")
         self._remote_pull_combo = ctk.CTkComboBox(
             sync_controls,
@@ -260,26 +280,36 @@ class SSHTab(ctk.CTkScrollableFrame):
             state="disabled",
             **combo_style(),
         )
-        self._remote_pull_combo.grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
+        self._remote_pull_combo.grid(row=3, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
         self._remote_pull_combo.set("请先读取远端配置")
+        remote_pull_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        remote_pull_button_frame.grid(row=3, column=3, sticky="e", pady=(10, 0))
+        self._remote_inspect_button = ctk.CTkButton(
+            remote_pull_button_frame,
+            text="读取单台",
+            width=86,
+            command=self._inspect_remote_configs,
+            **button_style("secondary", compact=True),
+        )
+        self._remote_inspect_button.pack(side="left", padx=(0, 6))
         self._remote_pull_button = ctk.CTkButton(
-            sync_controls,
-            text="拉取所选",
-            width=126,
+            remote_pull_button_frame,
+            text="拉取到本机",
+            width=86,
             command=self._pull_from_server,
             state="disabled",
-            **button_style("accent"),
+            **button_style("accent", compact=True),
         )
-        self._remote_pull_button.grid(row=2, column=3, sticky="e", pady=(10, 0))
+        self._remote_pull_button.pack(side="left")
         self._remote_pull_hint = ctk.CTkLabel(
             sync_controls,
-            text="先读取服务器上实际存在的配置；随后可按 API/账号或 Claude/Codex 过滤，并选择全部或具体项目拉取到本机。",
+            text="远端拉取只读取单台目标，不受批量勾选影响；先读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._remote_pull_hint.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self._remote_pull_hint.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         bind_wraplength(sync_controls, self._remote_pull_hint, padding=20)
 
         ctk.CTkLabel(
@@ -288,14 +318,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(10, 0))
         self._codex_wire_api_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._codex_wire_api_options.keys()),
             width=160,
             **combo_style(),
         )
-        self._codex_wire_api_combo.grid(row=4, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._codex_wire_api_combo.grid(row=5, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._codex_wire_api_combo.set("远端自测选择")
         self._codex_wire_api_hint = ctk.CTkLabel(
             sync_controls,
@@ -305,7 +335,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._codex_wire_api_hint.grid(row=4, column=2, columnspan=2, sticky="ew", pady=(10, 0))
+        self._codex_wire_api_hint.grid(row=5, column=2, columnspan=2, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._codex_wire_api_hint, padding=20)
 
         ctk.CTkLabel(
@@ -314,14 +344,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=5, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(10, 0))
         self._clear_api_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._clear_api_options.keys()),
             width=160,
             **combo_style(),
         )
-        self._clear_api_combo.grid(row=5, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._clear_api_combo.grid(row=6, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._clear_api_combo.set("Claude + Codex")
         clear_hint = ctk.CTkLabel(
             sync_controls,
@@ -331,7 +361,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        clear_hint.grid(row=5, column=2, sticky="ew", pady=(10, 0))
+        clear_hint.grid(row=6, column=2, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, clear_hint, padding=20)
         ctk.CTkButton(
             sync_controls,
@@ -339,7 +369,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             width=126,
             command=self._clear_remote_api_info,
             **button_style("danger"),
-        ).grid(row=5, column=3, sticky="e", pady=(10, 0))
+        ).grid(row=6, column=3, sticky="e", pady=(10, 0))
 
         ctk.CTkLabel(
             sync_controls,
@@ -347,19 +377,19 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=6, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=7, column=0, sticky="w", pady=(10, 0))
         self._git_login_status_label = ctk.CTkLabel(
             sync_controls,
-            text="检查本机/远端 Git 身份和 GitHub CLI 登录；可同步 gh token，无法读取 Windows 凭据库内部密码。",
+            text="检查/从 SSH 导入使用单台目标；同步到 SSH 使用当前操作目标（有批量勾选则同步到批量）。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._git_login_status_label.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
+        self._git_login_status_label.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
         bind_wraplength(sync_controls, self._git_login_status_label, padding=20)
         git_btn_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
-        git_btn_frame.grid(row=6, column=3, sticky="e", pady=(10, 0))
+        git_btn_frame.grid(row=7, column=3, sticky="e", pady=(10, 0))
         ctk.CTkButton(
             git_btn_frame,
             text="检查",
@@ -390,7 +420,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._sync_status_label.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._sync_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         proxy_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -699,10 +729,12 @@ class SSHTab(ctk.CTkScrollableFrame):
                 selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
                 ctk.CTkCheckBox(
                     top,
-                    text="",
-                    width=20,
+                    text="批量目标",
+                    width=76,
                     checkbox_width=18,
                     checkbox_height=18,
+                    text_color=COLORS["muted"],
+                    font=font(12),
                     variable=selected_var,
                     command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
                 ).pack(side="left", padx=(0, 6))
@@ -780,7 +812,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         # Update server combo
         server_names = [p.name for p in profiles]
         self._selected_server_names.intersection_update(server_names)
-        self._update_batch_target_label(server_names)
         current_server = self._server_combo.get()
         self._server_combo.configure(values=server_names if server_names else ["(无)"])
         if server_names:
@@ -791,6 +822,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         else:
             self._server_combo.set("(无)")
             self._reset_remote_pull_options()
+        self._update_batch_target_label(server_names)
         self._refresh_sync_profile_combo()
         self._update_remote_auto_feature_label()
         self._refresh_remote_auto_switch_availability()
@@ -857,6 +889,42 @@ class SSHTab(ctk.CTkScrollableFrame):
         suffix = "..." if len(server_names) > 3 else ""
         return f"{len(server_names)} 台服务器（{preview}{suffix}）"
 
+    def _single_target_name_for_ui(self) -> str:
+        if not self._server_combo:
+            return ""
+        server_name = str(self._server_combo.get() or "").strip()
+        if not server_name or (server_name.startswith("(") and server_name.endswith(")")):
+            return ""
+        return server_name
+
+    def _update_target_context_ui(self, selected: list[str] | None = None):
+        selected = selected if selected is not None else self._ordered_server_names(self._selected_server_names)
+        single_target = self._single_target_name_for_ui()
+        if selected:
+            summary = f"当前批量模式: {self._format_server_target(selected)}"
+            hint = (
+                "推送当前/所选、远端清理、Git 同步到 SSH、AI 代理会使用批量目标；"
+                f"远端拉取、Git 检查/导入、远端自动续跑仍使用单台目标 {single_target or '-'}。"
+            )
+            summary_color = COLORS["accent"]
+            current_text = "批量推送当前"
+            selected_text = "批量推送所选"
+        else:
+            summary = f"当前单台模式: {single_target or '未选择服务器'}"
+            hint = "要同时操作多台，请在上方服务器卡片勾选“批量目标”；远端拉取始终只读取单台目标。"
+            summary_color = COLORS["muted"] if single_target else COLORS["warning"]
+            current_text = "推送当前"
+            selected_text = "推送所选"
+
+        if self._target_summary_label:
+            self._target_summary_label.configure(text=summary, text_color=summary_color)
+        if self._target_hint_label:
+            self._target_hint_label.configure(text=hint)
+        if self._sync_current_button:
+            self._sync_current_button.configure(text=current_text)
+        if self._sync_selected_button:
+            self._sync_selected_button.configure(text=selected_text)
+
     def _update_batch_target_label(self, server_names: list[str] | None = None):
         all_names = server_names if server_names is not None else self._profile_server_names()
         self._selected_server_names.intersection_update(all_names)
@@ -869,7 +937,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 )
             else:
                 self._batch_target_label.configure(
-                    text="批量目标: 未勾选（使用下方单台目标）",
+                    text="批量目标: 未勾选（当前为单台模式）",
                     text_color=COLORS["muted"],
                 )
         action_state = "normal" if all_names else "disabled"
@@ -879,6 +947,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     button.configure(state=action_state)
                 except Exception:
                     pass
+        self._update_target_context_ui(selected)
 
     def _toggle_batch_server(self, server_name: str, selected: bool):
         if selected:
@@ -1063,12 +1132,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._remote_pull_hint:
             self._remote_pull_hint.configure(
                 text=message
-                or "先读取服务器上实际存在的配置；随后可按 API/账号或 Claude/Codex 过滤，并选择全部或具体项目拉取到本机。",
+                or "远端拉取只读取单台目标，不受批量勾选影响；先读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
                 text_color=COLORS["muted"],
             )
 
     def _on_server_selection_change(self):
         self._reset_remote_pull_options()
+        self._update_target_context_ui()
         self._on_remote_auto_provider_change()
 
     def _set_remote_pull_candidates(self, candidates, server_name: str):
@@ -1128,7 +1198,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         candidates = self._remote_config_candidates
         if not candidates:
             self._remote_pull_hint.configure(
-                text="先读取服务器上实际存在的配置；随后可按 API/账号或 Claude/Codex 过滤，并选择全部或具体项目拉取到本机。",
+                text="远端拉取只读取单台目标，不受批量勾选影响；先读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
                 text_color=COLORS["muted"],
             )
             return
