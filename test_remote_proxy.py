@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +41,7 @@ def test_build_mihomo_config_routes_only_ai_domains_to_proxy():
     assert 'DOMAIN-SUFFIX,chatgpt.com,AI-PROXY' in config
     assert 'DOMAIN-SUFFIX,anthropic.com,AI-PROXY' in config
     assert 'DOMAIN-SUFFIX,generativelanguage.googleapis.com,AI-PROXY' in config
+    assert 'DOMAIN-SUFFIX,oauth2.googleapis.com,AI-PROXY' in config
     assert 'MATCH,DIRECT' in config
 
 
@@ -263,6 +266,80 @@ def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, t
     assert state["url"] == "https://example.com/sub"
     assert state["node_count"] == 1
     assert state["saved_path"] == result.saved_path
+    assert state["content_type"] == "application/yaml"
+    assert state["charset"] == "utf-8"
+
+
+def test_fetch_proxy_subscription_retries_transient_download(monkeypatch, tmp_path):
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: retry, type: vless, server: example.com, port: 443 }\n"
+
+    calls = 0
+
+    def fake_urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise OSError("temporary disconnect")
+        return Response()
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", fake_urlopen)
+
+    result = remote_proxy.fetch_proxy_subscription("https://example.com/sub", retry_base_delay=0)
+
+    assert calls == 3
+    assert result.nodes[0].node["name"] == "retry"
+
+
+def test_fetch_proxy_subscription_decodes_gzip_response(monkeypatch, tmp_path):
+    class Headers:
+        def get(self, key, default=None):
+            return {"Content-Encoding": "gzip"}.get(key, default)
+
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return gzip.compress(
+                b"proxies:\n  - { name: zipped, type: vless, server: example.com, port: 443 }\n"
+            )
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    result = remote_proxy.fetch_proxy_subscription("https://example.com/sub", retry_base_delay=0)
+
+    assert result.nodes[0].node["name"] == "zipped"
+    assert b"proxies:" in Path(result.saved_path).read_bytes()
 
 
 def test_load_cached_proxy_subscription_reads_saved_content(monkeypatch, tmp_path):
@@ -286,6 +363,30 @@ def test_load_cached_proxy_subscription_reads_saved_content(monkeypatch, tmp_pat
     assert cached is not None
     assert cached.url == "https://example.com/sub"
     assert cached.nodes[0].node["name"] == "cached"
+
+
+def test_load_cached_proxy_subscription_respects_saved_charset(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    cache_dir = tmp_path / "proxy_subscriptions"
+    cache_dir.mkdir()
+    content_path = cache_dir / "subscription-gbk.yaml"
+    content_path.write_bytes(
+        "proxies:\n  - { name: 缓存节点, type: vless, server: example.com, port: 443 }\n".encode(
+            "gb18030"
+        )
+    )
+    remote_proxy.save_proxy_subscription_state(
+        url="https://example.com/sub",
+        saved_path=str(content_path),
+        last_fetched_at="2026-05-26T00:00:00+00:00",
+        node_count=1,
+        charset="gb18030",
+    )
+
+    cached = remote_proxy.load_cached_proxy_subscription()
+
+    assert cached is not None
+    assert cached.nodes[0].node["name"] == "缓存节点"
 
 
 def test_proxy_subscription_state_persists_auto_refresh_and_selection(monkeypatch, tmp_path):

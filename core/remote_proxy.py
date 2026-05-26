@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import hashlib
 import json
 import posixpath
 import re
 import shlex
+import time
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
@@ -30,6 +34,10 @@ AI_PROXY_DOMAINS = (
     "claude.ai",
     "gemini.google.com",
     "generativelanguage.googleapis.com",
+    "oauth2.googleapis.com",
+    "www.googleapis.com",
+    "aiplatform.googleapis.com",
+    "cloudcode-pa.googleapis.com",
     "aistudio.google.com",
     "ai.google.dev",
     "makersuite.google.com",
@@ -118,6 +126,8 @@ def parse_proxy_subscription_content(text: str) -> tuple[ProxySubscriptionNode, 
             raise ValueError("订阅内容里没有识别到可用的 Clash/mihomo 节点") from exc
 
     unique_nodes = _dedupe_proxy_nodes(nodes)
+    if not unique_nodes:
+        raise ValueError("订阅内容里没有识别到可用的 Clash/mihomo 节点")
     return tuple(
         ProxySubscriptionNode(index=index, node=node, source="subscription")
         for index, node in enumerate(unique_nodes, 1)
@@ -129,6 +139,8 @@ def fetch_proxy_subscription(
     timeout: int = 45,
     max_bytes: int = 5 * 1024 * 1024,
     persist: bool = True,
+    retries: int = 3,
+    retry_base_delay: float = 1.0,
 ) -> ProxySubscriptionResult:
     parsed_url = urlparse.urlparse((url or "").strip())
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
@@ -140,23 +152,20 @@ def fetch_proxy_subscription(
         headers={
             "User-Agent": "API-Switcher/1.0",
             "Accept": "text/plain, application/yaml, application/json, */*",
+            "Accept-Encoding": "gzip, deflate",
         },
     )
-    try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
-            payload = response.read(max_bytes + 1)
-            if len(payload) > max_bytes:
-                raise ValueError("订阅内容超过 5MB，已停止读取")
-            content_type = response.headers.get_content_type()
-            charset = response.headers.get_content_charset() or "utf-8"
-    except ValueError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"订阅下载失败: {exc}") from exc
 
-    saved_path = _save_proxy_subscription(normalized_url, payload, content_type)
-    text = payload.decode(charset, errors="replace")
+    payload, content_type, charset = _download_proxy_subscription(
+        request=request,
+        timeout=timeout,
+        max_bytes=max_bytes,
+        retries=retries,
+        retry_base_delay=retry_base_delay,
+    )
+    text = _decode_subscription_bytes(payload, charset)
     nodes = parse_proxy_subscription_content(text)
+    saved_path = _save_proxy_subscription(normalized_url, payload, content_type)
     fetched_at = _now_iso()
     if persist:
         save_proxy_subscription_state(
@@ -164,6 +173,8 @@ def fetch_proxy_subscription(
             saved_path=str(saved_path),
             last_fetched_at=fetched_at,
             node_count=len(nodes),
+            content_type=content_type,
+            charset=charset,
         )
     return ProxySubscriptionResult(
         nodes=nodes,
@@ -182,7 +193,7 @@ def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
     if not path.exists() or not path.is_file():
         return None
     try:
-        text = path.read_bytes().decode("utf-8-sig", errors="replace")
+        text = _decode_subscription_bytes(path.read_bytes(), str(state.get("charset") or "utf-8-sig"))
         nodes = parse_proxy_subscription_content(text)
     except Exception:
         return None
@@ -895,6 +906,140 @@ def _int_or_default(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _download_proxy_subscription(
+    *,
+    request: urlrequest.Request,
+    timeout: int,
+    max_bytes: int,
+    retries: int,
+    retry_base_delay: float,
+) -> tuple[bytes, str, str]:
+    try:
+        attempts = max(1, int(retries))
+    except (TypeError, ValueError):
+        attempts = 3
+    attempts = max(1, attempts)
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with urlrequest.urlopen(request, timeout=timeout) as response:
+                status = _int_or_default(getattr(response, "status", getattr(response, "code", 200)), 200)
+                if 400 <= status < 500:
+                    raise ValueError(f"订阅链接返回 HTTP {status}，请检查订阅地址是否有效")
+                if status >= 500:
+                    raise RuntimeError(f"订阅服务器返回 HTTP {status}")
+
+                payload = response.read(max_bytes + 1)
+                if len(payload) > max_bytes:
+                    raise ValueError("订阅内容超过 5MB，已停止读取")
+
+                headers = getattr(response, "headers", {}) or {}
+                payload = _decode_http_payload(
+                    payload,
+                    content_encoding=_header_value(headers, "Content-Encoding"),
+                    max_bytes=max_bytes,
+                )
+                return payload, _response_content_type(headers), _response_charset(headers) or "utf-8"
+        except HTTPError as exc:
+            if 400 <= exc.code < 500:
+                raise ValueError(f"订阅链接返回 HTTP {exc.code}，请检查订阅地址是否有效") from exc
+            last_error = exc
+        except ValueError:
+            raise
+        except Exception as exc:
+            last_error = exc
+
+        if attempt < attempts:
+            delay = _retry_delay_seconds(retry_base_delay, attempt)
+            if delay > 0:
+                time.sleep(delay)
+
+    suffix = f"（已重试 {attempts} 次）" if attempts > 1 else ""
+    raise RuntimeError(f"订阅下载失败{suffix}: {last_error}") from last_error
+
+
+def _decode_http_payload(payload: bytes, content_encoding: str, max_bytes: int) -> bytes:
+    encoding = (content_encoding or "").lower()
+    if "gzip" in encoding:
+        decoded = gzip.decompress(payload)
+    elif "deflate" in encoding:
+        try:
+            decoded = zlib.decompress(payload)
+        except zlib.error:
+            decoded = zlib.decompress(payload, -zlib.MAX_WBITS)
+    else:
+        return payload
+
+    if len(decoded) > max_bytes:
+        raise ValueError("订阅内容解压后超过 5MB，已停止读取")
+    return decoded
+
+
+def _header_value(headers, name: str) -> str:
+    getter = getattr(headers, "get", None)
+    if not callable(getter):
+        return ""
+    for key in (name, name.lower(), name.title()):
+        try:
+            value = getter(key, "")
+        except TypeError:
+            value = getter(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _response_content_type(headers) -> str:
+    getter = getattr(headers, "get_content_type", None)
+    if callable(getter):
+        try:
+            content_type = getter()
+        except Exception:
+            content_type = ""
+        if content_type:
+            return str(content_type)
+    content_type = _header_value(headers, "Content-Type").split(";", 1)[0].strip()
+    return content_type or "text/plain"
+
+
+def _response_charset(headers) -> str:
+    getter = getattr(headers, "get_content_charset", None)
+    if callable(getter):
+        try:
+            charset = getter()
+        except Exception:
+            charset = ""
+        if charset:
+            return str(charset)
+    content_type = _header_value(headers, "Content-Type")
+    match = re.search(r"charset\s*=\s*([^;\s]+)", content_type, flags=re.I)
+    return match.group(1).strip("\"'") if match else ""
+
+
+def _decode_subscription_bytes(payload: bytes, charset: str) -> str:
+    seen = set()
+    candidates = [charset, "utf-8-sig", "utf-8", "gb18030", "gbk", "latin-1"]
+    for candidate in candidates:
+        encoding = str(candidate or "").strip().strip("\"'")
+        if not encoding or encoding.lower() in seen:
+            continue
+        seen.add(encoding.lower())
+        try:
+            return payload.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def _retry_delay_seconds(retry_base_delay: float, failed_attempt: int) -> float:
+    try:
+        base_delay = float(retry_base_delay)
+    except (TypeError, ValueError):
+        base_delay = 1.0
+    return min(max(0.0, base_delay) * max(1, failed_attempt), 15.0)
 
 
 def _looks_like_proxy_node(value: dict) -> bool:

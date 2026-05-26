@@ -1199,8 +1199,13 @@ class SSHTab(ctk.CTkScrollableFrame):
                     return
                 self._set_proxy_busy(False)
                 if not payload["ok"]:
-                    message = f"订阅拉取失败: {payload['error']}"
-                    self._set_proxy_status(message, "error")
+                    if auto and self._proxy_subscription_options:
+                        message = f"自动刷新失败，已保留本机缓存: {payload['error']}"
+                        severity = "warning"
+                    else:
+                        message = f"订阅拉取失败: {payload['error']}"
+                        severity = "error"
+                    self._set_proxy_status(message, severity)
                     if show_message:
                         show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
