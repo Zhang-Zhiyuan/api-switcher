@@ -255,14 +255,38 @@ def format_proxy_node(node: dict) -> str:
 
 def _normalize_proxy_node(node: dict) -> dict:
     parsed = {str(k).strip(): v for k, v in node.items() if str(k).strip()}
+    _apply_proxy_node_aliases(parsed)
+    if not _has_value(parsed.get("name")) and _has_value(parsed.get("server")):
+        type_label = str(parsed.get("type") or "proxy").strip() or "proxy"
+        port_label = str(parsed.get("port") or "").strip()
+        parsed["name"] = f"{type_label}-{parsed['server']}{':' + port_label if port_label else ''}"
     required = ["name", "type", "server", "port"]
     missing = [key for key in required if not _has_value(parsed.get(key))]
     if missing:
         raise ValueError("代理节点缺少字段: " + "、".join(missing))
     for key in ("name", "type", "server"):
         parsed[key] = str(parsed[key]).strip()
+    if parsed["type"].lower() == "hy2":
+        parsed["type"] = "hysteria2"
+    elif parsed["type"].lower() == "socks":
+        parsed["type"] = "socks5"
     parsed["port"] = _normalize_port(parsed["port"], "代理节点端口")
     return parsed
+
+
+def _apply_proxy_node_aliases(parsed: dict) -> None:
+    aliases = {
+        "name": ("tag", "remark", "remarks", "ps"),
+        "server": ("address", "host"),
+        "port": ("server_port", "server-port", "serverPort"),
+    }
+    for canonical, names in aliases.items():
+        if _has_value(parsed.get(canonical)):
+            continue
+        for alias in names:
+            if _has_value(parsed.get(alias)):
+                parsed[canonical] = parsed[alias]
+                break
 
 
 def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
@@ -412,13 +436,21 @@ def _parse_yaml_proxy_nodes(text: str) -> list[dict]:
     try:
         parsed = yaml.safe_load(text)
     except Exception:
-        return []
+        proxy_section = _extract_yaml_proxy_section(text)
+        if not proxy_section:
+            return []
+        try:
+            parsed = yaml.safe_load(proxy_section)
+        except Exception:
+            return []
 
     candidates = []
     if isinstance(parsed, dict):
         proxies = parsed.get("proxies")
         if isinstance(proxies, list):
             candidates = proxies
+        elif isinstance(proxies, dict):
+            candidates = _proxy_mapping_values(proxies)
         elif _looks_like_proxy_node(parsed):
             candidates = [parsed]
     elif isinstance(parsed, list):
@@ -433,6 +465,39 @@ def _parse_yaml_proxy_nodes(text: str) -> list[dict]:
         except ValueError:
             continue
     return nodes
+
+
+def _extract_yaml_proxy_section(text: str) -> str:
+    match = re.search(r"(?m)^[ \t]*proxies\s*:", text or "")
+    if not match:
+        return ""
+    lines = text[match.start():].splitlines()
+    if not lines:
+        return ""
+    base_indent = len(lines[0]) - len(lines[0].lstrip(" "))
+    collected = [lines[0]]
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            collected.append(line)
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= base_indent and re.match(r"[A-Za-z0-9_-]+\s*:", stripped):
+            break
+        collected.append(line)
+    return "\n".join(collected).strip()
+
+
+def _proxy_mapping_values(proxies: dict) -> list[dict]:
+    candidates = []
+    for name, value in proxies.items():
+        if not isinstance(value, dict):
+            continue
+        candidate = dict(value)
+        if not _has_value(candidate.get("name")):
+            candidate["name"] = name
+        candidates.append(candidate)
+    return candidates
 
 
 def _parse_yaml_proxy_node(text: str) -> dict | None:
@@ -464,10 +529,7 @@ def _parse_custom_proxy_nodes(text: str) -> list[dict]:
 
 def _parse_proxy_uri_lines(text: str) -> list[dict]:
     nodes = []
-    for line in text.splitlines():
-        candidate = line.strip()
-        if not candidate or candidate.startswith("#"):
-            continue
+    for candidate in _iter_proxy_uri_candidates(text):
         try:
             node = _parse_proxy_uri(candidate)
         except ValueError:
@@ -475,6 +537,32 @@ def _parse_proxy_uri_lines(text: str) -> list[dict]:
         if node:
             nodes.append(node)
     return nodes
+
+
+def _iter_proxy_uri_candidates(text: str) -> list[str]:
+    pattern = re.compile(
+        r"(?i)\b(?:vmess|vless|trojan|ssr?|hy2|hysteria2|tuic)://[^\s<>'\"]+"
+    )
+    candidates = []
+    for match in pattern.finditer(text or ""):
+        candidate = _clean_proxy_uri_candidate(match.group(0))
+        if candidate:
+            candidates.append(candidate)
+    for line in (text or "").splitlines():
+        candidate = _clean_proxy_uri_candidate(line.strip())
+        if candidate and re.match(r"(?i)^(?:socks5?|https?)://", candidate):
+            candidates.append(candidate)
+    return candidates
+
+
+def _clean_proxy_uri_candidate(candidate: str) -> str:
+    value = (candidate or "").strip().strip(",;")
+    while value and value[-1] in ")]}":
+        opener = {"}": "{", "]": "[", ")": "("}[value[-1]]
+        if value.count(opener) >= value.count(value[-1]):
+            break
+        value = value[:-1]
+    return value.strip()
 
 
 def _parse_proxy_uri(text: str) -> dict:
@@ -487,6 +575,14 @@ def _parse_proxy_uri(text: str) -> dict:
         return _parse_trojan_uri(text)
     if scheme == "ss":
         return _parse_ss_uri(text)
+    if scheme == "ssr":
+        return _parse_ssr_uri(text)
+    if scheme in {"hy2", "hysteria2"}:
+        return _parse_hysteria2_uri(text)
+    if scheme == "tuic":
+        return _parse_tuic_uri(text)
+    if scheme in {"http", "https", "socks", "socks5"}:
+        return _parse_basic_proxy_uri(text, scheme)
     raise ValueError("不支持的代理 URI")
 
 
@@ -506,7 +602,7 @@ def _parse_vmess_uri(text: str) -> dict:
         "server": data.get("add"),
         "port": data.get("port"),
         "uuid": data.get("id"),
-        "alterId": int(data.get("aid") or 0),
+        "alterId": _int_or_default(data.get("aid"), 0),
         "cipher": data.get("scy") or "auto",
         "network": data.get("net") or "tcp",
     }
@@ -596,6 +692,100 @@ def _parse_ss_uri(text: str) -> dict:
     return _normalize_proxy_node(node)
 
 
+def _parse_ssr_uri(text: str) -> dict:
+    payload = _decode_base64_payload(text.split("://", 1)[1]) or _decode_base64_component(text.split("://", 1)[1])
+    if not payload:
+        raise ValueError("ssr URI 不是有效的 base64 内容")
+    main, _, query_text = payload.partition("/?")
+    parts = main.split(":")
+    if len(parts) < 6:
+        raise ValueError("ssr URI 主体字段不足")
+    server, port, protocol, method, obfs, password_encoded = parts[:6]
+    query = _query_map(query_text)
+    node = {
+        "name": _decode_base64_component(query.get("remarks") or "") or server,
+        "type": "ssr",
+        "server": server,
+        "port": port,
+        "cipher": method,
+        "password": _decode_base64_component(password_encoded),
+        "protocol": protocol,
+        "obfs": obfs,
+    }
+    if query.get("obfsparam"):
+        node["obfs-param"] = _decode_base64_component(query["obfsparam"])
+    if query.get("protoparam"):
+        node["protocol-param"] = _decode_base64_component(query["protoparam"])
+    return _normalize_proxy_node(node)
+
+
+def _parse_hysteria2_uri(text: str) -> dict:
+    parsed = urlparse.urlparse(text)
+    query = _query_map(parsed.query)
+    node = {
+        "name": _uri_name(parsed, "hysteria2"),
+        "type": "hysteria2",
+        "server": parsed.hostname,
+        "port": parsed.port,
+        "password": urlparse.unquote(parsed.username or query.get("password") or ""),
+    }
+    if query.get("sni"):
+        node["sni"] = query["sni"]
+    if _truthy(query.get("insecure") or query.get("allowInsecure")):
+        node["skip-cert-verify"] = True
+    if query.get("alpn"):
+        node["alpn"] = _split_csv(query["alpn"])
+    for key in ("obfs", "obfs-password", "up", "down"):
+        if query.get(key):
+            node[key] = query[key]
+    return _normalize_proxy_node(node)
+
+
+def _parse_tuic_uri(text: str) -> dict:
+    parsed = urlparse.urlparse(text)
+    query = _query_map(parsed.query)
+    username = urlparse.unquote(parsed.username or "")
+    password = urlparse.unquote(parsed.password or "")
+    if ":" in username and not password:
+        username, password = username.split(":", 1)
+    node = {
+        "name": _uri_name(parsed, "tuic"),
+        "type": "tuic",
+        "server": parsed.hostname,
+        "port": parsed.port,
+        "uuid": username,
+        "password": password or query.get("password") or "",
+    }
+    if query.get("sni"):
+        node["sni"] = query["sni"]
+    if query.get("alpn"):
+        node["alpn"] = _split_csv(query["alpn"])
+    if query.get("congestion_control"):
+        node["congestion-controller"] = query["congestion_control"]
+    if query.get("udp_relay_mode"):
+        node["udp-relay-mode"] = query["udp_relay_mode"]
+    if _truthy(query.get("allowInsecure") or query.get("insecure")):
+        node["skip-cert-verify"] = True
+    return _normalize_proxy_node(node)
+
+
+def _parse_basic_proxy_uri(text: str, scheme: str) -> dict:
+    parsed = urlparse.urlparse(text)
+    node = {
+        "name": _uri_name(parsed, scheme),
+        "type": "socks5" if scheme in {"socks", "socks5"} else "http",
+        "server": parsed.hostname,
+        "port": parsed.port,
+    }
+    if parsed.username:
+        node["username"] = urlparse.unquote(parsed.username)
+    if parsed.password:
+        node["password"] = urlparse.unquote(parsed.password)
+    if scheme == "https":
+        node["tls"] = True
+    return _normalize_proxy_node(node)
+
+
 def _apply_common_uri_options(node: dict, query: dict[str, str]) -> None:
     security = (query.get("security") or "").lower()
     if security in {"tls", "reality"} or query.get("tls", "").lower() in {"1", "true", "tls"}:
@@ -607,8 +797,10 @@ def _apply_common_uri_options(node: dict, query: dict[str, str]) -> None:
         node["flow"] = query["flow"]
     if query.get("fp"):
         node["client-fingerprint"] = query["fp"]
+    if _truthy(query.get("allowInsecure") or query.get("insecure")):
+        node["skip-cert-verify"] = True
     if query.get("alpn"):
-        node["alpn"] = [part for part in query["alpn"].split(",") if part]
+        node["alpn"] = _split_csv(query["alpn"])
 
     network = str(node.get("network") or "").lower()
     if network == "ws":
@@ -619,12 +811,39 @@ def _apply_common_uri_options(node: dict, query: dict[str, str]) -> None:
             ws_opts["headers"] = {"Host": query["host"]}
         if ws_opts:
             node["ws-opts"] = ws_opts
+    elif network == "grpc":
+        grpc_opts = {}
+        service_name = query.get("serviceName") or query.get("service_name") or query.get("grpc-service-name")
+        if service_name:
+            grpc_opts["grpc-service-name"] = service_name
+        if query.get("mode"):
+            grpc_opts["grpc-mode"] = query["mode"]
+        if grpc_opts:
+            node["grpc-opts"] = grpc_opts
+    elif network == "httpupgrade":
+        httpupgrade_opts = {}
+        if query.get("path"):
+            httpupgrade_opts["path"] = query["path"]
+        if query.get("host"):
+            httpupgrade_opts["host"] = query["host"]
+        if httpupgrade_opts:
+            node["httpupgrade-opts"] = httpupgrade_opts
+    elif network in {"http", "h2"}:
+        http_opts = {}
+        if query.get("path"):
+            http_opts["path"] = [query["path"]]
+        if query.get("host"):
+            http_opts["headers"] = {"Host": _split_csv(query["host"])}
+        if http_opts:
+            node["h2-opts" if network == "h2" else "http-opts"] = http_opts
     if security == "reality":
         reality_opts = {}
         if query.get("pbk"):
             reality_opts["public-key"] = query["pbk"]
         if query.get("sid"):
             reality_opts["short-id"] = query["sid"]
+        if query.get("spx"):
+            reality_opts["spider-x"] = query["spx"]
         if reality_opts:
             node["reality-opts"] = reality_opts
 
@@ -643,14 +862,39 @@ def _uri_name(parsed, fallback: str) -> str:
 def _decode_base64_userinfo(value: str) -> str:
     decoded = _decode_base64_payload(value)
     if not decoded:
-        padded = value + ("=" * (-len(value) % 4))
-        try:
-            decoded = base64.urlsafe_b64decode(padded).decode("utf-8", errors="strict")
-        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
-            raise ValueError("SS URI 用户信息不是有效 base64") from exc
+        decoded = _decode_base64_component(value)
+        if not decoded:
+            raise ValueError("SS URI 用户信息不是有效 base64")
     if ":" not in decoded:
         raise ValueError("SS URI 用户信息缺少加密方式或密码")
     return decoded
+
+
+def _decode_base64_component(value: str) -> str:
+    raw = urlparse.unquote(value or "").strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"\s+", "", raw)
+    padded = compact + ("=" * (-len(compact) % 4))
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace").strip()
+    except (binascii.Error, ValueError):
+        return ""
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_or_default(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _looks_like_proxy_node(value: dict) -> bool:
@@ -659,7 +903,7 @@ def _looks_like_proxy_node(value: dict) -> bool:
 
 def _subscription_text_variants(text: str) -> list[str]:
     variants = [text]
-    if "://" not in text and not re.search(r"(?m)^\s*proxies\s*:", text):
+    if "://" not in text and not re.search(r"(?m)^[ \t]*proxies\s*:", text):
         decoded = _decode_base64_text(text)
         if decoded and decoded not in variants:
             variants.append(decoded)
@@ -668,7 +912,7 @@ def _subscription_text_variants(text: str) -> list[str]:
 
 def _decode_base64_text(text: str) -> str:
     decoded = _decode_base64_payload(text)
-    if decoded and ("://" in decoded or re.search(r"(?m)^\s*proxies\s*:", decoded)):
+    if decoded and ("://" in decoded or re.search(r"(?m)^[ \t]*proxies\s*:", decoded)):
         return decoded
     return ""
 

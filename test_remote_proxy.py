@@ -152,6 +152,73 @@ def test_parse_proxy_subscription_content_accepts_vmess_uri():
     assert nodes[0].node["ws-opts"]["headers"]["Host"] == "host.example.com"
 
 
+def test_parse_proxy_subscription_content_accepts_ss_sip002_variants():
+    userinfo = base64.urlsafe_b64encode(b"aes-256-gcm:pass").decode("ascii").rstrip("=")
+    full = base64.urlsafe_b64encode(b"chacha20-ietf-poly1305:secret@full.example.com:8389").decode("ascii").rstrip("=")
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        "\n".join([
+            f"ss://{userinfo}@ss.example.com:8388#SS%20Userinfo",
+            f"ss://{full}#SS%20Full",
+        ])
+    )
+
+    assert nodes[0].node["cipher"] == "aes-256-gcm"
+    assert nodes[0].node["server"] == "ss.example.com"
+    assert nodes[1].node["server"] == "full.example.com"
+    assert nodes[1].node["password"] == "secret"
+
+
+def test_parse_proxy_subscription_content_accepts_ssr_uri():
+    def b64u(value: str) -> str:
+        return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+    body = (
+        f"ssr.example.com:443:origin:aes-256-gcm:plain:{b64u('pass')}"
+        f"/?remarks={b64u('SSR Node')}&obfsparam={b64u('obfs.example')}&protoparam={b64u('proto')}"
+    )
+    nodes = remote_proxy.parse_proxy_subscription_content(f"ssr://{b64u(body)}")
+
+    assert nodes[0].node["name"] == "SSR Node"
+    assert nodes[0].node["type"] == "ssr"
+    assert nodes[0].node["obfs-param"] == "obfs.example"
+    assert nodes[0].node["protocol-param"] == "proto"
+
+
+def test_parse_proxy_subscription_content_accepts_reality_grpc_and_hysteria2():
+    vless = (
+        "vless://token@reality.example.com:443?"
+        "encryption=none&security=reality&sni=target.example.com&fp=chrome"
+        "&pbk=public-key&sid=abcd&spx=%2F&type=grpc&serviceName=svc#Reality"
+    )
+    hy2 = "hy2://secret@hy.example.com:8443?sni=hy.example.com&insecure=1&alpn=h3#HY2"
+    nodes = remote_proxy.parse_proxy_subscription_content(f"prefix {vless}, then {hy2}")
+
+    assert nodes[0].node["reality-opts"]["public-key"] == "public-key"
+    assert nodes[0].node["reality-opts"]["spider-x"] == "/"
+    assert nodes[0].node["grpc-opts"]["grpc-service-name"] == "svc"
+    assert nodes[1].node["type"] == "hysteria2"
+    assert nodes[1].node["skip-cert-verify"] is True
+
+
+def test_parse_proxy_subscription_content_accepts_tuic_and_proxy_mapping_aliases():
+    tuic = "tuic://uuid:pass@tuic.example.com:443?sni=tuic.example.com&alpn=h3&congestion_control=bbr#TUIC"
+    yaml_text = """
+proxies:
+  mapped:
+    type: hy2
+    address: mapped.example.com
+    server_port: 9443
+    password: mapped-pass
+"""
+    nodes = remote_proxy.parse_proxy_subscription_content(tuic + "\n" + yaml_text)
+    by_name = {item.node["name"]: item.node for item in nodes}
+
+    assert by_name["TUIC"]["type"] == "tuic"
+    assert by_name["TUIC"]["congestion-controller"] == "bbr"
+    assert by_name["mapped"]["type"] == "hysteria2"
+    assert by_name["mapped"]["port"] == 9443
+
+
 def test_format_proxy_node_round_trips_selected_subscription_node():
     node = remote_proxy.parse_proxy_subscription_content(
         "vless://token@example.com:443?encryption=none&type=ws&path=%2Fchat#picked"
