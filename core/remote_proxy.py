@@ -61,6 +61,23 @@ VSCODE_SERVER_ENV_SETUP_PATHS = (
     "~/.cursor-server/server-env-setup",
 )
 
+SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
+    r"剩余流量",
+    r"已用流量",
+    r"流量.*(重置|到期|剩余|用尽|不足)",
+    r"距离.*重置",
+    r"下次重置",
+    r"套餐.*到期",
+    r"(到期|过期)时间",
+    r"官网",
+    r"防失联",
+    r"发布页",
+    r"订阅(信息|地址|链接)?",
+    r"联通移动用",
+    r"电信移动用",
+    r"\b(traffic|remaining|reset|expire|expiry|subscription|official|website)\b",
+)
+
 
 @dataclass(frozen=True)
 class RemoteAIProxyStatus:
@@ -1108,12 +1125,22 @@ def _dedupe_proxy_nodes(nodes: list[dict]) -> list[dict]:
             normalized = _normalize_proxy_node(node)
         except ValueError:
             continue
+        if _is_subscription_metadata_node(normalized):
+            continue
         key = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
         if key in seen:
             continue
         seen.add(key)
         unique.append(normalized)
     return unique
+
+
+def _is_subscription_metadata_node(node: dict) -> bool:
+    name = str(node.get("name") or "").strip()
+    if not name:
+        return False
+    compact = re.sub(r"\s+", "", name).lower()
+    return any(re.search(pattern, compact, flags=re.I) for pattern in SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS)
 
 
 def _proxy_subscription_dir() -> Path:
@@ -1578,14 +1605,20 @@ def _build_fish_proxy_config(start_path: str, mixed_port: int) -> str:
     ])
 
 
-def _write_shell_profile_block(client, home: str, env_path: str, start_path: str, mixed_port: int) -> None:
-    block = _build_shell_profile_block(env_path, start_path)
-    profile_paths = (
+def _shell_proxy_profile_paths(home: str) -> tuple[str, ...]:
+    return (
         posixpath.join(home, ".profile"),
         posixpath.join(home, ".bashrc"),
+        posixpath.join(home, ".bash_profile"),
+        posixpath.join(home, ".bash_login"),
         posixpath.join(home, ".zprofile"),
         posixpath.join(home, ".zshrc"),
     )
+
+
+def _write_shell_profile_block(client, home: str, env_path: str, start_path: str, mixed_port: int) -> None:
+    block = _build_shell_profile_block(env_path, start_path)
+    profile_paths = _shell_proxy_profile_paths(home)
     fish_path = posixpath.join(home, ".config", "fish", "conf.d", "api-switcher-ai-proxy.fish")
     ssh_manager.write_remote_file(client, fish_path, _build_fish_proxy_config(start_path, mixed_port), file_mode=0o600)
     quoted_paths = " ".join(shlex.quote(path) for path in profile_paths)
@@ -1648,7 +1681,10 @@ def _write_vscode_proxy_settings(client, mixed_port: int) -> int:
             targets.append((expanded, content))
 
     if not targets:
-        targets = [(remote_config._expand_remote_path(client, remote_config.REMOTE_VSCODE_SETTINGS_PATHS[0]), "")]
+        targets = [
+            (remote_config._expand_remote_path(client, raw_path), "")
+            for raw_path in remote_config.REMOTE_VSCODE_SETTINGS_PATHS
+        ]
 
     written = 0
     for path, content in targets:
@@ -1680,6 +1716,9 @@ def _apply_vscode_proxy_settings(settings: dict, mixed_port: int) -> tuple[dict,
 
     if updated.get("http.proxy") != proxy_url:
         updated["http.proxy"] = proxy_url
+        changed = True
+    if updated.get("http.proxySupport") != "override":
+        updated["http.proxySupport"] = "override"
         changed = True
 
     terminal_env = updated.get("terminal.integrated.env.linux")

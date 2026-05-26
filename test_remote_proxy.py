@@ -222,6 +222,21 @@ proxies:
     assert by_name["mapped"]["port"] == 9443
 
 
+def test_parse_proxy_subscription_content_filters_provider_metadata_nodes():
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        """
+proxies:
+  - { name: 剩余流量：351.98+GB, type: vless, server: cloudflare.example.com, port: 8443 }
+  - { name: 套餐到期：2026-05-30, type: vless, server: cloudflare.example.com, port: 8443 }
+  - { name: 官网地址防失联发布页：example.com, type: vless, server: cloudflare.example.com, port: 8443 }
+  - { name: real-node, type: vless, server: real.example.com, port: 443 }
+"""
+    )
+
+    assert [item.node["name"] for item in nodes] == ["real-node"]
+    assert nodes[0].index == 1
+
+
 def test_format_proxy_node_round_trips_selected_subscription_node():
     node = remote_proxy.parse_proxy_subscription_content(
         "vless://token@example.com:443?encryption=none&type=ws&path=%2Fchat#picked"
@@ -438,6 +453,7 @@ def test_start_script_checks_port_with_netstat_when_ss_is_missing():
 
 def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     env_file = remote_proxy._build_env_file(7890)
+    shell_paths = remote_proxy._shell_proxy_profile_paths("/home/me")
     profile_block = remote_proxy._build_shell_profile_block(
         "/home/me/.config/api-switcher/ai-proxy.env",
         "/home/me/.config/api-switcher/start-ai-proxy.sh",
@@ -452,6 +468,8 @@ def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     )
 
     assert "export HTTP_PROXY=http://127.0.0.1:7890" in env_file
+    assert "/home/me/.bash_profile" in shell_paths
+    assert "/home/me/.bash_login" in shell_paths
     assert ". /home/me/.config/api-switcher/ai-proxy.env" in profile_block
     assert vscode_setup.startswith("#!/bin/sh")
     assert "Loaded by VS Code Remote Server" in vscode_setup
@@ -469,6 +487,7 @@ def test_apply_vscode_proxy_settings_preserves_existing_terminal_env():
     assert changed is True
     assert updated["editor.fontSize"] == 14
     assert updated["http.proxy"] == "http://127.0.0.1:7890"
+    assert updated["http.proxySupport"] == "override"
     assert updated["terminal.integrated.env.linux"]["EXISTING"] == "1"
     assert updated["terminal.integrated.env.linux"]["HTTPS_PROXY"] == "http://127.0.0.1:7890"
     assert updated["terminal.integrated.env.linux"]["NO_PROXY"] == "127.0.0.1,localhost,::1,*.local"
