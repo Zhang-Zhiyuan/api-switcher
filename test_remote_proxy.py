@@ -567,6 +567,92 @@ def test_select_local_mixed_port_skips_busy_default(monkeypatch):
     assert local_proxy._select_local_mixed_port(17897) == 17898
 
 
+def test_select_local_mixed_port_ignores_unmanaged_pid(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897})
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 12345)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: True)
+    monkeypatch.setattr(local_proxy, "_is_managed_mihomo_pid", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: False)
+
+    assert local_proxy._select_local_mixed_port(17897) == 17897
+
+
+def test_inspect_local_proxy_reports_setting_drift(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("mixed-port: 17897", encoding="utf-8")
+
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897, "config_path": str(config_path)})
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 12345)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: True)
+    monkeypatch.setattr(local_proxy, "_is_managed_mihomo_pid", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(local_proxy, "_local_env_matches", lambda _port: False)
+    monkeypatch.setattr(local_proxy, "_local_vscode_proxy_match_detail", lambda _port: "VS Code 本机设置未完全指向本机代理")
+
+    status = local_proxy.inspect_local_ai_proxy()
+
+    assert status.running is True
+    assert "pid 文件指向非本工具代理进程" in status.detail
+    assert "Windows 环境变量未完全指向本机代理" in status.detail
+    assert "VS Code 本机设置未完全指向本机代理" in status.detail
+
+
+def test_read_url_with_retries_retries_transient_failure(monkeypatch):
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"ok"
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("temporary")
+        return Response()
+
+    monkeypatch.setattr(local_proxy.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(local_proxy.time, "sleep", lambda _seconds: None)
+
+    payload = local_proxy._read_url_with_retries(
+        local_proxy.urllib.request.Request("https://example.com/file"),
+        timeout=1,
+        label="下载测试",
+        retries=2,
+    )
+
+    assert payload == b"ok"
+    assert len(calls) == 2
+
+
+def test_install_local_proxy_failure_reports_restore_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", tmp_path / "mihomo.pid")
+    monkeypatch.setattr(local_proxy, "_select_local_mixed_port", lambda _port: 17897)
+    monkeypatch.setattr(local_proxy, "_ensure_mihomo_binary", lambda: tmp_path / "mihomo.exe")
+    monkeypatch.setattr(local_proxy, "_capture_previous_env", lambda: {})
+    monkeypatch.setattr(local_proxy, "_capture_vscode_proxy_state", lambda _settings: {})
+    monkeypatch.setattr(local_proxy.vscode_parser, "read_vscode_settings", lambda: {})
+    monkeypatch.setattr(local_proxy, "_start_local_mihomo", lambda *_args: (_ for _ in ()).throw(RuntimeError("start failed")))
+    monkeypatch.setattr(local_proxy, "_restore_local_env", lambda *_args: (_ for _ in ()).throw(RuntimeError("env restore failed")))
+    monkeypatch.setattr(local_proxy, "_restore_local_vscode_proxy", lambda *_args: None)
+    monkeypatch.setattr(local_proxy, "_cleanup_managed_process", lambda *_args: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        local_proxy.install_local_ai_proxy("{ name: node, type: vless, server: example.com, port: 443 }")
+
+    message = str(excinfo.value)
+    assert "start failed" in message
+    assert "env restore failed" in message
+
+
 def test_stop_local_proxy_does_not_terminate_unmanaged_pid(monkeypatch, tmp_path):
     pid_path = tmp_path / "mihomo.pid"
     pid_path.write_text("12345", encoding="utf-8")

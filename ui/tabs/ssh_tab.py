@@ -1263,6 +1263,17 @@ class SSHTab(ctk.CTkScrollableFrame):
                     button.configure(state=state)
             except Exception:
                 pass
+        if self._proxy_auto_refresh_check:
+            try:
+                self._proxy_auto_refresh_check.configure(state=state)
+            except Exception:
+                pass
+        if self._proxy_subscription_combo:
+            try:
+                combo_state = "disabled" if busy or not self._proxy_subscription_options else "normal"
+                self._proxy_subscription_combo.configure(state=combo_state)
+            except Exception:
+                pass
 
     def _load_saved_proxy_subscription_ui(self):
         if self._proxy_saved_subscription_loaded:
@@ -1489,7 +1500,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     severity = "warning" if failures and result.get("results") else "error" if failures else "success"
                     self._set_proxy_status(self._sync_status_label.cget("text"), severity)
 
-            self._run_ssh_task(
+            self._run_proxy_ssh_task(
                 f"正在部署 AI 代理到 {target_label}...",
                 lambda: self._run_server_batch(
                     server_names,
@@ -1527,7 +1538,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 severity = "warning" if failures and result.get("results") else "error" if failures else "success"
                 self._set_proxy_status(self._sync_status_label.cget("text"), severity)
 
-        self._run_ssh_task(
+        self._run_proxy_ssh_task(
             f"正在检查 {target_label} 的 AI 代理状态...",
             lambda: self._run_server_batch(
                 server_names,
@@ -1536,9 +1547,29 @@ class SSHTab(ctk.CTkScrollableFrame):
             on_done=done,
         )
 
+    def _run_proxy_ssh_task(self, busy_message: str, worker, on_done=None):
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "AI 代理操作正在进行中，请稍等", is_error=True)
+            return
+        if self._ssh_busy:
+            show_toast(self.winfo_toplevel(), "SSH 操作正在进行中，请稍等", is_error=True)
+            return
+        self._set_proxy_busy(True)
+        self._set_proxy_status(busy_message)
+
+        def finish(payload):
+            self._set_proxy_busy(False)
+            if on_done:
+                on_done(payload)
+
+        self._run_ssh_task(busy_message, worker, on_done=finish)
+
     def _run_local_proxy_task(self, busy_message: str, worker, success_prefix: str):
         if self._proxy_busy:
             show_toast(self.winfo_toplevel(), "AI 代理操作正在进行中，请稍等", is_error=True)
+            return
+        if self._ssh_busy:
+            show_toast(self.winfo_toplevel(), "SSH 操作正在进行中，请稍等", is_error=True)
             return
         self._set_proxy_busy(True)
         self._set_proxy_status(busy_message)

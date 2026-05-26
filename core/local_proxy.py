@@ -28,6 +28,7 @@ LOCAL_PROXY_BIN_DIR = LOCAL_PROXY_DIR / "bin"
 LOCAL_PROXY_STATE_PATH = LOCAL_PROXY_DIR / "state.json"
 LOCAL_PROXY_LOG_PATH = LOCAL_PROXY_DIR / "mihomo.log"
 LOCAL_PROXY_PID_PATH = LOCAL_PROXY_DIR / "mihomo.pid"
+MIHOMO_DOWNLOAD_RETRIES = 3
 
 
 @dataclass(frozen=True)
@@ -66,11 +67,13 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         _start_local_mihomo(binary_path, mixed_port)
         _apply_local_env(mixed_port)
         _apply_local_vscode_proxy(mixed_port)
-    except Exception:
-        _restore_local_env(state, mixed_port)
-        _restore_local_vscode_proxy(state, mixed_port)
+    except Exception as exc:
+        restore_errors = _restore_managed_settings(state, mixed_port)
         _cleanup_managed_process(binary_path, state)
-        raise
+        message = str(exc)
+        if restore_errors:
+            message = f"{message}；恢复启动前设置时也遇到问题: {'; '.join(restore_errors)}"
+        raise RuntimeError(message) from exc
 
     state.update(
         {
@@ -99,21 +102,35 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
     config_path = Path(state.get("config_path") or (LOCAL_PROXY_CONFIG_DIR / "config.yaml"))
     pid = _read_pid()
     pid_running = _is_pid_running(pid) if pid else False
+    managed_pid_running = bool(pid and pid_running and _is_managed_mihomo_pid(pid, state=state))
     port_listening = _is_port_listening(mixed_port)
     installed = config_path.exists()
-    detail = ""
-    if pid_running and not port_listening:
-        detail = "进程存在，但端口未监听"
-    elif installed and port_listening and not pid_running:
-        detail = "端口已监听，但 pid 文件未更新或不是本工具进程"
+    details = []
+    if pid_running and not managed_pid_running:
+        details.append("pid 文件指向非本工具代理进程")
+    if managed_pid_running and not port_listening:
+        details.append("受管进程存在，但端口未监听")
+    elif installed and port_listening and not managed_pid_running:
+        details.append("端口已监听，但 pid 文件未更新或不是本工具进程")
     elif not installed and port_listening:
-        detail = "默认端口被其他程序占用，本工具启动时会自动选择空闲端口"
+        details.append("默认端口被其他程序占用，本工具启动时会自动选择空闲端口")
+    if managed_pid_running or port_listening:
+        details.append("Windows 环境变量已指向本机代理" if _local_env_matches(mixed_port) else "Windows 环境变量未完全指向本机代理")
+        vscode_status = _local_vscode_proxy_match_detail(mixed_port)
+        if vscode_status:
+            details.append(vscode_status)
+    elif installed:
+        if _local_env_matches(mixed_port):
+            details.append("代理未运行，但 Windows 环境变量仍指向本机代理")
+        vscode_status = _local_vscode_proxy_match_detail(mixed_port)
+        if vscode_status.startswith("VS Code 本机设置已"):
+            details.append("代理未运行，但 VS Code 本机设置仍指向本机代理")
     return LocalAIProxyStatus(
         installed=installed,
-        running=pid_running or (installed and port_listening),
+        running=managed_pid_running or (installed and port_listening),
         config_path=str(config_path),
         proxy_url=_proxy_url(mixed_port),
-        detail=detail,
+        detail="；".join(details),
     )
 
 
@@ -128,20 +145,20 @@ def stop_local_ai_proxy(restore_settings: bool = True) -> str:
     skipped_unmanaged = False
     if pid and _is_pid_running(pid):
         if _is_managed_mihomo_pid(pid, state=state):
-            _terminate_pid(pid)
-            stopped = True
+            stopped = _terminate_pid(pid)
         else:
             skipped_unmanaged = True
     LOCAL_PROXY_PID_PATH.unlink(missing_ok=True)
+    restore_errors = []
     if restore_settings:
-        _restore_local_env(state, mixed_port)
-        _restore_local_vscode_proxy(state, mixed_port)
+        restore_errors = _restore_managed_settings(state, mixed_port)
     _save_state({})
+    restore_suffix = f"；但恢复设置失败: {'; '.join(restore_errors)}" if restore_errors else ""
     if stopped:
-        return "本机 AI 代理已停止"
+        return f"本机 AI 代理已停止{restore_suffix}"
     if skipped_unmanaged:
-        return "本机 AI 代理未停止：pid 文件指向的进程不是本工具启动的代理，已跳过"
-    return "本机 AI 代理未发现运行中的受管进程"
+        return f"本机 AI 代理未停止：pid 文件指向的进程不是本工具启动的代理，已跳过{restore_suffix}"
+    return f"本机 AI 代理未发现运行中的受管进程{restore_suffix}"
 
 
 def _ensure_local_dirs() -> None:
@@ -178,7 +195,7 @@ def _select_local_mixed_port(preferred_port: int = DEFAULT_LOCAL_MIXED_PORT) -> 
         state.get("mixed_port") or preferred_port,
         "本机代理端口",
     )
-    if pid and _is_pid_running(pid):
+    if pid and _is_pid_running(pid) and _is_managed_mihomo_pid(pid, state=state):
         return preferred
     if not _is_port_listening(preferred):
         return preferred
@@ -226,6 +243,29 @@ def _restore_local_env(state: dict, mixed_port: int) -> None:
         persistent_env.set_local_user_env(updates)
     if deletes:
         persistent_env.delete_local_user_env(deletes)
+
+
+def _restore_managed_settings(state: dict, mixed_port: int) -> list[str]:
+    errors = []
+    try:
+        _restore_local_env(state, mixed_port)
+    except Exception as exc:
+        errors.append(f"Windows 环境变量: {exc}")
+    try:
+        _restore_local_vscode_proxy(state, mixed_port)
+    except Exception as exc:
+        errors.append(f"VS Code 设置: {exc}")
+    return errors
+
+
+def _local_env_matches(mixed_port: int) -> bool:
+    if os.name != "nt":
+        return False
+    expected = _local_proxy_env_values(mixed_port)
+    for key in remote_proxy.PROXY_ENV_KEYS:
+        if persistent_env._local_user_env_value(key) != expected.get(key):
+            return False
+    return True
 
 
 def _capture_vscode_proxy_state(settings: dict) -> dict:
@@ -333,6 +373,19 @@ def _restore_local_vscode_proxy(state: dict, mixed_port: int) -> None:
         vscode_parser.write_vscode_settings(updated)
 
 
+def _local_vscode_proxy_matches(settings: dict, mixed_port: int) -> bool:
+    _updated, changed = _apply_local_vscode_proxy_settings(settings, mixed_port)
+    return not changed
+
+
+def _local_vscode_proxy_match_detail(mixed_port: int) -> str:
+    try:
+        settings = vscode_parser.read_vscode_settings()
+    except Exception as exc:
+        return f"VS Code 设置读取失败: {exc}"
+    return "VS Code 本机设置已指向本机代理" if _local_vscode_proxy_matches(settings, mixed_port) else "VS Code 本机设置未完全指向本机代理"
+
+
 def _ensure_mihomo_binary() -> Path:
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
     if binary_path.exists():
@@ -381,16 +434,40 @@ def _download_mihomo_binary(target: Path) -> None:
             "User-Agent": "API-Switcher/1.0",
         },
     )
-    with urllib.request.urlopen(release_request, timeout=45) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    data = json.loads(_read_url_with_retries(release_request, timeout=45, label="读取 mihomo 最新版本").decode("utf-8"))
     asset = _pick_mihomo_asset(data.get("assets") or [], pattern)
     url = str(asset.get("browser_download_url") or "")
     if not url:
         raise RuntimeError("mihomo 发行包缺少下载地址")
     asset_request = urllib.request.Request(url, headers={"User-Agent": "API-Switcher/1.0"})
-    with urllib.request.urlopen(asset_request, timeout=180) as response:
-        payload = response.read()
+    payload = _read_url_with_retries(asset_request, timeout=180, label="下载 mihomo Windows 发行包")
     _write_mihomo_payload(target, url, payload)
+
+
+def _read_url_with_retries(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    label: str,
+    retries: int = MIHOMO_DOWNLOAD_RETRIES,
+) -> bytes:
+    try:
+        attempts = max(1, int(retries))
+    except (TypeError, ValueError):
+        attempts = MIHOMO_DOWNLOAD_RETRIES
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except Exception as exc:
+            last_error = exc
+        if attempt < attempts:
+            delay = remote_proxy._retry_delay_seconds(1.0, attempt)
+            if delay > 0:
+                time.sleep(delay)
+    suffix = f"（已重试 {attempts} 次）" if attempts > 1 else ""
+    raise RuntimeError(f"{label}失败{suffix}: {last_error}") from last_error
 
 
 def _write_mihomo_payload(target: Path, url: str, payload: bytes) -> None:
@@ -522,15 +599,39 @@ def _cleanup_managed_process(binary_path: Path, state: dict | None = None) -> No
     LOCAL_PROXY_PID_PATH.unlink(missing_ok=True)
 
 
-def _terminate_pid(pid: int) -> None:
+def _terminate_pid(pid: int) -> bool:
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
-        return
+        return True
     for _ in range(20):
         if not _is_pid_running(pid):
-            return
+            return True
         time.sleep(0.2)
+    _force_terminate_pid(pid)
+    for _ in range(10):
+        if not _is_pid_running(pid):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _force_terminate_pid(pid: int) -> None:
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=10,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except Exception:
+        return
 
 
 def _is_port_listening(port: int) -> bool:
@@ -544,7 +645,10 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
     if pid and _is_pid_running(pid):
         state = _load_state()
         if _is_managed_mihomo_pid(pid, state=state, binary_path=binary_path):
-            _terminate_pid(pid)
+            if not _terminate_pid(pid):
+                raise RuntimeError(f"无法停止已有本机 AI 代理进程 PID {pid}")
+            if _is_port_listening(mixed_port):
+                raise RuntimeError(f"本机端口 127.0.0.1:{mixed_port} 仍被占用，请稍后重试")
         else:
             LOCAL_PROXY_PID_PATH.unlink(missing_ok=True)
             if _is_port_listening(mixed_port):
@@ -555,6 +659,7 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
     LOCAL_PROXY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     with LOCAL_PROXY_LOG_PATH.open("ab") as log_handle:
+        log_handle.write(f"\n--- API切换器 start {remote_proxy._now_iso()} port={mixed_port} ---\n".encode("utf-8"))
         process = subprocess.Popen(
             [str(binary_path), "-d", str(LOCAL_PROXY_CONFIG_DIR)],
             cwd=str(LOCAL_PROXY_DIR),
@@ -566,9 +671,28 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
     LOCAL_PROXY_PID_PATH.write_text(str(process.pid), encoding="utf-8")
     time.sleep(1.5)
     if process.poll() is not None:
-        raise RuntimeError(f"mihomo 启动失败，详见日志: {LOCAL_PROXY_LOG_PATH}")
+        raise RuntimeError(_mihomo_failure_message("mihomo 启动失败"))
     for _ in range(10):
         if _is_port_listening(mixed_port):
             return
         time.sleep(0.5)
-    raise RuntimeError(f"mihomo 已启动但端口 {mixed_port} 未监听，详见日志: {LOCAL_PROXY_LOG_PATH}")
+    raise RuntimeError(_mihomo_failure_message(f"mihomo 已启动但端口 {mixed_port} 未监听"))
+
+
+def _mihomo_failure_message(prefix: str) -> str:
+    tail = _read_log_tail()
+    if not tail:
+        return f"{prefix}，详见日志: {LOCAL_PROXY_LOG_PATH}"
+    return f"{prefix}，详见日志: {LOCAL_PROXY_LOG_PATH}；最近日志: {tail}"
+
+
+def _read_log_tail(max_lines: int = 8, max_chars: int = 1000) -> str:
+    try:
+        text = LOCAL_PROXY_LOG_PATH.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    tail = "\n".join(lines[-max(1, max_lines):])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
