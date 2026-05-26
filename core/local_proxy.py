@@ -31,7 +31,7 @@ LOCAL_PROXY_LOG_PATH = LOCAL_PROXY_DIR / "mihomo.log"
 LOCAL_PROXY_PID_PATH = LOCAL_PROXY_DIR / "mihomo.pid"
 MIHOMO_DOWNLOAD_RETRIES = 3
 WINDOWS_SYSTEM_PROXY_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-WINDOWS_SYSTEM_PROXY_KEYS = ("ProxyEnable", "ProxyServer", "ProxyOverride")
+WINDOWS_SYSTEM_PROXY_KEYS = ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL", "AutoDetect")
 WINDOWS_SYSTEM_PROXY_OVERRIDE = "<local>;127.0.0.1;localhost;::1"
 LOCAL_AI_PROBE_TARGETS = (
     ("OpenAI/ChatGPT", "https://chatgpt.com/cdn-cgi/trace"),
@@ -117,7 +117,8 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     _save_state(state)
     return (
         f"本机 AI 代理已启动: {proxy_url}；"
-        "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，新终端生效"
+        "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
+        "并临时关闭系统 PAC/自动检测代理；新终端或重开的 VS Code 窗口生效"
     )
 
 
@@ -323,6 +324,8 @@ def _windows_system_proxy_expected_values(mixed_port: int) -> dict[str, object]:
         "ProxyEnable": 1,
         "ProxyServer": f"127.0.0.1:{mixed_port}",
         "ProxyOverride": WINDOWS_SYSTEM_PROXY_OVERRIDE,
+        "AutoConfigURL": "",
+        "AutoDetect": 0,
     }
 
 
@@ -332,6 +335,8 @@ def _windows_system_proxy_matches_values(values: dict, mixed_port: int) -> bool:
         int(values.get("ProxyEnable") or 0) == expected["ProxyEnable"]
         and str(values.get("ProxyServer") or "") == expected["ProxyServer"]
         and str(values.get("ProxyOverride") or "") == expected["ProxyOverride"]
+        and str(values.get("AutoConfigURL") or "") == expected["AutoConfigURL"]
+        and int(values.get("AutoDetect") or 0) == expected["AutoDetect"]
     )
 
 
@@ -381,6 +386,11 @@ def _apply_windows_system_proxy(mixed_port: int) -> None:
         winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, int(expected["ProxyEnable"]))
         winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, str(expected["ProxyServer"]))
         winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, str(expected["ProxyOverride"]))
+        winreg.SetValueEx(key, "AutoDetect", 0, winreg.REG_DWORD, int(expected["AutoDetect"]))
+        try:
+            winreg.DeleteValue(key, "AutoConfigURL")
+        except FileNotFoundError:
+            pass
     _notify_windows_proxy_change()
 
 
@@ -400,8 +410,8 @@ def _restore_windows_system_proxy(state: dict, mixed_port: int) -> None:
             item = previous.get(name)
             if isinstance(item, dict) and item.get("exists"):
                 value = item.get("value")
-                value_type = item.get("type") or (winreg.REG_DWORD if name == "ProxyEnable" else winreg.REG_SZ)
-                if name == "ProxyEnable":
+                value_type = item.get("type") or (winreg.REG_DWORD if name in {"ProxyEnable", "AutoDetect"} else winreg.REG_SZ)
+                if name in {"ProxyEnable", "AutoDetect"}:
                     value = int(value or 0)
                 else:
                     value = str(value or "")

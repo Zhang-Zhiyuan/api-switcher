@@ -250,6 +250,84 @@ def test_format_proxy_node_round_trips_selected_subscription_node():
     assert parsed["ws-opts"]["path"] == "/chat"
 
 
+def test_proxy_node_region_and_latency_sorting():
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        """
+proxies:
+  - { name: 台湾 2, type: vless, server: tw2.example.com, port: 443 }
+  - { name: 日本, type: vless, server: jp.example.com, port: 443 }
+  - { name: 台湾 1, type: vless, server: tw1.example.com, port: 443 }
+"""
+    )
+    latencies = {
+        remote_proxy.proxy_node_key(nodes[0].node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(nodes[0].node),
+            True,
+            latency_ms=80,
+        ),
+        remote_proxy.proxy_node_key(nodes[2].node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(nodes[2].node),
+            True,
+            latency_ms=20,
+        ),
+    }
+
+    sorted_nodes = remote_proxy.sort_proxy_subscription_nodes(nodes, latencies)
+
+    assert remote_proxy.proxy_node_region(nodes[0].node) == "台湾"
+    assert [item.node["name"] for item in sorted_nodes if remote_proxy.proxy_node_region(item.node) == "台湾"] == [
+        "台湾 1",
+        "台湾 2",
+    ]
+
+
+def test_measure_proxy_node_latency_success(monkeypatch):
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    calls = []
+    times = iter([10.0, 10.05])
+
+    def fake_connect(endpoint, timeout):
+        calls.append((endpoint, timeout))
+        return FakeSocket()
+
+    monkeypatch.setattr(remote_proxy.socket, "create_connection", fake_connect)
+    monkeypatch.setattr(remote_proxy.time, "perf_counter", lambda: next(times))
+
+    result = remote_proxy.measure_proxy_node_latency(
+        {"name": "香港", "type": "vless", "server": "hk.example.com", "port": "443"},
+        timeout=2.5,
+        attempts=1,
+    )
+
+    assert result.ok is True
+    assert result.latency_ms == 50
+    assert calls == [(("hk.example.com", 443), 2.5)]
+
+
+def test_measure_proxy_node_latency_failure(monkeypatch):
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("timed out")),
+    )
+
+    result = remote_proxy.measure_proxy_node_latency(
+        {"name": "bad", "type": "vless", "server": "bad.example.com", "port": 443},
+        timeout=0.2,
+        attempts=1,
+    )
+
+    assert result.ok is False
+    assert result.latency_ms is None
+    assert "timed out" in result.detail
+
+
 def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, tmp_path):
     class Headers:
         def get_content_type(self):
@@ -740,8 +818,11 @@ def test_windows_system_proxy_expected_values_match_managed_proxy():
 
     assert values["ProxyEnable"] == 1
     assert values["ProxyServer"] == "127.0.0.1:17897"
+    assert values["AutoConfigURL"] == ""
+    assert values["AutoDetect"] == 0
     assert local_proxy._windows_system_proxy_matches_values(values, 17897) is True
     assert local_proxy._windows_system_proxy_matches_values({**values, "ProxyServer": "127.0.0.1:18000"}, 17897) is False
+    assert local_proxy._windows_system_proxy_matches_values({**values, "AutoDetect": 1}, 17897) is False
 
 
 def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):

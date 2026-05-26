@@ -1323,10 +1323,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         return self._proxy_subscription_entry.get().strip()
 
     def _set_proxy_subscription_nodes(self, nodes):
-        self._proxy_subscription_nodes = list(nodes or [])
+        self._proxy_subscription_nodes = list(remote_proxy.sort_proxy_subscription_nodes(nodes or []))
         options = {}
         for item in self._proxy_subscription_nodes:
-            label = item.display_name()
+            label = f"【{remote_proxy.proxy_node_region(item.node)}】 {item.display_name()}"
             if label in options:
                 label = f"{label} #{item.index}"
             options[label] = item

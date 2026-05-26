@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gzip
 import hashlib
 import json
 import posixpath
 import re
 import shlex
+import socket
 import time
 import uuid
 import zlib
@@ -90,6 +92,39 @@ SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"\b(traffic|remaining|reset|expire|expiry|subscription|official|website)\b",
 )
 
+PROXY_REGION_RULES = (
+    ("香港", (r"香港", r"\bhk\b", r"hong\s*kong", r"🇭🇰")),
+    ("台湾", (r"台湾", r"台灣", r"\btw\b", r"taiwan", r"hinet", r"🇹🇼")),
+    ("日本", (r"日本", r"\bjp\b", r"japan", r"tokyo", r"osaka", r"东京", r"大阪", r"🇯🇵")),
+    ("新加坡", (r"新加坡", r"\bsg\b", r"singapore", r"🇸🇬")),
+    ("美国", (r"美国", r"美國", r"\bus\b", r"\busa\b", r"united\s*states", r"america", r"los\s*angeles", r"san\s*jose", r"🇺🇸")),
+    ("韩国", (r"韩国", r"韓國", r"\bkr\b", r"korea", r"seoul", r"🇰🇷")),
+    ("英国", (r"英国", r"英國", r"\buk\b", r"\bgb\b", r"united\s*kingdom", r"london", r"🇬🇧")),
+    ("德国", (r"德国", r"德國", r"\bde\b", r"germany", r"frankfurt", r"🇩🇪")),
+    ("法国", (r"法国", r"法國", r"\bfr\b", r"france", r"paris", r"🇫🇷")),
+    ("荷兰", (r"荷兰", r"荷蘭", r"\bnl\b", r"netherlands", r"amsterdam", r"🇳🇱")),
+    ("加拿大", (r"加拿大", r"\bca\b", r"canada", r"toronto", r"vancouver", r"🇨🇦")),
+    ("澳大利亚", (r"澳大利亚", r"澳洲", r"\bau\b", r"australia", r"sydney", r"🇦🇺")),
+)
+
+PROXY_REGION_TLD_MAP = {
+    "hk": "香港",
+    "tw": "台湾",
+    "jp": "日本",
+    "sg": "新加坡",
+    "us": "美国",
+    "kr": "韩国",
+    "uk": "英国",
+    "gb": "英国",
+    "de": "德国",
+    "fr": "法国",
+    "nl": "荷兰",
+    "ca": "加拿大",
+    "au": "澳大利亚",
+}
+
+PROXY_REGION_ORDER = tuple(region for region, _patterns in PROXY_REGION_RULES) + ("其他",)
+
 
 @dataclass(frozen=True)
 class RemoteAIProxyStatus:
@@ -128,6 +163,20 @@ class ProxySubscriptionNode:
 
     def display_name(self) -> str:
         return f"{self.index}. {describe_proxy_node(self.node)}"
+
+
+@dataclass(frozen=True)
+class ProxyNodeLatencyResult:
+    node_key: str
+    ok: bool
+    latency_ms: int | None = None
+    detail: str = ""
+    attempts: int = 0
+
+    def label(self) -> str:
+        if self.ok and self.latency_ms is not None:
+            return f"{self.latency_ms}ms"
+        return "不可连"
 
 
 @dataclass(frozen=True)
@@ -310,6 +359,50 @@ def set_proxy_subscription_selected_node(node: dict | None) -> dict:
     )
 
 
+def save_proxy_subscription_latencies(latencies: dict[str, ProxyNodeLatencyResult | dict]) -> dict:
+    measured_at = _now_iso()
+    payload = {}
+    for key, result in (latencies or {}).items():
+        node_key = str(key or "").strip()
+        if not node_key:
+            continue
+        payload[node_key] = {
+            "ok": proxy_node_latency_ok(result),
+            "latency_ms": proxy_node_latency_ms(result),
+            "detail": proxy_node_latency_detail(result),
+            "attempts": proxy_node_latency_attempts(result),
+            "measured_at": measured_at,
+        }
+    return save_proxy_subscription_state(node_latencies=payload, node_latencies_updated_at=measured_at)
+
+
+def load_proxy_subscription_latencies() -> dict[str, dict]:
+    state = load_proxy_subscription_state()
+    raw = state.get("node_latencies")
+    if not isinstance(raw, dict):
+        return {}
+    results = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        node_key = str(key or "").strip()
+        if not node_key:
+            continue
+        latency_ms = value.get("latency_ms")
+        try:
+            latency_value = int(latency_ms) if latency_ms is not None else None
+        except (TypeError, ValueError):
+            latency_value = None
+        results[node_key] = {
+            "ok": bool(value.get("ok") and latency_value is not None),
+            "latency_ms": latency_value,
+            "detail": str(value.get("detail") or "")[:160],
+            "attempts": _int_or_default(value.get("attempts"), 0),
+            "measured_at": str(value.get("measured_at") or ""),
+        }
+    return results
+
+
 def proxy_node_key(node: dict) -> str:
     normalized = _normalize_proxy_node(node)
     payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
@@ -326,6 +419,150 @@ def describe_proxy_node(node: dict) -> str:
 
 def format_proxy_node(node: dict) -> str:
     return _dump_yaml(_normalize_proxy_node(node))
+
+
+def proxy_node_region(node: dict) -> str:
+    normalized = _normalize_proxy_node(node)
+    text = f"{normalized.get('name', '')} {normalized.get('server', '')}".lower()
+    for region, patterns in PROXY_REGION_RULES:
+        for pattern in patterns:
+            if re.search(pattern, text, flags=re.I):
+                return region
+
+    server = str(normalized.get("server") or "").strip().lower().rstrip(".")
+    tld = server.rsplit(".", 1)[-1] if "." in server else ""
+    return PROXY_REGION_TLD_MAP.get(tld, "其他")
+
+
+def sort_proxy_subscription_nodes(
+    nodes,
+    latency_results: dict[str, ProxyNodeLatencyResult | dict] | None = None,
+) -> tuple[ProxySubscriptionNode, ...]:
+    items = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
+    latencies = latency_results or {}
+
+    def sort_key(item: ProxySubscriptionNode):
+        region = proxy_node_region(item.node)
+        region_index = PROXY_REGION_ORDER.index(region) if region in PROXY_REGION_ORDER else len(PROXY_REGION_ORDER)
+        latency = proxy_node_latency_ms(latencies.get(proxy_node_key(item.node)))
+        latency_sort = latency if latency is not None else 10**9
+        ok_sort = 0 if latency is not None else 1
+        return (region_index, region, ok_sort, latency_sort, item.display_name().lower())
+
+    return tuple(sorted(items, key=sort_key))
+
+
+def measure_proxy_node_latency(node: dict, timeout: float = 3.0, attempts: int = 2) -> ProxyNodeLatencyResult:
+    normalized = _normalize_proxy_node(node)
+    node_key = proxy_node_key(normalized)
+    attempts = max(1, _int_or_default(attempts, 2))
+    timeout = _normalize_timeout(timeout, 3.0)
+    latencies = []
+    last_error = ""
+    endpoint = (str(normalized["server"]), int(normalized["port"]))
+
+    for _attempt in range(attempts):
+        started = time.perf_counter()
+        try:
+            with socket.create_connection(endpoint, timeout=timeout):
+                latencies.append(max(1, int((time.perf_counter() - started) * 1000)))
+        except Exception as exc:
+            last_error = str(exc).splitlines()[0][:120] or exc.__class__.__name__
+
+    if latencies:
+        return ProxyNodeLatencyResult(
+            node_key=node_key,
+            ok=True,
+            latency_ms=min(latencies),
+            attempts=attempts,
+        )
+    return ProxyNodeLatencyResult(
+        node_key=node_key,
+        ok=False,
+        latency_ms=None,
+        detail=last_error or "TCP 连接失败",
+        attempts=attempts,
+    )
+
+
+def measure_proxy_node_latencies(
+    nodes,
+    timeout: float = 3.0,
+    attempts: int = 2,
+    max_workers: int = 16,
+) -> dict[str, ProxyNodeLatencyResult]:
+    items = []
+    seen = set()
+    for item in nodes or []:
+        node = item.node if isinstance(item, ProxySubscriptionNode) else item
+        if not isinstance(node, dict):
+            continue
+        try:
+            normalized = _normalize_proxy_node(node)
+            node_key = proxy_node_key(normalized)
+        except Exception:
+            continue
+        if node_key in seen:
+            continue
+        items.append(normalized)
+        seen.add(node_key)
+
+    if not items:
+        return {}
+
+    worker_count = min(max(1, _int_or_default(max_workers, 16)), len(items))
+    results: dict[str, ProxyNodeLatencyResult] = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(measure_proxy_node_latency, node, timeout, attempts) for node in items]
+        for future in as_completed(futures):
+            result = future.result()
+            results[result.node_key] = result
+    return results
+
+
+def proxy_node_latency_ok(result: ProxyNodeLatencyResult | dict | None) -> bool:
+    if isinstance(result, ProxyNodeLatencyResult):
+        return bool(result.ok and result.latency_ms is not None)
+    if isinstance(result, dict):
+        return bool(result.get("ok") and proxy_node_latency_ms(result) is not None)
+    return False
+
+
+def proxy_node_latency_ms(result: ProxyNodeLatencyResult | dict | None) -> int | None:
+    if isinstance(result, ProxyNodeLatencyResult):
+        return int(result.latency_ms) if result.latency_ms is not None else None
+    if isinstance(result, dict):
+        value = result.get("latency_ms")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def proxy_node_latency_detail(result: ProxyNodeLatencyResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeLatencyResult):
+        return str(result.detail or "")[:160]
+    if isinstance(result, dict):
+        return str(result.get("detail") or "")[:160]
+    return ""
+
+
+def proxy_node_latency_attempts(result: ProxyNodeLatencyResult | dict | None) -> int:
+    if isinstance(result, ProxyNodeLatencyResult):
+        return int(result.attempts or 0)
+    if isinstance(result, dict):
+        return _int_or_default(result.get("attempts"), 0)
+    return 0
+
+
+def proxy_node_latency_label(result: ProxyNodeLatencyResult | dict | None) -> str:
+    latency = proxy_node_latency_ms(result)
+    if latency is not None and proxy_node_latency_ok(result):
+        return f"{latency}ms"
+    if result is None:
+        return "未测"
+    return "不可连"
 
 
 def _normalize_proxy_node(node: dict) -> dict:
@@ -1103,6 +1340,14 @@ def _int_or_default(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_timeout(value, default: float) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        timeout = default
+    return min(max(timeout, 0.2), 15.0)
 
 
 def _download_proxy_subscription(

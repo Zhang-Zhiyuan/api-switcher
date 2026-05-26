@@ -20,6 +20,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_combo = None
         self._fetch_button = None
         self._use_node_button = None
+        self._latency_button = None
         self._auto_refresh_var = ctk.BooleanVar(value=False)
         self._auto_refresh_check = None
         self._cache_label = None
@@ -33,6 +34,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._status_label = None
         self._subscription_nodes = []
         self._subscription_options = {}
+        self._latency_results = {}
         self._busy = False
         self._saved_subscription_loaded = False
         self._build_ui()
@@ -139,15 +141,26 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._subscription_combo.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._subscription_combo.set("请先拉取订阅")
+        node_actions = ctk.CTkFrame(controls, fg_color="transparent")
+        node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        self._latency_button = ctk.CTkButton(
+            node_actions,
+            text="测速选最快",
+            width=104,
+            command=self._measure_subscription_latencies,
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._latency_button.pack(anchor="e", pady=(0, 6))
         self._use_node_button = ctk.CTkButton(
-            controls,
+            node_actions,
             text="填入待启动",
-            width=98,
+            width=104,
             command=self._use_selected_subscription_node,
             state="disabled",
             **button_style("accent", compact=True),
         )
-        self._use_node_button.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        self._use_node_button.pack(anchor="e")
         self._selected_label = ctk.CTkLabel(
             controls,
             text="待启动节点: 未选择",
@@ -273,6 +286,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         state = "disabled" if busy else "normal"
         for button in (
             self._fetch_button,
+            self._latency_button,
             self._use_node_button,
             self._load_file_button,
             self._start_button,
@@ -283,7 +297,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if not button:
                 continue
             try:
-                if button is self._use_node_button and not self._subscription_options:
+                if button in (self._use_node_button, self._latency_button) and not self._subscription_options:
                     button.configure(state="disabled")
                 else:
                     button.configure(state=state)
@@ -316,6 +330,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         cached = remote_proxy.load_cached_proxy_subscription()
         if cached and cached.nodes:
+            self._latency_results = remote_proxy.load_proxy_subscription_latencies()
             self._set_subscription_nodes(cached.nodes)
             self._select_subscription_node_by_key(str(state.get("selected_node_key") or ""))
             self._use_selected_subscription_node(show_message=False, persist_selection=False)
@@ -357,11 +372,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return ""
         return self._subscription_entry.get().strip()
 
-    def _set_subscription_nodes(self, nodes):
-        self._subscription_nodes = list(nodes or [])
+    def _selected_subscription_node_key(self) -> str:
+        if not self._subscription_combo:
+            return ""
+        selected = self._subscription_combo.get()
+        item = self._subscription_options.get(selected)
+        if not item:
+            return ""
+        return remote_proxy.proxy_node_key(item.node)
+
+    def _set_subscription_nodes(self, nodes, preserve_key: str = ""):
+        current_key = preserve_key or self._selected_subscription_node_key()
+        self._subscription_nodes = list(remote_proxy.sort_proxy_subscription_nodes(nodes or [], self._latency_results))
         options = {}
         for item in self._subscription_nodes:
-            label = item.display_name()
+            label = self._subscription_option_label(item)
             if label in options:
                 label = f"{label} #{item.index}"
             options[label] = item
@@ -372,8 +397,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         values = list(options.keys()) or ["没有识别到可用节点"]
         self._subscription_combo.configure(values=values, state="normal" if options else "disabled")
         self._subscription_combo.set(values[0])
+        if current_key:
+            self._select_subscription_node_by_key(current_key)
         if self._use_node_button:
             self._use_node_button.configure(state="normal" if options and not self._busy else "disabled")
+        if self._latency_button:
+            self._latency_button.configure(state="normal" if options and not self._busy else "disabled")
+
+    def _subscription_option_label(self, item) -> str:
+        key = remote_proxy.proxy_node_key(item.node)
+        region = remote_proxy.proxy_node_region(item.node)
+        latency = remote_proxy.proxy_node_latency_label(self._latency_results.get(key))
+        return f"【{region}】 {latency} · {item.display_name()}"
 
     def _fetch_subscription(self, auto: bool = False, show_message: bool = True):
         if self._busy:
@@ -418,6 +453,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
                 result = payload["result"]
                 state = remote_proxy.load_proxy_subscription_state()
+                self._latency_results = remote_proxy.load_proxy_subscription_latencies()
                 self._set_subscription_nodes(result.nodes)
                 if not self._select_subscription_node_by_key(str(state.get("selected_node_key") or "")):
                     self._use_selected_subscription_node(show_message=False)
@@ -438,6 +474,82 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pass
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _measure_subscription_latencies(self):
+        if self._busy:
+            show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
+            return
+        if not self._subscription_nodes:
+            message = "请先拉取订阅，再测速选择节点"
+            self._set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        node_count = len(self._subscription_nodes)
+        self._set_busy(True)
+        self._set_status(f"正在测试 {node_count} 个订阅节点的 TCP 延迟；完成后会按地区聚类并自动选择最低延迟节点...")
+
+        def run():
+            try:
+                results = remote_proxy.measure_proxy_node_latencies(
+                    tuple(self._subscription_nodes),
+                    timeout=3.0,
+                    attempts=2,
+                    max_workers=20,
+                )
+                payload = {"ok": True, "result": results, "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_busy(False)
+                if not payload["ok"]:
+                    message = f"节点测速失败: {payload['error']}"
+                    self._set_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                self._latency_results = payload["result"] or {}
+                remote_proxy.save_proxy_subscription_latencies(self._latency_results)
+                self._set_subscription_nodes(self._subscription_nodes)
+                fastest = self._fastest_subscription_node()
+                ok_count = sum(1 for item in self._latency_results.values() if remote_proxy.proxy_node_latency_ok(item))
+                if not fastest:
+                    message = f"测速完成: {ok_count}/{node_count} 个节点可连；未找到可用节点，已按地区展示。"
+                    self._set_status(message, "warning")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                fastest_key = remote_proxy.proxy_node_key(fastest.node)
+                self._select_subscription_node_by_key(fastest_key)
+                self._use_selected_subscription_node(show_message=False)
+                latency = remote_proxy.proxy_node_latency_label(self._latency_results.get(fastest_key))
+                region = remote_proxy.proxy_node_region(fastest.node)
+                message = f"测速完成: {ok_count}/{node_count} 个节点可连；已选择最快节点【{region}】{latency}。"
+                self._set_status(message, "success")
+                show_toast(self.winfo_toplevel(), message)
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _fastest_subscription_node(self):
+        fastest = None
+        fastest_latency = None
+        for item in self._subscription_nodes:
+            result = self._latency_results.get(remote_proxy.proxy_node_key(item.node))
+            latency = remote_proxy.proxy_node_latency_ms(result)
+            if latency is None or not remote_proxy.proxy_node_latency_ok(result):
+                continue
+            if fastest is None or latency < fastest_latency:
+                fastest = item
+                fastest_latency = latency
+        return fastest
 
     def _use_selected_subscription_node(self, show_message: bool = True, persist_selection: bool = True):
         if not self._subscription_combo:
