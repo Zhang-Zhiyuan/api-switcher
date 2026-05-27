@@ -2449,6 +2449,32 @@ def test_remote_git_snapshot_status_requires_git():
     assert not status.ready
 
 
+def test_remote_auto_status_summary_clarifies_git_push_scope():
+    status = remote_auto_continue.RemoteAutoContinueStatus(
+        provider_name="codex",
+        enabled=False,
+        git_snapshot_enabled=True,
+        git_snapshot_master_enabled=True,
+        git_snapshot_on_start_enabled=True,
+        git_snapshot_on_recovery_enabled=True,
+        git_auto_push_enabled=True,
+        git_available=True,
+        hook_script_exists=True,
+        hook_script_matches_expected=True,
+        hook_registered=True,
+        settings_valid=True,
+        settings_matches_expected=True,
+        runtime_ready=True,
+        codex_hooks_enabled=True,
+    )
+
+    summary = status.summary()
+
+    assert "Git快照 ON" in summary
+    assert "推送已有 Git remote ON" in summary
+    assert "Git push" not in summary
+
+
 def test_remote_status_requires_error_hook_for_enabled_error_recovery(monkeypatch):
     from models.auto_continue import AutoContinueSettings
 

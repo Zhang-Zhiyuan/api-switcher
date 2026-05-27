@@ -145,26 +145,38 @@ class RemoteAutoContinueStatus:
         state = "正常" if self.ready else "需处理"
         parts = [
             f"{self.label}: {state}",
-            f"Stop续跑 {'on' if self.enabled else 'off'}",
-            f"训练续跑 {'on' if self.training_auto_continue_enabled else 'off'}",
-            f"Git快照总开关 {'on' if self.git_snapshot_master_enabled else 'off'}",
-            f"对话快照 {'on' if self.git_snapshot_on_start_enabled else 'off'}",
-            f"API恢复快照 {'on' if self.git_snapshot_on_recovery_enabled else 'off'}",
-            f"API恢复 {'on' if self.error_recovery_enabled else 'off'}",
-            f"权限自动确认 {'on' if self.permission_auto_approve_enabled else 'off'}",
-            f"Git {'ok' if self.git_available else 'missing'}",
-            f"系统 {self.remote_os or 'unknown'}",
-            f"脚本 {'存在' if self.hook_script_exists else '缺失'}",
-            f"Hook {'已注册' if self.hook_registered else '未注册'}",
-            f"设置 {'有效' if self.settings_valid else '缺失/无效'}",
+            f"Stop续跑 {'ON' if self.enabled else 'OFF'}",
+            f"训练续跑 {'ON' if self.training_auto_continue_enabled else 'OFF'}",
+            f"Git快照 {'ON' if self.git_snapshot_master_enabled else 'OFF'}",
+            f"触发 {'对话/消息/Stop' if self.git_snapshot_on_start_enabled else 'OFF'}",
+            f"API恢复 {'ON' if self.error_recovery_enabled else 'OFF'}",
         ]
-        parts.append(f"Git push {'on' if self.git_auto_push_enabled else 'off'}")
-        if self.hook_script_matches_expected is not None:
-            parts.append(f"脚本一致性 {'ok' if self.hook_script_matches_expected else 'stale'}")
-        if self.settings_matches_expected is not None:
-            parts.append(f"设置一致性 {'ok' if self.settings_matches_expected else 'stale'}")
-        if self.hook_script_mode is not None:
-            parts.append(f"权限 {oct(self.hook_script_mode)}")
+        if self.git_snapshot_on_recovery_enabled:
+            parts.append("恢复前快照 ON")
+        if self.git_auto_push_enabled:
+            parts.append("推送已有 Git remote ON")
+        if self.permission_auto_approve_enabled:
+            parts.append("权限自动确认 ON")
+        script_state = (
+            "缺失"
+            if not self.hook_script_exists
+            else "需更新"
+            if self.hook_script_matches_expected is False
+            else "最新"
+        )
+        settings_state = (
+            "缺失/无效"
+            if not self.settings_valid
+            else "需更新"
+            if self.settings_matches_expected is False
+            else "最新"
+        )
+        parts.extend([
+            f"Git {'可用' if self.git_available else '缺失'}",
+            f"Hook {'已注册' if self.hook_registered else '未注册'}",
+            f"脚本 {script_state}",
+            f"设置 {settings_state}",
+        ])
         if self.provider_name == "claude":
             parts.append(f"权限模式 {self.permission_mode or '(未设置)'}")
         if self.provider_name == "codex":

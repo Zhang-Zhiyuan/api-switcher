@@ -725,7 +725,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
         ctk.CTkLabel(
             auto_header,
-            text="同步 Stop 续跑、训练守护、Git 快照、API 恢复和权限自动确认到 SSH",
+            text="同步本机 Hook 设置；Git 仓库会在远端项目首次触发时自动初始化",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(side="left", padx=(10, 0))
@@ -769,7 +769,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         check_button.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
         git_snapshot_button = ctk.CTkButton(
             action_bar,
-            text="修复 Git 快照",
+            text="只修复 Git 快照",
             width=116,
             command=self._install_remote_git_snapshot,
             **button_style("secondary"),
@@ -843,24 +843,24 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         add_remote_switch("Stop 续跑", self._remote_auto_continue_var, "auto_continue", 0, 1)
         add_remote_switch("训练达标续跑", self._remote_training_auto_continue_var, "training_auto_continue", 0, 2, color="accent")
-        add_remote_switch("Git 快照开关", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
+        add_remote_switch("Git 本地快照", self._remote_git_snapshot_var, "git_snapshot", 0, 3)
         add_remote_switch("API 恢复", self._remote_error_recovery_var, "error_recovery", 0, 4)
         self._remote_git_snapshot_on_start_switch = add_remote_switch(
-            "对话/消息/Stop 快照",
+            "开局/消息/Stop",
             self._remote_git_snapshot_on_start_var,
             "git_snapshot_on_start",
             1,
             1,
         )
         self._remote_git_snapshot_on_recovery_switch = add_remote_switch(
-            "API 恢复快照",
+            "恢复前快照",
             self._remote_git_snapshot_on_recovery_var,
             "git_snapshot_on_recovery",
             1,
             2,
         )
         self._remote_git_auto_push_switch = add_remote_switch(
-            "快照后推送远端",
+            "推送已有 Git remote",
             self._remote_git_auto_push_var,
             "git_auto_push",
             1,
@@ -889,7 +889,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._remote_auto_status_label = ctk.CTkLabel(
             auto_controls,
-            text="未检查。安装/修复会写入远端 hook 与设置；远端需具备 sh 和 Python 3.6+。",
+            text="未检查。安装/修复会写入远端 Hook 与设置；Git 初始化发生在目标项目第一次触发快照时。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -2216,10 +2216,10 @@ class SSHTab(ctk.CTkScrollableFrame):
                 f"Stop续跑 {'ON' if settings.enabled else 'OFF'}",
                 f"训练续跑 {'ON' if settings.training_auto_continue_enabled else 'OFF'}",
                 f"训练模板 {training_prompt_template_by_key(settings.training_prompt_template_key)['name']}",
-                f"Git快照开关 {'ON' if settings.git_auto_snapshot else 'OFF'}",
+                f"Git本地快照 {'ON' if settings.git_auto_snapshot else 'OFF'}",
                 f"API错误恢复 {'ON' if settings.error_recovery_enabled else 'OFF'}",
             ]
-            feature_parts.append(f"快照后推送 {'ON' if settings.git_auto_push else 'OFF'}")
+            feature_parts.append(f"推送已有 Git remote {'ON' if settings.git_auto_push else 'OFF'}")
             if provider == "claude":
                 feature_parts.append(f"权限自动确认 {'ON' if settings.auto_approve_permission_requests else 'OFF'}")
                 feature_parts.append(f"Subagent {'ON' if settings.apply_to_subagents else 'OFF'}")
@@ -2227,7 +2227,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_feature_label.configure(
             text=(
                 "安装/修复会把本机设置和训练 Prompt 模板同步到远端；"
-                "上方开关会立即写入已选 SSH 服务器。暂停只关闭 Stop 续跑，不影响 Git 快照、API 恢复或权限自动确认。"
+                "Git 快照首次触发时才会在项目目录 git init；"
+                "推送只使用项目已有 Git remote/upstream。暂停只关闭 Stop 续跑。"
                 + (" | " if parts else "")
                 + " | ".join(parts)
             )
@@ -2656,7 +2657,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         parts = [status.summary() for status in statuses]
         if failures:
             parts.append("失败: " + "；".join(failures))
-        return " | ".join(parts) if parts else "没有可显示的远端自动续跑状态"
+        return "\n".join(parts) if parts else "没有可显示的远端自动续跑状态"
 
     def _format_remote_auto_diagnostics(self, statuses=None, failures: list[str] | None = None) -> str:
         if statuses is None:

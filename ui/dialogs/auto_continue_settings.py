@@ -230,7 +230,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._git_auto_push_var = ctk.BooleanVar(value=self.settings.git_auto_push)
         self._git_auto_push_switch = self._add_switch(
             scroll,
-            "快照提交后自动推送到 Git 远端",
+            "快照提交后推送已有 Git remote/upstream",
             self._git_auto_push_var,
             padx=(20, 0),
         )

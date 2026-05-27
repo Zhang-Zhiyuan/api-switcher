@@ -155,7 +155,7 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
             feature_row,
-            text="Git 快照开关",
+            text="Git 本地快照",
             variable=self._git_snapshot_var,
             command=lambda: self._toggle_feature("git_snapshot"),
             text_color=COLORS["text"],
@@ -208,7 +208,7 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_start_switch = ctk.CTkSwitch(
             git_row,
-            text="开新对话/发消息/Stop 时",
+            text="开局/消息/Stop",
             variable=self._git_snapshot_on_start_var,
             command=lambda: self._toggle_feature("git_snapshot_on_start"),
             text_color=COLORS["text"],
@@ -232,7 +232,7 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_auto_push_var = ctk.BooleanVar(value=False)
         self._git_auto_push_switch = ctk.CTkSwitch(
             git_row,
-            text="快照后推送",
+            text="推送已有 Git remote",
             variable=self._git_auto_push_var,
             command=lambda: self._toggle_feature("git_auto_push"),
             text_color=COLORS["text"],
@@ -357,7 +357,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     info_lines.append(f"训练模板: {template['name']}")
                 info_lines.append(
                     f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'} / "
-                    f"推送远端 {'ON' if settings.git_auto_push else 'OFF'} / "
+                    f"推送已有 Git remote {'ON' if settings.git_auto_push else 'OFF'} / "
                     f"对话/消息/Stop {'ON' if settings.git_snapshot_on_start else 'OFF'} / "
                     f"API恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
                 )
