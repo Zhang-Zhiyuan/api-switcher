@@ -1194,6 +1194,8 @@ def test_local_proxy_preferences_build_custom_routing_rules(monkeypatch, tmp_pat
 def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", tmp_path / "mihomo.pid")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
     monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
     local_proxy.set_local_proxy_start_on_login(True)
@@ -1201,15 +1203,68 @@ def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
         last_node={"name": "saved", "type": "vless", "server": "saved.example.com", "port": 443}
     )
     starts = []
-    monkeypatch.setattr(
-        local_proxy,
-        "inspect_local_ai_proxy",
-        lambda: local_proxy.LocalAIProxyStatus(False, False, "", "http://127.0.0.1:17897"),
-    )
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
     monkeypatch.setattr(local_proxy, "install_local_ai_proxy", lambda text: starts.append(text) or "started")
 
     assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
     assert "saved.example.com" in starts[0]
+
+
+def test_local_proxy_auto_start_skips_when_managed_proxy_is_alive(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+    local_proxy._save_state({"mixed_port": 17898})
+    local_proxy.set_local_proxy_start_on_login(True)
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda port: port == 17898)
+    monkeypatch.setattr(
+        local_proxy,
+        "install_local_ai_proxy",
+        lambda _text: (_ for _ in ()).throw(AssertionError("should not restart live managed proxy")),
+    )
+
+    message = local_proxy.auto_start_local_ai_proxy_if_enabled()
+
+    assert "已在运行" in message
+    assert "17898" in message
+
+
+def test_apply_local_proxy_routing_skips_unmanaged_listener(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    local_proxy._save_state({"mixed_port": 17897})
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(
+        local_proxy,
+        "reload_local_ai_proxy",
+        lambda _text: (_ for _ in ()).throw(AssertionError("should not reload unmanaged proxy")),
+    )
+
+    message = local_proxy.apply_local_proxy_routing_to_running()
+
+    assert "下次启动时生效" in message
+
+
+def test_subscription_auto_update_skips_unmanaged_local_proxy(monkeypatch, tmp_path):
+    node = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: node, type: vless, server: example.com, port: 443 }"),
+    )
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    local_proxy._save_state({"mixed_port": 17897})
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(
+        local_proxy,
+        "reload_local_ai_proxy_verified",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not update unmanaged proxy")),
+    )
+
+    message = local_proxy.refresh_running_local_ai_proxy_from_subscription([node])
+
+    assert "未运行" in message
 
 
 def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):
@@ -1247,6 +1302,8 @@ def test_reload_local_ai_proxy_uses_controller_and_updates_state(monkeypatch, tm
 
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897, "config_path": str(config_path)})
     monkeypatch.setattr(local_proxy, "_save_state", lambda state: saved_states.append(state))
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
     monkeypatch.setattr(
         local_proxy,
         "inspect_local_ai_proxy",
@@ -1265,6 +1322,29 @@ def test_reload_local_ai_proxy_uses_controller_and_updates_state(monkeypatch, tm
     assert "已热更新" in message
     assert "new.example.com" in config_path.read_text(encoding="utf-8")
     assert saved_states[-1]["node_name"] == "new"
+
+
+def test_reload_local_proxy_skips_unmanaged_listener(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    original = remote_proxy.build_mihomo_config(
+        {"name": "old", "type": "vless", "server": "old.example.com", "port": 443},
+        17897,
+    )
+    config_path.write_text(original, encoding="utf-8")
+
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897, "config_path": str(config_path)})
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(
+        local_proxy,
+        "_reload_local_mihomo_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reload unmanaged proxy")),
+    )
+
+    message = local_proxy.reload_local_ai_proxy("{ name: new, type: vless, server: new.example.com, port: 443 }")
+
+    assert "不是本工具受管进程" in message
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_read_url_with_retries_retries_transient_failure(monkeypatch):

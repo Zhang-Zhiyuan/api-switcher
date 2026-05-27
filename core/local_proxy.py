@@ -259,8 +259,12 @@ def normalize_proxy_target(target: str) -> dict:
 
 
 def apply_local_proxy_routing_to_running() -> str:
-    status = inspect_local_ai_proxy()
-    if not status.running:
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+        "本机代理端口",
+    )
+    if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
         return "代理范围已保存；本机代理未运行，下次启动时生效"
     node = _read_local_managed_proxy_node() or _load_last_proxy_node()
     if not node:
@@ -273,9 +277,13 @@ def auto_start_local_ai_proxy_if_enabled() -> str:
         return "Win11 本机代理自启未开启"
     if os.name != "nt":
         return "本机 AI 代理目前只支持 Windows，已跳过自启"
-    status = inspect_local_ai_proxy()
-    if status.running:
-        return f"Win11 本机代理已在运行: {status.proxy_url}"
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+        "本机代理端口",
+    )
+    if _managed_local_proxy_is_running(state) and _is_port_listening(mixed_port):
+        return f"Win11 本机代理已在运行: {_proxy_url(mixed_port)}"
     node = _load_last_proxy_node() or _read_local_managed_proxy_node()
     if not node:
         return "Win11 本机代理自启已开启，但还没有保存过可启动节点"
@@ -345,6 +353,8 @@ def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED
         state.get("mixed_port") or mixed_port,
         "本机代理端口",
     )
+    if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
+        return "本机 AI 代理未运行或不是本工具受管进程，已跳过热更新"
     status = inspect_local_ai_proxy(mixed_port)
     if not status.running:
         return "本机 AI 代理未运行，已跳过热更新"
@@ -378,7 +388,7 @@ def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED
     )
     _save_state(state)
     _save_last_proxy_node(proxy_node)
-    remote_proxy.set_proxy_subscription_selected_node(proxy_node)
+    _remember_selected_subscription_node(proxy_node)
     return f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}"
 
 
@@ -439,7 +449,7 @@ def reload_local_ai_proxy_verified(
         except Exception:
             continue
         if remote_proxy._probe_summary_all_ok(candidate_probe):
-            remote_proxy.set_proxy_subscription_selected_node(item.node)
+            _remember_selected_subscription_node(item.node)
             return (
                 f"本机 AI 代理原热更新节点验证失败，已无重启切换到 {remote_proxy.describe_proxy_node(item.node)}"
                 f"（本机 TCP {remote_proxy.proxy_node_latency_label(result)}）；"
@@ -454,8 +464,12 @@ def reload_local_ai_proxy_verified(
 
 
 def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
-    status = inspect_local_ai_proxy()
-    if not status.running:
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+        "本机代理端口",
+    )
+    if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
         return "本机 AI 代理未运行，已跳过订阅自动热更新"
     candidates = tuple(item for item in (nodes or []) if isinstance(item, remote_proxy.ProxySubscriptionNode))
     if not candidates:
@@ -684,9 +698,9 @@ def _build_local_mihomo_config(proxy_node: dict, mixed_port: int) -> str:
 def _save_last_proxy_node(proxy_node: dict) -> None:
     try:
         normalized = remote_proxy._normalize_proxy_node(proxy_node)
+        save_local_proxy_preferences(last_node=normalized)
     except Exception:
         return
-    save_local_proxy_preferences(last_node=normalized)
 
 
 def _load_last_proxy_node() -> dict | None:
@@ -697,6 +711,13 @@ def _load_last_proxy_node() -> dict | None:
         return remote_proxy._normalize_proxy_node(node)
     except Exception:
         return None
+
+
+def _remember_selected_subscription_node(proxy_node: dict) -> None:
+    try:
+        remote_proxy.set_proxy_subscription_selected_node(proxy_node)
+    except Exception:
+        return
 
 
 def _load_state() -> dict:
@@ -1267,6 +1288,11 @@ def _read_pid() -> int | None:
         return int(LOCAL_PROXY_PID_PATH.read_text(encoding="utf-8").strip())
     except Exception:
         return None
+
+
+def _managed_local_proxy_is_running(state: dict | None = None) -> bool:
+    pid = _read_pid()
+    return bool(pid and _is_pid_running(pid) and _is_managed_mihomo_pid(pid, state=state or _load_state()))
 
 
 def _is_pid_running(pid: int | None) -> bool:

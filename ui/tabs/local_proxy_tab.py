@@ -573,6 +573,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _on_proxy_non_cn_toggle(self):
         enabled = bool(self._proxy_non_cn_var.get())
         local_proxy.set_local_proxy_non_cn_mode(enabled)
+        self._load_proxy_preferences_ui()
         self._apply_saved_routing("已开启大陆境外 IP 走代理。" if enabled else "已关闭大陆境外 IP 走代理。")
 
     def _on_builtin_site_toggle(self, site_id: str):
@@ -582,6 +583,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         except Exception as e:
             self._set_routing_status(f"保存内置站点开关失败: {e}", "error")
             return
+        self._load_proxy_preferences_ui()
         self._apply_saved_routing("内置站点代理规则已保存。")
 
     def _add_custom_target(self):
