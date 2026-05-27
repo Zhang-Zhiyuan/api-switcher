@@ -10,6 +10,7 @@ import posixpath
 import re
 import shlex
 import socket
+import threading
 import time
 import uuid
 import zlib
@@ -74,6 +75,7 @@ VSCODE_SERVER_ENV_SETUP_PATHS = (
 
 VSCODE_ENV_BLOCK_START = "# >>> API切换器 AI proxy VS Code >>>"
 VSCODE_ENV_BLOCK_END = "# <<< API切换器 AI proxy VS Code <<<"
+_PROXY_SUBSCRIPTION_STATE_LOCK = threading.RLock()
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -333,35 +335,48 @@ def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
 
 def load_proxy_subscription_state() -> dict:
     path = _proxy_subscription_state_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
 
 
 def save_proxy_subscription_state(**updates) -> dict:
-    directory = _proxy_subscription_dir()
-    directory.mkdir(parents=True, exist_ok=True)
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        directory = _proxy_subscription_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        state = load_proxy_subscription_state()
+        for key, value in updates.items():
+            if value is None:
+                continue
+            state[key] = value
+        state["updated_at"] = _now_iso()
+        path = _proxy_subscription_state_path()
+        temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return state
+
+
+def proxy_subscription_auto_refresh_enabled(scope: str = "") -> bool:
     state = load_proxy_subscription_state()
-    for key, value in updates.items():
-        if value is None:
-            continue
-        state[key] = value
-    state["updated_at"] = _now_iso()
-    path = _proxy_subscription_state_path()
-    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-    return state
+    scoped_key = _proxy_subscription_auto_refresh_key(scope)
+    if scoped_key and scoped_key in state:
+        return bool(state.get(scoped_key))
+    return bool(state.get("auto_refresh"))
 
 
-def set_proxy_subscription_auto_refresh(enabled: bool) -> dict:
+def set_proxy_subscription_auto_refresh(enabled: bool, scope: str = "") -> dict:
+    scoped_key = _proxy_subscription_auto_refresh_key(scope)
+    if scoped_key:
+        return save_proxy_subscription_state(**{scoped_key: bool(enabled)})
     return save_proxy_subscription_state(auto_refresh=bool(enabled))
 
 
@@ -1639,6 +1654,15 @@ def _split_csv(value: str) -> list[str]:
 
 def _truthy(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _proxy_subscription_auto_refresh_key(scope: str = "") -> str:
+    normalized = str(scope or "").strip().lower()
+    if normalized in {"local", "win", "win11", "windows"}:
+        return "local_auto_refresh_enabled"
+    if normalized in {"ssh", "remote", "server"}:
+        return "ssh_auto_refresh_enabled"
+    return ""
 
 
 def _int_or_default(value, default: int) -> int:

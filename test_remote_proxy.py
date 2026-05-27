@@ -499,6 +499,24 @@ def test_proxy_subscription_state_persists_auto_refresh_and_selection(monkeypatc
     assert state["selected_node_key"] == remote_proxy.proxy_node_key(node)
 
 
+def test_proxy_subscription_auto_refresh_scopes_are_independent(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+
+    remote_proxy.set_proxy_subscription_auto_refresh(True)
+    assert remote_proxy.proxy_subscription_auto_refresh_enabled("local") is True
+    assert remote_proxy.proxy_subscription_auto_refresh_enabled("ssh") is True
+
+    remote_proxy.set_proxy_subscription_auto_refresh(False, scope="local")
+    remote_proxy.set_proxy_subscription_auto_refresh(True, scope="ssh")
+
+    state = remote_proxy.load_proxy_subscription_state()
+    assert state["auto_refresh"] is True
+    assert state["local_auto_refresh_enabled"] is False
+    assert state["ssh_auto_refresh_enabled"] is True
+    assert remote_proxy.proxy_subscription_auto_refresh_enabled("local") is False
+    assert remote_proxy.proxy_subscription_auto_refresh_enabled("ssh") is True
+
+
 def test_describe_proxy_node_uses_normalized_endpoint():
     node = remote_proxy.parse_proxy_node("{ name: node, type: vless, server: example.com, port: '443' }")
 

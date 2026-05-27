@@ -28,6 +28,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._periodic_update_entry = None
         self._periodic_update_after_id = None
         self._periodic_update_running = False
+        self._startup_refresh_after_id = None
         self._cache_label = None
         self._selected_label = None
         self._node_text = None
@@ -278,6 +279,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         bind_wraplength(controls, self._status_label, padding=20)
         self.refresh()
 
+    def destroy(self):
+        self._cancel_startup_refresh()
+        self._cancel_periodic_update()
+        super().destroy()
+
     def refresh(self):
         self._load_saved_subscription_ui()
 
@@ -356,7 +362,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._saved_subscription_loaded = True
         state = remote_proxy.load_proxy_subscription_state()
         url = str(state.get("url") or "").strip()
-        auto_refresh = bool(state.get("auto_refresh"))
+        auto_refresh = remote_proxy.proxy_subscription_auto_refresh_enabled("local")
         periodic_update = bool(state.get("local_periodic_update_enabled"))
         interval_minutes = str(state.get("local_periodic_update_interval_minutes") or "60")
         self._auto_refresh_var.set(auto_refresh)
@@ -387,7 +393,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_status("已恢复订阅链接；尚未找到可用本机缓存，可手动拉取订阅。", "warning")
 
         if url and auto_refresh:
-            self.after(800, lambda: self._fetch_subscription(auto=True, show_message=False))
+            self._schedule_startup_refresh()
         self._schedule_periodic_update(initial=True)
 
     def _select_subscription_node_by_key(self, node_key: str) -> bool:
@@ -401,13 +407,37 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _on_auto_refresh_toggle(self):
         enabled = bool(self._auto_refresh_var.get())
-        remote_proxy.set_proxy_subscription_auto_refresh(enabled)
+        remote_proxy.set_proxy_subscription_auto_refresh(enabled, scope="local")
         if enabled:
-            self._set_status("已开启启动自动刷新；下次打开会自动重新拉取订阅并保留可用缓存。", "success")
+            self._set_status("已开启 Win11 代理启动时刷新；下次打开本页会自动重新拉取订阅并保留可用缓存。", "success")
             if self._subscription_url_input():
                 self._fetch_subscription(auto=True, show_message=False)
         else:
-            self._set_status("已关闭启动自动刷新。")
+            self._cancel_startup_refresh()
+            self._set_status("已关闭 Win11 代理启动时刷新。")
+
+    def _schedule_startup_refresh(self):
+        self._cancel_startup_refresh()
+        self._startup_refresh_after_id = self.after(800, self._run_startup_refresh)
+
+    def _run_startup_refresh(self):
+        self._startup_refresh_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        if self._subscription_url_input() and bool(self._auto_refresh_var.get()):
+            self._fetch_subscription(auto=True, show_message=False)
+
+    def _cancel_startup_refresh(self):
+        if not self._startup_refresh_after_id:
+            return
+        try:
+            self.after_cancel(self._startup_refresh_after_id)
+        except Exception:
+            pass
+        self._startup_refresh_after_id = None
 
     def _periodic_update_interval_minutes(self) -> int:
         raw = self._periodic_update_entry.get().strip() if self._periodic_update_entry else ""
@@ -435,18 +465,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._schedule_periodic_update(initial=not enabled)
 
     def _schedule_periodic_update(self, initial: bool = False):
-        if self._periodic_update_after_id:
-            try:
-                self.after_cancel(self._periodic_update_after_id)
-            except Exception:
-                pass
-            self._periodic_update_after_id = None
+        self._cancel_periodic_update()
         if not bool(self._periodic_update_var.get()):
             return
         interval_minutes = self._periodic_update_interval_minutes()
         delay_minutes = 1 if initial else interval_minutes
         remote_proxy.save_proxy_subscription_state(local_periodic_update_interval_minutes=interval_minutes)
         self._periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_periodic_update)
+
+    def _cancel_periodic_update(self):
+        if not self._periodic_update_after_id:
+            return
+        try:
+            self.after_cancel(self._periodic_update_after_id)
+        except Exception:
+            pass
+        self._periodic_update_after_id = None
 
     def _run_periodic_update(self):
         if not bool(self._periodic_update_var.get()):
