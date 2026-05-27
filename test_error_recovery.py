@@ -1322,6 +1322,71 @@ def test_local_stop_hook_reads_utf8_stdin_bytes(tmp_path):
     assert "????" not in log_text
 
 
+def test_local_stop_hook_reads_claude_transcript_path(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.script_generator import generate_hook_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "auto_continue_stop.ps1"
+    transcript_path = tmp_path / "claude-transcript.jsonl"
+    settings = AutoContinueSettings(
+        enabled=True,
+        max_continuations=10,
+        continuation_prompt="continue from transcript",
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_hook_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+    transcript_lines = [
+        {"message": {"role": "user", "content": "please implement it"}},
+        {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I still need to finish tests and verification."}
+                ],
+            }
+        },
+    ]
+    transcript_path.write_text(
+        "\n".join(json.dumps(line, ensure_ascii=False) for line in transcript_lines),
+        encoding="utf-8",
+    )
+
+    payload = {
+        "session_id": "session-transcript",
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript_path),
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload, ensure_ascii=False),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["decision"] == "block"
+    assert output["reason"] == "continue from transcript"
+
+
 def test_local_stop_hook_snapshots_completed_manual_turn(tmp_path):
     import subprocess
 

@@ -346,6 +346,138 @@ function Get-NormalizedText {{
     return ($Text -replace "\\s+", " ").Trim()
 }}
 
+function Get-HookPropertyValue {{
+    param(
+        $Value,
+        [string[]]$Names
+    )
+
+    if ($null -eq $Value) {{
+        return $null
+    }}
+
+    foreach ($name in $Names) {{
+        if ($Value -is [System.Collections.IDictionary] -and $Value.Contains($name)) {{
+            return $Value[$name]
+        }}
+        if ($Value.PSObject -and $Value.PSObject.Properties) {{
+            $property = $Value.PSObject.Properties[$name]
+            if ($null -ne $property) {{
+                return $property.Value
+            }}
+        }}
+    }}
+
+    return $null
+}}
+
+function Get-FlattenedHookText {{
+    param(
+        $Value,
+        [int]$Depth = 0
+    )
+
+    if ($null -eq $Value -or $Depth -gt 6) {{
+        return ""
+    }}
+
+    if ($Value -is [string]) {{
+        return [string]$Value
+    }}
+
+    if ($Value -is [System.Array]) {{
+        $parts = @()
+        foreach ($item in $Value) {{
+            $text = Get-FlattenedHookText -Value $item -Depth ($Depth + 1)
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{
+                $parts += $text
+            }}
+        }}
+        return ($parts -join "`n")
+    }}
+
+    if ($Value -is [System.Collections.IDictionary] -or ($Value.PSObject -and $Value.PSObject.Properties)) {{
+        foreach ($name in @("text", "content", "message", "body")) {{
+            $candidate = Get-HookPropertyValue -Value $Value -Names @($name)
+            $text = Get-FlattenedHookText -Value $candidate -Depth ($Depth + 1)
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{
+                return $text
+            }}
+        }}
+
+        $parts = @()
+        if ($Value -is [System.Collections.IDictionary]) {{
+            foreach ($item in $Value.Values) {{
+                $text = Get-FlattenedHookText -Value $item -Depth ($Depth + 1)
+                if (-not [string]::IsNullOrWhiteSpace($text)) {{
+                    $parts += $text
+                }}
+            }}
+        }} else {{
+            foreach ($property in $Value.PSObject.Properties) {{
+                $text = Get-FlattenedHookText -Value $property.Value -Depth ($Depth + 1)
+                if (-not [string]::IsNullOrWhiteSpace($text)) {{
+                    $parts += $text
+                }}
+            }}
+        }}
+        return ($parts -join "`n")
+    }}
+
+    return [string]$Value
+}}
+
+function Get-TranscriptAssistantTail {{
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {{
+        return ""
+    }}
+
+    try {{
+        $lines = Get-Content -LiteralPath $Path -Tail 300 -Encoding UTF8 -ErrorAction Stop
+    }} catch {{
+        Write-Log "Failed to read transcript path: $_" "WARN"
+        return ""
+    }}
+
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {{
+        $line = [string]$lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) {{
+            continue
+        }}
+        try {{
+            $obj = $line | ConvertFrom-Json -ErrorAction Stop
+        }} catch {{
+            continue
+        }}
+
+        $message = Get-HookPropertyValue -Value $obj -Names @("message")
+        $role = ""
+        $content = $null
+        if ($null -ne $message) {{
+            $roleValue = Get-HookPropertyValue -Value $message -Names @("role")
+            if ($null -ne $roleValue) {{ $role = [string]$roleValue }}
+            $content = Get-HookPropertyValue -Value $message -Names @("content")
+        }} else {{
+            $roleValue = Get-HookPropertyValue -Value $obj -Names @("role")
+            if ($null -ne $roleValue) {{ $role = [string]$roleValue }}
+            $content = Get-HookPropertyValue -Value $obj -Names @("content", "text")
+        }}
+
+        if (-not [string]::IsNullOrWhiteSpace($role) -and $role -ne "assistant") {{
+            continue
+        }}
+
+        $text = Get-FlattenedHookText -Value $content
+        if (-not [string]::IsNullOrWhiteSpace($text)) {{
+            return $text
+        }}
+    }}
+
+    return ""
+}}
+
 function Find-MatchingRegex {{
     param(
         [string]$Text,
@@ -698,6 +830,21 @@ try {{
         if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {{
             $lastMessage = [string]$property.Value
             break
+        }}
+    }}
+    if ([string]::IsNullOrWhiteSpace($lastMessage)) {{
+        $transcriptPath = ""
+        $transcriptProperty = $hookInput.PSObject.Properties["transcript_path"]
+        if ($null -ne $transcriptProperty) {{
+            $transcriptPath = [string]$transcriptProperty.Value
+        }} else {{
+            $transcriptProperty = $hookInput.PSObject.Properties["transcriptPath"]
+            if ($null -ne $transcriptProperty) {{
+                $transcriptPath = [string]$transcriptProperty.Value
+            }}
+        }}
+        if (-not [string]::IsNullOrWhiteSpace($transcriptPath)) {{
+            $lastMessage = Get-TranscriptAssistantTail -Path $transcriptPath
         }}
     }}
     $lastMessage = Get-NormalizedText $lastMessage
