@@ -65,10 +65,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_combo = None
         self._proxy_fetch_button = None
         self._proxy_use_node_button = None
+        self._proxy_latency_button = None
         self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
         self._proxy_auto_refresh_check = None
         self._proxy_subscription_nodes = []
         self._proxy_subscription_options = {}
+        self._proxy_latency_results = {}
+        self._proxy_latency_server_count = 0
         self._proxy_busy = False
         self._proxy_saved_subscription_loaded = False
         self._proxy_node_text = None
@@ -560,15 +563,26 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_subscription_combo.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._proxy_subscription_combo.set("请先拉取订阅")
+        proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
+        proxy_node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        self._proxy_latency_button = ctk.CTkButton(
+            proxy_node_actions,
+            text="测速选最快",
+            width=98,
+            command=self._measure_proxy_subscription_latencies,
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
         self._proxy_use_node_button = ctk.CTkButton(
-            proxy_controls,
+            proxy_node_actions,
             text="填入待部署",
             width=98,
             command=self._use_selected_proxy_subscription_node,
             state="disabled",
             **button_style("accent", compact=True),
         )
-        self._proxy_use_node_button.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        self._proxy_use_node_button.pack(anchor="e")
         self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
             text="待部署节点: 未选择",
@@ -1238,6 +1252,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         state = "disabled" if busy else "normal"
         for button in (
             self._proxy_fetch_button,
+            self._proxy_latency_button,
             self._proxy_use_node_button,
             self._proxy_load_file_button,
             self._proxy_deploy_button,
@@ -1248,7 +1263,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             if not button:
                 continue
             try:
-                if button is self._proxy_use_node_button and not self._proxy_subscription_options:
+                if button in (self._proxy_use_node_button, self._proxy_latency_button) and not self._proxy_subscription_options:
                     button.configure(state="disabled")
                 else:
                     button.configure(state=state)
@@ -1281,6 +1296,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         cached = remote_proxy.load_cached_proxy_subscription()
         if cached and cached.nodes:
+            self._proxy_latency_results = {}
+            self._proxy_latency_server_count = 0
             self._set_proxy_subscription_nodes(cached.nodes)
             self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
             self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
@@ -1322,11 +1339,23 @@ class SSHTab(ctk.CTkScrollableFrame):
             return ""
         return self._proxy_subscription_entry.get().strip()
 
-    def _set_proxy_subscription_nodes(self, nodes):
-        self._proxy_subscription_nodes = list(remote_proxy.sort_proxy_subscription_nodes(nodes or []))
+    def _selected_proxy_subscription_node_key(self) -> str:
+        if not self._proxy_subscription_combo:
+            return ""
+        selected = self._proxy_subscription_combo.get()
+        item = self._proxy_subscription_options.get(selected)
+        if not item:
+            return ""
+        return remote_proxy.proxy_node_key(item.node)
+
+    def _set_proxy_subscription_nodes(self, nodes, preserve_key: str = ""):
+        current_key = preserve_key or self._selected_proxy_subscription_node_key()
+        self._proxy_subscription_nodes = list(
+            remote_proxy.sort_proxy_subscription_nodes(nodes or [], self._proxy_latency_results)
+        )
         options = {}
         for item in self._proxy_subscription_nodes:
-            label = f"【{remote_proxy.proxy_node_region(item.node)}】 {item.display_name()}"
+            label = self._proxy_subscription_option_label(item)
             if label in options:
                 label = f"{label} #{item.index}"
             options[label] = item
@@ -1337,8 +1366,22 @@ class SSHTab(ctk.CTkScrollableFrame):
         values = list(options.keys()) or ["没有识别到可用节点"]
         self._proxy_subscription_combo.configure(values=values, state="normal" if options else "disabled")
         self._proxy_subscription_combo.set(values[0])
+        if current_key:
+            self._select_proxy_subscription_node_by_key(current_key)
         if self._proxy_use_node_button:
             self._proxy_use_node_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+        if self._proxy_latency_button:
+            self._proxy_latency_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+
+    def _proxy_subscription_option_label(self, item) -> str:
+        key = remote_proxy.proxy_node_key(item.node)
+        region = remote_proxy.proxy_node_region(item.node)
+        latency = remote_proxy.proxy_node_latency_label(self._proxy_latency_results.get(key))
+        if self._proxy_latency_server_count > 1:
+            detail = remote_proxy.proxy_node_latency_detail(self._proxy_latency_results.get(key))
+            if detail:
+                latency = f"{detail} · {latency}"
+        return f"【{region}】 {latency} · {item.display_name()}"
 
     def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
@@ -1383,6 +1426,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
                 result = payload["result"]
                 state = remote_proxy.load_proxy_subscription_state()
+                self._proxy_latency_results = {}
+                self._proxy_latency_server_count = 0
                 self._set_proxy_subscription_nodes(result.nodes)
                 if not self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or "")):
                     self._use_selected_proxy_subscription_node(show_message=False)
@@ -1403,6 +1448,138 @@ class SSHTab(ctk.CTkScrollableFrame):
                 pass
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _measure_proxy_subscription_latencies(self):
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "远端代理操作正在进行中，请稍等", is_error=True)
+            return
+        if not self._proxy_subscription_nodes:
+            message = "请先拉取订阅，再对 SSH 目标测速"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        server_names = self._selected_sync_server_names()
+        if not server_names:
+            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        target_label = self._format_server_target(server_names)
+        node_count = len(self._proxy_subscription_nodes)
+
+        def done(payload):
+            if not payload["ok"]:
+                message = f"远端节点测速失败: {payload['error']}"
+                self._set_proxy_status(message, "error")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+                return
+
+            result = payload.get("result") or {}
+            failures = result.get("failures", [])
+            server_results = result.get("results", {})
+            self._proxy_latency_server_count = len(server_names)
+            self._proxy_latency_results = self._aggregate_proxy_latency_results(server_results, len(server_names))
+            self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
+            fastest = self._fastest_proxy_subscription_node()
+            ok_nodes = sum(1 for item in self._proxy_latency_results.values() if remote_proxy.proxy_node_latency_ok(item))
+            if not fastest:
+                message = f"{target_label}: 测速完成，但没有发现可连节点。"
+                if failures:
+                    message += " 失败: " + "；".join(failures)
+                self._set_proxy_status(message, "warning")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+                return
+
+            fastest_key = remote_proxy.proxy_node_key(fastest.node)
+            self._select_proxy_subscription_node_by_key(fastest_key)
+            self._use_selected_proxy_subscription_node(show_message=False)
+            latency = remote_proxy.proxy_node_latency_label(self._proxy_latency_results.get(fastest_key))
+            region = remote_proxy.proxy_node_region(fastest.node)
+            detail = remote_proxy.proxy_node_latency_detail(self._proxy_latency_results.get(fastest_key))
+            target_detail = f"{detail}，" if detail and len(server_names) > 1 else ""
+            message = (
+                f"{target_label}: 已完成 {node_count} 个节点远端测速，"
+                f"{ok_nodes} 个可连；已选择最快节点【{region}】{target_detail}{latency}。"
+            )
+            if failures:
+                message += " 部分服务器失败: " + "；".join(failures)
+                severity = "warning"
+            else:
+                severity = "success"
+            self._set_proxy_status(message, severity)
+            show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
+
+        self._run_proxy_ssh_task(
+            f"正在从 {target_label} 测试 {node_count} 个订阅节点延迟，完成后自动选择最低延迟节点...",
+            lambda: self._measure_proxy_nodes_for_servers(server_names),
+            on_done=done,
+        )
+
+    def _measure_proxy_nodes_for_servers(self, server_names: list[str]) -> dict:
+        results = {}
+        failures = []
+        for server_name in server_names:
+            try:
+                results[server_name] = remote_proxy.measure_proxy_node_latencies_on_server(
+                    server_name,
+                    tuple(self._proxy_subscription_nodes),
+                    timeout=3.0,
+                    attempts=2,
+                    max_workers=20,
+                )
+            except Exception as e:
+                failures.append(f"{server_name}: {e}")
+        return {"results": results, "failures": failures, "server_names": server_names}
+
+    def _aggregate_proxy_latency_results(self, server_results: dict, server_count: int) -> dict:
+        aggregate = {}
+        for item in self._proxy_subscription_nodes:
+            key = remote_proxy.proxy_node_key(item.node)
+            latencies = []
+            details = []
+            attempts = 0
+            for server_name, results in (server_results or {}).items():
+                result = (results or {}).get(key)
+                latency = remote_proxy.proxy_node_latency_ms(result)
+                attempts = max(attempts, remote_proxy.proxy_node_latency_attempts(result))
+                if latency is not None and remote_proxy.proxy_node_latency_ok(result):
+                    latencies.append(latency)
+                elif result is not None:
+                    detail = remote_proxy.proxy_node_latency_detail(result)
+                    if detail:
+                        details.append(f"{server_name}: {detail}")
+            if latencies:
+                label = f"{len(latencies)}/{server_count} 可用" if server_count > 1 else ""
+                aggregate[key] = remote_proxy.ProxyNodeLatencyResult(
+                    node_key=key,
+                    ok=True,
+                    latency_ms=int(sum(latencies) / len(latencies)),
+                    detail=label,
+                    attempts=attempts,
+                )
+            else:
+                aggregate[key] = remote_proxy.ProxyNodeLatencyResult(
+                    node_key=key,
+                    ok=False,
+                    latency_ms=None,
+                    detail="；".join(details[:2]),
+                    attempts=attempts,
+                )
+        return aggregate
+
+    def _fastest_proxy_subscription_node(self):
+        fastest = None
+        fastest_latency = None
+        for item in self._proxy_subscription_nodes:
+            result = self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
+            latency = remote_proxy.proxy_node_latency_ms(result)
+            if latency is None or not remote_proxy.proxy_node_latency_ok(result):
+                continue
+            if fastest is None or latency < fastest_latency:
+                fastest = item
+                fastest_latency = latency
+        return fastest
 
     def _use_selected_proxy_subscription_node(self, show_message: bool = True, persist_selection: bool = True):
         if not self._proxy_subscription_combo:

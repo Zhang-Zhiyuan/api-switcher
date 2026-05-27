@@ -105,6 +105,14 @@ PROXY_REGION_RULES = (
     ("荷兰", (r"荷兰", r"荷蘭", r"\bnl\b", r"netherlands", r"amsterdam", r"🇳🇱")),
     ("加拿大", (r"加拿大", r"\bca\b", r"canada", r"toronto", r"vancouver", r"🇨🇦")),
     ("澳大利亚", (r"澳大利亚", r"澳洲", r"\bau\b", r"australia", r"sydney", r"🇦🇺")),
+    ("越南", (r"越南", r"\bvn\b", r"vietnam", r"🇻🇳")),
+    ("泰国", (r"泰国", r"泰國", r"\bth\b", r"thailand", r"bangkok", r"🇹🇭")),
+    ("马来西亚", (r"马来西亚", r"馬來西亞", r"\bmy\b", r"malaysia", r"kuala\s*lumpur", r"🇲🇾")),
+    ("菲律宾", (r"菲律宾", r"菲律賓", r"\bph\b", r"philippines", r"manila", r"🇵🇭")),
+    ("印度", (r"印度", r"\bin\b", r"india", r"mumbai", r"delhi", r"🇮🇳")),
+    ("俄罗斯", (r"俄罗斯", r"俄羅斯", r"\bru\b", r"russia", r"moscow", r"🇷🇺")),
+    ("土耳其", (r"土耳其", r"\btr\b", r"turkey", r"istanbul", r"🇹🇷")),
+    ("巴西", (r"巴西", r"\bbr\b", r"brazil", r"sao\s*paulo", r"🇧🇷")),
 )
 
 PROXY_REGION_TLD_MAP = {
@@ -121,6 +129,14 @@ PROXY_REGION_TLD_MAP = {
     "nl": "荷兰",
     "ca": "加拿大",
     "au": "澳大利亚",
+    "vn": "越南",
+    "th": "泰国",
+    "my": "马来西亚",
+    "ph": "菲律宾",
+    "in": "印度",
+    "ru": "俄罗斯",
+    "tr": "土耳其",
+    "br": "巴西",
 }
 
 PROXY_REGION_ORDER = tuple(region for region, _patterns in PROXY_REGION_RULES) + ("其他",)
@@ -520,6 +536,58 @@ def measure_proxy_node_latencies(
     return results
 
 
+def measure_proxy_node_latencies_on_server(
+    ssh_name: str,
+    nodes,
+    timeout: float = 3.0,
+    attempts: int = 2,
+    max_workers: int = 16,
+) -> dict[str, ProxyNodeLatencyResult]:
+    items = []
+    seen = set()
+    for item in nodes or []:
+        node = item.node if isinstance(item, ProxySubscriptionNode) else item
+        if not isinstance(node, dict):
+            continue
+        try:
+            normalized = _normalize_proxy_node(node)
+            node_key = proxy_node_key(normalized)
+        except Exception:
+            continue
+        if node_key in seen:
+            continue
+        items.append(
+            {
+                "key": node_key,
+                "server": str(normalized["server"]),
+                "port": int(normalized["port"]),
+                "name": str(normalized["name"]),
+            }
+        )
+        seen.add(node_key)
+
+    if not items:
+        return {}
+
+    timeout_value = _normalize_timeout(timeout, 3.0)
+    attempts_value = max(1, _int_or_default(attempts, 2))
+    workers_value = max(1, _int_or_default(max_workers, 16))
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    command = _build_remote_latency_command(timeout_value, attempts_value, workers_value)
+    command_timeout = _remote_latency_command_timeout(len(items), timeout_value, attempts_value, workers_value)
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=command_timeout,
+        input_data=json.dumps(items, ensure_ascii=False),
+        log_command=False,
+    )
+    if status != 0:
+        detail = (stderr or stdout or "").strip()
+        raise RuntimeError(f"{ssh_name}: 远端节点测速失败: {detail or status}")
+    return _parse_remote_latency_output(stdout)
+
+
 def proxy_node_latency_ok(result: ProxyNodeLatencyResult | dict | None) -> bool:
     if isinstance(result, ProxyNodeLatencyResult):
         return bool(result.ok and result.latency_ms is not None)
@@ -795,10 +863,15 @@ def probe_ai_proxy(ssh_name: str, mixed_port: int = 7890, timeout: int = 8) -> s
     if not results:
         return f"{ssh_name}: 未得到连通性测试结果"
     ok_count = sum(1 for item in results if item.ok)
-    return (
+    message = (
         f"{ssh_name}: {proxy_status.summary()}；AI 连通性 {ok_count}/{len(results)} 可达；"
         + "；".join(item.summary() for item in results)
     )
+    if ok_count == 0:
+        log_hint = _read_remote_ai_proxy_error_tail(client, remote_config._remote_home(client))
+        if log_hint:
+            message += f"；最近远端代理日志: {log_hint}"
+    return message
 
 
 def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_config: bool = True) -> str:
@@ -2330,6 +2403,79 @@ probe_curl() {{
 """
 
 
+def _build_remote_latency_command(timeout: float = 3.0, attempts: int = 2, max_workers: int = 16) -> str:
+    timeout = _normalize_timeout(timeout, 3.0)
+    attempts = max(1, _int_or_default(attempts, 2))
+    max_workers = max(1, min(_int_or_default(max_workers, 16), 64))
+    return f"""set -u
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "远端未安装 python3，无法批量测试节点延迟" >&2
+  exit 11
+fi
+TMP_INPUT="${{TMPDIR:-/tmp}}/api-switcher-node-latency.$$.json"
+cleanup_latency_input() {{
+  rm -f "$TMP_INPUT"
+}}
+trap cleanup_latency_input EXIT HUP INT TERM
+cat > "$TMP_INPUT"
+python3 - "$TMP_INPUT" <<'PY'
+import concurrent.futures
+import json
+import socket
+import sys
+import time
+
+TIMEOUT = {timeout!r}
+ATTEMPTS = {attempts}
+MAX_WORKERS = {max_workers}
+
+def clean(value):
+    return str(value or "").replace("\\t", " ").replace("\\r", " ").replace("\\n", " ")[:180]
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        nodes = json.load(handle)
+except Exception as exc:
+    print(f"读取节点列表失败: {{clean(exc)}}", file=sys.stderr)
+    sys.exit(12)
+
+def measure(item):
+    key = clean(item.get("key"))
+    server = clean(item.get("server"))
+    try:
+        port = int(item.get("port"))
+    except Exception:
+        return key, 0, "", "端口无效"
+    latencies = []
+    detail = ""
+    for _ in range(max(1, ATTEMPTS)):
+        started = time.perf_counter()
+        try:
+            with socket.create_connection((server, port), timeout=TIMEOUT):
+                latencies.append(max(1, int((time.perf_counter() - started) * 1000)))
+        except Exception as exc:
+            detail = clean(exc) or exc.__class__.__name__
+    if latencies:
+        return key, 1, str(min(latencies)), ""
+    return key, 0, "", detail or "TCP 连接失败"
+
+workers = max(1, min(MAX_WORKERS, len(nodes) or 1))
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+    futures = [executor.submit(measure, item) for item in nodes if isinstance(item, dict)]
+    for future in concurrent.futures.as_completed(futures):
+        key, ok, latency, detail = future.result()
+        if key:
+            print(f"latency\\t{{key}}\\t{{ok}}\\t{{latency}}\\t{{clean(detail)}}\\t{{ATTEMPTS}}", flush=True)
+PY
+"""
+
+
+def _remote_latency_command_timeout(node_count: int, timeout: float, attempts: int, max_workers: int) -> int:
+    workers = max(1, min(_int_or_default(max_workers, 16), max(1, int(node_count or 1))))
+    batches = (max(1, int(node_count or 1)) + workers - 1) // workers
+    return max(45, min(300, int(batches * max(1, attempts) * _normalize_timeout(timeout, 3.0) + 30)))
+
+
 def _build_install_command(
     home: str,
     config_dir: str,
@@ -2668,3 +2814,50 @@ def _parse_remote_probe_output(text: str) -> tuple[RemoteAIProxyProbeResult, ...
             )
         )
     return tuple(results)
+
+
+def _parse_remote_latency_output(text: str) -> dict[str, ProxyNodeLatencyResult]:
+    results: dict[str, ProxyNodeLatencyResult] = {}
+    for line in (text or "").splitlines():
+        if not line.startswith("latency\t"):
+            continue
+        _prefix, node_key, ok, latency, detail, attempts = (line.split("\t", 5) + ["", "", "", "", "", ""])[:6]
+        node_key = (node_key or "").strip()
+        if not node_key:
+            continue
+        latency_ms = _int_or_default((latency or "").strip(), 0) if ok == "1" else 0
+        results[node_key] = ProxyNodeLatencyResult(
+            node_key=node_key,
+            ok=ok == "1" and latency_ms > 0,
+            latency_ms=latency_ms if ok == "1" and latency_ms > 0 else None,
+            detail=(detail or "").strip()[:180],
+            attempts=_int_or_default((attempts or "").strip(), 0),
+        )
+    return results
+
+
+def _read_remote_ai_proxy_error_tail(client, home: str) -> str:
+    log_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.log")
+    command = f"""
+LOG={shlex.quote(log_path)}
+if [ -s "$LOG" ]; then
+  tail -n 80 "$LOG" 2>/dev/null |
+    grep -E 'level=(warning|error)| connect error| timeout| reset| refused' |
+    tail -n 3 |
+    sed -E 's/[[:space:]]+/ /g; s/(uuid: )[A-Za-z0-9_-]+/\\1***/g; s/(password: )[A-Za-z0-9._-]+/\\1***/g' |
+    cut -c 1-260
+fi
+"""
+    try:
+        status, stdout, _stderr = ssh_manager.execute_command_with_status(
+            client,
+            command,
+            timeout=10,
+            log_command=False,
+        )
+    except Exception:
+        return ""
+    if status != 0:
+        return ""
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    return " | ".join(lines)[-700:]

@@ -257,6 +257,7 @@ proxies:
   - { name: 台湾 2, type: vless, server: tw2.example.com, port: 443 }
   - { name: 日本, type: vless, server: jp.example.com, port: 443 }
   - { name: 台湾 1, type: vless, server: tw1.example.com, port: 443 }
+  - { name: cf加速|越南动态家宽🇻🇳, type: vless, server: vn.example.com, port: 443 }
 """
     )
     latencies = {
@@ -275,6 +276,7 @@ proxies:
     sorted_nodes = remote_proxy.sort_proxy_subscription_nodes(nodes, latencies)
 
     assert remote_proxy.proxy_node_region(nodes[0].node) == "台湾"
+    assert remote_proxy.proxy_node_region(nodes[3].node) == "越南"
     assert [item.node["name"] for item in sorted_nodes if remote_proxy.proxy_node_region(item.node) == "台湾"] == [
         "台湾 1",
         "台湾 2",
@@ -596,6 +598,57 @@ def test_build_remote_probe_command_covers_python_and_curl_fallbacks():
     assert "command -v curl" in command
     assert "OpenAI/ChatGPT" in command
     assert "Gemini/Google AI" in command
+
+
+def test_build_remote_latency_command_uses_stdin_json_temp_file():
+    command = remote_proxy._build_remote_latency_command(timeout=2.5, attempts=3, max_workers=12)
+
+    assert "api-switcher-node-latency" in command
+    assert "cat > \"$TMP_INPUT\"" in command
+    assert "socket.create_connection" in command
+    assert "ThreadPoolExecutor" in command
+    assert "latency\\t" in command
+    assert "ATTEMPTS = 3" in command
+
+
+def test_parse_remote_latency_output_returns_latency_results():
+    results = remote_proxy._parse_remote_latency_output(
+        "noise\n"
+        "latency\tkey-a\t1\t42\t\t2\n"
+        "latency\tkey-b\t0\t\ttimed out\t2\n"
+    )
+
+    assert results["key-a"].ok is True
+    assert results["key-a"].latency_ms == 42
+    assert results["key-b"].ok is False
+    assert results["key-b"].detail == "timed out"
+
+
+def test_measure_proxy_node_latencies_on_server_sends_nodes_json(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, object()))
+
+    def fake_execute(_client, command, **kwargs):
+        sent["command"] = command
+        sent["input"] = json.loads(kwargs["input_data"])
+        sent["timeout"] = kwargs["timeout"]
+        assert kwargs["log_command"] is False
+        return 0, "latency\tkey-1\t1\t25\t\t2\n", ""
+
+    monkeypatch.setattr(remote_proxy, "proxy_node_key", lambda _node: "key-1")
+    monkeypatch.setattr(remote_proxy.ssh_manager, "execute_command_with_status", fake_execute)
+
+    results = remote_proxy.measure_proxy_node_latencies_on_server(
+        "server-a",
+        [{"name": "node", "type": "vless", "server": "example.com", "port": 443}],
+        timeout=1,
+        attempts=2,
+        max_workers=4,
+    )
+
+    assert sent["input"] == [{"key": "key-1", "server": "example.com", "port": 443, "name": "node"}]
+    assert sent["timeout"] >= 45
+    assert results["key-1"].latency_ms == 25
 
 
 def test_parse_remote_probe_output_formats_result_summaries():
