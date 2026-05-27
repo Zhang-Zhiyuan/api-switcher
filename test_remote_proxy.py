@@ -718,6 +718,72 @@ def test_probe_ai_proxy_combines_status_and_remote_probe_results(monkeypatch):
     assert "OpenAI/ChatGPT: 可达 / HTTP 403 / 11ms" in summary
 
 
+def test_install_ai_proxy_verified_keeps_working_requested_node(monkeypatch):
+    installs = []
+    monkeypatch.setattr(remote_proxy, "install_ai_proxy", lambda _server, text, _port=7890: installs.append(text) or "installed")
+    monkeypatch.setattr(
+        remote_proxy,
+        "probe_ai_proxy",
+        lambda *_args, **_kwargs: "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 3/3 可达",
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "measure_proxy_node_latencies_on_server",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not fallback")),
+    )
+
+    message = remote_proxy.install_ai_proxy_verified(
+        "server",
+        "{ name: good, type: vless, server: good.example.com, port: 443 }",
+    )
+
+    assert len(installs) == 1
+    assert "验证通过" in message
+
+
+def test_install_ai_proxy_verified_falls_back_to_working_candidate(monkeypatch):
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: bad, type: vless, server: bad.example.com, port: 443 }"),
+    )
+    candidate = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node("{ name: good, type: vless, server: good.example.com, port: 443 }"),
+    )
+    installs = []
+    probes = iter([
+        "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 0/3 可达",
+        "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 3/3 可达",
+    ])
+
+    def fake_install(_server, text, _port=7890):
+        installs.append(remote_proxy.parse_proxy_node(text)["name"])
+        return "installed"
+
+    latencies = {
+        remote_proxy.proxy_node_key(candidate.node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(candidate.node),
+            True,
+            latency_ms=22,
+        )
+    }
+
+    monkeypatch.setattr(remote_proxy, "install_ai_proxy", fake_install)
+    monkeypatch.setattr(remote_proxy, "probe_ai_proxy", lambda *_args, **_kwargs: next(probes))
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies_on_server", lambda *_args, **_kwargs: latencies)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = remote_proxy.install_ai_proxy_verified(
+        "server",
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, candidate],
+    )
+
+    assert installs == ["bad", "good"]
+    assert "自动切换到 good" in message
+    assert "验证通过" in message
+
+
 def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     env_file = remote_proxy._build_env_file(7890)
     shell_paths = remote_proxy._shell_proxy_profile_paths("/home/me")

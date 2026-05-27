@@ -734,6 +734,77 @@ def install_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> 
     )
 
 
+def install_ai_proxy_verified(
+    ssh_name: str,
+    proxy_text: str,
+    candidate_nodes=None,
+    mixed_port: int = 7890,
+    max_candidates: int = 10,
+) -> str:
+    requested_node = parse_proxy_node(proxy_text)
+    requested_key = proxy_node_key(requested_node)
+    install_message = install_ai_proxy(ssh_name, proxy_text, mixed_port)
+    probe_message = probe_ai_proxy(ssh_name, mixed_port)
+    if _probe_summary_all_ok(probe_message):
+        return f"{install_message}；验证通过: {_compact_probe_summary(probe_message)}"
+
+    candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, ProxySubscriptionNode))
+    if not candidates:
+        return f"{install_message}；验证失败: {_compact_probe_summary(probe_message)}"
+
+    try:
+        latencies = measure_proxy_node_latencies_on_server(
+            ssh_name,
+            candidates,
+            timeout=3.0,
+            attempts=2,
+            max_workers=20,
+        )
+    except Exception as exc:
+        return f"{install_message}；验证失败: {_compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}"
+
+    ranked = []
+    for item in sort_proxy_subscription_nodes(candidates, latencies):
+        key = proxy_node_key(item.node)
+        if key == requested_key:
+            continue
+        result = latencies.get(key)
+        latency = proxy_node_latency_ms(result)
+        if latency is None or not proxy_node_latency_ok(result):
+            continue
+        ranked.append((latency, item, result))
+
+    attempts = max(1, min(_int_or_default(max_candidates, 10), len(ranked)))
+    tried = []
+    for latency, item, result in ranked[:attempts]:
+        node_summary = describe_proxy_node(item.node)
+        latency_label = proxy_node_latency_label(result)
+        try:
+            install_ai_proxy(ssh_name, format_proxy_node(item.node), mixed_port)
+            candidate_probe = probe_ai_proxy(ssh_name, mixed_port)
+        except Exception as exc:
+            tried.append(f"{node_summary} {latency_label}: {exc}")
+            continue
+        if _probe_summary_all_ok(candidate_probe):
+            set_proxy_subscription_selected_node(item.node)
+            return (
+                f"{ssh_name}: 原节点验证失败，已自动切换到 {node_summary}（远端 TCP {latency_label}）；"
+                f"验证通过: {_compact_probe_summary(candidate_probe)}"
+            )
+        tried.append(f"{node_summary} {latency_label}: {_probe_summary_counts(candidate_probe)}")
+
+    try:
+        install_ai_proxy(ssh_name, format_proxy_node(requested_node), mixed_port)
+    except Exception:
+        pass
+    tried_summary = "；".join(tried[:3])
+    suffix = f"；尝试摘要: {tried_summary}" if tried_summary else ""
+    return (
+        f"{install_message}；验证失败: {_compact_probe_summary(probe_message)}；"
+        f"自动尝试 {attempts} 个测速靠前节点仍未 3/3 可达，已恢复原节点{suffix}"
+    )
+
+
 def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStatus:
     _ssh_profile, client = _connect_ssh(ssh_name)
     home = remote_config._remote_home(client)
@@ -2814,6 +2885,29 @@ def _parse_remote_probe_output(text: str) -> tuple[RemoteAIProxyProbeResult, ...
             )
         )
     return tuple(results)
+
+
+def _probe_summary_counts(summary: str) -> str:
+    match = re.search(r"AI 连通性\s+(\d+)/(\d+)\s+可达", summary or "")
+    if match:
+        return f"{match.group(1)}/{match.group(2)} 可达"
+    return str(summary or "").split("；", 1)[0][:160]
+
+
+def _probe_summary_all_ok(summary: str) -> bool:
+    match = re.search(r"AI 连通性\s+(\d+)/(\d+)\s+可达", summary or "")
+    if not match:
+        return False
+    return _int_or_default(match.group(1), 0) >= _int_or_default(match.group(2), 1)
+
+
+def _compact_probe_summary(summary: str) -> str:
+    text = str(summary or "").strip()
+    if not text:
+        return ""
+    parts = [part for part in text.split("；") if part]
+    useful = [part for part in parts if "AI 连通性" in part or "OpenAI/ChatGPT" in part or "Claude/Anthropic" in part or "Gemini/Google AI" in part]
+    return "；".join(useful or parts[:2])[:900]
 
 
 def _parse_remote_latency_output(text: str) -> dict[str, ProxyNodeLatencyResult]:

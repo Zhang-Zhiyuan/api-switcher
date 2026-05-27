@@ -1669,10 +1669,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._set_proxy_status(self._sync_status_label.cget("text"), severity)
 
             self._run_proxy_ssh_task(
-                f"正在部署 AI 代理到 {target_label}...",
+                f"正在部署 AI 代理到 {target_label}，并验证 GPT/Claude/Gemini 连通性...",
                 lambda: self._run_server_batch(
                     server_names,
-                    lambda server_name: remote_proxy.install_ai_proxy(server_name, proxy_text),
+                    lambda server_name: remote_proxy.install_ai_proxy_verified(
+                        server_name,
+                        proxy_text,
+                        tuple(self._proxy_subscription_nodes),
+                    ),
                 ),
                 on_done=done,
             )
@@ -1684,7 +1688,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 f"将把当前 Clash 节点写入 {target_label}，安装/复用 mihomo，"
                 "并写入 VS Code Remote/Codex/Claude Code 远端环境入口。\n"
                 f"识别到节点: {node_summary}\n"
-                "规则只代理 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名，其余 DIRECT。确定继续吗？"
+                "规则只代理 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名，其余 DIRECT。\n"
+                "部署后会立即做真实连通验证；如果当前节点不可用，会从订阅节点里按远端测速自动尝试可用节点。确定继续吗？"
             ),
             on_confirm=do_deploy,
         )
