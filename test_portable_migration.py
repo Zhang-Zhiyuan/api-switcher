@@ -502,6 +502,18 @@ class _SessionSFTP:
         self.closed = True
 
 
+class _BrokenReadSessionSFTP(_SessionSFTP):
+    def __init__(self, home: str = "/home/test"):
+        super().__init__(home)
+        self.broken_reads: set[str] = set()
+
+    def open(self, path: str, mode: str):
+        normalized = posixpath.normpath(path)
+        if "r" in mode and normalized in self.broken_reads:
+            raise OSError("permission denied")
+        return super().open(path, mode)
+
+
 class _SessionSSHClient:
     def __init__(self, sftp: _SessionSFTP):
         self.sftp = sftp
@@ -616,6 +628,38 @@ def test_session_migration_supports_ssh_export_and_import(monkeypatch, tmp_path)
     codex_meta = json.loads(target_sftp.files["/home/test/.codex/sessions/2026/05/01/rollout-remote.jsonl"].decode("utf-8").splitlines()[0])
     assert codex_meta["payload"]["cwd"] == "/workspace/new"
     assert "远端 Codex 标题" in target_sftp.files["/home/test/.codex/session_index.jsonl"].decode("utf-8")
+
+
+def test_remote_session_export_skips_unreadable_support_file(monkeypatch, tmp_path):
+    sftp = _BrokenReadSessionSFTP()
+    claude_file = "/home/test/.claude/projects/-home-test-proj/claude-session-remote.jsonl"
+    support_file = "/home/test/.claude/projects/-home-test-proj/claude-session-remote/tool-results/result.txt"
+    sftp.add_file(
+        claude_file,
+        json.dumps({
+            "type": "user",
+            "timestamp": "2026-05-01T00:00:00Z",
+            "sessionId": "claude-session-remote",
+            "cwd": "/home/test/proj",
+            "message": {"content": "远端 Claude 会话"},
+        }, ensure_ascii=False) + "\n",
+    )
+    sftp.add_file(support_file, "unreadable tool result")
+    sftp.broken_reads.add(support_file)
+    _patch_session_ssh(monkeypatch, sftp)
+
+    records = session_migration.list_sessions("claude", ssh_name="gpu")
+    bundle = tmp_path / "remote-unreadable.asxsession"
+    exported = session_migration.export_remote_sessions("gpu", bundle, {record.key for record in records}, provider="claude")
+
+    assert exported.session_count == 1
+    assert exported.file_count == 1
+    assert exported.skipped_keys == []
+    with zipfile.ZipFile(bundle, "r") as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+    assert len(manifest["sessions"]) == 1
+    assert len(manifest["sessions"][0]["files"]) == 1
+    assert manifest["sessions"][0]["files"][0]["main"] is True
 
 
 def _reset_store() -> None:
