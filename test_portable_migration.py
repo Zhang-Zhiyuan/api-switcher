@@ -254,6 +254,69 @@ def test_session_migration_ignores_runtime_context_titles(tmp_path):
     assert by_provider["codex"].summary == "真正的 Codex 迁移需求"
 
 
+def test_session_export_skips_oversized_files(tmp_path, monkeypatch):
+    claude_home = tmp_path / "claude"
+    codex_home = tmp_path / "codex"
+    claude_project = claude_home / "projects" / "c--Users-Test-Project"
+    claude_project.mkdir(parents=True)
+    claude_file = claude_project / "small-claude.jsonl"
+    claude_file.write_text(
+        json.dumps({
+            "type": "user",
+            "timestamp": "2026-05-01T00:00:00Z",
+            "sessionId": "small-claude",
+            "message": {"content": "小会话"},
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    support_file = claude_project / "small-claude" / "tool-results" / "huge.txt"
+    support_file.parent.mkdir(parents=True)
+
+    codex_session_dir = codex_home / "sessions" / "2026" / "05" / "01"
+    codex_session_dir.mkdir(parents=True)
+    codex_file = codex_session_dir / "rollout-large-codex.jsonl"
+
+    limit = claude_file.stat().st_size + 40
+    support_file.write_text("s" * (limit + 20), encoding="utf-8")
+    codex_file.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "large-codex", "cwd": "C:\\Users\\Test\\Project"},
+            }, ensure_ascii=False),
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "大 Codex 会话 " + ("x" * limit)}],
+                },
+            }, ensure_ascii=False),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_migration, "MAX_PACKAGE_FILE_BYTES", limit)
+
+    records = session_migration.list_sessions(claude_home=claude_home, codex_home=codex_home)
+    bundle = tmp_path / "oversized.asxsession"
+    exported = session_migration.export_sessions(
+        bundle,
+        {record.key for record in records},
+        claude_home=claude_home,
+        codex_home=codex_home,
+    )
+
+    assert exported.session_count == 1
+    assert exported.file_count == 1
+    assert any(key.startswith("codex:") for key in exported.skipped_keys)
+    with zipfile.ZipFile(bundle, "r") as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+    assert manifest["sessions"][0]["provider"] == "claude"
+    assert len(manifest["sessions"][0]["files"]) == 1
+
+
 def test_session_migration_skips_invalid_package_entries(tmp_path):
     package = tmp_path / "invalid.asxsession"
     manifest = {

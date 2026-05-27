@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import shutil
 import stat
@@ -169,16 +170,21 @@ def export_sessions(
                 entry["files"] = []
 
                 for file_path in _record_files(record):
-                    if not file_path.is_file():
-                        continue
                     try:
+                        if not file_path.is_file():
+                            continue
                         relative_path = _relative_to_home(file_path, home)
-                    except ValueError:
+                        size = file_path.stat().st_size
+                    except (OSError, ValueError):
+                        continue
+                    if not _package_size_allowed(size, total_bytes):
                         continue
 
                     archive_path = f"files/{index}/{relative_path}"
-                    size = file_path.stat().st_size
-                    bundle.write(file_path, archive_path)
+                    try:
+                        bundle.write(file_path, archive_path)
+                    except OSError:
+                        continue
                     entry["files"].append({
                         "relative_path": relative_path,
                         "archive_path": archive_path,
@@ -188,8 +194,10 @@ def export_sessions(
                     file_count += 1
                     total_bytes += size
 
-                if entry["files"]:
+                if _entry_has_main_file(entry):
                     manifest_entries.append(entry)
+                else:
+                    skipped_keys.append(record.key)
 
             manifest = {
                 "format": PACKAGE_FORMAT,
@@ -208,7 +216,7 @@ def export_sessions(
         session_count=len(manifest_entries),
         file_count=file_count,
         total_bytes=total_bytes,
-        skipped_keys=skipped_keys,
+        skipped_keys=sorted(set(skipped_keys)),
     )
 
 
@@ -257,12 +265,15 @@ def export_remote_sessions(
                     except Exception:
                         continue
                     size = int(getattr(info, "st_size", 0) or 0)
-                    if size > MAX_PACKAGE_FILE_BYTES or total_bytes + size > MAX_PACKAGE_TOTAL_BYTES:
+                    if not _package_size_allowed(size, total_bytes):
                         continue
 
                     archive_path = f"files/{index}/{relative_path}"
-                    with bundle.open(archive_path, "w") as target, sftp.open(remote_path, "rb") as source:
-                        shutil.copyfileobj(source, target)
+                    try:
+                        with sftp.open(remote_path, "rb") as source, bundle.open(archive_path, "w") as target:
+                            shutil.copyfileobj(source, target)
+                    except Exception:
+                        continue
                     entry["files"].append({
                         "relative_path": relative_path,
                         "archive_path": archive_path,
@@ -272,8 +283,10 @@ def export_remote_sessions(
                     file_count += 1
                     total_bytes += size
 
-                if entry["files"]:
+                if _entry_has_main_file(entry):
                     manifest_entries.append(entry)
+                else:
+                    skipped_keys.append(record.key)
 
             manifest = {
                 "format": PACKAGE_FORMAT,
@@ -298,7 +311,7 @@ def export_remote_sessions(
         session_count=len(manifest_entries),
         file_count=file_count,
         total_bytes=total_bytes,
-        skipped_keys=skipped_keys,
+        skipped_keys=sorted(set(skipped_keys)),
     )
 
 
@@ -521,6 +534,17 @@ def format_size(size_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
     return f"{size_bytes} B"
+
+
+def _package_size_allowed(file_size: int, current_total: int) -> bool:
+    if file_size < 0:
+        return False
+    return file_size <= MAX_PACKAGE_FILE_BYTES and current_total + file_size <= MAX_PACKAGE_TOTAL_BYTES
+
+
+def _entry_has_main_file(entry: dict[str, Any]) -> bool:
+    files = entry.get("files")
+    return isinstance(files, list) and any(isinstance(item, dict) and item.get("main") for item in files)
 
 
 def _list_claude_sessions(claude_home: Path) -> list[SessionRecord]:
@@ -1018,8 +1042,23 @@ def _record_files(record: SessionRecord) -> list[Path]:
     if record.provider == "claude":
         support_dir = record.source_path.with_suffix("")
         if support_dir.is_dir():
-            files.extend(path for path in support_dir.rglob("*") if path.is_file())
+            files.extend(_iter_local_files(support_dir))
     return files
+
+
+def _iter_local_files(root: Path):
+    try:
+        walker = os.walk(root, onerror=lambda _error: None)
+        for dirpath, _dirnames, filenames in walker:
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    if path.is_file():
+                        yield path
+                except OSError:
+                    continue
+    except OSError:
+        return
 
 
 def _remote_record_files(sftp, record: SessionRecord) -> list[str]:
@@ -1173,14 +1212,17 @@ def _read_codex_index(codex_home: Path) -> dict[str, dict[str, Any]]:
     if not index_path.exists():
         return {}
     result: dict[str, dict[str, Any]] = {}
-    with index_path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(item, dict) and item.get("id"):
-                result[str(item["id"])] = item
+    try:
+        with index_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict) and item.get("id"):
+                    result[str(item["id"])] = item
+    except OSError:
+        return {}
     return result
 
 
