@@ -159,7 +159,7 @@ def set_local_proxy_start_on_login(enabled: bool) -> dict:
 
 def set_local_proxy_startup_node(proxy_text: str) -> str:
     proxy_node = remote_proxy.parse_proxy_node(proxy_text)
-    _save_last_proxy_node(proxy_node)
+    _save_last_proxy_node_strict(proxy_node)
     return remote_proxy.describe_proxy_node(proxy_node)
 
 
@@ -708,10 +708,14 @@ def _build_local_mihomo_config(proxy_node: dict, mixed_port: int) -> str:
 
 def _save_last_proxy_node(proxy_node: dict) -> None:
     try:
-        normalized = remote_proxy._normalize_proxy_node(proxy_node)
-        save_local_proxy_preferences(last_node=normalized)
+        _save_last_proxy_node_strict(proxy_node)
     except Exception:
         return
+
+
+def _save_last_proxy_node_strict(proxy_node: dict) -> None:
+    normalized = remote_proxy._normalize_proxy_node(proxy_node)
+    save_local_proxy_preferences(last_node=normalized)
 
 
 def _load_last_proxy_node() -> dict | None:

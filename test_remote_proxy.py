@@ -1234,6 +1234,24 @@ def test_local_proxy_startup_node_can_be_saved_from_current_node(monkeypatch, tm
     assert "boot.example.com" in starts[0]
 
 
+def test_local_proxy_startup_node_reports_save_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", tmp_path / "mihomo.pid")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+
+    def fail_save_preferences(**_updates):
+        raise OSError("readonly preferences")
+
+    monkeypatch.setattr(local_proxy, "save_local_proxy_preferences", fail_save_preferences)
+
+    with pytest.raises(OSError, match="readonly preferences"):
+        local_proxy.set_local_proxy_startup_node(
+            "{ name: boot, type: vless, server: boot.example.com, port: 443 }"
+        )
+
+
 def test_local_proxy_auto_start_skips_when_managed_proxy_is_alive(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")

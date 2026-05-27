@@ -555,9 +555,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 local_proxy.set_local_proxy_start_on_login(False)
             except Exception as e:
                 message = f"关闭本机代理开机自启失败: {e}"
+                self._load_proxy_preferences_ui()
                 self._set_routing_status(message, "error")
                 show_toast(self.winfo_toplevel(), message, is_error=True)
-                self._load_proxy_preferences_ui()
                 return
             self._set_routing_status("已关闭本机代理开机自启；应用本身的开机自启状态不会被自动改动。")
             return
@@ -582,13 +582,27 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_routing_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
+        previous_startup = startup_manager.get_startup_status()
+        should_rollback_app_startup = previous_startup.supported and not previous_startup.enabled
         try:
             status = startup_manager.set_startup_enabled(True)
             local_proxy.set_local_proxy_start_on_login(True)
         except Exception as e:
             self._start_on_login_var.set(False)
-            local_proxy.set_local_proxy_start_on_login(False)
+            rollback_errors = []
+            try:
+                local_proxy.set_local_proxy_start_on_login(False)
+            except Exception as rollback_error:
+                rollback_errors.append(f"代理偏好回滚失败: {rollback_error}")
+            if should_rollback_app_startup:
+                try:
+                    startup_manager.set_startup_enabled(False)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"应用自启回滚失败: {rollback_error}")
             message = f"开启本机代理开机自启失败: {e}"
+            if rollback_errors:
+                message = f"{message}；" + "；".join(rollback_errors)
+            self._load_proxy_preferences_ui()
             self._set_routing_status(message, "error")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
