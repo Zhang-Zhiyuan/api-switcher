@@ -16,7 +16,11 @@ def read_vscode_settings() -> dict:
     if not VSCODE_SETTINGS.exists():
         return {}
     try:
-        return json.loads(VSCODE_SETTINGS.read_text(encoding="utf-8"))
+        data = json.loads(VSCODE_SETTINGS.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.error(f"Failed to read {VSCODE_SETTINGS}: top-level JSON is not an object")
+            return {}
+        return data
     except Exception as e:
         logger.error(f"Failed to read {VSCODE_SETTINGS}: {e}")
         return {}

@@ -17,7 +17,11 @@ def read_claude_settings() -> dict:
     if not CLAUDE_SETTINGS.exists():
         return {}
     try:
-        return json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        data = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.error(f"Failed to read {CLAUDE_SETTINGS}: top-level JSON is not an object")
+            return {}
+        return data
     except Exception as e:
         logger.error(f"Failed to read {CLAUDE_SETTINGS}: {e}")
         return {}
@@ -32,7 +36,11 @@ def read_claude_config() -> dict:
     if not CLAUDE_CONFIG.exists():
         return {}
     try:
-        return json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8"))
+        data = json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.error(f"Failed to read {CLAUDE_CONFIG}: top-level JSON is not an object")
+            return {}
+        return data
     except Exception as e:
         logger.error(f"Failed to read {CLAUDE_CONFIG}: {e}")
         return {}
@@ -47,7 +55,11 @@ def read_claude_credentials() -> dict:
     if not CLAUDE_CREDENTIALS.exists():
         return {}
     try:
-        return json.loads(CLAUDE_CREDENTIALS.read_text(encoding="utf-8"))
+        data = json.loads(CLAUDE_CREDENTIALS.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.error(f"Failed to read {CLAUDE_CREDENTIALS}: top-level JSON is not an object")
+            return {}
+        return data
     except Exception as e:
         logger.error(f"Failed to read {CLAUDE_CREDENTIALS}: {e}")
         return {}

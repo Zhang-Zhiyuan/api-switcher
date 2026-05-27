@@ -1,6 +1,14 @@
 from core import vscode_parser
 
 
+def test_read_vscode_settings_returns_empty_for_non_object_json(monkeypatch, tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(vscode_parser, "VSCODE_SETTINGS", settings_path)
+
+    assert vscode_parser.read_vscode_settings() == {}
+
+
 def test_apply_permissions_keeps_mode_and_prompt_skip_separate():
     settings = vscode_parser.apply_permissions({}, bypass=False, skip_dangerous=True)
 

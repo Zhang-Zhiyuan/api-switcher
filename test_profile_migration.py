@@ -64,6 +64,40 @@ def test_corrupted_profiles_restore_preserves_valid_backup(tmp_path, monkeypatch
     assert backup_after["version"] == 3
 
 
+def test_profile_store_normalization_removes_bad_entries(tmp_path, monkeypatch):
+    profiles_file = tmp_path / "profiles.json"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    store = profile_manager._get_default_store()
+    store["claude_profiles"] = [
+        {"name": "Valid", "provider": "anthropic", "custom_provider_name": None},
+        "bad-entry",
+        {"name": ""},
+        {"name": "Valid", "provider": "anthropic", "custom_provider_name": None, "model": "duplicate"},
+    ]
+    store["codex_profiles"] = [{"missing_name": True}]
+    store["active_claude_profile"] = "Valid"
+    profiles_file.parent.mkdir(parents=True, exist_ok=True)
+    profiles_file.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = profile_manager._load_store()
+
+    assert [item["name"] for item in loaded["claude_profiles"]] == ["Valid"]
+    assert loaded["codex_profiles"] == []
+    assert loaded["active_claude_profile"] == "Valid"
+
+    persisted = json.loads(profiles_file.read_text(encoding="utf-8"))
+    assert [item["name"] for item in persisted["claude_profiles"]] == ["Valid"]
+    assert persisted["codex_profiles"] == []
+
+
+def test_profile_migration_script_checks_are_collected_by_pytest(tmp_path, monkeypatch) -> None:
+    profiles_file = tmp_path / "profiles.json"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr("test_profile_migration.PROFILES_FILE", profiles_file)
+
+    main()
+
+
 def main():
     backup_file = PROFILES_FILE.with_suffix(".backup")
     original_profiles = _read_bytes(PROFILES_FILE)

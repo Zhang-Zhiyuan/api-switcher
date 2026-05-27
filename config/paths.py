@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -96,7 +97,7 @@ def _get_user_data_dir_pointer() -> Path:
 def _can_use_storage_dir(path: Path) -> tuple[bool, str]:
     try:
         path.mkdir(parents=True, exist_ok=True)
-        test_path = path / f".write_test_{os.getpid()}.tmp"
+        test_path = path / f".write_test_{os.getpid()}_{uuid.uuid4().hex}.tmp"
         test_path.write_text("ok", encoding="utf-8")
         test_path.unlink(missing_ok=True)
         return True, ""
@@ -164,6 +165,20 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _copy_missing(source: Path, target: Path, copied: list[str], root: Path) -> None:
     """Copy legacy storage content without overwriting existing user data."""
     if source.is_symlink():
@@ -171,8 +186,15 @@ def _copy_missing(source: Path, target: Path, copied: list[str], root: Path) -> 
 
     if source.is_dir():
         target.mkdir(parents=True, exist_ok=True)
-        for child in source.iterdir():
-            _copy_missing(child, target / child.name, copied, root)
+        try:
+            children = list(source.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                _copy_missing(child, target / child.name, copied, root)
+            except OSError:
+                continue
         return
 
     if source.is_file() and not target.exists():
@@ -255,12 +277,12 @@ def write_data_dir_pointer(target_dir: str | Path, copy_current: bool = True) ->
     target = _expand_configured_path(str(target_dir))
     copied = copy_storage_to(target) if copy_current else []
     try:
-        DATA_DIR_POINTER.write_text(str(target), encoding="utf-8")
+        _atomic_write_text(DATA_DIR_POINTER, str(target))
         if USER_DATA_DIR_POINTER.exists():
             USER_DATA_DIR_POINTER.unlink()
     except OSError:
         USER_DATA_DIR_POINTER.parent.mkdir(parents=True, exist_ok=True)
-        USER_DATA_DIR_POINTER.write_text(str(target), encoding="utf-8")
+        _atomic_write_text(USER_DATA_DIR_POINTER, str(target))
     return copied
 
 
@@ -279,9 +301,9 @@ def enable_portable_storage(copy_current: bool = True) -> list[str]:
     """Use APP_DIR/data as storage after restart."""
     target = APP_DIR / PORTABLE_DATA_DIR_NAME
     copied = copy_storage_to(target) if copy_current else []
-    PORTABLE_MARKER.write_text(
+    _atomic_write_text(
+        PORTABLE_MARKER,
         "API_SWITCHER_PORTABLE=1\nData is stored in the sibling data directory.\n",
-        encoding="utf-8",
     )
     return copied
 

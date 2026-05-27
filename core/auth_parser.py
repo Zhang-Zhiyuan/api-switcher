@@ -16,7 +16,11 @@ def read_codex_auth() -> dict:
     if not CODEX_AUTH.exists():
         return {}
     try:
-        return json.loads(CODEX_AUTH.read_text(encoding="utf-8-sig"))
+        data = json.loads(CODEX_AUTH.read_text(encoding="utf-8-sig"))
+        if not isinstance(data, dict):
+            logger.error(f"Failed to read {CODEX_AUTH}: top-level JSON is not an object")
+            return {}
+        return data
     except Exception as e:
         logger.error(f"Failed to read {CODEX_AUTH}: {e}")
         return {}

@@ -93,5 +93,44 @@ def main() -> None:
     print("OK storage path checks passed")
 
 
+def test_storage_path_selection_and_copy_helpers() -> None:
+    main()
+
+
+def test_write_data_dir_pointer_falls_back_to_user_pointer(monkeypatch, tmp_path) -> None:
+    app_pointer = tmp_path / "app" / paths.DATA_DIR_POINTER_FILE
+    user_pointer = tmp_path / "user" / paths.DATA_DIR_POINTER_FILE
+    target = tmp_path / "target"
+    writes = []
+
+    original_pointer = paths.DATA_DIR_POINTER
+    original_user_pointer = paths.USER_DATA_DIR_POINTER
+    original_storage_dir = paths.STORAGE_DIR
+    try:
+        paths.DATA_DIR_POINTER = app_pointer
+        paths.USER_DATA_DIR_POINTER = user_pointer
+        paths.STORAGE_DIR = tmp_path / "storage"
+        paths.STORAGE_DIR.mkdir()
+
+        def fake_atomic_write(path, content):
+            writes.append(path)
+            if path == app_pointer:
+                raise OSError("app dir readonly")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        monkeypatch.setattr(paths, "_atomic_write_text", fake_atomic_write)
+
+        copied = paths.write_data_dir_pointer(target, copy_current=False)
+
+        assert copied == []
+        assert writes == [app_pointer, user_pointer]
+        assert user_pointer.read_text(encoding="utf-8") == str(target.resolve())
+    finally:
+        paths.DATA_DIR_POINTER = original_pointer
+        paths.USER_DATA_DIR_POINTER = original_user_pointer
+        paths.STORAGE_DIR = original_storage_dir
+
+
 if __name__ == "__main__":
     main()

@@ -66,6 +66,20 @@ def test_switch_claude_account_clears_api_overrides_and_resets_third_party_model
     assert profile_manager.get_current_claude_account_name() == account.name
 
 
+def test_json_readers_return_empty_for_non_object_json(isolated_accounts):
+    parser.CLAUDE_SETTINGS.parent.mkdir(parents=True)
+    auth_parser.CODEX_AUTH.parent.mkdir(parents=True)
+    parser.CLAUDE_SETTINGS.write_text("[]", encoding="utf-8")
+    parser.CLAUDE_CONFIG.write_text('"bad"', encoding="utf-8")
+    parser.CLAUDE_CREDENTIALS.write_text("[]", encoding="utf-8")
+    auth_parser.CODEX_AUTH.write_text("[]", encoding="utf-8")
+
+    assert parser.read_claude_settings() == {}
+    assert parser.read_claude_config() == {}
+    assert parser.read_claude_credentials() == {}
+    assert auth_parser.read_codex_auth() == {}
+
+
 def test_switch_claude_account_preserves_official_model_aliases(isolated_accounts):
     for model in ["opus[1m]", "sonnet[1m]", "opusplan", "claude-opus-4-7[1m]"]:
         settings = parser.clear_claude_api_overrides({"model": model, "env": {}})

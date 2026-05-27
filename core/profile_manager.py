@@ -82,6 +82,28 @@ def _normalize_store(store: dict) -> bool:
             logger.warning(f"Invalid profile list field: {key}, resetting to empty list")
             store[key] = []
             changed = True
+            continue
+
+        cleaned_items = []
+        seen_names: set[str] = set()
+        for idx, item in enumerate(store.get(key, [])):
+            if not isinstance(item, dict):
+                logger.warning(f"Invalid profile entry in {key}[{idx}], removing")
+                changed = True
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                logger.warning(f"Profile entry in {key}[{idx}] has no valid name, removing")
+                changed = True
+                continue
+            if name in seen_names:
+                logger.warning(f"Duplicate profile name {name!r} in {key}, keeping first entry")
+                changed = True
+                continue
+            seen_names.add(name)
+            cleaned_items.append(item)
+        if len(cleaned_items) != len(store.get(key, [])):
+            store[key] = cleaned_items
 
     for key in ACTIVE_PROFILE_KEYS:
         if store.get(key) is not None and not isinstance(store.get(key), str):
