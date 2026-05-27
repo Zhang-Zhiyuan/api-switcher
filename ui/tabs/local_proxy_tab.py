@@ -23,6 +23,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button = None
         self._auto_refresh_var = ctk.BooleanVar(value=False)
         self._auto_refresh_check = None
+        self._periodic_update_var = ctk.BooleanVar(value=False)
+        self._periodic_update_check = None
+        self._periodic_update_entry = None
+        self._periodic_update_after_id = None
+        self._periodic_update_running = False
         self._cache_label = None
         self._selected_label = None
         self._node_text = None
@@ -108,6 +113,25 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(12),
         )
         self._auto_refresh_check.pack(side="left")
+        self._periodic_update_check = ctk.CTkCheckBox(
+            sub_actions,
+            text="定时更新",
+            width=84,
+            checkbox_width=16,
+            checkbox_height=16,
+            variable=self._periodic_update_var,
+            command=self._on_periodic_update_toggle,
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._periodic_update_check.pack(side="left", padx=(8, 0))
+        self._periodic_update_entry = ctk.CTkEntry(
+            sub_actions,
+            width=48,
+            placeholder_text="60",
+            **input_style(),
+        )
+        self._periodic_update_entry.pack(side="left", padx=(6, 0))
         self._cache_label = ctk.CTkLabel(
             controls,
             text="本机缓存: 未加载",
@@ -308,6 +332,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._auto_refresh_check.configure(state=state)
             except Exception:
                 pass
+        if self._periodic_update_check:
+            try:
+                self._periodic_update_check.configure(state=state)
+            except Exception:
+                pass
         if self._subscription_combo:
             try:
                 combo_state = "disabled" if busy or not self._subscription_options else "normal"
@@ -322,11 +351,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         state = remote_proxy.load_proxy_subscription_state()
         url = str(state.get("url") or "").strip()
         auto_refresh = bool(state.get("auto_refresh"))
+        periodic_update = bool(state.get("local_periodic_update_enabled"))
+        interval_minutes = str(state.get("local_periodic_update_interval_minutes") or "60")
         self._auto_refresh_var.set(auto_refresh)
+        self._periodic_update_var.set(periodic_update)
 
         if url and self._subscription_entry:
             self._subscription_entry.delete(0, "end")
             self._subscription_entry.insert(0, url)
+        if self._periodic_update_entry:
+            self._periodic_update_entry.delete(0, "end")
+            self._periodic_update_entry.insert(0, interval_minutes)
 
         cached = remote_proxy.load_cached_proxy_subscription()
         if cached and cached.nodes:
@@ -347,6 +382,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         if url and auto_refresh:
             self.after(800, lambda: self._fetch_subscription(auto=True, show_message=False))
+        self._schedule_periodic_update(initial=True)
 
     def _select_subscription_node_by_key(self, node_key: str) -> bool:
         if not node_key or not self._subscription_combo:
@@ -366,6 +402,84 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._fetch_subscription(auto=True, show_message=False)
         else:
             self._set_status("已关闭启动自动刷新。")
+
+    def _periodic_update_interval_minutes(self) -> int:
+        raw = self._periodic_update_entry.get().strip() if self._periodic_update_entry else ""
+        try:
+            value = int(raw or "60")
+        except ValueError:
+            value = 60
+        return min(max(value, 5), 1440)
+
+    def _on_periodic_update_toggle(self):
+        enabled = bool(self._periodic_update_var.get())
+        interval = self._periodic_update_interval_minutes()
+        remote_proxy.save_proxy_subscription_state(
+            local_periodic_update_enabled=enabled,
+            local_periodic_update_interval_minutes=interval,
+        )
+        if enabled:
+            self._set_status(f"已开启 Win11 代理定时更新；每 {interval} 分钟拉取订阅，运行中代理会尝试热更新。", "success")
+        else:
+            self._set_status("已关闭 Win11 代理定时更新。")
+        self._schedule_periodic_update(initial=not enabled)
+
+    def _schedule_periodic_update(self, initial: bool = False):
+        if self._periodic_update_after_id:
+            try:
+                self.after_cancel(self._periodic_update_after_id)
+            except Exception:
+                pass
+            self._periodic_update_after_id = None
+        if not bool(self._periodic_update_var.get()):
+            return
+        delay_minutes = 1 if initial else self._periodic_update_interval_minutes()
+        self._periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_periodic_update)
+
+    def _run_periodic_update(self):
+        if not bool(self._periodic_update_var.get()):
+            return
+        if self._periodic_update_running or self._busy:
+            self._schedule_periodic_update()
+            return
+        url = self._subscription_url_input()
+        if not url:
+            self._set_status("Win11 代理定时更新跳过：尚未设置订阅链接。", "warning")
+            self._schedule_periodic_update()
+            return
+        self._periodic_update_running = True
+        self._set_cache_status("本机缓存: 定时更新中...")
+
+        def run():
+            try:
+                result = remote_proxy.fetch_proxy_subscription(url)
+                apply_message = local_proxy.refresh_running_local_ai_proxy_from_subscription(result.nodes)
+                payload = {"ok": True, "result": result, "apply": apply_message, "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "apply": "", "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._periodic_update_running = False
+                if not payload["ok"]:
+                    self._set_cache_status("本机缓存: 定时更新失败，继续使用已有节点", "warning")
+                    self._set_status(f"Win11 代理定时更新失败: {payload['error']}", "warning")
+                    self._schedule_periodic_update()
+                    return
+                result = payload["result"]
+                self._latency_results = remote_proxy.load_proxy_subscription_latencies()
+                self._set_subscription_nodes(result.nodes)
+                self._set_cache_status(f"本机缓存: 定时更新已保存 {len(result.nodes)} 个节点", "success")
+                self._set_status(f"Win11 代理定时更新完成；{payload['apply']}", "success")
+                self._schedule_periodic_update()
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _subscription_url_input(self) -> str:
         if not self._subscription_entry:

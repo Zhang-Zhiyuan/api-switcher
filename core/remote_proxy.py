@@ -677,6 +677,7 @@ def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     config = {
         "mixed-port": mixed_port,
+        "external-controller": f"127.0.0.1:{mihomo_controller_port(mixed_port)}",
         "allow-lan": False,
         "bind-address": "127.0.0.1",
         "mode": "rule",
@@ -696,6 +697,13 @@ def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
         ],
     }
     return AI_PROXY_CONFIG_MARKER + "\n" + _dump_yaml(config)
+
+
+def mihomo_controller_port(mixed_port: int) -> int:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    if mixed_port <= 64535:
+        return mixed_port + 1000
+    return max(1, mixed_port - 1000)
 
 
 def install_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> str:
@@ -803,6 +811,133 @@ def install_ai_proxy_verified(
         f"{install_message}；验证失败: {_compact_probe_summary(probe_message)}；"
         f"自动尝试 {attempts} 个测速靠前节点仍未 3/3 可达，已恢复原节点{suffix}"
     )
+
+
+def reload_ai_proxy(ssh_name: str, proxy_text: str, mixed_port: int = 7890) -> str:
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    proxy_node = parse_proxy_node(proxy_text)
+    status = inspect_ai_proxy(ssh_name, mixed_port)
+    if not status.running:
+        return f"{ssh_name}: AI 代理未运行，已跳过热更新"
+
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
+    new_config = build_mihomo_config(proxy_node, mixed_port)
+    old_config = ssh_manager.read_remote_file(client, config_path) or ""
+    if old_config.strip() == new_config.strip():
+        return f"{ssh_name}: 运行节点已是最新配置，无需热更新"
+
+    ssh_manager.write_remote_file(client, config_path, new_config, file_mode=0o600)
+    command = _build_reload_command(config_path, mixed_port)
+    status_code, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=20,
+        log_command=False,
+    )
+    if status_code != 0:
+        if old_config:
+            ssh_manager.write_remote_file(client, config_path, old_config, file_mode=0o600)
+        detail = (stderr or stdout or "").strip()
+        raise RuntimeError(
+            f"{ssh_name}: 当前远端代理不支持无感热更新或控制口不可用: {detail or status_code}"
+        )
+    set_proxy_subscription_selected_node(proxy_node)
+    return f"{ssh_name}: 已热更新远端 AI 代理节点为 {describe_proxy_node(proxy_node)}"
+
+
+def reload_ai_proxy_verified(
+    ssh_name: str,
+    proxy_text: str,
+    candidate_nodes=None,
+    mixed_port: int = 7890,
+    max_candidates: int = 10,
+) -> str:
+    requested_node = parse_proxy_node(proxy_text)
+    requested_key = proxy_node_key(requested_node)
+    try:
+        reload_message = reload_ai_proxy(ssh_name, proxy_text, mixed_port)
+    except Exception as exc:
+        return f"{ssh_name}: 自动更新跳过，{exc}"
+    if "跳过" in reload_message or "无需热更新" in reload_message:
+        return reload_message
+
+    probe_message = probe_ai_proxy(ssh_name, mixed_port)
+    if _probe_summary_all_ok(probe_message):
+        return f"{reload_message}；验证通过: {_compact_probe_summary(probe_message)}"
+
+    candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, ProxySubscriptionNode))
+    if not candidates:
+        return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}"
+
+    try:
+        latencies = measure_proxy_node_latencies_on_server(
+            ssh_name,
+            candidates,
+            timeout=3.0,
+            attempts=2,
+            max_workers=20,
+        )
+    except Exception as exc:
+        return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}"
+
+    ranked = []
+    for item in sort_proxy_subscription_nodes(candidates, latencies):
+        key = proxy_node_key(item.node)
+        if key == requested_key:
+            continue
+        result = latencies.get(key)
+        latency = proxy_node_latency_ms(result)
+        if latency is None or not proxy_node_latency_ok(result):
+            continue
+        ranked.append((latency, item, result))
+
+    attempts = max(1, min(_int_or_default(max_candidates, 10), len(ranked)))
+    for _latency, item, result in ranked[:attempts]:
+        try:
+            reload_ai_proxy(ssh_name, format_proxy_node(item.node), mixed_port)
+            candidate_probe = probe_ai_proxy(ssh_name, mixed_port)
+        except Exception:
+            continue
+        if _probe_summary_all_ok(candidate_probe):
+            set_proxy_subscription_selected_node(item.node)
+            return (
+                f"{ssh_name}: 原热更新节点验证失败，已无重启切换到 {describe_proxy_node(item.node)}"
+                f"（远端 TCP {proxy_node_latency_label(result)}）；"
+                f"验证通过: {_compact_probe_summary(candidate_probe)}"
+            )
+    return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动尝试 {attempts} 个节点仍未 3/3 可达"
+
+
+def refresh_running_ai_proxy_from_subscription(
+    ssh_name: str,
+    nodes,
+    mixed_port: int = 7890,
+) -> str:
+    status = inspect_ai_proxy(ssh_name, mixed_port)
+    if not status.running:
+        return f"{ssh_name}: AI 代理未运行，已跳过订阅自动热更新"
+    candidates = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
+    if not candidates:
+        return f"{ssh_name}: 订阅里没有可用节点，已跳过热更新"
+    current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+    chosen = _find_matching_subscription_node(candidates, current_node) if current_node else None
+    if chosen is None:
+        latencies = measure_proxy_node_latencies_on_server(
+            ssh_name,
+            candidates,
+            timeout=3.0,
+            attempts=2,
+            max_workers=20,
+        )
+        ranked = [
+            item
+            for item in sort_proxy_subscription_nodes(candidates, latencies)
+            if proxy_node_latency_ok(latencies.get(proxy_node_key(item.node)))
+        ]
+        chosen = ranked[0] if ranked else candidates[0]
+    return reload_ai_proxy_verified(ssh_name, format_proxy_node(chosen.node), candidates, mixed_port)
 
 
 def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStatus:
@@ -2541,6 +2676,41 @@ PY
 """
 
 
+def _build_reload_command(config_path: str, mixed_port: int) -> str:
+    controller = f"http://127.0.0.1:{mihomo_controller_port(mixed_port)}"
+    payload = json.dumps({"path": config_path}, ensure_ascii=False)
+    return f"""set -eu
+URL={shlex.quote(controller + "/configs?force=true")}
+PAYLOAD={shlex.quote(payload)}
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$URL" "$PAYLOAD" <<'PY'
+import sys
+import urllib.request
+
+url = sys.argv[1]
+payload = sys.argv[2].encode("utf-8")
+request = urllib.request.Request(
+    url,
+    data=payload,
+    headers={{"Content-Type": "application/json"}},
+    method="PUT",
+)
+with urllib.request.urlopen(request, timeout=8) as response:
+    code = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+    if not (200 <= code < 300):
+        raise SystemExit(f"mihomo reload HTTP {{code}}")
+PY
+  exit $?
+fi
+if command -v curl >/dev/null 2>&1; then
+  curl -fsS -X PUT -H 'Content-Type: application/json' --data "$PAYLOAD" "$URL" >/dev/null
+  exit $?
+fi
+echo "远端未安装 python3/curl，无法调用 mihomo 热更新接口" >&2
+exit 12
+"""
+
+
 def _remote_latency_command_timeout(node_count: int, timeout: float, attempts: int, max_workers: int) -> int:
     workers = max(1, min(_int_or_default(max_workers, 16), max(1, int(node_count or 1))))
     batches = (max(1, int(node_count or 1)) + workers - 1) // workers
@@ -2928,6 +3098,56 @@ def _parse_remote_latency_output(text: str) -> dict[str, ProxyNodeLatencyResult]
             attempts=_int_or_default((attempts or "").strip(), 0),
         )
     return results
+
+
+def _find_matching_subscription_node(nodes, current_node: dict | None):
+    if not current_node:
+        return None
+    try:
+        current = _normalize_proxy_node(current_node)
+    except Exception:
+        return None
+    current_key = proxy_node_key(current)
+    for item in nodes or []:
+        try:
+            if proxy_node_key(item.node) == current_key:
+                return item
+        except Exception:
+            continue
+    current_name = str(current.get("name") or "").strip().lower()
+    if current_name:
+        for item in nodes or []:
+            try:
+                if str(item.node.get("name") or "").strip().lower() == current_name:
+                    return item
+            except Exception:
+                continue
+    return None
+
+
+def _read_remote_managed_proxy_node(ssh_name: str, mixed_port: int = 7890) -> dict | None:
+    _profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
+    content = ssh_manager.read_remote_file(client, config_path)
+    if not content or AI_PROXY_CONFIG_MARKER not in content:
+        return None
+    try:
+        parsed = yaml.safe_load(content)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    proxies = parsed.get("proxies")
+    if not isinstance(proxies, list) or not proxies:
+        return None
+    node = proxies[0]
+    if not isinstance(node, dict):
+        return None
+    try:
+        return _normalize_proxy_node(node)
+    except Exception:
+        return None
 
 
 def _read_remote_ai_proxy_error_tail(client, home: str) -> str:

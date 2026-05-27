@@ -68,6 +68,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_button = None
         self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
         self._proxy_auto_refresh_check = None
+        self._proxy_periodic_update_var = ctk.BooleanVar(value=False)
+        self._proxy_periodic_update_check = None
+        self._proxy_periodic_update_entry = None
+        self._proxy_periodic_update_after_id = None
+        self._proxy_periodic_update_running = False
         self._proxy_subscription_nodes = []
         self._proxy_subscription_options = {}
         self._proxy_latency_results = {}
@@ -530,6 +535,25 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
         )
         self._proxy_auto_refresh_check.pack(side="left")
+        self._proxy_periodic_update_check = ctk.CTkCheckBox(
+            proxy_sub_action_frame,
+            text="定时更新",
+            width=84,
+            checkbox_width=16,
+            checkbox_height=16,
+            variable=self._proxy_periodic_update_var,
+            command=self._on_proxy_periodic_update_toggle,
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._proxy_periodic_update_check.pack(side="left", padx=(8, 0))
+        self._proxy_periodic_update_entry = ctk.CTkEntry(
+            proxy_sub_action_frame,
+            width=48,
+            placeholder_text="60",
+            **input_style(),
+        )
+        self._proxy_periodic_update_entry.pack(side="left", padx=(6, 0))
         self._proxy_cache_label = ctk.CTkLabel(
             proxy_controls,
             text="本机缓存: 未加载",
@@ -1274,6 +1298,11 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._proxy_auto_refresh_check.configure(state=state)
             except Exception:
                 pass
+        if self._proxy_periodic_update_check:
+            try:
+                self._proxy_periodic_update_check.configure(state=state)
+            except Exception:
+                pass
         if self._proxy_subscription_combo:
             try:
                 combo_state = "disabled" if busy or not self._proxy_subscription_options else "normal"
@@ -1288,11 +1317,17 @@ class SSHTab(ctk.CTkScrollableFrame):
         state = remote_proxy.load_proxy_subscription_state()
         url = str(state.get("url") or "").strip()
         auto_refresh = bool(state.get("auto_refresh"))
+        periodic_update = bool(state.get("ssh_periodic_update_enabled"))
+        interval_minutes = str(state.get("ssh_periodic_update_interval_minutes") or "60")
         self._proxy_auto_refresh_var.set(auto_refresh)
+        self._proxy_periodic_update_var.set(periodic_update)
 
         if url and self._proxy_subscription_entry:
             self._proxy_subscription_entry.delete(0, "end")
             self._proxy_subscription_entry.insert(0, url)
+        if self._proxy_periodic_update_entry:
+            self._proxy_periodic_update_entry.delete(0, "end")
+            self._proxy_periodic_update_entry.insert(0, interval_minutes)
 
         cached = remote_proxy.load_cached_proxy_subscription()
         if cached and cached.nodes:
@@ -1314,6 +1349,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         if url and auto_refresh:
             self.after(800, lambda: self._fetch_proxy_subscription(auto=True, show_message=False))
+        self._schedule_proxy_periodic_update(initial=True)
 
     def _select_proxy_subscription_node_by_key(self, node_key: str) -> bool:
         if not node_key or not self._proxy_subscription_combo:
@@ -1333,6 +1369,106 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._fetch_proxy_subscription(auto=True, show_message=False)
         else:
             self._set_proxy_status("已关闭启动自动刷新。")
+
+    def _proxy_periodic_update_interval_minutes(self) -> int:
+        raw = self._proxy_periodic_update_entry.get().strip() if self._proxy_periodic_update_entry else ""
+        try:
+            value = int(raw or "60")
+        except ValueError:
+            value = 60
+        return min(max(value, 5), 1440)
+
+    def _on_proxy_periodic_update_toggle(self):
+        enabled = bool(self._proxy_periodic_update_var.get())
+        interval = self._proxy_periodic_update_interval_minutes()
+        remote_proxy.save_proxy_subscription_state(
+            ssh_periodic_update_enabled=enabled,
+            ssh_periodic_update_interval_minutes=interval,
+        )
+        if enabled:
+            self._set_proxy_status(f"已开启 SSH 代理定时更新；每 {interval} 分钟拉取订阅，并热更新正在运行的 SSH 代理。", "success")
+        else:
+            self._set_proxy_status("已关闭 SSH 代理定时更新。")
+        self._schedule_proxy_periodic_update(initial=not enabled)
+
+    def _schedule_proxy_periodic_update(self, initial: bool = False):
+        if self._proxy_periodic_update_after_id:
+            try:
+                self.after_cancel(self._proxy_periodic_update_after_id)
+            except Exception:
+                pass
+            self._proxy_periodic_update_after_id = None
+        if not bool(self._proxy_periodic_update_var.get()):
+            return
+        delay_minutes = 1 if initial else self._proxy_periodic_update_interval_minutes()
+        self._proxy_periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_proxy_periodic_update)
+
+    def _run_proxy_periodic_update(self):
+        if not bool(self._proxy_periodic_update_var.get()):
+            return
+        if self._proxy_periodic_update_running or self._proxy_busy or self._ssh_busy:
+            self._schedule_proxy_periodic_update()
+            return
+        url = self._proxy_subscription_url_input()
+        if not url:
+            self._set_proxy_status("SSH 代理定时更新跳过：尚未设置订阅链接。", "warning")
+            self._schedule_proxy_periodic_update()
+            return
+        server_names = self._selected_sync_server_names()
+        if not server_names:
+            self._set_proxy_status("SSH 代理定时更新跳过：尚未选择 SSH 目标。", "warning")
+            self._schedule_proxy_periodic_update()
+            return
+        self._proxy_periodic_update_running = True
+        self._set_proxy_cache_status("本机缓存: SSH 定时更新中...")
+        self._set_proxy_status(f"正在定时刷新订阅，并热更新 {self._format_server_target(server_names)} 上运行中的代理...")
+
+        def run():
+            try:
+                result = remote_proxy.fetch_proxy_subscription(url)
+                batch = self._run_server_batch(
+                    server_names,
+                    lambda server_name: remote_proxy.refresh_running_ai_proxy_from_subscription(server_name, result.nodes),
+                )
+                payload = {"ok": True, "result": result, "batch": batch, "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "batch": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._proxy_periodic_update_running = False
+                if not payload["ok"]:
+                    self._set_proxy_cache_status("本机缓存: SSH 定时更新失败，继续使用已有节点", "warning")
+                    self._set_proxy_status(f"SSH 代理定时更新失败: {payload['error']}", "warning")
+                    self._schedule_proxy_periodic_update()
+                    return
+                result = payload["result"]
+                self._proxy_latency_results = {}
+                self._proxy_latency_server_count = 0
+                self._set_proxy_subscription_nodes(result.nodes)
+                self._set_proxy_cache_status(f"本机缓存: SSH 定时更新已保存 {len(result.nodes)} 个节点", "success")
+                batch = payload.get("batch") or {}
+                results = batch.get("results", [])
+                failures = batch.get("failures", [])
+                if failures and results:
+                    message = "SSH 代理定时更新部分成功: " + " | ".join(results) + " | 失败: " + "；".join(failures)
+                    severity = "warning"
+                elif failures:
+                    message = "SSH 代理定时更新失败: " + "；".join(failures)
+                    severity = "warning"
+                else:
+                    message = "SSH 代理定时更新完成: " + (" | ".join(results) if results else "无运行中代理需要更新")
+                    severity = "success"
+                self._set_proxy_status(message, severity)
+                self._schedule_proxy_periodic_update()
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _proxy_subscription_url_input(self) -> str:
         if not self._proxy_subscription_entry:

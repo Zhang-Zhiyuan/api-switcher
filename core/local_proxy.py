@@ -111,6 +111,9 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
             "binary_path": str(binary_path),
             "pid": _read_pid(),
             "node_display": remote_proxy.describe_proxy_node(proxy_node),
+            "node_key": remote_proxy.proxy_node_key(proxy_node),
+            "node_name": str(proxy_node.get("name") or ""),
+            "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
             "updated_at": remote_proxy._now_iso(),
         }
     )
@@ -120,6 +123,79 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
         "并临时关闭系统 PAC/自动检测代理；新终端或重开的 VS Code 窗口生效"
     )
+
+
+def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> str:
+    if os.name != "nt":
+        raise RuntimeError("本机 AI 代理目前只支持 Windows")
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or mixed_port,
+        "本机代理端口",
+    )
+    status = inspect_local_ai_proxy(mixed_port)
+    if not status.running:
+        return "本机 AI 代理未运行，已跳过热更新"
+    proxy_node = remote_proxy.parse_proxy_node(proxy_text)
+    config_path = Path(status.config_path)
+    old_config = config_path.read_text(encoding="utf-8", errors="replace") if config_path.exists() else ""
+    new_config = remote_proxy.build_mihomo_config(proxy_node, mixed_port)
+    if old_config.strip() == new_config.strip():
+        return "本机 AI 代理运行节点已是最新配置，无需热更新"
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(new_config, encoding="utf-8")
+    try:
+        _reload_local_mihomo_config(config_path, mixed_port)
+    except Exception as exc:
+        if old_config:
+            config_path.write_text(old_config, encoding="utf-8")
+        raise RuntimeError(f"当前本机代理不支持无感热更新或控制口不可用: {exc}") from exc
+
+    state.update(
+        {
+            "mixed_port": mixed_port,
+            "proxy_url": _proxy_url(mixed_port),
+            "config_path": str(config_path),
+            "node_display": remote_proxy.describe_proxy_node(proxy_node),
+            "node_key": remote_proxy.proxy_node_key(proxy_node),
+            "node_name": str(proxy_node.get("name") or ""),
+            "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "updated_at": remote_proxy._now_iso(),
+        }
+    )
+    _save_state(state)
+    remote_proxy.set_proxy_subscription_selected_node(proxy_node)
+    return f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}"
+
+
+def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
+    status = inspect_local_ai_proxy()
+    if not status.running:
+        return "本机 AI 代理未运行，已跳过订阅自动热更新"
+    candidates = tuple(item for item in (nodes or []) if isinstance(item, remote_proxy.ProxySubscriptionNode))
+    if not candidates:
+        return "订阅里没有可用节点，已跳过本机热更新"
+    current_node = _read_local_managed_proxy_node()
+    chosen = remote_proxy._find_matching_subscription_node(candidates, current_node) if current_node else None
+    if chosen is None:
+        latencies = remote_proxy.measure_proxy_node_latencies(
+            candidates,
+            timeout=3.0,
+            attempts=2,
+            max_workers=20,
+        )
+        ranked = [
+            item
+            for item in remote_proxy.sort_proxy_subscription_nodes(candidates, latencies)
+            if remote_proxy.proxy_node_latency_ok(latencies.get(remote_proxy.proxy_node_key(item.node)))
+        ]
+        chosen = ranked[0] if ranked else candidates[0]
+    reload_message = reload_local_ai_proxy(remote_proxy.format_proxy_node(chosen.node))
+    probe_message = probe_local_ai_proxy()
+    if "AI 连通性 3/3 可达" in probe_message:
+        return f"{reload_message}；验证通过: {probe_message}"
+    return f"{reload_message}；验证未完全通过: {probe_message}"
 
 
 def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalAIProxyStatus:
@@ -436,6 +512,48 @@ def _notify_windows_proxy_change() -> None:
         ctypes.windll.Wininet.InternetSetOptionW(0, internet_option_refresh, 0, 0)
     except Exception:
         return
+
+
+def _reload_local_mihomo_config(config_path: Path, mixed_port: int) -> None:
+    controller_port = remote_proxy.mihomo_controller_port(mixed_port)
+    payload = json.dumps({"path": str(config_path)}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{controller_port}/configs?force=true",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        if status < 200 or status >= 300:
+            raise RuntimeError(f"mihomo reload HTTP {status}")
+
+
+def _read_local_managed_proxy_node() -> dict | None:
+    state = _load_state()
+    config_path = Path(state.get("config_path") or (LOCAL_PROXY_CONFIG_DIR / "config.yaml"))
+    try:
+        content = config_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if remote_proxy.AI_PROXY_CONFIG_MARKER not in content:
+        return None
+    try:
+        parsed = remote_proxy.yaml.safe_load(content)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    proxies = parsed.get("proxies")
+    if not isinstance(proxies, list) or not proxies:
+        return None
+    node = proxies[0]
+    if not isinstance(node, dict):
+        return None
+    try:
+        return remote_proxy._normalize_proxy_node(node)
+    except Exception:
+        return None
 
 
 def _capture_vscode_proxy_state(settings: dict) -> dict:

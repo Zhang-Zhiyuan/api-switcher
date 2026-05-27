@@ -38,6 +38,7 @@ def test_build_mihomo_config_routes_only_ai_domains_to_proxy():
 
     assert config.startswith(remote_proxy.AI_PROXY_CONFIG_MARKER)
     assert 'name: "node-a"' in config
+    assert 'external-controller: "127.0.0.1:8890"' in config
     assert 'server: "example.com"' in config
     assert 'DOMAIN-SUFFIX,chatgpt.com,AI-PROXY' in config
     assert 'DOMAIN-SUFFIX,anthropic.com,AI-PROXY' in config
@@ -552,6 +553,61 @@ def test_remote_install_command_retries_mihomo_downloads_with_user_agent():
     assert "download failed after 3 attempts" in command
 
 
+def test_remote_reload_command_calls_mihomo_controller():
+    command = remote_proxy._build_reload_command("/home/me/.config/mihomo/config.yaml", 7890)
+
+    assert "127.0.0.1:8890/configs?force=true" in command
+    assert '"path": "/home/me/.config/mihomo/config.yaml"' in command
+    assert 'method="PUT"' in command
+
+
+def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
+    writes = []
+    fake_client = object()
+
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+        ),
+    )
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(remote_proxy.ssh_manager, "read_remote_file", lambda *_args, **_kwargs: "old config")
+    monkeypatch.setattr(remote_proxy.ssh_manager, "write_remote_file", lambda _client, _path, content, **_kwargs: writes.append(content))
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "execute_command_with_status",
+        lambda *_args, **_kwargs: (7, "", "connection refused"),
+    )
+
+    with pytest.raises(RuntimeError, match="控制口不可用"):
+        remote_proxy.reload_ai_proxy("server", "{ name: node, type: vless, server: example.com, port: 443 }")
+
+    assert writes[-1] == "old config"
+
+
+def test_refresh_running_ai_proxy_skips_stopped_proxy(monkeypatch):
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=False,
+            running=False,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+        ),
+    )
+
+    message = remote_proxy.refresh_running_ai_proxy_from_subscription("server", [])
+
+    assert "未运行" in message
+
+
 def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_managed_blocks():
     command = remote_proxy._build_cleanup_command("/home/me", 7890, include_legacy_config=True)
 
@@ -970,6 +1026,33 @@ def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):
     assert "AI 连通性 2/3 可达" in summary
     assert "OpenAI/ChatGPT: 可达 / HTTP 403 / 11ms" in summary
     assert "Gemini/Google AI: 失败 / timeout / 13ms" in summary
+
+
+def test_reload_local_ai_proxy_uses_controller_and_updates_state(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(remote_proxy.build_mihomo_config({"name": "old", "type": "vless", "server": "old.example.com", "port": 443}, 17897), encoding="utf-8")
+    saved_states = []
+
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897, "config_path": str(config_path)})
+    monkeypatch.setattr(local_proxy, "_save_state", lambda state: saved_states.append(state))
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda *_args, **_kwargs: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path=str(config_path),
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+    monkeypatch.setattr(local_proxy, "_reload_local_mihomo_config", lambda path, port: None)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = local_proxy.reload_local_ai_proxy("{ name: new, type: vless, server: new.example.com, port: 443 }")
+
+    assert "已热更新" in message
+    assert "new.example.com" in config_path.read_text(encoding="utf-8")
+    assert saved_states[-1]["node_name"] == "new"
 
 
 def test_read_url_with_retries_retries_transient_failure(monkeypatch):
