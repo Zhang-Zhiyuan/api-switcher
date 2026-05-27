@@ -857,6 +857,10 @@ def reload_ai_proxy_verified(
     requested_node = parse_proxy_node(proxy_text)
     requested_key = proxy_node_key(requested_node)
     try:
+        original_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+    except Exception:
+        original_node = None
+    try:
         reload_message = reload_ai_proxy(ssh_name, proxy_text, mixed_port)
     except Exception as exc:
         return f"{ssh_name}: 自动更新跳过，{exc}"
@@ -869,7 +873,13 @@ def reload_ai_proxy_verified(
 
     candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, ProxySubscriptionNode))
     if not candidates:
-        return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}"
+        restore_suffix = _restore_remote_proxy_node_after_failed_update(
+            ssh_name,
+            original_node,
+            requested_node,
+            mixed_port,
+        )
+        return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}{restore_suffix}"
 
     try:
         latencies = measure_proxy_node_latencies_on_server(
@@ -880,7 +890,13 @@ def reload_ai_proxy_verified(
             max_workers=20,
         )
     except Exception as exc:
-        return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}"
+        restore_suffix = _restore_remote_proxy_node_after_failed_update(
+            ssh_name,
+            original_node,
+            requested_node,
+            mixed_port,
+        )
+        return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}{restore_suffix}"
 
     ranked = []
     for item in sort_proxy_subscription_nodes(candidates, latencies):
@@ -907,7 +923,13 @@ def reload_ai_proxy_verified(
                 f"（远端 TCP {proxy_node_latency_label(result)}）；"
                 f"验证通过: {_compact_probe_summary(candidate_probe)}"
             )
-    return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动尝试 {attempts} 个节点仍未 3/3 可达"
+    restore_suffix = _restore_remote_proxy_node_after_failed_update(
+        ssh_name,
+        original_node,
+        requested_node,
+        mixed_port,
+    )
+    return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动尝试 {attempts} 个节点仍未 3/3 可达{restore_suffix}"
 
 
 def refresh_running_ai_proxy_from_subscription(
@@ -924,19 +946,24 @@ def refresh_running_ai_proxy_from_subscription(
     current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
     chosen = _find_matching_subscription_node(candidates, current_node) if current_node else None
     if chosen is None:
-        latencies = measure_proxy_node_latencies_on_server(
-            ssh_name,
-            candidates,
-            timeout=3.0,
-            attempts=2,
-            max_workers=20,
-        )
+        try:
+            latencies = measure_proxy_node_latencies_on_server(
+                ssh_name,
+                candidates,
+                timeout=3.0,
+                attempts=2,
+                max_workers=20,
+            )
+        except Exception as exc:
+            return f"{ssh_name}: 订阅已刷新，但远端节点测速失败，已保留当前运行节点: {exc}"
         ranked = [
             item
             for item in sort_proxy_subscription_nodes(candidates, latencies)
             if proxy_node_latency_ok(latencies.get(proxy_node_key(item.node)))
         ]
-        chosen = ranked[0] if ranked else candidates[0]
+        if not ranked:
+            return f"{ssh_name}: 订阅已刷新，但没有测到可连节点，已保留当前运行节点"
+        chosen = ranked[0]
     return reload_ai_proxy_verified(ssh_name, format_proxy_node(chosen.node), candidates, mixed_port)
 
 
@@ -3078,6 +3105,32 @@ def _compact_probe_summary(summary: str) -> str:
     parts = [part for part in text.split("；") if part]
     useful = [part for part in parts if "AI 连通性" in part or "OpenAI/ChatGPT" in part or "Claude/Anthropic" in part or "Gemini/Google AI" in part]
     return "；".join(useful or parts[:2])[:900]
+
+
+def _restore_remote_proxy_node_after_failed_update(
+    ssh_name: str,
+    original_node: dict | None,
+    attempted_node: dict | None,
+    mixed_port: int,
+) -> str:
+    if not original_node:
+        return "；未读取到更新前节点，已保留最后一次热更新状态"
+    try:
+        original = _normalize_proxy_node(original_node)
+    except Exception:
+        return "；更新前节点格式不可恢复，已保留最后一次热更新状态"
+    try:
+        reload_ai_proxy(ssh_name, format_proxy_node(original), mixed_port)
+    except Exception as exc:
+        attempted = describe_proxy_node(attempted_node or {}) if attempted_node else "当前节点"
+        return f"；尝试从 {attempted} 恢复更新前节点失败: {exc}"
+    try:
+        restore_probe = probe_ai_proxy(ssh_name, mixed_port)
+    except Exception as exc:
+        return f"；已恢复更新前节点 {describe_proxy_node(original)}，但恢复后验证失败: {exc}"
+    if _probe_summary_all_ok(restore_probe):
+        return f"；已恢复更新前节点 {describe_proxy_node(original)}，验证通过: {_compact_probe_summary(restore_probe)}"
+    return f"；已恢复更新前节点 {describe_proxy_node(original)}，但验证仍未完全通过: {_compact_probe_summary(restore_probe)}"
 
 
 def _parse_remote_latency_output(text: str) -> dict[str, ProxyNodeLatencyResult]:

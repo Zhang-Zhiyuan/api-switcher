@@ -525,7 +525,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_fetch_button.pack(side="left", padx=(0, 6))
         self._proxy_auto_refresh_check = ctk.CTkCheckBox(
             proxy_sub_action_frame,
-            text="启动刷新",
+            text="启动时刷新",
             width=84,
             checkbox_width=16,
             checkbox_height=16,
@@ -537,8 +537,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_auto_refresh_check.pack(side="left")
         self._proxy_periodic_update_check = ctk.CTkCheckBox(
             proxy_sub_action_frame,
-            text="定时更新",
-            width=84,
+            text="定时热更新",
+            width=96,
             checkbox_width=16,
             checkbox_height=16,
             variable=self._proxy_periodic_update_var,
@@ -554,6 +554,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             **input_style(),
         )
         self._proxy_periodic_update_entry.pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(
+            proxy_sub_action_frame,
+            text="分钟",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(side="left", padx=(4, 0))
         self._proxy_cache_label = ctk.CTkLabel(
             proxy_controls,
             text="本机缓存: 未加载",
@@ -1376,7 +1382,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             value = int(raw or "60")
         except ValueError:
             value = 60
-        return min(max(value, 5), 1440)
+        value = min(max(value, 5), 1440)
+        if self._proxy_periodic_update_entry and raw != str(value):
+            self._proxy_periodic_update_entry.delete(0, "end")
+            self._proxy_periodic_update_entry.insert(0, str(value))
+        return value
 
     def _on_proxy_periodic_update_toggle(self):
         enabled = bool(self._proxy_periodic_update_var.get())
@@ -1386,9 +1396,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             ssh_periodic_update_interval_minutes=interval,
         )
         if enabled:
-            self._set_proxy_status(f"已开启 SSH 代理定时更新；每 {interval} 分钟拉取订阅，并热更新正在运行的 SSH 代理。", "success")
+            self._set_proxy_status(f"已开启 SSH 代理定时热更新；每 {interval} 分钟拉取订阅，并无重启热更新正在运行的 SSH 代理。", "success")
         else:
-            self._set_proxy_status("已关闭 SSH 代理定时更新。")
+            self._set_proxy_status("已关闭 SSH 代理定时热更新。")
         self._schedule_proxy_periodic_update(initial=not enabled)
 
     def _schedule_proxy_periodic_update(self, initial: bool = False):
@@ -1400,7 +1410,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_periodic_update_after_id = None
         if not bool(self._proxy_periodic_update_var.get()):
             return
-        delay_minutes = 1 if initial else self._proxy_periodic_update_interval_minutes()
+        interval_minutes = self._proxy_periodic_update_interval_minutes()
+        delay_minutes = 1 if initial else interval_minutes
+        remote_proxy.save_proxy_subscription_state(ssh_periodic_update_interval_minutes=interval_minutes)
         self._proxy_periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_proxy_periodic_update)
 
     def _run_proxy_periodic_update(self):
@@ -1459,7 +1471,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     severity = "warning"
                 else:
                     message = "SSH 代理定时更新完成: " + (" | ".join(results) if results else "无运行中代理需要更新")
-                    severity = "success"
+                    severity = self._proxy_periodic_update_message_severity(message)
                 self._set_proxy_status(message, severity)
                 self._schedule_proxy_periodic_update()
 
@@ -1469,6 +1481,12 @@ class SSHTab(ctk.CTkScrollableFrame):
                 pass
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _proxy_periodic_update_message_severity(self, message: str) -> str:
+        text = str(message or "")
+        if any(marker in text for marker in ("失败", "未完全", "跳过", "不可用", "没有测到")):
+            return "warning"
+        return "success"
 
     def _proxy_subscription_url_input(self) -> str:
         if not self._proxy_subscription_entry:

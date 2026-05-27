@@ -169,6 +169,77 @@ def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED
     return f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}"
 
 
+def reload_local_ai_proxy_verified(
+    proxy_text: str,
+    candidate_nodes=None,
+    max_candidates: int = 10,
+) -> str:
+    requested_node = remote_proxy.parse_proxy_node(proxy_text)
+    requested_key = remote_proxy.proxy_node_key(requested_node)
+    original_node = _read_local_managed_proxy_node()
+    try:
+        reload_message = reload_local_ai_proxy(proxy_text)
+    except Exception as exc:
+        return f"本机 AI 代理自动更新跳过，{exc}"
+    if "跳过" in reload_message or "无需热更新" in reload_message:
+        return reload_message
+
+    probe_message = probe_local_ai_proxy()
+    if remote_proxy._probe_summary_all_ok(probe_message):
+        return f"{reload_message}；验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
+
+    candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, remote_proxy.ProxySubscriptionNode))
+    if not candidates:
+        restore_suffix = _restore_local_proxy_node_after_failed_update(original_node, requested_node)
+        return f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}{restore_suffix}"
+
+    try:
+        latencies = remote_proxy.measure_proxy_node_latencies(
+            candidates,
+            timeout=3.0,
+            attempts=2,
+            max_workers=20,
+        )
+    except Exception as exc:
+        restore_suffix = _restore_local_proxy_node_after_failed_update(original_node, requested_node)
+        return (
+            f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
+            f"自动换节点测速失败: {exc}{restore_suffix}"
+        )
+
+    ranked = []
+    for item in remote_proxy.sort_proxy_subscription_nodes(candidates, latencies):
+        key = remote_proxy.proxy_node_key(item.node)
+        if key == requested_key:
+            continue
+        result = latencies.get(key)
+        latency = remote_proxy.proxy_node_latency_ms(result)
+        if latency is None or not remote_proxy.proxy_node_latency_ok(result):
+            continue
+        ranked.append((latency, item, result))
+
+    attempts = max(1, min(remote_proxy._int_or_default(max_candidates, 10), len(ranked)))
+    for _latency, item, result in ranked[:attempts]:
+        try:
+            reload_local_ai_proxy(remote_proxy.format_proxy_node(item.node))
+            candidate_probe = probe_local_ai_proxy()
+        except Exception:
+            continue
+        if remote_proxy._probe_summary_all_ok(candidate_probe):
+            remote_proxy.set_proxy_subscription_selected_node(item.node)
+            return (
+                f"本机 AI 代理原热更新节点验证失败，已无重启切换到 {remote_proxy.describe_proxy_node(item.node)}"
+                f"（本机 TCP {remote_proxy.proxy_node_latency_label(result)}）；"
+                f"验证通过: {remote_proxy._compact_probe_summary(candidate_probe)}"
+            )
+
+    restore_suffix = _restore_local_proxy_node_after_failed_update(original_node, requested_node)
+    return (
+        f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
+        f"自动尝试 {attempts} 个节点仍未 3/3 可达{restore_suffix}"
+    )
+
+
 def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
     status = inspect_local_ai_proxy()
     if not status.running:
@@ -179,23 +250,24 @@ def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
     current_node = _read_local_managed_proxy_node()
     chosen = remote_proxy._find_matching_subscription_node(candidates, current_node) if current_node else None
     if chosen is None:
-        latencies = remote_proxy.measure_proxy_node_latencies(
-            candidates,
-            timeout=3.0,
-            attempts=2,
-            max_workers=20,
-        )
+        try:
+            latencies = remote_proxy.measure_proxy_node_latencies(
+                candidates,
+                timeout=3.0,
+                attempts=2,
+                max_workers=20,
+            )
+        except Exception as exc:
+            return f"订阅已刷新，但本机节点测速失败，已保留当前运行节点: {exc}"
         ranked = [
             item
             for item in remote_proxy.sort_proxy_subscription_nodes(candidates, latencies)
             if remote_proxy.proxy_node_latency_ok(latencies.get(remote_proxy.proxy_node_key(item.node)))
         ]
-        chosen = ranked[0] if ranked else candidates[0]
-    reload_message = reload_local_ai_proxy(remote_proxy.format_proxy_node(chosen.node))
-    probe_message = probe_local_ai_proxy()
-    if "AI 连通性 3/3 可达" in probe_message:
-        return f"{reload_message}；验证通过: {probe_message}"
-    return f"{reload_message}；验证未完全通过: {probe_message}"
+        if not ranked:
+            return "订阅已刷新，但没有测到可连节点，已保留当前运行节点"
+        chosen = ranked[0]
+    return reload_local_ai_proxy_verified(remote_proxy.format_proxy_node(chosen.node), candidates)
 
 
 def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalAIProxyStatus:
@@ -527,6 +599,30 @@ def _reload_local_mihomo_config(config_path: Path, mixed_port: int) -> None:
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
         if status < 200 or status >= 300:
             raise RuntimeError(f"mihomo reload HTTP {status}")
+
+
+def _restore_local_proxy_node_after_failed_update(original_node: dict | None, attempted_node: dict | None) -> str:
+    if not original_node:
+        return "；未读取到更新前节点，已保留最后一次热更新状态"
+    try:
+        original = remote_proxy._normalize_proxy_node(original_node)
+    except Exception:
+        return "；更新前节点格式不可恢复，已保留最后一次热更新状态"
+    try:
+        reload_local_ai_proxy(remote_proxy.format_proxy_node(original))
+    except Exception as exc:
+        attempted = remote_proxy.describe_proxy_node(attempted_node or {}) if attempted_node else "当前节点"
+        return f"；尝试从 {attempted} 恢复更新前节点失败: {exc}"
+    try:
+        restore_probe = probe_local_ai_proxy()
+    except Exception as exc:
+        return f"；已恢复更新前节点 {remote_proxy.describe_proxy_node(original)}，但恢复后验证失败: {exc}"
+    if remote_proxy._probe_summary_all_ok(restore_probe):
+        return f"；已恢复更新前节点 {remote_proxy.describe_proxy_node(original)}，验证通过: {remote_proxy._compact_probe_summary(restore_probe)}"
+    return (
+        f"；已恢复更新前节点 {remote_proxy.describe_proxy_node(original)}，"
+        f"但验证仍未完全通过: {remote_proxy._compact_probe_summary(restore_probe)}"
+    )
 
 
 def _read_local_managed_proxy_node() -> dict | None:

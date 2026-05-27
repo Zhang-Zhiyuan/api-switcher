@@ -103,7 +103,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._fetch_button.pack(side="left", padx=(0, 6))
         self._auto_refresh_check = ctk.CTkCheckBox(
             sub_actions,
-            text="启动刷新",
+            text="启动时刷新",
             width=84,
             checkbox_width=16,
             checkbox_height=16,
@@ -115,8 +115,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._auto_refresh_check.pack(side="left")
         self._periodic_update_check = ctk.CTkCheckBox(
             sub_actions,
-            text="定时更新",
-            width=84,
+            text="定时热更新",
+            width=96,
             checkbox_width=16,
             checkbox_height=16,
             variable=self._periodic_update_var,
@@ -132,6 +132,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **input_style(),
         )
         self._periodic_update_entry.pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(
+            sub_actions,
+            text="分钟",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(side="left", padx=(4, 0))
         self._cache_label = ctk.CTkLabel(
             controls,
             text="本机缓存: 未加载",
@@ -409,7 +415,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             value = int(raw or "60")
         except ValueError:
             value = 60
-        return min(max(value, 5), 1440)
+        value = min(max(value, 5), 1440)
+        if self._periodic_update_entry and raw != str(value):
+            self._periodic_update_entry.delete(0, "end")
+            self._periodic_update_entry.insert(0, str(value))
+        return value
 
     def _on_periodic_update_toggle(self):
         enabled = bool(self._periodic_update_var.get())
@@ -419,9 +429,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             local_periodic_update_interval_minutes=interval,
         )
         if enabled:
-            self._set_status(f"已开启 Win11 代理定时更新；每 {interval} 分钟拉取订阅，运行中代理会尝试热更新。", "success")
+            self._set_status(f"已开启 Win11 代理定时热更新；每 {interval} 分钟拉取订阅，运行中代理会尝试无重启切换。", "success")
         else:
-            self._set_status("已关闭 Win11 代理定时更新。")
+            self._set_status("已关闭 Win11 代理定时热更新。")
         self._schedule_periodic_update(initial=not enabled)
 
     def _schedule_periodic_update(self, initial: bool = False):
@@ -433,7 +443,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._periodic_update_after_id = None
         if not bool(self._periodic_update_var.get()):
             return
-        delay_minutes = 1 if initial else self._periodic_update_interval_minutes()
+        interval_minutes = self._periodic_update_interval_minutes()
+        delay_minutes = 1 if initial else interval_minutes
+        remote_proxy.save_proxy_subscription_state(local_periodic_update_interval_minutes=interval_minutes)
         self._periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_periodic_update)
 
     def _run_periodic_update(self):
@@ -471,7 +483,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._latency_results = remote_proxy.load_proxy_subscription_latencies()
                 self._set_subscription_nodes(result.nodes)
                 self._set_cache_status(f"本机缓存: 定时更新已保存 {len(result.nodes)} 个节点", "success")
-                self._set_status(f"Win11 代理定时更新完成；{payload['apply']}", "success")
+                severity = self._periodic_update_message_severity(payload["apply"])
+                self._set_status(f"Win11 代理定时热更新完成；{payload['apply']}", severity)
                 self._schedule_periodic_update()
 
             try:
@@ -480,6 +493,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pass
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _periodic_update_message_severity(self, message: str) -> str:
+        text = str(message or "")
+        if any(marker in text for marker in ("失败", "未完全", "跳过", "不可用", "没有测到")):
+            return "warning"
+        return "success"
 
     def _subscription_url_input(self) -> str:
         if not self._subscription_entry:

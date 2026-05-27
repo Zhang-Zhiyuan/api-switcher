@@ -591,6 +591,53 @@ def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
     assert writes[-1] == "old config"
 
 
+def test_reload_ai_proxy_verified_restores_previous_node_when_candidates_fail(monkeypatch):
+    original = remote_proxy.parse_proxy_node("{ name: old, type: vless, server: old.example.com, port: 443 }")
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: bad, type: vless, server: bad.example.com, port: 443 }"),
+    )
+    candidate = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node("{ name: worse, type: vless, server: worse.example.com, port: 443 }"),
+    )
+    reloads = []
+    probes = iter(
+        [
+            "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 0/3 可达",
+            "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 0/3 可达",
+            "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 3/3 可达",
+        ]
+    )
+    latencies = {
+        remote_proxy.proxy_node_key(candidate.node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(candidate.node),
+            True,
+            latency_ms=30,
+        )
+    }
+
+    def fake_reload(_server, text, _port=7890):
+        reloads.append(remote_proxy.parse_proxy_node(text)["name"])
+        return f"server: 已热更新远端 AI 代理节点为 {reloads[-1]}"
+
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", lambda *_args, **_kwargs: original)
+    monkeypatch.setattr(remote_proxy, "reload_ai_proxy", fake_reload)
+    monkeypatch.setattr(remote_proxy, "probe_ai_proxy", lambda *_args, **_kwargs: next(probes))
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies_on_server", lambda *_args, **_kwargs: latencies)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = remote_proxy.reload_ai_proxy_verified(
+        "server",
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, candidate],
+    )
+
+    assert reloads == ["bad", "worse", "old"]
+    assert "已恢复更新前节点 old" in message
+    assert "验证通过" in message
+
+
 def test_refresh_running_ai_proxy_skips_stopped_proxy(monkeypatch):
     monkeypatch.setattr(
         remote_proxy,
@@ -606,6 +653,84 @@ def test_refresh_running_ai_proxy_skips_stopped_proxy(monkeypatch):
     message = remote_proxy.refresh_running_ai_proxy_from_subscription("server", [])
 
     assert "未运行" in message
+
+
+def test_refresh_running_ai_proxy_keeps_current_when_latency_fails(monkeypatch):
+    node = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: node, type: vless, server: node.example.com, port: 443 }"),
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+        ),
+    )
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        remote_proxy,
+        "measure_proxy_node_latencies_on_server",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ssh timeout")),
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "reload_ai_proxy_verified",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should keep current node")),
+    )
+
+    message = remote_proxy.refresh_running_ai_proxy_from_subscription("server", [node])
+
+    assert "已保留当前运行节点" in message
+
+
+def test_reload_local_ai_proxy_verified_restores_previous_node_when_candidates_fail(monkeypatch):
+    original = remote_proxy.parse_proxy_node("{ name: old, type: vless, server: old.example.com, port: 443 }")
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: bad, type: vless, server: bad.example.com, port: 443 }"),
+    )
+    candidate = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node("{ name: worse, type: vless, server: worse.example.com, port: 443 }"),
+    )
+    reloads = []
+    probes = iter(
+        [
+            "本机 AI 代理已配置，运行中: http://127.0.0.1:17897；AI 连通性 0/3 可达",
+            "本机 AI 代理已配置，运行中: http://127.0.0.1:17897；AI 连通性 0/3 可达",
+            "本机 AI 代理已配置，运行中: http://127.0.0.1:17897；AI 连通性 3/3 可达",
+        ]
+    )
+    latencies = {
+        remote_proxy.proxy_node_key(candidate.node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(candidate.node),
+            True,
+            latency_ms=35,
+        )
+    }
+
+    def fake_reload(text):
+        reloads.append(remote_proxy.parse_proxy_node(text)["name"])
+        return f"本机 AI 代理已热更新节点为 {reloads[-1]}"
+
+    monkeypatch.setattr(local_proxy, "_read_local_managed_proxy_node", lambda: original)
+    monkeypatch.setattr(local_proxy, "reload_local_ai_proxy", fake_reload)
+    monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda *_args, **_kwargs: next(probes))
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies", lambda *_args, **_kwargs: latencies)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = local_proxy.reload_local_ai_proxy_verified(
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, candidate],
+    )
+
+    assert reloads == ["bad", "worse", "old"]
+    assert "已恢复更新前节点 old" in message
+    assert "验证通过" in message
 
 
 def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_managed_blocks():
