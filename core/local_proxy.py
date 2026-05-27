@@ -157,6 +157,17 @@ def set_local_proxy_start_on_login(enabled: bool) -> dict:
     return save_local_proxy_preferences(start_on_login=bool(enabled))
 
 
+def set_local_proxy_startup_node(proxy_text: str) -> str:
+    proxy_node = remote_proxy.parse_proxy_node(proxy_text)
+    _save_last_proxy_node(proxy_node)
+    return remote_proxy.describe_proxy_node(proxy_node)
+
+
+def local_proxy_startup_node_summary() -> str:
+    node = _load_last_proxy_node()
+    return remote_proxy.describe_proxy_node(node) if node else ""
+
+
 def set_local_proxy_non_cn_mode(enabled: bool) -> dict:
     return save_local_proxy_preferences(proxy_non_cn=bool(enabled))
 

@@ -1211,6 +1211,29 @@ def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
     assert "saved.example.com" in starts[0]
 
 
+def test_local_proxy_startup_node_can_be_saved_from_current_node(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", tmp_path / "mihomo.pid")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+
+    summary = local_proxy.set_local_proxy_startup_node(
+        "{ name: boot, type: vless, server: boot.example.com, port: 443 }"
+    )
+    local_proxy.set_local_proxy_start_on_login(True)
+    starts = []
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: False)
+    monkeypatch.setattr(local_proxy, "install_local_ai_proxy", lambda text: starts.append(text) or "started")
+
+    assert "boot.example.com" in summary
+    assert "boot.example.com" in local_proxy.local_proxy_startup_node_summary()
+    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert "boot.example.com" in starts[0]
+
+
 def test_local_proxy_auto_start_skips_when_managed_proxy_is_alive(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")

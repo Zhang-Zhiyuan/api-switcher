@@ -550,12 +550,41 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _on_start_on_login_toggle(self):
         enabled = bool(self._start_on_login_var.get())
-        local_proxy.set_local_proxy_start_on_login(enabled)
         if not enabled:
+            try:
+                local_proxy.set_local_proxy_start_on_login(False)
+            except Exception as e:
+                message = f"关闭本机代理开机自启失败: {e}"
+                self._set_routing_status(message, "error")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+                self._load_proxy_preferences_ui()
+                return
             self._set_routing_status("已关闭本机代理开机自启；应用本身的开机自启状态不会被自动改动。")
+            return
+
+        startup_node_summary = local_proxy.local_proxy_startup_node_summary()
+        node_text = self._node_input()
+        node_note = ""
+        if node_text:
+            try:
+                startup_node_summary = local_proxy.set_local_proxy_startup_node(node_text)
+            except Exception as e:
+                if not startup_node_summary:
+                    self._start_on_login_var.set(False)
+                    message = f"请先选择或填入一个有效节点，再开启开机自动启动: {e}"
+                    self._set_routing_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+                node_note = f"；当前待启动节点未保存，将继续使用上一次节点（{e}）"
+        if not startup_node_summary:
+            self._start_on_login_var.set(False)
+            message = "请先选择或填入一个有效节点，再开启开机自动启动。"
+            self._set_routing_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         try:
             status = startup_manager.set_startup_enabled(True)
+            local_proxy.set_local_proxy_start_on_login(True)
         except Exception as e:
             self._start_on_login_var.set(False)
             local_proxy.set_local_proxy_start_on_login(False)
@@ -565,8 +594,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
         suffix = "" if status.matches_expected else "；应用自启命令不是当前版本，已按系统记录继续"
         self._set_routing_status(
-            "已开启本机代理开机自启；程序会随 Windows 进入托盘，并在后台恢复上一次成功节点"
-            f"{suffix}。",
+            f"已开启本机代理开机自启；程序会随 Windows 进入托盘，并在后台自动启动节点: {startup_node_summary}"
+            f"{suffix}{node_note}。",
             "success",
         )
 
