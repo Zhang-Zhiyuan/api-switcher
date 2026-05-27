@@ -268,7 +268,6 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             variable=selected_var,
             command=lambda key=record.key, var=selected_var: self._toggle_selected(key, var.get()),
         ).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(top, text=record.title, text_color=COLORS["text"], font=font(15, "bold")).pack(side="left")
         ctk.CTkLabel(
             top,
             text="Claude" if record.provider == "claude" else "Codex",
@@ -278,7 +277,17 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             font=font(11, "bold"),
             padx=7,
             pady=1,
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="right", padx=(8, 0))
+        title_label = ctk.CTkLabel(
+            top,
+            text=record.title,
+            text_color=COLORS["text"],
+            font=font(15, "bold"),
+            anchor="w",
+            justify="left",
+        )
+        title_label.pack(side="left", fill="x", expand=True)
+        bind_wraplength(top, title_label, padding=110, min_width=260, max_width=980)
 
         info_frame = ctk.CTkFrame(card, fg_color="transparent")
         info_frame.pack(fill="x", padx=14, pady=(0, 10))

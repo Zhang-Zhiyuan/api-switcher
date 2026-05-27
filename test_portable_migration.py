@@ -146,6 +146,114 @@ def test_session_migration_round_trip(tmp_path):
     assert summary.file_count == 3
 
 
+def test_session_migration_ignores_runtime_context_titles(tmp_path):
+    claude_home = tmp_path / "claude"
+    codex_home = tmp_path / "codex"
+    claude_project = claude_home / "projects" / "c--Users-Test-Project"
+    claude_project.mkdir(parents=True)
+    claude_file = claude_project / "claude-context.jsonl"
+    claude_file.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:00Z",
+                "sessionId": "claude-context",
+                "cwd": "C:\\Users\\Test\\Project",
+                "message": {
+                    "content": "<local-command-caveat>Caveat: ignore generated command messages</local-command-caveat>"
+                },
+            }, ensure_ascii=False),
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:01Z",
+                "sessionId": "claude-context",
+                "message": {"content": "<command-name>/model</command-name>"},
+            }, ensure_ascii=False),
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:02Z",
+                "sessionId": "claude-context",
+                "message": {"content": "<local-command-stdout>Set model</local-command-stdout>"},
+            }, ensure_ascii=False),
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:03Z",
+                "sessionId": "claude-context",
+                "message": {"content": "真正的 Claude 迁移需求"},
+            }, ensure_ascii=False),
+            json.dumps({
+                "type": "ai-title",
+                "timestamp": "2026-05-01T00:00:04Z",
+                "sessionId": "claude-context",
+                "aiTitle": "Claude 真实标题",
+            }, ensure_ascii=False),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    codex_session_dir = codex_home / "sessions" / "2026" / "05" / "01"
+    codex_session_dir.mkdir(parents=True)
+    codex_file = codex_session_dir / "rollout-2026-05-01T00-00-00-codex-context.jsonl"
+    codex_file.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-context",
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "cwd": "C:\\Users\\Test\\Project",
+                    "model_provider": "openai",
+                },
+            }, ensure_ascii=False),
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "# AGENTS.md instructions for C:\\Users\\Test\\Project"}],
+                },
+            }, ensure_ascii=False),
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "<hook_prompt>continue</hook_prompt>"}],
+                },
+            }, ensure_ascii=False),
+            json.dumps({
+                "timestamp": "2026-05-01T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "真正的 Codex 迁移需求"}],
+                },
+            }, ensure_ascii=False),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps({
+            "id": "codex-context",
+            "thread_name": "# AGENTS.md instructions for C:\\Users\\Test\\Project",
+            "updated_at": "2026-05-01T00:00:04Z",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    records = session_migration.list_sessions(claude_home=claude_home, codex_home=codex_home)
+    by_provider = {record.provider: record for record in records}
+
+    assert by_provider["claude"].title == "Claude 真实标题"
+    assert by_provider["claude"].summary == "真正的 Claude 迁移需求"
+    assert by_provider["codex"].title == "真正的 Codex 迁移需求"
+    assert by_provider["codex"].summary == "真正的 Codex 迁移需求"
+
+
 def test_session_migration_skips_invalid_package_entries(tmp_path):
     package = tmp_path / "invalid.asxsession"
     manifest = {
