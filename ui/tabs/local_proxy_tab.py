@@ -4,7 +4,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core import local_proxy, remote_proxy
+from core import local_proxy, remote_proxy, startup_manager
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
 from ui.widgets.toast import show_toast
@@ -29,6 +29,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._periodic_update_after_id = None
         self._periodic_update_running = False
         self._startup_refresh_after_id = None
+        self._start_on_login_var = ctk.BooleanVar(value=False)
+        self._proxy_non_cn_var = ctk.BooleanVar(value=False)
+        self._builtin_site_vars = {}
+        self._custom_target_entry = None
+        self._custom_target_frame = None
+        self._routing_status_label = None
+        self._apply_routing_button = None
         self._cache_label = None
         self._selected_label = None
         self._node_text = None
@@ -64,6 +71,118 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         subtitle.pack(anchor="w", fill="x", pady=(2, 0))
         bind_wraplength(header, subtitle, padding=12, min_width=260, max_width=920)
+
+        policy_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        policy_frame.pack(fill="x", padx=14, pady=(0, 12))
+        policy = ctk.CTkFrame(policy_frame, fg_color="transparent")
+        policy.pack(fill="x", padx=14, pady=14)
+        policy.grid_columnconfigure(1, weight=1)
+        policy.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkLabel(
+            policy,
+            text="运行策略与代理范围",
+            text_color=COLORS["text"],
+            font=font(13, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=4, sticky="ew")
+
+        startup_box = ctk.CTkFrame(policy, fg_color="transparent")
+        startup_box.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        startup_box.grid_columnconfigure(0, weight=1)
+        startup_box.grid_columnconfigure(1, weight=1)
+        ctk.CTkCheckBox(
+            startup_box,
+            text="开机自动启动本机代理",
+            variable=self._start_on_login_var,
+            command=self._on_start_on_login_toggle,
+            checkbox_width=18,
+            checkbox_height=18,
+            text_color=COLORS["text"],
+            font=font(12),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 16))
+        ctk.CTkCheckBox(
+            startup_box,
+            text="代理大陆境外 IP",
+            variable=self._proxy_non_cn_var,
+            command=self._on_proxy_non_cn_toggle,
+            checkbox_width=18,
+            checkbox_height=18,
+            text_color=COLORS["text"],
+            font=font(12),
+        ).grid(row=0, column=1, sticky="w")
+        self._apply_routing_button = ctk.CTkButton(
+            startup_box,
+            text="应用规则",
+            width=92,
+            command=self._apply_saved_routing,
+            **button_style("secondary", compact=True),
+        )
+        self._apply_routing_button.grid(row=0, column=2, sticky="e")
+
+        ctk.CTkLabel(
+            policy,
+            text="内置站点",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="nw", pady=(12, 0))
+        builtin_box = ctk.CTkFrame(policy, fg_color="transparent")
+        builtin_box.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        builtin_box.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self._builtin_site_vars = {}
+        for index, site in enumerate(local_proxy.LOCAL_PROXY_BUILTIN_SITES):
+            site_id = str(site["id"])
+            var = ctk.BooleanVar(value=False)
+            self._builtin_site_vars[site_id] = var
+            ctk.CTkCheckBox(
+                builtin_box,
+                text=str(site["label"]),
+                variable=var,
+                command=lambda value=site_id: self._on_builtin_site_toggle(value),
+                checkbox_width=16,
+                checkbox_height=16,
+                text_color=COLORS["text"],
+                font=font(12),
+            ).grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 14), pady=(0, 8))
+
+        ctk.CTkLabel(
+            policy,
+            text="自定义",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        custom_box = ctk.CTkFrame(policy, fg_color="transparent")
+        custom_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        custom_box.grid_columnconfigure(0, weight=1)
+        self._custom_target_entry = ctk.CTkEntry(
+            custom_box,
+            placeholder_text="输入网址或 IP，例如 youtube.com、https://example.com、8.8.8.8、1.1.1.0/24",
+            **input_style(),
+        )
+        self._custom_target_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            custom_box,
+            text="新增",
+            width=72,
+            command=self._add_custom_target,
+            **button_style("accent", compact=True),
+        ).grid(row=0, column=1, sticky="e")
+
+        self._custom_target_frame = ctk.CTkFrame(policy, fg_color="transparent")
+        self._custom_target_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        self._routing_status_label = ctk.CTkLabel(
+            policy,
+            text="默认只代理 AI 相关域名；勾选内置站点或新增自定义目标后，会写入本机 mihomo 规则。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._routing_status_label.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        bind_wraplength(policy, self._routing_status_label, padding=20)
 
         node_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         node_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -285,6 +404,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         super().destroy()
 
     def refresh(self):
+        self._load_proxy_preferences_ui()
         self._load_saved_subscription_ui()
 
     def _set_status(self, message: str, severity: str = "info"):
@@ -317,6 +437,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         }.get(severity, COLORS["muted"])
         self._selected_label.configure(text=message, text_color=color)
 
+    def _set_routing_status(self, message: str, severity: str = "info"):
+        if not self._routing_status_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._routing_status_label.configure(text=message, text_color=color)
+
     def _set_busy(self, busy: bool):
         self._busy = busy
         state = "disabled" if busy else "normal"
@@ -329,6 +459,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._inspect_button,
             self._test_button,
             self._stop_button,
+            self._apply_routing_button,
         ):
             if not button:
                 continue
@@ -355,6 +486,146 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._subscription_combo.configure(state=combo_state)
             except Exception:
                 pass
+
+    def _load_proxy_preferences_ui(self):
+        preferences = local_proxy.load_local_proxy_preferences()
+        self._start_on_login_var.set(bool(preferences.get("start_on_login")))
+        self._proxy_non_cn_var.set(bool(preferences.get("proxy_non_cn")))
+        builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
+        for site_id, var in self._builtin_site_vars.items():
+            var.set(bool(builtin_sites.get(site_id)))
+        self._render_custom_targets(preferences.get("custom_targets") or [])
+        enabled_sites = sum(1 for enabled in builtin_sites.values() if enabled)
+        enabled_custom = sum(1 for item in preferences.get("custom_targets") or [] if item.get("enabled", True))
+        mode = "大陆境外 IP 走代理" if preferences.get("proxy_non_cn") else "仅规则命中的站点走代理"
+        self._set_routing_status(
+            f"当前规则: {mode}；内置站点 {enabled_sites} 个，自定义目标 {enabled_custom} 个。"
+        )
+
+    def _render_custom_targets(self, entries):
+        if not self._custom_target_frame:
+            return
+        for child in self._custom_target_frame.winfo_children():
+            child.destroy()
+        clean_entries = [item for item in entries or [] if isinstance(item, dict)]
+        if not clean_entries:
+            ctk.CTkLabel(
+                self._custom_target_frame,
+                text="尚未添加自定义网址或 IP",
+                text_color=COLORS["muted"],
+                font=font(12),
+                anchor="w",
+            ).pack(anchor="w")
+            return
+        for entry in clean_entries:
+            row = ctk.CTkFrame(self._custom_target_frame, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 6))
+            row.grid_columnconfigure(1, weight=1)
+            target_id = str(entry.get("id") or "")
+            var = ctk.BooleanVar(value=bool(entry.get("enabled", True)))
+            ctk.CTkCheckBox(
+                row,
+                text="",
+                variable=var,
+                command=lambda item_id=target_id, value_var=var: self._on_custom_target_toggle(item_id, value_var),
+                width=28,
+                checkbox_width=16,
+                checkbox_height=16,
+            ).grid(row=0, column=0, sticky="w")
+            label = f"{entry.get('target') or entry.get('value')} · {'IP' if entry.get('kind') == 'ip-cidr' else '域名'}"
+            ctk.CTkLabel(
+                row,
+                text=label,
+                text_color=COLORS["text"],
+                font=font(12),
+                anchor="w",
+            ).grid(row=0, column=1, sticky="ew", padx=(4, 8))
+            ctk.CTkButton(
+                row,
+                text="删除",
+                width=58,
+                command=lambda item_id=target_id: self._remove_custom_target(item_id),
+                **button_style("danger", compact=True),
+            ).grid(row=0, column=2, sticky="e")
+
+    def _on_start_on_login_toggle(self):
+        enabled = bool(self._start_on_login_var.get())
+        local_proxy.set_local_proxy_start_on_login(enabled)
+        if not enabled:
+            self._set_routing_status("已关闭本机代理开机自启；应用本身的开机自启状态不会被自动改动。")
+            return
+        try:
+            status = startup_manager.set_startup_enabled(True)
+        except Exception as e:
+            self._start_on_login_var.set(False)
+            local_proxy.set_local_proxy_start_on_login(False)
+            message = f"开启本机代理开机自启失败: {e}"
+            self._set_routing_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        suffix = "" if status.matches_expected else "；应用自启命令不是当前版本，已按系统记录继续"
+        self._set_routing_status(
+            "已开启本机代理开机自启；程序会随 Windows 进入托盘，并在后台恢复上一次成功节点"
+            f"{suffix}。",
+            "success",
+        )
+
+    def _on_proxy_non_cn_toggle(self):
+        enabled = bool(self._proxy_non_cn_var.get())
+        local_proxy.set_local_proxy_non_cn_mode(enabled)
+        self._apply_saved_routing("已开启大陆境外 IP 走代理。" if enabled else "已关闭大陆境外 IP 走代理。")
+
+    def _on_builtin_site_toggle(self, site_id: str):
+        enabled = bool(self._builtin_site_vars.get(site_id).get()) if site_id in self._builtin_site_vars else False
+        try:
+            local_proxy.set_builtin_proxy_site_enabled(site_id, enabled)
+        except Exception as e:
+            self._set_routing_status(f"保存内置站点开关失败: {e}", "error")
+            return
+        self._apply_saved_routing("内置站点代理规则已保存。")
+
+    def _add_custom_target(self):
+        raw = self._custom_target_entry.get().strip() if self._custom_target_entry else ""
+        try:
+            entry = local_proxy.add_custom_proxy_target(raw)
+        except Exception as e:
+            message = f"新增自定义代理目标失败: {e}"
+            self._set_routing_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        if self._custom_target_entry:
+            self._custom_target_entry.delete(0, "end")
+        self._load_proxy_preferences_ui()
+        self._apply_saved_routing(f"已新增自定义代理目标: {entry.get('target')}")
+
+    def _remove_custom_target(self, target_id: str):
+        if not local_proxy.remove_custom_proxy_target(target_id):
+            self._set_routing_status("要删除的自定义代理目标不存在，已刷新列表。", "warning")
+        self._load_proxy_preferences_ui()
+        self._apply_saved_routing("自定义代理目标已删除。")
+
+    def _on_custom_target_toggle(self, target_id: str, value_var):
+        try:
+            local_proxy.set_custom_proxy_target_enabled(target_id, bool(value_var.get()))
+        except Exception as e:
+            self._set_routing_status(f"保存自定义代理目标开关失败: {e}", "error")
+            return
+        self._load_proxy_preferences_ui()
+        self._apply_saved_routing("自定义代理目标开关已保存。")
+
+    def _apply_saved_routing(self, prefix: str = "代理范围规则已保存。"):
+        if self._busy:
+            self._set_routing_status(f"{prefix} 当前有代理操作在运行，稍后可点“应用规则”。", "warning")
+            return
+
+        def worker():
+            return f"{prefix} {local_proxy.apply_local_proxy_routing_to_running()}"
+
+        self._run_local_task(
+            "正在把 Win11 代理规则应用到运行中的本机代理...",
+            worker,
+            "应用 Win11 代理规则",
+        )
 
     def _load_saved_subscription_ui(self):
         if self._saved_subscription_loaded:
@@ -835,7 +1106,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 "将使用当前节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
                 "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY、VS Code 本机代理设置，以及 Win11 当前用户系统代理。\n"
                 f"识别到节点: {node_summary}\n"
-                "mihomo 规则只让 OpenAI/ChatGPT、Claude/Anthropic、Gemini/Google AI 等域名走代理，其余 DIRECT。"
+                "mihomo 会按上方“代理范围”规则转发：AI 站点始终走代理，内置站点/自定义目标和境外 IP 模式按开关生效。"
             ),
             on_confirm=do_start,
         )

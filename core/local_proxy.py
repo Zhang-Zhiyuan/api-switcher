@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import gzip
+import ipaddress
 import io
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +19,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser
@@ -27,6 +31,7 @@ LOCAL_PROXY_DIR = STORAGE_DIR / "local_ai_proxy"
 LOCAL_PROXY_CONFIG_DIR = LOCAL_PROXY_DIR / "mihomo"
 LOCAL_PROXY_BIN_DIR = LOCAL_PROXY_DIR / "bin"
 LOCAL_PROXY_STATE_PATH = LOCAL_PROXY_DIR / "state.json"
+LOCAL_PROXY_PREFS_PATH = LOCAL_PROXY_DIR / "preferences.json"
 LOCAL_PROXY_LOG_PATH = LOCAL_PROXY_DIR / "mihomo.log"
 LOCAL_PROXY_PID_PATH = LOCAL_PROXY_DIR / "mihomo.pid"
 MIHOMO_DOWNLOAD_RETRIES = 3
@@ -38,6 +43,54 @@ LOCAL_AI_PROBE_TARGETS = (
     ("Claude/Anthropic", "https://api.anthropic.com/"),
     ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
 )
+LOCAL_PROXY_BUILTIN_SITES = (
+    {
+        "id": "youtube",
+        "label": "YouTube",
+        "targets": ("youtube.com", "youtu.be", "ytimg.com", "googlevideo.com"),
+    },
+    {
+        "id": "google",
+        "label": "Google 搜索/账号",
+        "targets": ("google.com", "gstatic.com", "googleapis.com", "googleusercontent.com"),
+    },
+    {
+        "id": "github",
+        "label": "GitHub",
+        "targets": ("github.com", "githubusercontent.com", "githubassets.com", "github.io"),
+    },
+    {
+        "id": "huggingface",
+        "label": "Hugging Face",
+        "targets": ("huggingface.co", "hf.co"),
+    },
+    {
+        "id": "x_twitter",
+        "label": "X / Twitter",
+        "targets": ("x.com", "twitter.com", "twimg.com", "t.co"),
+    },
+    {
+        "id": "reddit",
+        "label": "Reddit",
+        "targets": ("reddit.com", "redd.it", "redditstatic.com", "redditmedia.com"),
+    },
+    {
+        "id": "discord",
+        "label": "Discord",
+        "targets": ("discord.com", "discordapp.com", "discord.gg", "discordcdn.com"),
+    },
+    {
+        "id": "telegram",
+        "label": "Telegram",
+        "targets": ("telegram.org", "t.me", "tdesktop.com"),
+    },
+)
+LOCAL_PROXY_BUILTIN_SITE_IDS = {str(item["id"]) for item in LOCAL_PROXY_BUILTIN_SITES}
+LOCAL_PROXY_DOMAIN_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?!-)[a-z0-9][a-z0-9-]{0,62}(\.[a-z0-9][a-z0-9-]{0,62})+$",
+    re.IGNORECASE,
+)
+_LOCAL_PROXY_PREFS_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -71,6 +124,164 @@ class LocalAIProxyProbeResult:
         return f"{self.label}: {' / '.join(pieces)}"
 
 
+def load_local_proxy_preferences() -> dict:
+    with _LOCAL_PROXY_PREFS_LOCK:
+        try:
+            data = json.loads(LOCAL_PROXY_PREFS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        return _normalize_local_proxy_preferences(data)
+
+
+def save_local_proxy_preferences(**updates) -> dict:
+    with _LOCAL_PROXY_PREFS_LOCK:
+        preferences = load_local_proxy_preferences()
+        preferences.update({key: value for key, value in updates.items() if value is not None})
+        preferences = _normalize_local_proxy_preferences(preferences)
+        preferences["updated_at"] = remote_proxy._now_iso()
+        _ensure_local_dirs()
+        temp_path = LOCAL_PROXY_PREFS_PATH.with_name(f"{LOCAL_PROXY_PREFS_PATH.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(json.dumps(preferences, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(LOCAL_PROXY_PREFS_PATH)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return preferences
+
+
+def local_proxy_start_on_login_enabled() -> bool:
+    return bool(load_local_proxy_preferences().get("start_on_login"))
+
+
+def set_local_proxy_start_on_login(enabled: bool) -> dict:
+    return save_local_proxy_preferences(start_on_login=bool(enabled))
+
+
+def set_local_proxy_non_cn_mode(enabled: bool) -> dict:
+    return save_local_proxy_preferences(proxy_non_cn=bool(enabled))
+
+
+def set_builtin_proxy_site_enabled(site_id: str, enabled: bool) -> dict:
+    site_key = str(site_id or "").strip()
+    if site_key not in LOCAL_PROXY_BUILTIN_SITE_IDS:
+        raise ValueError(f"未知内置站点: {site_id}")
+    preferences = load_local_proxy_preferences()
+    builtin_sites = dict(preferences.get("builtin_sites") or {})
+    builtin_sites[site_key] = bool(enabled)
+    return save_local_proxy_preferences(builtin_sites=builtin_sites)
+
+
+def add_custom_proxy_target(target: str, enabled: bool = True) -> dict:
+    normalized = normalize_proxy_target(target)
+    preferences = load_local_proxy_preferences()
+    entries = list(preferences.get("custom_targets") or [])
+    for entry in entries:
+        if (
+            str(entry.get("kind") or "") == normalized["kind"]
+            and str(entry.get("value") or "").casefold() == normalized["value"].casefold()
+        ):
+            entry["enabled"] = bool(enabled)
+            entry["target"] = normalized["target"]
+            save_local_proxy_preferences(custom_targets=entries)
+            return entry
+    entry = {
+        "id": uuid.uuid4().hex,
+        "target": normalized["target"],
+        "kind": normalized["kind"],
+        "value": normalized["value"],
+        "enabled": bool(enabled),
+        "created_at": remote_proxy._now_iso(),
+    }
+    entries.append(entry)
+    save_local_proxy_preferences(custom_targets=entries)
+    return entry
+
+
+def remove_custom_proxy_target(target_id: str) -> bool:
+    target_key = str(target_id or "").strip()
+    if not target_key:
+        return False
+    preferences = load_local_proxy_preferences()
+    entries = [entry for entry in preferences.get("custom_targets") or [] if str(entry.get("id") or "") != target_key]
+    removed = len(entries) != len(preferences.get("custom_targets") or [])
+    if removed:
+        save_local_proxy_preferences(custom_targets=entries)
+    return removed
+
+
+def set_custom_proxy_target_enabled(target_id: str, enabled: bool) -> dict:
+    target_key = str(target_id or "").strip()
+    preferences = load_local_proxy_preferences()
+    entries = list(preferences.get("custom_targets") or [])
+    for entry in entries:
+        if str(entry.get("id") or "") == target_key:
+            entry["enabled"] = bool(enabled)
+            save_local_proxy_preferences(custom_targets=entries)
+            return entry
+    raise ValueError("没有找到要修改的自定义代理目标")
+
+
+def normalize_proxy_target(target: str) -> dict:
+    raw = str(target or "").strip().strip("\"'")
+    if not raw:
+        raise ValueError("请先输入要代理的网址或 IP")
+    if any(marker in raw for marker in ("\n", "\r", ",")):
+        raise ValueError("每次只能添加一个网址或 IP")
+
+    try:
+        network = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        network = None
+    if network is not None:
+        return {
+            "target": str(network.network_address) if network.prefixlen == network.max_prefixlen else str(network),
+            "kind": "ip-cidr",
+            "value": str(network),
+        }
+
+    host = _extract_host_from_target(raw)
+    try:
+        network = ipaddress.ip_network(host, strict=False)
+    except ValueError:
+        network = None
+    if network is not None:
+        return {
+            "target": str(network.network_address) if network.prefixlen == network.max_prefixlen else str(network),
+            "kind": "ip-cidr",
+            "value": str(network),
+        }
+    domain = _normalize_domain_target(host)
+    return {
+        "target": domain,
+        "kind": "domain",
+        "value": domain,
+    }
+
+
+def apply_local_proxy_routing_to_running() -> str:
+    status = inspect_local_ai_proxy()
+    if not status.running:
+        return "代理范围已保存；本机代理未运行，下次启动时生效"
+    node = _read_local_managed_proxy_node() or _load_last_proxy_node()
+    if not node:
+        raise RuntimeError("未读取到当前运行节点，无法热更新代理范围")
+    return reload_local_ai_proxy(remote_proxy.format_proxy_node(node))
+
+
+def auto_start_local_ai_proxy_if_enabled() -> str:
+    if not local_proxy_start_on_login_enabled():
+        return "Win11 本机代理自启未开启"
+    if os.name != "nt":
+        return "本机 AI 代理目前只支持 Windows，已跳过自启"
+    status = inspect_local_ai_proxy()
+    if status.running:
+        return f"Win11 本机代理已在运行: {status.proxy_url}"
+    node = _load_last_proxy_node() or _read_local_managed_proxy_node()
+    if not node:
+        return "Win11 本机代理自启已开启，但还没有保存过可启动节点"
+    return install_local_ai_proxy(remote_proxy.format_proxy_node(node))
+
+
 def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
@@ -89,7 +300,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     if not isinstance(state.get("previous_system_proxy"), dict):
         state["previous_system_proxy"] = _capture_windows_system_proxy_state()
 
-    config_path.write_text(remote_proxy.build_mihomo_config(proxy_node, mixed_port), encoding="utf-8")
+    config_path.write_text(_build_local_mihomo_config(proxy_node, mixed_port), encoding="utf-8")
     try:
         _start_local_mihomo(binary_path, mixed_port)
         _apply_local_env(mixed_port)
@@ -118,6 +329,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         }
     )
     _save_state(state)
+    _save_last_proxy_node(proxy_node)
     return (
         f"本机 AI 代理已启动: {proxy_url}；"
         "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
@@ -139,7 +351,7 @@ def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED
     proxy_node = remote_proxy.parse_proxy_node(proxy_text)
     config_path = Path(status.config_path)
     old_config = config_path.read_text(encoding="utf-8", errors="replace") if config_path.exists() else ""
-    new_config = remote_proxy.build_mihomo_config(proxy_node, mixed_port)
+    new_config = _build_local_mihomo_config(proxy_node, mixed_port)
     if old_config.strip() == new_config.strip():
         return "本机 AI 代理运行节点已是最新配置，无需热更新"
 
@@ -165,6 +377,7 @@ def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED
         }
     )
     _save_state(state)
+    _save_last_proxy_node(proxy_node)
     remote_proxy.set_proxy_subscription_selected_node(proxy_node)
     return f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}"
 
@@ -358,6 +571,132 @@ def probe_local_ai_proxy(timeout: int = 8) -> str:
 def _ensure_local_dirs() -> None:
     LOCAL_PROXY_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     LOCAL_PROXY_BIN_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _normalize_local_proxy_preferences(data: dict | None) -> dict:
+    raw = data if isinstance(data, dict) else {}
+    builtin_sites = {}
+    raw_sites = raw.get("builtin_sites")
+    if isinstance(raw_sites, dict):
+        for site_id, enabled in raw_sites.items():
+            site_key = str(site_id or "").strip()
+            if site_key in LOCAL_PROXY_BUILTIN_SITE_IDS:
+                builtin_sites[site_key] = bool(enabled)
+
+    custom_targets = []
+    seen_custom = set()
+    raw_targets = raw.get("custom_targets")
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            try:
+                normalized = normalize_proxy_target(str(item.get("value") or item.get("target") or ""))
+            except ValueError:
+                continue
+            key = (normalized["kind"], normalized["value"].casefold())
+            if key in seen_custom:
+                continue
+            seen_custom.add(key)
+            custom_targets.append({
+                "id": str(item.get("id") or uuid.uuid4().hex),
+                "target": normalized["target"],
+                "kind": normalized["kind"],
+                "value": normalized["value"],
+                "enabled": bool(item.get("enabled", True)),
+                "created_at": str(item.get("created_at") or remote_proxy._now_iso()),
+            })
+
+    last_node = raw.get("last_node") if isinstance(raw.get("last_node"), dict) else None
+    if last_node:
+        try:
+            last_node = remote_proxy._normalize_proxy_node(last_node)
+        except Exception:
+            last_node = None
+
+    return {
+        "start_on_login": bool(raw.get("start_on_login")),
+        "proxy_non_cn": bool(raw.get("proxy_non_cn")),
+        "builtin_sites": builtin_sites,
+        "custom_targets": custom_targets,
+        "last_node": last_node,
+        "updated_at": str(raw.get("updated_at") or ""),
+    }
+
+
+def _extract_host_from_target(raw: str) -> str:
+    text = raw.strip()
+    parsed = urlparse(text if "://" in text else f"//{text}", scheme="https")
+    host = parsed.hostname
+    if host:
+        return host
+    host_part = text.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if host_part.count(":") == 1:
+        host_part = host_part.rsplit(":", 1)[0]
+    return host_part.strip("[]")
+
+
+def _normalize_domain_target(host: str) -> str:
+    domain = str(host or "").strip().strip(".").lower()
+    if domain.startswith("*."):
+        domain = domain[2:]
+    if not domain:
+        raise ValueError("没有识别到有效网址")
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("网址包含无法识别的字符") from exc
+    if not LOCAL_PROXY_DOMAIN_PATTERN.match(domain):
+        raise ValueError("网址格式不正确，请输入类似 youtube.com 或 https://youtube.com")
+    return domain
+
+
+def _routing_options_from_preferences(preferences: dict | None = None) -> dict:
+    preferences = preferences or load_local_proxy_preferences()
+    domains = []
+    ip_cidrs = []
+    builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
+    for site in LOCAL_PROXY_BUILTIN_SITES:
+        if builtin_sites.get(str(site["id"])):
+            domains.extend(str(target) for target in site.get("targets") or ())
+    for entry in preferences.get("custom_targets") or []:
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+        if entry.get("kind") == "ip-cidr":
+            ip_cidrs.append(str(entry.get("value") or ""))
+        elif entry.get("kind") == "domain":
+            domains.append(str(entry.get("value") or ""))
+    return {
+        "extra_proxy_domains": tuple(domains),
+        "extra_proxy_ip_cidrs": tuple(ip_cidrs),
+        "proxy_non_cn": bool(preferences.get("proxy_non_cn")),
+    }
+
+
+def _build_local_mihomo_config(proxy_node: dict, mixed_port: int) -> str:
+    return remote_proxy.build_mihomo_config(
+        proxy_node,
+        mixed_port,
+        **_routing_options_from_preferences(),
+    )
+
+
+def _save_last_proxy_node(proxy_node: dict) -> None:
+    try:
+        normalized = remote_proxy._normalize_proxy_node(proxy_node)
+    except Exception:
+        return
+    save_local_proxy_preferences(last_node=normalized)
+
+
+def _load_last_proxy_node() -> dict | None:
+    node = load_local_proxy_preferences().get("last_node")
+    if not isinstance(node, dict):
+        return None
+    try:
+        return remote_proxy._normalize_proxy_node(node)
+    except Exception:
+        return None
 
 
 def _load_state() -> dict:

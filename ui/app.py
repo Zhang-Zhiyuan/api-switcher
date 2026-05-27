@@ -1,5 +1,6 @@
 import importlib
 import logging
+import threading
 
 import customtkinter as ctk
 from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
@@ -206,6 +207,7 @@ class App(ctk.CTk):
         self.codex_switch.configure(values=["正在加载..."], state="disabled")
         self.after(20, self._load_quick_switch_profiles)
         self.after(50, self._start_tray_icon)
+        self.after(900, self._auto_start_local_proxy)
 
     def _install_tab_placeholder(self, label: str):
         frame = self._tab_frames.get(label)
@@ -312,6 +314,38 @@ class App(ctk.CTk):
             logger.info("Tray icon started")
         else:
             logger.info("Tray icon disabled: pystray is not installed")
+
+    def _auto_start_local_proxy(self):
+        if self._exit_requested:
+            return
+
+        def run():
+            try:
+                from core import local_proxy
+
+                if not local_proxy.local_proxy_start_on_login_enabled():
+                    return
+                message = local_proxy.auto_start_local_ai_proxy_if_enabled()
+                logger.info("Local proxy auto-start: %s", message)
+
+                def update_status():
+                    if self._exit_requested:
+                        return
+                    self._status.configure(text=message)
+                    self._refresh_loaded_tab("_local_proxy_tab")
+
+                self._run_on_ui_thread(update_status)
+            except Exception as e:
+                logger.error("Failed to auto-start local proxy: %s", e, exc_info=True)
+                error_message = str(e)
+
+                def update_error():
+                    if not self._exit_requested:
+                        self._status.configure(text=f"Win11 本机代理自启失败: {error_message}")
+
+                self._run_on_ui_thread(update_error)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _load_quick_switch_profiles(self):
         """Load profiles for quick switch menus."""

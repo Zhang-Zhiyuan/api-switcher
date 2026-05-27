@@ -47,6 +47,24 @@ def test_build_mihomo_config_routes_only_ai_domains_to_proxy():
     assert 'MATCH,DIRECT' in config
 
 
+def test_build_mihomo_config_supports_extra_targets_and_non_cn_mode():
+    config = remote_proxy.build_mihomo_config(
+        {"name": "node-a", "type": "vless", "server": "example.com", "port": 443},
+        17897,
+        extra_proxy_domains=("youtube.com", "github.com"),
+        extra_proxy_ip_cidrs=("8.8.8.8/32", "2001:4860:4860::8888/128"),
+        proxy_non_cn=True,
+    )
+
+    assert "DOMAIN-SUFFIX,youtube.com,AI-PROXY" in config
+    assert "DOMAIN-SUFFIX,github.com,AI-PROXY" in config
+    assert "IP-CIDR,8.8.8.8/32,AI-PROXY,no-resolve" in config
+    assert "IP-CIDR6,2001:4860:4860::8888/128,AI-PROXY,no-resolve" in config
+    assert "GEOIP,CN,DIRECT" in config
+    assert "MATCH,AI-PROXY" in config
+    assert "MATCH,DIRECT" not in config
+
+
 def test_parse_proxy_node_supports_nested_inline_options_from_full_config():
     node = remote_proxy.parse_proxy_node(
         """
@@ -1141,6 +1159,57 @@ def test_windows_system_proxy_expected_values_match_managed_proxy():
     assert local_proxy._windows_system_proxy_matches_values(values, 17897) is True
     assert local_proxy._windows_system_proxy_matches_values({**values, "ProxyServer": "127.0.0.1:18000"}, 17897) is False
     assert local_proxy._windows_system_proxy_matches_values({**values, "AutoDetect": 1}, 17897) is False
+
+
+def test_local_proxy_preferences_build_custom_routing_rules(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+
+    local_proxy.set_builtin_proxy_site_enabled("github", True)
+    local_proxy.set_local_proxy_non_cn_mode(True)
+    domain_entry = local_proxy.add_custom_proxy_target("https://www.youtube.com/watch?v=1")
+    ip_entry = local_proxy.add_custom_proxy_target("8.8.8.8")
+    config = local_proxy._build_local_mihomo_config(
+        {"name": "node", "type": "vless", "server": "example.com", "port": 443},
+        17897,
+    )
+
+    assert domain_entry["value"] == "www.youtube.com"
+    assert ip_entry["value"] == "8.8.8.8/32"
+    assert "DOMAIN-SUFFIX,github.com,AI-PROXY" in config
+    assert "DOMAIN-SUFFIX,www.youtube.com,AI-PROXY" in config
+    assert "IP-CIDR,8.8.8.8/32,AI-PROXY,no-resolve" in config
+    assert "GEOIP,CN,DIRECT" in config
+    assert "MATCH,AI-PROXY" in config
+
+    assert local_proxy.remove_custom_proxy_target(ip_entry["id"]) is True
+    updated = local_proxy._build_local_mihomo_config(
+        {"name": "node", "type": "vless", "server": "example.com", "port": 443},
+        17897,
+    )
+    assert "IP-CIDR,8.8.8.8/32,AI-PROXY,no-resolve" not in updated
+
+
+def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+    local_proxy.set_local_proxy_start_on_login(True)
+    local_proxy.save_local_proxy_preferences(
+        last_node={"name": "saved", "type": "vless", "server": "saved.example.com", "port": 443}
+    )
+    starts = []
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: local_proxy.LocalAIProxyStatus(False, False, "", "http://127.0.0.1:17897"),
+    )
+    monkeypatch.setattr(local_proxy, "install_local_ai_proxy", lambda text: starts.append(text) or "started")
+
+    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert "saved.example.com" in starts[0]
 
 
 def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):

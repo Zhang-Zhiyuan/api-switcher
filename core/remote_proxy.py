@@ -54,6 +54,19 @@ REMOTE_AI_PROBE_TARGETS = (
 )
 
 AI_PROXY_CONFIG_MARKER = "# Managed by API切换器 AI proxy"
+PRIVATE_DIRECT_IP_RULES = (
+    "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+    "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+    "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR,224.0.0.0/4,DIRECT,no-resolve",
+    "IP-CIDR6,::1/128,DIRECT,no-resolve",
+    "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+    "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+)
 
 PROXY_ENV_KEYS = (
     "API_SWITCHER_AI_PROXY_URL",
@@ -684,12 +697,31 @@ def _apply_proxy_node_aliases(parsed: dict) -> None:
                 break
 
 
-def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
+def build_mihomo_config(
+    proxy_node: dict,
+    mixed_port: int = 7890,
+    *,
+    extra_proxy_domains: tuple[str, ...] | list[str] | None = None,
+    extra_proxy_ip_cidrs: tuple[str, ...] | list[str] | None = None,
+    proxy_non_cn: bool = False,
+) -> str:
     node = dict(proxy_node)
     node["port"] = _normalize_port(node.get("port"), "代理节点端口")
     proxy_name = str(node.get("name") or "AI_PROXY").strip()
     node["name"] = proxy_name
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    rules = [
+        *(f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains)),
+        *(_ip_cidr_rule(cidr) for cidr in _unique_clean_values(extra_proxy_ip_cidrs)),
+    ]
+    if proxy_non_cn:
+        rules.extend(PRIVATE_DIRECT_IP_RULES)
+        rules.extend([
+            "GEOIP,CN,DIRECT",
+            "MATCH,AI-PROXY",
+        ])
+    else:
+        rules.append("MATCH,DIRECT")
     config = {
         "mixed-port": mixed_port,
         "external-controller": f"127.0.0.1:{mihomo_controller_port(mixed_port)}",
@@ -706,12 +738,31 @@ def build_mihomo_config(proxy_node: dict, mixed_port: int = 7890) -> str:
                 "proxies": [proxy_name],
             }
         ],
-        "rules": [
-            *(f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in AI_PROXY_DOMAINS),
-            "MATCH,DIRECT",
-        ],
+        "rules": rules,
     }
     return AI_PROXY_CONFIG_MARKER + "\n" + _dump_yaml(config)
+
+
+def _unique_clean_values(*groups) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group or ():
+            text = str(value or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(text)
+    return tuple(values)
+
+
+def _ip_cidr_rule(cidr: str) -> str:
+    text = str(cidr or "").strip()
+    rule_type = "IP-CIDR6" if ":" in text else "IP-CIDR"
+    return f"{rule_type},{text},AI-PROXY,no-resolve"
 
 
 def mihomo_controller_port(mixed_port: int) -> int:
