@@ -1492,6 +1492,9 @@ def push_git_snapshot(auto_push=False):
                 text=True,
                 timeout=5,
             )
+            if branch.returncode != 0 or remotes.returncode != 0:
+                log("Git auto push skipped: failed to inspect branch or remotes", "WARN")
+                return
             remote_names = [line.strip() for line in remotes.stdout.splitlines() if line.strip()]
             branch_name = branch.stdout.strip()
             if not branch_name or not remote_names:
@@ -1542,6 +1545,9 @@ def run_git_snapshot(auto_push=False):
                 text=True,
                 timeout=5,
             )
+            if git_dir_result.returncode != 0 or not git_dir_result.stdout.strip():
+                log("Git directory could not be resolved after init; skipping git snapshot", "WARN")
+                return ""
 
         if initialized_repo:
             ensure_gitignore()
@@ -1554,10 +1560,14 @@ def run_git_snapshot(auto_push=False):
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
             text=True,
             timeout=15,
         )
+        if status.returncode != 0:
+            first_line = next((line.strip() for line in status.stdout.splitlines() if line.strip()), "unknown error")
+            log(f"Git status failed; skipping git snapshot: {first_line}", "WARN")
+            return ""
         if not status.stdout.strip():
             return ""
 

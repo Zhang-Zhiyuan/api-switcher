@@ -2584,6 +2584,67 @@ def test_remote_prompt_hook_snapshots_without_auto_continue(tmp_path):
     assert not (state_dir / "auto_continue_stop_state.json").exists()
 
 
+def test_remote_git_snapshot_logs_status_failure(tmp_path):
+    import subprocess
+
+    if not shutil.which("git"):
+        pytest.skip("Git is not available")
+
+    from core import remote_auto_continue
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    init = subprocess.run(
+        ["git", "init"],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert init.returncode == 0, init.stderr
+    (tmp_path / ".git" / "index").write_bytes(b"bad-index")
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings_path.write_text(
+        json.dumps({
+            "enabled": False,
+            "git_auto_snapshot": True,
+            "git_snapshot_on_start": True,
+        }),
+        encoding="utf-8",
+    )
+    input_path.write_text(
+        json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "session-bad-git",
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+    assert "Git status failed; skipping git snapshot:" in result.stderr
+
+
 def test_remote_permission_hook_skips_git_snapshot_for_fast_approval(tmp_path, monkeypatch):
     import os
     import stat
