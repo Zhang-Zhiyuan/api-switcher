@@ -867,8 +867,28 @@ def _clean_text(text: str, limit: int = 180) -> str:
 
 
 def _is_context_message(text: str) -> bool:
-    stripped = str(text or "").strip().lower()
-    return stripped.startswith("<environment_context>") or stripped.startswith("<system_context>")
+    stripped = str(text or "").strip()
+    lowered = stripped.lower()
+    if not lowered:
+        return True
+    context_prefixes = (
+        "<environment_context>",
+        "<system_context>",
+        "<developer_context>",
+        "<user_editable_context>",
+        "<hook_prompt",
+        "<local-command-caveat>",
+        "<task-notification>",
+        "# agents.md instructions for ",
+        "# claude.md instructions for ",
+    )
+    if lowered.startswith(context_prefixes):
+        return True
+    if lowered.startswith("please continue from where you left off. complete any remaining work."):
+        return True
+    if lowered.startswith("reconnecting...") and not any(char in lowered for char in "？?。.!"):
+        return True
+    return False
 
 
 def _title_from_summary(summary: str, fallback: str) -> str:
