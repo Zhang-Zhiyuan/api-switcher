@@ -1446,6 +1446,35 @@ def test_install_local_proxy_failure_reports_restore_errors(monkeypatch, tmp_pat
     assert "env restore failed" in message
 
 
+def test_install_local_proxy_saves_restore_checkpoint_before_start(monkeypatch, tmp_path):
+    saved_states = []
+
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", tmp_path / "mihomo.pid")
+    monkeypatch.setattr(local_proxy, "_select_local_mixed_port", lambda _port: 17897)
+    monkeypatch.setattr(local_proxy, "_ensure_mihomo_binary", lambda: tmp_path / "mihomo.exe")
+    monkeypatch.setattr(local_proxy, "_capture_previous_env", lambda: {"HTTP_PROXY": {"exists": True, "value": "old"}})
+    monkeypatch.setattr(local_proxy, "_capture_vscode_proxy_state", lambda _settings: {"http.proxy": {"exists": False}})
+    monkeypatch.setattr(local_proxy, "_capture_windows_system_proxy_state", lambda: {"ProxyEnable": {"exists": True, "value": 0, "type": 4}})
+    monkeypatch.setattr(local_proxy.vscode_parser, "read_vscode_settings", lambda: {})
+    monkeypatch.setattr(local_proxy, "_save_state", lambda state: saved_states.append(dict(state)))
+    monkeypatch.setattr(local_proxy, "_start_local_mihomo", lambda *_args: (_ for _ in ()).throw(RuntimeError("start failed")))
+    monkeypatch.setattr(local_proxy, "_restore_local_env", lambda *_args: None)
+    monkeypatch.setattr(local_proxy, "_restore_local_vscode_proxy", lambda *_args: None)
+    monkeypatch.setattr(local_proxy, "_restore_windows_system_proxy", lambda *_args: None)
+    monkeypatch.setattr(local_proxy, "_cleanup_managed_process", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        local_proxy.install_local_ai_proxy("{ name: node, type: vless, server: example.com, port: 443 }")
+
+    assert saved_states[0]["installing"] is True
+    assert saved_states[0]["previous_env"]["HTTP_PROXY"]["value"] == "old"
+    assert saved_states[0]["config_path"].endswith("config.yaml")
+    assert saved_states[-1] == {}
+
+
 def test_stop_local_proxy_does_not_terminate_unmanaged_pid(monkeypatch, tmp_path):
     pid_path = tmp_path / "mihomo.pid"
     pid_path.write_text("12345", encoding="utf-8")
@@ -1468,3 +1497,31 @@ def test_stop_local_proxy_does_not_terminate_unmanaged_pid(monkeypatch, tmp_path
     assert terminated == []
     assert not pid_path.exists()
     assert saved_states[-1] == {}
+
+
+def test_stop_local_proxy_keeps_restore_state_when_restore_fails(monkeypatch, tmp_path):
+    saved_states = []
+    state = {
+        "mixed_port": 17897,
+        "pid": 12345,
+        "previous_env": {"HTTP_PROXY": {"exists": True, "value": "old"}},
+    }
+
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PID_PATH", tmp_path / "missing.pid")
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: dict(state))
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: None)
+    monkeypatch.setattr(
+        local_proxy,
+        "_restore_local_env",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("env restore failed")),
+    )
+    monkeypatch.setattr(local_proxy, "_restore_local_vscode_proxy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(local_proxy, "_restore_windows_system_proxy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(local_proxy, "_save_state", lambda next_state: saved_states.append(dict(next_state)))
+
+    message = local_proxy.stop_local_ai_proxy()
+
+    assert "恢复设置失败" in message
+    assert saved_states[-1]["previous_env"] == state["previous_env"]
+    assert "pid" not in saved_states[-1]
+    assert "env restore failed" in saved_states[-1]["last_restore_error"]

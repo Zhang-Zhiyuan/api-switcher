@@ -318,9 +318,21 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         state["previous_vscode"] = _capture_vscode_proxy_state(vscode_parser.read_vscode_settings())
     if not isinstance(state.get("previous_system_proxy"), dict):
         state["previous_system_proxy"] = _capture_windows_system_proxy_state()
+    state.update(
+        {
+            "mixed_port": mixed_port,
+            "proxy_url": proxy_url,
+            "config_path": str(config_path),
+            "binary_path": str(binary_path),
+            "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "installing": True,
+            "updated_at": remote_proxy._now_iso(),
+        }
+    )
+    _save_state(state)
 
-    config_path.write_text(_build_local_mihomo_config(proxy_node, mixed_port), encoding="utf-8")
     try:
+        config_path.write_text(_build_local_mihomo_config(proxy_node, mixed_port), encoding="utf-8")
         _start_local_mihomo(binary_path, mixed_port)
         _apply_local_env(mixed_port)
         _apply_local_vscode_proxy(mixed_port)
@@ -328,6 +340,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     except Exception as exc:
         restore_errors = _restore_managed_settings(state, mixed_port)
         _cleanup_managed_process(binary_path, state)
+        _save_restore_retry_state(state, mixed_port, restore_errors)
         message = str(exc)
         if restore_errors:
             message = f"{message}；恢复启动前设置时也遇到问题: {'; '.join(restore_errors)}"
@@ -344,6 +357,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
             "node_key": remote_proxy.proxy_node_key(proxy_node),
             "node_name": str(proxy_node.get("name") or ""),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "installing": False,
             "updated_at": remote_proxy._now_iso(),
         }
     )
@@ -570,7 +584,10 @@ def stop_local_ai_proxy(restore_settings: bool = True) -> str:
     restore_errors = []
     if restore_settings:
         restore_errors = _restore_managed_settings(state, mixed_port)
-    _save_state({})
+    if restore_settings:
+        _save_restore_retry_state(state, mixed_port, restore_errors)
+    else:
+        _save_state({})
     restore_suffix = f"；但恢复设置失败: {'; '.join(restore_errors)}" if restore_errors else ""
     if stopped:
         return f"本机 AI 代理已停止{restore_suffix}"
@@ -829,6 +846,18 @@ def _restore_managed_settings(state: dict, mixed_port: int) -> list[str]:
     except Exception as exc:
         errors.append(f"Windows 系统代理: {exc}")
     return errors
+
+
+def _save_restore_retry_state(state: dict, mixed_port: int, restore_errors: list[str]) -> None:
+    if not restore_errors:
+        _save_state({})
+        return
+    retry_state = dict(state or {})
+    retry_state.pop("pid", None)
+    retry_state["mixed_port"] = mixed_port
+    retry_state["last_restore_error"] = "; ".join(str(item) for item in restore_errors)
+    retry_state["updated_at"] = remote_proxy._now_iso()
+    _save_state(retry_state)
 
 
 def _local_env_matches(mixed_port: int) -> bool:
