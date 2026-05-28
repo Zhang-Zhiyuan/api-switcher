@@ -37,6 +37,16 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def _resolve_managed_backup_dir(directory: Path | str) -> Path:
+    backup_root = BACKUPS_DIR.resolve()
+    backup_dir = Path(directory).resolve()
+    if backup_dir == backup_root or not _is_relative_to(backup_dir, backup_root):
+        raise ValueError("备份目录不在受管备份目录内")
+    if not backup_dir.is_dir():
+        raise ValueError("备份目录不存在或不可访问")
+    return backup_dir
+
+
 def _allocate_backup_dir(timestamp: str) -> Path:
     """Create and return a unique backup directory for the timestamp."""
     base = BACKUPS_DIR / timestamp
@@ -127,11 +137,12 @@ def get_latest_backup() -> BackupEntry | None:
 
 def restore_backup(entry: BackupEntry) -> list[str]:
     """Restore config files from a backup. Returns list of restored file names."""
+    backup_dir = _resolve_managed_backup_dir(entry.directory)
+
     # Create a safety backup first
     create_backup("回滚前自动备份")
 
     restored = []
-    backup_dir = Path(entry.directory)
 
     for name, dst in BACKUP_FILES.items():
         src = backup_dir / name

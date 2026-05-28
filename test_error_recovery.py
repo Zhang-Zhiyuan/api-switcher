@@ -3084,6 +3084,97 @@ def test_update_settings_honors_enabled_switch(tmp_path):
     assert calls == ["install", "register"]
 
 
+def test_update_settings_rolls_back_when_hook_registration_fails(tmp_path):
+    from core.auto_continue.base import AutoContinueProvider
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+
+    class FakeProvider(AutoContinueProvider):
+        def get_config_dir(self):
+            return tmp_path
+
+        def get_hook_script_path(self):
+            return tmp_path / "hook.ps1"
+
+        def get_settings_path(self):
+            return tmp_path / "auto_continue_settings.json"
+
+        def is_hook_registered(self):
+            return False
+
+        def register_hook(self):
+            calls.append("register")
+            raise RuntimeError("hook write failed")
+
+        def unregister_hook(self):
+            calls.append("unregister")
+
+        def install_hook_script(self):
+            calls.append("install")
+
+        def uninstall_hook_script(self):
+            calls.append("uninstall")
+
+    provider = FakeProvider("codex")
+    provider.save_settings(AutoContinueSettings(enabled=False, git_auto_snapshot=False))
+
+    with pytest.raises(RuntimeError, match="hook write failed"):
+        provider.update_settings(AutoContinueSettings(enabled=True, git_auto_snapshot=False))
+
+    assert provider.load_settings().enabled is False
+    assert calls == ["install", "register", "unregister"]
+
+
+def test_update_settings_keeps_previous_hook_when_save_fails(tmp_path, monkeypatch):
+    from core.auto_continue.base import AutoContinueProvider
+    from models.auto_continue import AutoContinueSettings
+
+    calls = []
+
+    class FakeProvider(AutoContinueProvider):
+        def get_config_dir(self):
+            return tmp_path
+
+        def get_hook_script_path(self):
+            return tmp_path / "hook.ps1"
+
+        def get_settings_path(self):
+            return tmp_path / "auto_continue_settings.json"
+
+        def is_hook_registered(self):
+            return True
+
+        def register_hook(self):
+            calls.append("register")
+
+        def unregister_hook(self):
+            calls.append("unregister")
+
+        def install_hook_script(self):
+            calls.append("install")
+
+        def uninstall_hook_script(self):
+            calls.append("uninstall")
+
+    provider = FakeProvider("codex")
+    provider.save_settings(AutoContinueSettings(enabled=True, git_auto_snapshot=False))
+    original_save = provider.save_settings
+
+    def fail_saving_new_settings(settings):
+        if settings.enabled is False:
+            raise RuntimeError("settings disk failed")
+        original_save(settings)
+
+    monkeypatch.setattr(provider, "save_settings", fail_saving_new_settings)
+
+    with pytest.raises(RuntimeError, match="settings disk failed"):
+        provider.update_settings(AutoContinueSettings(enabled=False, git_auto_snapshot=False))
+
+    assert provider.load_settings().enabled is True
+    assert calls == ["unregister", "install", "register"]
+
+
 def test_permission_rule_helpers_detect_ask_conflicts_and_broad_allows():
     from core.auto_continue.permission_rules import (
         conflicting_permission_rules,

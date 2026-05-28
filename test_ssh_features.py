@@ -1395,6 +1395,14 @@ def test_remote_config_reads_json_with_utf8_bom():
     assert remote_config.read_remote_json(client, "/bom.json") == {"ok": True}
 
 
+def test_remote_config_ignores_non_object_json():
+    sftp = _FakeSFTP()
+    sftp.files["/list.json"] = b'["not", "a", "config"]'
+    client = _FakeClient(sftp)
+
+    assert remote_config.read_remote_json(client, "/list.json") is None
+
+
 def test_remote_config_expands_home_and_custom_profile_dirs():
     sftp = _FakeSFTP()
     client = _FakeClient(sftp, command_outputs=["/srv/users/alice"])

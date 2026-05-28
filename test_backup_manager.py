@@ -1,4 +1,5 @@
 from core import backup_manager
+from models.profile import BackupEntry
 
 
 def test_backup_dirs_are_unique_and_latest_can_restore(tmp_path, monkeypatch):
@@ -67,3 +68,39 @@ def test_backup_prune_ignores_directory_from_metadata(tmp_path, monkeypatch):
     assert backup_manager.prune_backups(keep_count=0) == 1
     assert not backup_dir.exists()
     assert (external_dir / "keep.txt").exists()
+
+
+def test_restore_backup_rejects_unmanaged_directory_before_safety_backup(tmp_path, monkeypatch):
+    source = tmp_path / "config.json"
+    source.write_text("current", encoding="utf-8")
+    backups_dir = tmp_path / "backups"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    (external_dir / "config.json").write_text("external", encoding="utf-8")
+
+    safety_backups: list[str] = []
+    original_create_backup = backup_manager.create_backup
+
+    def create_backup(description: str = ""):
+        safety_backups.append(description)
+        return original_create_backup(description)
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(backup_manager, "BACKUP_FILES", {"config.json": source})
+    monkeypatch.setattr(backup_manager, "create_backup", create_backup)
+
+    entry = BackupEntry(
+        timestamp="2026-01-01T00:00:00",
+        directory=external_dir,
+        description="external",
+        files=["config.json"],
+    )
+    try:
+        backup_manager.restore_backup(entry)
+    except ValueError as e:
+        assert "受管备份目录" in str(e)
+    else:
+        raise AssertionError("restore_backup should reject unmanaged directories")
+
+    assert source.read_text(encoding="utf-8") == "current"
+    assert safety_backups == []

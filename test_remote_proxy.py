@@ -457,6 +457,36 @@ def test_fetch_proxy_subscription_decodes_gzip_response(monkeypatch, tmp_path):
     assert b"proxies:" in Path(result.saved_path).read_bytes()
 
 
+def test_fetch_proxy_subscription_rejects_oversized_gzip_after_limited_decode(monkeypatch, tmp_path):
+    class Headers:
+        def get(self, key, default=None):
+            return {"Content-Encoding": "gzip"}.get(key, default)
+
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return gzip.compress(b"proxies:\n" + b"a" * 2048)
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(ValueError, match="解压后超过"):
+        remote_proxy.fetch_proxy_subscription("https://example.com/sub", max_bytes=1024, retry_base_delay=0)
+
+
 def test_load_cached_proxy_subscription_reads_saved_content(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     cache_dir = tmp_path / "proxy_subscriptions"

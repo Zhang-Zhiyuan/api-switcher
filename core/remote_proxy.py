@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import gzip
 import hashlib
 import json
 import posixpath
@@ -1787,15 +1786,27 @@ def _download_proxy_subscription(
 def _decode_http_payload(payload: bytes, content_encoding: str, max_bytes: int) -> bytes:
     encoding = (content_encoding or "").lower()
     if "gzip" in encoding:
-        decoded = gzip.decompress(payload)
+        decoded = _decompress_limited(payload, max_bytes, 16 + zlib.MAX_WBITS)
     elif "deflate" in encoding:
         try:
-            decoded = zlib.decompress(payload)
+            decoded = _decompress_limited(payload, max_bytes, zlib.MAX_WBITS)
         except zlib.error:
-            decoded = zlib.decompress(payload, -zlib.MAX_WBITS)
+            decoded = _decompress_limited(payload, max_bytes, -zlib.MAX_WBITS)
     else:
         return payload
 
+    if len(decoded) > max_bytes:
+        raise ValueError("订阅内容解压后超过 5MB，已停止读取")
+    return decoded
+
+
+def _decompress_limited(payload: bytes, max_bytes: int, wbits: int) -> bytes:
+    decompressor = zlib.decompressobj(wbits)
+    decoded = decompressor.decompress(payload, max_bytes + 1)
+    if decompressor.unconsumed_tail or len(decoded) > max_bytes:
+        raise ValueError("订阅内容解压后超过 5MB，已停止读取")
+    remaining = max_bytes + 1 - len(decoded)
+    decoded += decompressor.flush(remaining)
     if len(decoded) > max_bytes:
         raise ValueError("订阅内容解压后超过 5MB，已停止读取")
     return decoded

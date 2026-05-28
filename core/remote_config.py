@@ -112,10 +112,14 @@ def read_remote_json(client: paramiko.SSHClient, remote_path: str) -> dict | Non
     if content is None:
         return None
     try:
-        return json.loads(content.lstrip("\ufeff"))
+        parsed = json.loads(content.lstrip("\ufeff"))
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse remote JSON {expanded}: {e}")
         return None
+    if not isinstance(parsed, dict):
+        logger.warning(f"Remote JSON {expanded} is not an object, ignoring")
+        return None
+    return parsed
 
 
 def write_remote_json(client: paramiko.SSHClient, remote_path: str, data: dict, file_mode: int | None = None):
@@ -150,10 +154,14 @@ def read_remote_toml(client: paramiko.SSHClient, remote_path: str) -> dict | Non
             import tomllib
         except ModuleNotFoundError:
             import tomli as tomllib
-        return tomllib.loads(content)
+        parsed = tomllib.loads(content)
     except Exception as e:
         logger.error(f"Failed to parse remote TOML {expanded}: {e}")
         return None
+    if not isinstance(parsed, dict):
+        logger.warning(f"Remote TOML {expanded} is not an object, ignoring")
+        return None
+    return parsed
 
 
 def write_remote_toml(client: paramiko.SSHClient, remote_path: str, data: dict, file_mode: int | None = None):

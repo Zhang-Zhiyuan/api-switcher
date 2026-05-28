@@ -26,6 +26,7 @@ MAX_REMOTE_SESSION_FILES = 5000
 MAX_REMOTE_PARSE_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 512 * 1024 * 1024
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -1192,10 +1193,17 @@ def _write_remote_bytes_atomic(sftp, destination: str, data: bytes, file_mode: i
 
 
 def _read_manifest(bundle: zipfile.ZipFile) -> dict[str, Any]:
+    _ensure_unique_package_entries(bundle, {"manifest.json"})
     try:
-        manifest = json.loads(bundle.read("manifest.json").decode("utf-8"))
+        info = bundle.getinfo("manifest.json")
     except KeyError as e:
         raise ValueError("会话迁移包缺少 manifest.json") from e
+    if info.is_dir():
+        raise ValueError("会话迁移包 manifest 不是文件")
+    if info.file_size > MAX_MANIFEST_BYTES:
+        raise ValueError("会话迁移包 manifest 过大")
+    try:
+        manifest = json.loads(bundle.read(info).decode("utf-8"))
     except json.JSONDecodeError as e:
         raise ValueError("会话迁移包 manifest 损坏") from e
     if manifest.get("format") != PACKAGE_FORMAT:
@@ -1205,6 +1213,16 @@ def _read_manifest(bundle: zipfile.ZipFile) -> dict[str, Any]:
     if not isinstance(manifest.get("sessions"), list):
         raise ValueError("会话迁移包格式不完整")
     return manifest
+
+
+def _ensure_unique_package_entries(bundle: zipfile.ZipFile, names: set[str]) -> None:
+    counts: dict[str, int] = {}
+    for info in bundle.infolist():
+        if info.filename in names:
+            counts[info.filename] = counts.get(info.filename, 0) + 1
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError("会话迁移包包含重复关键条目: " + ", ".join(duplicates))
 
 
 def _read_codex_index(codex_home: Path) -> dict[str, dict[str, Any]]:

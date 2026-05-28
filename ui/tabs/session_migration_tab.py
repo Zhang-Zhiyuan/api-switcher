@@ -240,10 +240,11 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             )
 
         if not self._records:
+            source_label = self._endpoint_label(self._current_source_ssh_name()).strip()
             EmptyState(
                 self._cards_frame,
-                "没有找到本机会话",
-                "本机或 SSH 上的 Claude Code 会话通常在 ~/.claude/projects，Codex CLI 会话通常在 ~/.codex/sessions。",
+                f"没有找到{source_label}会话",
+                f"{source_label}上的 Claude Code 会话通常在 ~/.claude/projects，Codex CLI 会话通常在 ~/.codex/sessions。",
                 "刷新",
                 self.refresh,
             ).pack(fill="x", pady=(12, 4))

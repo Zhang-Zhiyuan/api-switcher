@@ -3,9 +3,12 @@ import json
 import posixpath
 import stat
 import tempfile
+import warnings
 import zipfile
 from io import BytesIO
 from pathlib import Path
+
+import pytest
 
 from config import paths
 from core import portable_migration, profile_manager, security, session_migration
@@ -379,6 +382,33 @@ def test_session_migration_skips_invalid_package_entries(tmp_path):
     assert imported.skipped_invalid == 2
     assert (tmp_path / "codex" / "sessions" / "2026" / "05" / "01" / "good.jsonl").exists()
     assert not (tmp_path / "bad.jsonl").exists()
+
+
+def test_session_migration_rejects_duplicate_manifest(tmp_path):
+    package = tmp_path / "duplicate-manifest.asxsession"
+    manifest = json.dumps({
+        "format": session_migration.PACKAGE_FORMAT,
+        "version": session_migration.PACKAGE_VERSION,
+        "sessions": [],
+    })
+    with zipfile.ZipFile(package, "w") as bundle:
+        bundle.writestr("manifest.json", manifest)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            bundle.writestr("manifest.json", manifest)
+
+    with pytest.raises(ValueError, match="重复关键条目"):
+        session_migration.inspect_package(package)
+
+
+def test_session_migration_rejects_oversized_manifest(tmp_path, monkeypatch):
+    package = tmp_path / "oversized-manifest.asxsession"
+    monkeypatch.setattr(session_migration, "MAX_MANIFEST_BYTES", 32)
+    with zipfile.ZipFile(package, "w") as bundle:
+        bundle.writestr("manifest.json", " " * 64)
+
+    with pytest.raises(ValueError, match="manifest 过大"):
+        session_migration.inspect_package(package)
 
 
 class _RemoteAttr:

@@ -263,23 +263,46 @@ class AutoContinueProvider(ABC):
             logger.warning(f"Warnings during uninstall: {'; '.join(errors)}")
 
     def update_settings(self, settings: AutoContinueSettings) -> None:
-        """Update settings and synchronize hook registration."""
+        """Update settings and synchronize hook registration atomically."""
         # Validate first
         is_valid, error = settings.validate()
         if not is_valid:
             raise ValueError(f"Invalid settings: {error}")
 
-        self.save_settings(settings)
+        previous_settings = self.load_settings()
 
-        # Re-install/register the stop hook for either auto-continue or standalone Git snapshots.
+        try:
+            # Re-install/register the stop hook for either auto-continue or standalone Git snapshots.
+            self._apply_hook_state_for_settings(settings)
+            self.save_settings(settings)
+        except Exception as exc:
+            rollback_error = self._rollback_settings_update(previous_settings)
+            if rollback_error:
+                raise RuntimeError(
+                    f"Failed to update settings: {exc}; rollback failed: {rollback_error}"
+                ) from exc
+            raise RuntimeError(f"Failed to update settings: {exc}") from exc
+
+    def _apply_hook_state_for_settings(self, settings: AutoContinueSettings | None) -> None:
         if self._settings_require_hook(settings):
-            try:
-                self.install_hook_script()
-                self.register_hook_for_settings(settings)
-            except Exception as e:
-                logger.warning(f"Failed to update hook script: {e}")
+            self.install_hook_script()
+            self.register_hook_for_settings(settings)
         else:
-            try:
-                self.unregister_hook()
-            except Exception as e:
-                logger.warning(f"Failed to unregister hook after disabling features: {e}")
+            self.unregister_hook()
+
+    def _rollback_settings_update(self, previous_settings: AutoContinueSettings | None) -> str:
+        try:
+            if previous_settings is None:
+                try:
+                    self.unregister_hook()
+                finally:
+                    settings_path = self.get_settings_path()
+                    if settings_path.exists():
+                        settings_path.unlink()
+                return ""
+            self._apply_hook_state_for_settings(previous_settings)
+            self.save_settings(previous_settings)
+            return ""
+        except Exception as exc:
+            logger.warning(f"Failed to rollback auto-continue settings update: {exc}")
+            return str(exc)
