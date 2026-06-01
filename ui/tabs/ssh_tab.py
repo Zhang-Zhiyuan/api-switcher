@@ -45,7 +45,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._codex_wire_api_combo = None
         self._codex_wire_api_hint = None
         self._clear_api_combo = None
-        self._server_combo_label = None
         self._target_summary_label = None
         self._target_hint_label = None
         self._sync_current_button = None
@@ -215,15 +214,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
         self._batch_target_label = ctk.CTkLabel(
             sync_header,
-            text="远端批量: 未勾选（单台模式）",
-            text_color=COLORS["muted"],
-            font=font(12),
+            text="目标: 未勾选服务器",
+            text_color=COLORS["warning"],
+            font=font(12, "bold"),
         )
         self._batch_target_label.pack(side="left", padx=(12, 0))
         ctk.CTkFrame(sync_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
         self._batch_select_all_button = ctk.CTkButton(
             sync_header,
-            text="全选远端",
+            text="全选目标",
             width=86,
             command=self._select_all_batch_servers,
             **button_style("secondary", compact=True),
@@ -231,7 +230,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._batch_select_all_button.pack(side="right", padx=(6, 0))
         self._batch_clear_button = ctk.CTkButton(
             sync_header,
-            text="清空批量",
+            text="清空目标",
             width=78,
             command=self._clear_batch_servers,
             **button_style("secondary", compact=True),
@@ -248,41 +247,24 @@ class SSHTab(ctk.CTkScrollableFrame):
         sync_controls.grid_columnconfigure(2, weight=2, minsize=240)
         sync_controls.grid_columnconfigure(3, weight=0, minsize=240)
 
-        # Target selector
-        self._server_combo_label = ctk.CTkLabel(
-            sync_controls,
-            text="单台目标",
-            text_color=COLORS["muted"],
-            width=82,
-            anchor="w",
-        )
-        self._server_combo_label.grid(row=0, column=0, sticky="w")
-        self._server_combo = ctk.CTkComboBox(
-            sync_controls,
-            values=["(无)"],
-            width=220,
-            command=lambda _value: self._on_server_selection_change(),
-            **combo_style(),
-        )
-        self._server_combo.grid(row=0, column=1, sticky="ew", padx=(8, 12))
         self._target_summary_label = ctk.CTkLabel(
             sync_controls,
-            text="单台模式",
-            text_color=COLORS["muted"],
-            font=font(12, "bold"),
+            text="未选择目标服务器",
+            text_color=COLORS["warning"],
+            font=font(13, "bold"),
             anchor="w",
             justify="left",
         )
-        self._target_summary_label.grid(row=0, column=2, columnspan=2, sticky="ew")
+        self._target_summary_label.grid(row=0, column=0, columnspan=4, sticky="ew")
         self._target_hint_label = ctk.CTkLabel(
             sync_controls,
-            text="单台模式下，推送/清理/Git 同步/SSH AI 代理使用单台目标；勾选服务器卡片后这些操作改为远端批量。远端拉取始终只读取单台目标。",
+            text="在上方服务器卡片勾选目标。选 1 台就是单台操作，选多台就是批量；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._target_hint_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self._target_hint_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         bind_wraplength(sync_controls, self._target_hint_label, padding=20)
 
         ctk.CTkLabel(
@@ -359,7 +341,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         remote_pull_button_frame.grid(row=3, column=3, sticky="e", pady=(10, 0))
         self._remote_inspect_button = ctk.CTkButton(
             remote_pull_button_frame,
-            text="读取单台",
+            text="读取目标",
             width=86,
             command=self._inspect_remote_configs,
             **button_style("secondary", compact=True),
@@ -513,7 +495,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ctk.CTkFrame(proxy_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
         self._proxy_target_label = ctk.CTkLabel(
             proxy_header,
-            text="SSH 目标: 未选择服务器",
+            text="已选目标: 未勾选服务器",
             text_color=COLORS["warning"],
             font=font(12, "bold"),
         )
@@ -738,7 +720,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
-            text="本页只影响 SSH 服务器；部署远端使用 SSH 目标（远端批量优先）。Win11 本机代理请使用“Win11 代理”标签页。",
+            text="本页只影响已勾选的 SSH 目标服务器；Win11 本机代理请使用“Win11 代理”标签页。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1075,25 +1057,17 @@ class SSHTab(ctk.CTkScrollableFrame):
                     lbl.pack(fill="x")
                     bind_wraplength(info_frame, lbl, padding=4)
 
-        # Update server combo
         server_names = [p.name for p in profiles]
+        previous_selection = set(self._selected_server_names)
         self._selected_server_names.intersection_update(server_names)
-        current_server = self._server_combo.get()
-        self._server_combo.configure(values=server_names if server_names else ["(无)"])
-        if server_names:
-            selected_server = current_server if current_server in server_names else server_names[0]
-            self._server_combo.set(selected_server)
-            if selected_server != current_server:
-                self._reset_remote_pull_options()
-        else:
-            self._server_combo.set("(无)")
-            self._reset_remote_pull_options()
+        if self._selected_server_names != previous_selection:
+            self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
         self._update_batch_target_label(server_names)
         self._refresh_sync_profile_combo()
         self._update_remote_auto_feature_label()
         self._refresh_remote_auto_switch_availability()
         if not server_names:
-            self._set_remote_auto_status("\u8bf7\u5148\u6dfb\u52a0\u5e76\u9009\u62e9 SSH \u670d\u52a1\u5668", severity="warning")
+            self._set_remote_auto_status("\u8bf7\u5148\u6dfb\u52a0\u5e76\u52fe\u9009 1 \u53f0 SSH \u670d\u52a1\u5668", severity="warning")
 
     def _create_server(self):
         def on_save(profile, _):
@@ -1155,32 +1129,20 @@ class SSHTab(ctk.CTkScrollableFrame):
         suffix = "..." if len(server_names) > 3 else ""
         return f"{len(server_names)} 台服务器（{preview}{suffix}）"
 
-    def _single_target_name_for_ui(self) -> str:
-        if not self._server_combo:
-            return ""
-        server_name = str(self._server_combo.get() or "").strip()
-        if not server_name or (server_name.startswith("(") and server_name.endswith(")")):
-            return ""
-        return server_name
-
     def _update_target_context_ui(self, selected: list[str] | None = None):
         selected = selected if selected is not None else self._ordered_server_names(self._selected_server_names)
-        single_target = self._single_target_name_for_ui()
         if selected:
-            summary = f"远端批量模式: {self._format_server_target(selected)}"
-            hint = (
-                "批量已接管：推送、清理、Git 同步和 SSH AI 代理会作用于已勾选服务器；"
-                f"拉取、Git 检查和自动续跑仍读取单台目标 {single_target or '未选择'}。"
-            )
+            summary = f"已选目标: {self._format_server_target(selected)}"
+            hint = "所有写入/部署操作使用已选目标；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。"
             summary_color = COLORS["accent"]
-            current_text = "推送当前到批量"
-            selected_text = "推送所选到批量"
+            current_text = "推送当前"
+            selected_text = "推送所选"
         else:
-            summary = f"单台模式: {single_target or '未选择服务器'}"
-            hint = "当前为单台模式；推送、清理、Git 同步和 SSH AI 代理使用下拉目标。要同时操作多台，请勾选服务器卡片。"
-            summary_color = COLORS["muted"] if single_target else COLORS["warning"]
-            current_text = "推送当前到单台"
-            selected_text = "推送所选到单台"
+            summary = "未选择目标服务器"
+            hint = "请先在上方服务器卡片勾选目标。选 1 台就是单台操作，选多台就是批量。"
+            summary_color = COLORS["warning"]
+            current_text = "推送当前"
+            selected_text = "推送所选"
 
         if self._target_summary_label:
             self._target_summary_label.configure(text=summary, text_color=summary_color)
@@ -1199,13 +1161,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._batch_target_label:
             if selected:
                 self._batch_target_label.configure(
-                    text=f"远端批量: {self._format_server_target(selected)}",
+                    text=f"目标: {self._format_server_target(selected)}",
                     text_color=COLORS["accent"],
                 )
             else:
                 self._batch_target_label.configure(
-                    text="远端批量: 未勾选（单台模式）",
-                    text_color=COLORS["muted"],
+                    text="目标: 未勾选服务器",
+                    text_color=COLORS["warning"],
                 )
         action_state = "normal" if all_names else "disabled"
         for button in (self._batch_select_all_button, self._batch_clear_button):
@@ -1234,11 +1196,33 @@ class SSHTab(ctk.CTkScrollableFrame):
         self.refresh()
 
     def _selected_sync_server_names(self) -> list[str]:
-        selected = self._ordered_server_names(self._selected_server_names)
-        if selected:
-            return selected
-        server_name = self._selected_server_name()
-        return [server_name] if server_name else []
+        return self._ordered_server_names(self._selected_server_names)
+
+    def _require_selected_servers(self, status_setter=None) -> list[str]:
+        server_names = self._selected_sync_server_names()
+        if server_names:
+            return server_names
+        message = "请先在上方服务器卡片勾选目标服务器。"
+        if status_setter:
+            status_setter(message, "warning")
+        else:
+            self._set_sync_status(message, "warning")
+        show_toast(self.winfo_toplevel(), message, is_error=True)
+        return []
+
+    def _require_single_selected_server(self, status_setter=None) -> str | None:
+        server_names = self._selected_sync_server_names()
+        if len(server_names) == 1:
+            return server_names[0]
+        message = "此操作需要刚好勾选 1 台服务器。"
+        if not server_names:
+            message = "请先勾选 1 台服务器。"
+        if status_setter:
+            status_setter(message, "warning")
+        else:
+            self._set_sync_status(message, "warning")
+        show_toast(self.winfo_toplevel(), message, is_error=True)
+        return None
 
     def _run_server_batch(self, server_names: list[str], action):
         results = []
@@ -1311,15 +1295,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         selected = self._ordered_server_names(self._selected_server_names)
         if selected:
             self._proxy_target_label.configure(
-                text=f"SSH 目标: {self._format_server_target(selected)}",
+                text=f"已选目标: {self._format_server_target(selected)}",
                 text_color=COLORS["accent"],
             )
-            return
-        single_target = self._single_target_name_for_ui()
-        if single_target:
-            self._proxy_target_label.configure(text=f"SSH 目标: {single_target}", text_color=COLORS["muted"])
         else:
-            self._proxy_target_label.configure(text="SSH 目标: 未选择服务器", text_color=COLORS["warning"])
+            self._proxy_target_label.configure(text="已选目标: 未勾选服务器", text_color=COLORS["warning"])
 
     def _set_proxy_busy(self, busy: bool):
         self._proxy_busy = busy
