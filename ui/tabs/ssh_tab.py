@@ -176,7 +176,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         overview.pack(fill="x", padx=14, pady=(0, 10))
         overview_content = ctk.CTkFrame(overview, fg_color="transparent")
         overview_content.pack(fill="x", padx=14, pady=12)
-        overview_content.grid_columnconfigure((0, 1, 2), weight=1, uniform="ssh_overview")
+        for column in range(3):
+            overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
         overview_items = [
             ("1 选择目标", "单台下拉或勾选卡片批量操作", "primary"),
             ("2 同步配置", "推送/拉取 API、账号和 Git 登录", "accent"),
