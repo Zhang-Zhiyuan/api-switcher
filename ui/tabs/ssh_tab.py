@@ -358,7 +358,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_button.pack(side="left")
         self._remote_pull_hint = ctk.CTkLabel(
             sync_controls,
-            text="远端拉取只读取单台目标，不受批量勾选影响；先读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
+            text="需要刚好勾选 1 台目标后读取；读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -435,7 +435,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).grid(row=7, column=0, sticky="w", pady=(10, 0))
         self._git_login_status_label = ctk.CTkLabel(
             sync_controls,
-            text="检查/从 SSH 导入只使用单台目标；同步到 SSH 使用远端批量目标，未勾选时使用单台目标。",
+            text="检查/从 SSH 导入需要刚好勾选 1 台；同步到 SSH 使用所有已勾选目标。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -968,7 +968,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
                 ctk.CTkCheckBox(
                     top,
-                    text="批量",
+                    text="目标",
                     width=58,
                     checkbox_width=18,
                     checkbox_height=18,
@@ -996,7 +996,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if is_active:
                     ctk.CTkLabel(
                         top,
-                        text="单台目标",
+                        text="当前",
                         fg_color=COLORS["primary"],
                         corner_radius=999,
                         text_color=COLORS["text"],
@@ -1183,16 +1183,22 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._selected_server_names.add(server_name)
         else:
             self._selected_server_names.discard(server_name)
+        self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
         self._update_batch_target_label()
+        self._on_remote_auto_provider_change()
 
     def _select_all_batch_servers(self):
         self._selected_server_names = set(self._profile_server_names())
+        self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
         self._update_batch_target_label()
+        self._on_remote_auto_provider_change()
         self.refresh()
 
     def _clear_batch_servers(self):
         self._selected_server_names.clear()
+        self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
         self._update_batch_target_label()
+        self._on_remote_auto_provider_change()
         self.refresh()
 
     def _selected_sync_server_names(self) -> list[str]:
@@ -1664,12 +1670,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
-        server_names = self._selected_sync_server_names()
-        if not server_names:
-            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
-            self._set_proxy_status(message, "warning")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
 
         target_label = self._format_server_target(server_names)
         node_count = len(self._proxy_subscription_nodes)
@@ -1846,12 +1847,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_status(f"已载入代理文件: {Path(path).name}；暂未识别到可用节点: {e}", "warning")
 
     def _deploy_ai_proxy(self):
-        server_names = self._selected_sync_server_names()
-        if not server_names:
-            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
-            self._set_proxy_status(message, "warning")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
         proxy_text = self._proxy_node_input()
         try:
             proxy_node = remote_proxy.parse_proxy_node(proxy_text)
@@ -1901,12 +1897,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _inspect_ai_proxy(self):
-        server_names = self._selected_sync_server_names()
-        if not server_names:
-            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
-            self._set_proxy_status(message, "warning")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
         target_label = self._format_server_target(server_names)
 
         def done(payload):
@@ -1927,12 +1918,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _probe_ai_proxy(self):
-        server_names = self._selected_sync_server_names()
-        if not server_names:
-            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
-            self._set_proxy_status(message, "warning")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
         target_label = self._format_server_target(server_names)
 
         def done(payload):
@@ -1953,12 +1939,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _cleanup_ai_proxy(self):
-        server_names = self._selected_sync_server_names()
-        if not server_names:
-            message = "请先选择单台服务器，或在上方服务器卡片勾选批量目标。"
-            self._set_proxy_status(message, "warning")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
         target_label = self._format_server_target(server_names)
 
         def do_cleanup():
@@ -2023,14 +2004,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._remote_pull_hint:
             self._remote_pull_hint.configure(
                 text=message
-                or "远端拉取只读取单台目标，不受批量勾选影响；先读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
+                or "需要刚好勾选 1 台目标后读取；读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
                 text_color=COLORS["muted"],
             )
-
-    def _on_server_selection_change(self):
-        self._reset_remote_pull_options()
-        self._update_target_context_ui()
-        self._on_remote_auto_provider_change()
 
     def _set_remote_pull_candidates(self, candidates, server_name: str):
         self._remote_config_candidates = list(candidates or [])
@@ -2089,7 +2065,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         candidates = self._remote_config_candidates
         if not candidates:
             self._remote_pull_hint.configure(
-                text="远端拉取只读取单台目标，不受批量勾选影响；先读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
+                text="需要刚好勾选 1 台目标后读取；读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
                 text_color=COLORS["muted"],
             )
             return
@@ -2183,7 +2159,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self.refresh()
 
     def _sync_current(self):
-        server_names = self._selected_sync_server_names()
+        server_names = self._require_selected_servers()
         if not server_names:
             return
 
@@ -2285,7 +2261,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._update_codex_wire_hint()
 
     def _sync_selected(self):
-        server_names = self._selected_sync_server_names()
+        server_names = self._require_selected_servers()
         if not server_names:
             return
 
@@ -2325,7 +2301,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         do_sync()
 
     def _clear_remote_api_info(self):
-        server_names = self._selected_sync_server_names()
+        server_names = self._require_selected_servers()
         if not server_names:
             return
 
@@ -2365,7 +2341,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._git_login_status_label.configure(text=message, text_color=color)
 
     def _inspect_git_login(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_git_login_status)
         if not server_name:
             return
 
@@ -2391,7 +2367,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _sync_git_login(self):
-        server_names = self._selected_sync_server_names()
+        server_names = self._require_selected_servers(self._set_git_login_status)
         if not server_names:
             return
         target_label = self._format_server_target(server_names)
@@ -2443,7 +2419,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _import_git_login(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_git_login_status)
         if not server_name:
             return
 
@@ -2488,10 +2464,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         return [selected]
 
     def _has_selected_server(self) -> bool:
-        if not self._server_combo:
-            return False
-        server_name = str(self._server_combo.get() or "").strip()
-        return bool(server_name) and not (server_name.startswith("(") and server_name.endswith(")"))
+        selected = self._selected_sync_server_names()
+        return len(selected) == 1
 
     def _on_remote_auto_provider_change(self):
         self._update_remote_auto_feature_label()
@@ -2501,10 +2475,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         else:
             self._refresh_remote_auto_switch_availability()
 
+    def _single_remote_auto_server_name(self) -> str:
+        selected = self._selected_sync_server_names()
+        return selected[0] if len(selected) == 1 else ""
+
     def _cached_remote_auto_statuses_for_selection(self):
-        if not self._server_combo:
+        server_names = self._selected_sync_server_names()
+        if len(server_names) != 1:
             return []
-        server_name = self._server_combo.get()
+        server_name = server_names[0]
         targets = self._selected_remote_auto_targets()
         statuses = []
         for provider in targets:
@@ -2608,14 +2587,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._refresh_remote_auto_switch_availability()
 
     def _selected_server_name(self) -> str | None:
-        server_name = self._server_combo.get()
-        if not self._has_selected_server():
-            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
-            return None
-        if server_name == "(无)":
-            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
-            return None
-        return server_name
+        return self._require_single_selected_server()
 
     def _set_remote_auto_status(self, message: str, is_error: bool = False, severity: str | None = None):
         if self._remote_auto_status_label:
@@ -2681,7 +2653,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if statuses is None:
             statuses = self._cached_remote_auto_statuses_for_selection()
         failures = failures or []
-        server_name = self._server_combo.get() if self._server_combo else ""
+        selected = self._selected_sync_server_names()
+        server_name = selected[0] if len(selected) == 1 else ""
         targets = ", ".join(self._selected_remote_auto_targets())
         lines = [
             f"SSH: {server_name or '-'}",
@@ -2761,9 +2734,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         has_not_ready = expect_ready and any(not status.ready for status in statuses)
         severity = "error" if failures else "warning" if has_not_ready else "info"
         self._set_remote_auto_status(message, severity=severity)
-        if self._server_combo:
-            server_name = self._server_combo.get()
-            for status in statuses:
+        server_name = self._single_remote_auto_server_name()
+        for status in statuses:
+            if server_name:
                 self._remote_auto_last_statuses[(server_name, status.provider_name)] = status
         self._refresh_remote_auto_switches_from_statuses(statuses)
         toast_message = " | ".join(results)
@@ -2775,7 +2748,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._remote_auto_refreshing:
             return
 
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
         if not server_name:
             self._refresh_remote_auto_switch_availability()
             return
@@ -2856,7 +2829,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._refresh_remote_auto_switch_availability()
 
     def _check_remote_auto_continue(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
         if not server_name:
             return
 
@@ -2873,7 +2846,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _install_remote_git_snapshot(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
         if not server_name:
             return
 
@@ -2898,7 +2871,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _install_remote_auto_continue(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
         if not server_name:
             return
 
@@ -2923,7 +2896,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _pause_remote_auto_continue(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
         if not server_name:
             return
 
@@ -2948,7 +2921,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _uninstall_remote_auto_continue(self):
-        server_name = self._selected_server_name()
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
         if not server_name:
             return
 
@@ -2982,12 +2955,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _inspect_remote_configs(self):
-        server_name = self._server_combo.get()
-        if not self._has_selected_server():
-            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
-            return
-        if server_name == "(无)":
-            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+        server_name = self._require_single_selected_server()
+        if not server_name:
             return
 
         def done(payload):
@@ -2996,8 +2965,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_sync_status(f"读取远端配置失败: {payload['error']}", "error")
                 show_toast(self.winfo_toplevel(), f"读取远端配置失败: {payload['error']}", is_error=True)
                 return
-            if self._server_combo.get() != server_name:
-                message = "读取完成，但当前服务器已变化；请重新读取远端配置。"
+            current = self._selected_sync_server_names()
+            if current != [server_name]:
+                message = "读取完成，但目标服务器已变化；请重新读取远端配置。"
                 self._reset_remote_pull_options(message)
                 self._set_sync_status(message, "warning")
                 show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -3017,12 +2987,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
 
     def _pull_from_server(self):
-        server_name = self._server_combo.get()
-        if not self._has_selected_server():
-            show_toast(self.winfo_toplevel(), "\u8bf7\u5148\u9009\u62e9\u670d\u52a1\u5668", is_error=True)
-            return
-        if server_name == "(无)":
-            show_toast(self.winfo_toplevel(), "请先选择服务器", is_error=True)
+        server_name = self._require_single_selected_server()
+        if not server_name:
             return
 
         selected = self._remote_pull_combo.get() if self._remote_pull_combo else ""
@@ -3032,9 +2998,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_sync_status("请先读取远端配置，并选择可拉取的项目", "warning")
             return
         if self._remote_pull_server_name != server_name:
-            self._reset_remote_pull_options("服务器选择已变化，请重新读取远端配置。")
-            show_toast(self.winfo_toplevel(), "服务器选择已变化，请重新读取远端配置", is_error=True)
-            self._set_sync_status("服务器选择已变化，请重新读取远端配置", "warning")
+            self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
+            show_toast(self.winfo_toplevel(), "目标服务器已变化，请重新读取远端配置", is_error=True)
+            self._set_sync_status("目标服务器已变化，请重新读取远端配置", "warning")
             return
 
         def worker():
