@@ -142,7 +142,6 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._build_ui()
 
     def _build_ui(self):
-        # Header
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=14, pady=(14, 8))
 
@@ -150,16 +149,20 @@ class SSHTab(ctk.CTkScrollableFrame):
         title_area.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             title_area,
-            text="SSH 服务器管理",
+            text="SSH 服务器",
             text_color=COLORS["text"],
-            font=font(18, "bold"),
+            font=font(20, "bold"),
         ).pack(anchor="w")
-        ctk.CTkLabel(
+        subtitle_label = ctk.CTkLabel(
             title_area,
-            text="连接远程服务器，双向同步 API、账号、Git 登录和 Hook 设置",
+            text="管理远端连接，把 API、账号、Git 登录、AI 代理和自动续跑部署到 SSH 环境。",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(anchor="w", pady=(2, 0))
+            anchor="w",
+            justify="left",
+        )
+        subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(title_area, subtitle_label, padding=20, max_width=760)
 
         ctk.CTkButton(
             header,
@@ -169,11 +172,38 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("primary"),
         ).pack(side="right")
 
-        # Server cards
+        overview = ctk.CTkFrame(self, **card_frame_kwargs(COLORS["border_soft"]))
+        overview.pack(fill="x", padx=14, pady=(0, 10))
+        overview_content = ctk.CTkFrame(overview, fg_color="transparent")
+        overview_content.pack(fill="x", padx=14, pady=12)
+        overview_content.grid_columnconfigure((0, 1, 2), weight=1, uniform="ssh_overview")
+        overview_items = [
+            ("1 选择目标", "单台下拉或勾选卡片批量操作", "primary"),
+            ("2 同步配置", "推送/拉取 API、账号和 Git 登录", "accent"),
+            ("3 部署能力", "远端 AI 代理与自动续跑", "success"),
+        ]
+        for column, (title, body, color_key) in enumerate(overview_items):
+            item = ctk.CTkFrame(overview_content, fg_color=COLORS["surface_alt"], corner_radius=8)
+            item.grid(row=0, column=column, sticky="ew", padx=(0, 8) if column < 2 else 0)
+            ctk.CTkLabel(
+                item,
+                text=title,
+                text_color=COLORS[color_key],
+                font=font(12, "bold"),
+                anchor="w",
+            ).pack(anchor="w", padx=12, pady=(9, 2))
+            ctk.CTkLabel(
+                item,
+                text=body,
+                text_color=COLORS["muted"],
+                font=font(12),
+                anchor="w",
+                justify="left",
+            ).pack(anchor="w", fill="x", padx=12, pady=(0, 9))
+
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 8))
 
-        # Sync panel
         sync_header = ctk.CTkFrame(self, fg_color="transparent")
         sync_header.pack(fill="x", padx=14, pady=(8, 5))
         ctk.CTkLabel(
@@ -213,8 +243,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         # Sync controls
         sync_controls = ctk.CTkFrame(self._sync_frame, fg_color="transparent")
         sync_controls.pack(fill="x", padx=14, pady=14)
-        sync_controls.grid_columnconfigure(1, weight=1)
-        sync_controls.grid_columnconfigure(2, weight=1)
+        sync_controls.grid_columnconfigure(1, weight=1, minsize=190)
+        sync_controls.grid_columnconfigure(2, weight=2, minsize=240)
+        sync_controls.grid_columnconfigure(3, weight=0, minsize=240)
 
         # Target selector
         self._server_combo_label = ctk.CTkLabel(
@@ -491,8 +522,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
         proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
         proxy_controls.pack(fill="x", padx=14, pady=14)
-        proxy_controls.grid_columnconfigure(1, weight=1)
-        proxy_controls.grid_columnconfigure(2, weight=1)
+        proxy_controls.grid_columnconfigure(1, weight=1, minsize=260)
+        proxy_controls.grid_columnconfigure(2, weight=1, minsize=220)
+        proxy_controls.grid_columnconfigure(3, weight=0, minsize=190)
 
         ctk.CTkLabel(
             proxy_controls,
@@ -756,7 +788,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         action_bar = ctk.CTkFrame(auto_controls, fg_color="transparent")
         action_bar.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(10, 0))
-        for column in range(3):
+        for column in range(6):
             action_bar.grid_columnconfigure(column, weight=0)
 
         check_button = ctk.CTkButton(
@@ -764,7 +796,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="一致性检查",
             width=104,
             command=self._check_remote_auto_continue,
-            **button_style("secondary"),
+            **button_style("secondary", compact=True),
         )
         check_button.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
         git_snapshot_button = ctk.CTkButton(
@@ -772,7 +804,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="只修复 Git 快照",
             width=116,
             command=self._install_remote_git_snapshot,
-            **button_style("secondary"),
+            **button_style("secondary", compact=True),
         )
         git_snapshot_button.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
         install_button = ctk.CTkButton(
@@ -780,7 +812,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="安装/修复全部",
             width=124,
             command=self._install_remote_auto_continue,
-            **button_style("primary"),
+            **button_style("primary", compact=True),
         )
         install_button.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=(0, 4))
         pause_button = ctk.CTkButton(
@@ -788,25 +820,25 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="暂停 Stop 续跑",
             width=118,
             command=self._pause_remote_auto_continue,
-            **button_style("warning"),
+            **button_style("warning", compact=True),
         )
-        pause_button.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        pause_button.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=(0, 4))
         uninstall_button = ctk.CTkButton(
             action_bar,
             text="卸载 Hook",
             width=88,
             command=self._uninstall_remote_auto_continue,
-            **button_style("danger"),
+            **button_style("danger", compact=True),
         )
-        uninstall_button.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
+        uninstall_button.grid(row=0, column=4, sticky="w", padx=(0, 8), pady=(0, 4))
         copy_diag_button = ctk.CTkButton(
             action_bar,
             text="复制诊断",
             width=96,
             command=self._copy_remote_auto_diagnostics,
-            **button_style("secondary"),
+            **button_style("secondary", compact=True),
         )
-        copy_diag_button.grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 4))
+        copy_diag_button.grid(row=0, column=5, sticky="w", padx=(0, 8), pady=(0, 4))
         self._remote_auto_buttons = [
             check_button,
             git_snapshot_button,
@@ -930,11 +962,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 is_active = p.name == active
                 is_connected = ssh_manager.ssh_manager.is_connected(p.name)
                 status = "已连接" if is_connected else "未连接"
-                status_color = COLORS["success"] if is_connected else COLORS["muted_soft"]
-
                 info = [
-                    f"地址: {p.host}:{p.port}  |  用户: {p.username}  |  认证: {p.auth_type}",
-                    f"状态: {status}",
+                    f"{p.host}:{p.port}  ·  {p.username}  ·  {p.auth_type}",
                 ]
                 remote_dirs = []
                 if getattr(p, "remote_claude_dir", None):
@@ -942,7 +971,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if getattr(p, "remote_codex_dir", None):
                     remote_dirs.append(f"Codex: {p.remote_codex_dir}")
                 if remote_dirs:
-                    info.append("远端目录: " + "  |  ".join(remote_dirs))
+                    info.append("远端目录: " + "  ·  ".join(remote_dirs))
 
                 card_frame = ctk.CTkFrame(
                     self._cards_frame,
@@ -950,59 +979,53 @@ class SSHTab(ctk.CTkScrollableFrame):
                 )
                 card_frame.pack(fill="x", pady=5)
 
-                # Header
                 top = ctk.CTkFrame(card_frame, fg_color="transparent")
                 top.pack(fill="x", padx=14, pady=(12, 4))
 
                 selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
                 ctk.CTkCheckBox(
                     top,
-                    text="批量操作",
-                    width=84,
+                    text="批量",
+                    width=58,
                     checkbox_width=18,
                     checkbox_height=18,
                     text_color=COLORS["muted"],
                     font=font(12),
                     variable=selected_var,
                     command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
-                ).pack(side="left", padx=(0, 6))
+                ).pack(side="left", padx=(0, 10))
 
-                indicator = ctk.CTkLabel(top, text="●", text_color=status_color, font=font(15))
-                indicator.pack(side="left")
+                status_pill = ctk.CTkLabel(
+                    top,
+                    text=status,
+                    fg_color=COLORS["success"] if is_connected else COLORS["surface_alt"],
+                    corner_radius=999,
+                    text_color=COLORS["text"] if is_connected else COLORS["muted"],
+                    font=font(11, "bold"),
+                    padx=8,
+                    pady=2,
+                )
+                status_pill.pack(side="left", padx=(0, 8))
 
                 name_label = ctk.CTkLabel(top, text=p.name, text_color=COLORS["text"], font=font(15, "bold"))
-                name_label.pack(side="left", padx=(7, 0))
+                name_label.pack(side="left", padx=(0, 0))
 
                 if is_active:
                     ctk.CTkLabel(
                         top,
-                        text="当前",
+                        text="单台目标",
                         fg_color=COLORS["primary"],
-                        corner_radius=4,
+                        corner_radius=999,
                         text_color=COLORS["text"],
                         font=font(11, "bold"),
-                        padx=7,
-                        pady=1,
+                        padx=8,
+                        pady=2,
                     ).pack(side="left", padx=(8, 0))
 
-                # Info
-                info_frame = ctk.CTkFrame(card_frame, fg_color="transparent")
-                info_frame.pack(fill="x", padx=14, pady=(0, 8))
-                for line in info:
-                    lbl = ctk.CTkLabel(
-                        info_frame,
-                        text=line,
-                        text_color=COLORS["muted"],
-                        font=font(12),
-                        anchor="w",
-                        justify="left",
-                    )
-                    lbl.pack(fill="x")
-                    bind_wraplength(info_frame, lbl, padding=4)
+                ctk.CTkFrame(top, fg_color="transparent").pack(side="left", fill="x", expand=True)
 
-                # Buttons
-                btn_frame = ctk.CTkFrame(card_frame, fg_color="transparent")
-                btn_frame.pack(fill="x", padx=14, pady=(0, 12))
+                btn_frame = ctk.CTkFrame(top, fg_color="transparent")
+                btn_frame.pack(side="right")
 
                 if is_connected:
                     ctk.CTkButton(
@@ -1036,6 +1059,20 @@ class SSHTab(ctk.CTkScrollableFrame):
                     command=lambda n=p.name: self._delete_server(n),
                     **button_style("danger", compact=True),
                 ).pack(side="left")
+
+                info_frame = ctk.CTkFrame(card_frame, fg_color="transparent")
+                info_frame.pack(fill="x", padx=14, pady=(0, 12))
+                for line in info:
+                    lbl = ctk.CTkLabel(
+                        info_frame,
+                        text=line,
+                        text_color=COLORS["muted"],
+                        font=font(12),
+                        anchor="w",
+                        justify="left",
+                    )
+                    lbl.pack(fill="x")
+                    bind_wraplength(info_frame, lbl, padding=4)
 
         # Update server combo
         server_names = [p.name for p in profiles]
@@ -1131,15 +1168,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         if selected:
             summary = f"远端批量模式: {self._format_server_target(selected)}"
             hint = (
-                "推送当前/所选、远端清理、Git 同步到 SSH、SSH AI 代理使用远端批量；"
-                f"远端拉取、Git 检查/从 SSH 导入、远端自动续跑仍使用单台目标 {single_target or '未选择'}。"
+                "批量已接管：推送、清理、Git 同步和 SSH AI 代理会作用于已勾选服务器；"
+                f"拉取、Git 检查和自动续跑仍读取单台目标 {single_target or '未选择'}。"
             )
             summary_color = COLORS["accent"]
             current_text = "推送当前到批量"
             selected_text = "推送所选到批量"
         else:
             summary = f"单台模式: {single_target or '未选择服务器'}"
-            hint = "推送/清理/Git 同步到 SSH/SSH AI 代理使用单台目标；要同时操作多台，请勾选服务器卡片里的“批量操作”。远端拉取始终只读取单台目标。"
+            hint = "当前为单台模式；推送、清理、Git 同步和 SSH AI 代理使用下拉目标。要同时操作多台，请勾选服务器卡片。"
             summary_color = COLORS["muted"] if single_target else COLORS["warning"]
             current_text = "推送当前到单台"
             selected_text = "推送所选到单台"
