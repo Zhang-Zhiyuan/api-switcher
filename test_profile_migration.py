@@ -90,6 +90,75 @@ def test_profile_store_normalization_removes_bad_entries(tmp_path, monkeypatch):
     assert persisted["codex_profiles"] == []
 
 
+def test_profile_models_coerce_dirty_persisted_values(tmp_path, monkeypatch):
+    profiles_file = tmp_path / "profiles.json"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    store = profile_manager._get_default_store()
+    store["claude_profiles"] = [
+        {
+            "name": " Dirty Claude ",
+            "auth_token_ref": 123,
+            "base_url": None,
+            "skip_dangerous_prompt": "false",
+            "permissions_allow": ["Read", "", None, 42],
+            "additional_directories": "not-a-list",
+        }
+    ]
+    store["codex_profiles"] = [
+        {
+            "name": "Dirty Codex",
+            "api_key_ref": "",
+            "custom_requires_openai_auth": "yes",
+            "disable_response_storage": "0",
+        }
+    ]
+    store["ssh_profiles"] = [
+        {
+            "name": "Dirty SSH",
+            "host": " example.com ",
+            "port": "70000",
+            "auth_type": "bad",
+        }
+    ]
+    store["browser_profiles"] = [
+        {
+            "name": "Dirty Browser",
+            "browser_type": "unknown",
+            "profile_mode": "external",
+            "user_data_dir": 123,
+            "allow_full_reset": "on",
+            "launch_width": "tiny",
+            "launch_height": 99999,
+        }
+    ]
+    profiles_file.parent.mkdir(parents=True, exist_ok=True)
+    profiles_file.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    claude = profile_manager.list_claude_profiles()[0]
+    codex = profile_manager.list_codex_profiles()[0]
+    ssh = profile_manager.list_ssh_profiles()[0]
+    browser = profile_manager.list_browser_profiles()[0]
+
+    assert claude.name == "Dirty Claude"
+    assert claude.auth_token_ref == "123"
+    assert claude.base_url == ""
+    assert claude.skip_dangerous_prompt is False
+    assert claude.permissions_allow == ["Read", "42"]
+    assert claude.additional_directories == []
+    assert codex.api_key_ref is None
+    assert codex.custom_requires_openai_auth is True
+    assert codex.disable_response_storage is False
+    assert ssh.host == "example.com"
+    assert ssh.port == 65535
+    assert ssh.auth_type == "key"
+    assert browser.browser_type == "chrome"
+    assert browser.profile_mode == "external"
+    assert browser.user_data_dir == "123"
+    assert browser.allow_full_reset is True
+    assert browser.launch_width == 1280
+    assert browser.launch_height == 4320
+
+
 def test_profile_migration_script_checks_are_collected_by_pytest(tmp_path, monkeypatch) -> None:
     profiles_file = tmp_path / "profiles.json"
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
