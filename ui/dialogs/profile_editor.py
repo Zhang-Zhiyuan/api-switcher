@@ -1,7 +1,7 @@
 import customtkinter as ctk
 from ui.widgets.masked_entry import MaskedEntry
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
-from core.providers import CODEX_REASONING_EFFORTS, ProviderRegistry
+from core.providers import ProviderRegistry
 
 
 class ProfileEditorDialog(ctk.CTkToplevel):
@@ -202,15 +202,25 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             model_widget.set(p.model)
         else:
             model_widget.set(default_provider.default_model if default_provider else "")
+        self._bind_model_effort_refresh(model_widget)
         self._attach_refresh_button("model")
 
         # 推理力度
         self._add_field(parent, "推理力度", "effort_level",
-                        default_provider.reasoning_efforts if default_provider else [], "combo")
+                        ProviderRegistry.get_reasoning_efforts_for_model(
+                            default_provider.name if default_provider else "",
+                            model_widget.get(),
+                        ),
+                        "combo")
         if p:
             self._fields["effort_level"][0].set(p.effort_level)
         else:
-            self._fields["effort_level"][0].set("high")
+            self._fields["effort_level"][0].set(
+                ProviderRegistry.get_default_reasoning_effort_for_model(
+                    default_provider.name if default_provider else "",
+                    model_widget.get(),
+                ) or "high"
+            )
 
         self._add_field(parent, "权限模式", "permissions_mode",
                         ["dontAsk", "acceptEdits", "bypassPermissions", "default", "plan", "auto"], "combo")
@@ -234,6 +244,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._fields["base_url"][0].insert(0, p.base_url)
                 self._fields["model"][0].set(p.model)
                 self._fields["effort_level"][0].set(p.effort_level)
+                self._refresh_reasoning_effort_options("effort_level", self._current_claude_provider())
 
     def _build_codex_fields(self, parent):
         p = self._profile
@@ -271,15 +282,25 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             model_widget.set(p.model)
         else:
             model_widget.set(default_provider.default_model if default_provider else "")
+        self._bind_model_effort_refresh(model_widget)
         self._attach_refresh_button("model")
 
         # 推理力度 - 改为下拉框
         self._add_field(parent, "推理力度", "model_reasoning_effort",
-                        CODEX_REASONING_EFFORTS, "combo")
+                        ProviderRegistry.get_reasoning_efforts_for_model(
+                            default_provider.name if default_provider else "",
+                            model_widget.get(),
+                        ),
+                        "combo")
         if p:
             self._fields["model_reasoning_effort"][0].set(p.model_reasoning_effort)
         else:
-            self._fields["model_reasoning_effort"][0].set("high")
+            self._fields["model_reasoning_effort"][0].set(
+                ProviderRegistry.get_default_reasoning_effort_for_model(
+                    default_provider.name if default_provider else "",
+                    model_widget.get(),
+                ) or "high"
+            )
 
         self._add_field(parent, "自定义端点", "custom_base_url", p.custom_base_url if p else "")
         self._add_field(parent, "自定义名称", "custom_name", p.custom_name if p else "")
@@ -313,6 +334,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._set_wire_api_value(p.custom_wire_api)
                 self._fields["custom_env_key"][0].delete(0, "end")
                 self._fields["custom_env_key"][0].insert(0, p.custom_env_key or ProviderRegistry.get_codex_env_key_for_profile(p))
+                self._refresh_reasoning_effort_options("model_reasoning_effort", self._current_codex_provider())
 
     def _get_value(self, key):
         widget, ftype = self._fields[key]
@@ -353,7 +375,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             parts.append(provider.notes)
 
         if provider.reasoning_efforts:
-            parts.append(f"推理力度可选: {', '.join(provider.reasoning_efforts)}。")
+            parts.append(f"推理力度会随模型调整，基础可选: {', '.join(provider.reasoning_efforts)}；Opus 类模型会额外显示 max。")
         else:
             parts.append("该 provider 不暴露推理力度；保存时会自动忽略推理力度字段。")
 
@@ -393,6 +415,55 @@ class ProfileEditorDialog(ctk.CTkToplevel):
     def _current_claude_provider(self):
         return ProviderRegistry.get_provider_by_display_name(self._fields["provider"][0].get())
 
+    def _bind_model_effort_refresh(self, model_widget) -> None:
+        model_widget.configure(command=lambda _value: self._on_model_change())
+        try:
+            model_widget.bind("<FocusOut>", lambda _event: self._on_model_change())
+            model_widget.bind("<Return>", lambda _event: self._on_model_change())
+        except Exception:
+            pass
+
+    def _on_model_change(self) -> None:
+        if self._profile_type == "claude":
+            self._refresh_reasoning_effort_options(
+                "effort_level",
+                self._current_claude_provider(),
+                force_model_default=True,
+            )
+        else:
+            self._refresh_reasoning_effort_options(
+                "model_reasoning_effort",
+                self._current_codex_provider(),
+                force_model_default=True,
+            )
+
+    def _refresh_reasoning_effort_options(self, field_key: str, provider, force_model_default: bool = False) -> None:
+        if field_key not in self._fields or "model" not in self._fields:
+            return
+        effort_widget, _ = self._fields[field_key]
+        effort_row = effort_widget.master
+        model = self._fields["model"][0].get()
+        efforts = ProviderRegistry.get_reasoning_efforts_for_model(
+            provider.name if provider else "",
+            model,
+            getattr(self._profile, "custom_name", None),
+        )
+        if not efforts:
+            effort_row.pack_forget()
+            return
+
+        effort_row.pack(fill="x", pady=5)
+        effort_widget.configure(values=efforts)
+
+        current = str(effort_widget.get() or "").strip()
+        preferred = ProviderRegistry.get_default_reasoning_effort_for_model(provider.name if provider else "", model)
+        should_use_preferred = current not in efforts
+        if force_model_default and preferred in efforts and current in {"", "high", "xhigh"} and current != preferred:
+            should_use_preferred = True
+
+        if should_use_preferred:
+            effort_widget.set(preferred if preferred in efforts else efforts[0])
+
     def _on_claude_provider_change(self, provider_display_name):
         """当 Claude Provider 改变时更新相关字段"""
         provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
@@ -416,17 +487,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 model_widget.configure(values=[""])
                 model_widget.set("")
 
-        # 更新推理力度可见性
-        if "effort_level" in self._fields:
-            effort_widget, _ = self._fields["effort_level"]
-            effort_row = effort_widget.master
-            if provider.reasoning_efforts:
-                effort_row.pack(fill="x", pady=5)
-                effort_widget.configure(values=provider.reasoning_efforts)
-                if effort_widget.get() not in provider.reasoning_efforts:
-                    effort_widget.set(provider.reasoning_efforts[0])
-            else:
-                effort_row.pack_forget()
+        self._refresh_reasoning_effort_options("effort_level", provider, force_model_default=True)
 
         # 更新自定义名称可见性
         if "custom_provider_name" in self._fields:
@@ -463,17 +524,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             else:
                 self._fields["model"][0].configure(values=[""])
                 self._fields["model"][0].set("")
-        # 更新推理力度可见性
-        if "model_reasoning_effort" in self._fields:
-            effort_widget, _ = self._fields["model_reasoning_effort"]
-            effort_row = effort_widget.master
-            if provider.reasoning_efforts:
-                effort_row.pack(fill="x", pady=5)
-                effort_widget.configure(values=provider.reasoning_efforts)
-                if effort_widget.get() not in provider.reasoning_efforts:
-                    effort_widget.set(provider.reasoning_efforts[0])
-            else:
-                effort_row.pack_forget()
+        self._refresh_reasoning_effort_options("model_reasoning_effort", provider, force_model_default=True)
 
     def _test_connection(self):
         """Test API connection with current settings."""
@@ -559,6 +610,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._set_test_busy(False)
         if getattr(result, "selected_model", None) and "model" in self._fields:
             self._fields["model"][0].set(result.selected_model)
+            self._on_model_change()
         if getattr(result, "recommended_wire_api", None) and "custom_wire_api" in self._fields:
             self._set_wire_api_value(result.recommended_wire_api)
         self._show_test_result(result, profile_name)
@@ -670,6 +722,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         )
         model_widget.configure(values=sorted_models)
         model_widget.set(recommended or sorted_models[0])
+        self._on_model_change()
         suffix = f"；已选择推荐模型 {recommended}" if recommended else ""
         self._show_error(message + suffix) if is_error else self._show_status(message + suffix, "success")
 

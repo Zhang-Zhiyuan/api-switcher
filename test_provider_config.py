@@ -101,6 +101,39 @@ def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
     assert config["model_providers"]["layer4"]["wire_api"] == "responses"
 
 
+def test_reasoning_efforts_follow_model_family():
+    assert ProviderRegistry.get_reasoning_efforts_for_model("layer4", "gpt-5.5") == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert ProviderRegistry.get_reasoning_efforts_for_model("layer4", "claude-opus-4-7") == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert ProviderRegistry.get_reasoning_efforts_for_model("anthropic", "claude-opus-4-7[1m]") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert ProviderRegistry.get_reasoning_efforts_for_model("anthropic", "claude-sonnet-4-6") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert ProviderRegistry.get_default_reasoning_effort_for_model("layer4", "gpt-5.5") == "xhigh"
+    assert ProviderRegistry.get_default_reasoning_effort_for_model("layer4", "claude-opus-4-7") == "max"
+
+
 def check_claude_provider(provider_id, model, base_url, writes_effort):
     profile = ClaudeProfile(
         name=provider_id,

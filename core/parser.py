@@ -97,7 +97,7 @@ def clear_claude_api_overrides(settings: dict) -> dict:
         settings["model"] = "claude-sonnet-4"
 
     effort = str(settings.get("effortLevel") or "").strip()
-    if effort and effort not in {"low", "medium", "high", "xhigh"}:
+    if effort and effort not in {"low", "medium", "high", "xhigh", "max"}:
         settings["effortLevel"] = "high"
     return settings
 

@@ -89,6 +89,16 @@ def test_switch_claude_account_preserves_official_model_aliases(isolated_account
     assert settings["model"] == "claude-sonnet-4"
 
 
+def test_switch_claude_account_preserves_max_reasoning_effort(isolated_accounts):
+    settings = parser.clear_claude_api_overrides({
+        "model": "claude-opus-4-7",
+        "effortLevel": "max",
+        "env": {},
+    })
+
+    assert settings["effortLevel"] == "max"
+
+
 def test_anthropic_presets_include_opus_1m_alias():
     provider = ProviderRegistry.get_provider("anthropic")
     assert provider is not None

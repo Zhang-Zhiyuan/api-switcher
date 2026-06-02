@@ -247,6 +247,41 @@ class ProviderRegistry:
         return provider.reasoning_efforts if provider else []
 
     @staticmethod
+    def model_supports_max_reasoning(model: str | None) -> bool:
+        normalized = str(model or "").strip().lower()
+        if not normalized:
+            return False
+        return "opus" in normalized
+
+    @staticmethod
+    def get_reasoning_efforts_for_model(
+        provider_name: str,
+        model: str | None,
+        custom_name: str | None = None,
+    ) -> list[str]:
+        provider = PROVIDERS.get(provider_name)
+        if not provider and custom_name:
+            provider = ProviderRegistry.get_provider_by_display_name(custom_name)
+        if not provider or not provider.reasoning_efforts:
+            return []
+
+        efforts = list(provider.reasoning_efforts)
+        if ProviderRegistry.model_supports_max_reasoning(model) and "xhigh" in efforts and "max" not in efforts:
+            efforts.append("max")
+        return efforts
+
+    @staticmethod
+    def get_default_reasoning_effort_for_model(provider_name: str, model: str | None) -> str:
+        efforts = ProviderRegistry.get_reasoning_efforts_for_model(provider_name, model)
+        if ProviderRegistry.model_supports_max_reasoning(model) and "max" in efforts:
+            return "max"
+        if "xhigh" in efforts:
+            return "xhigh"
+        if "high" in efforts:
+            return "high"
+        return efforts[0] if efforts else ""
+
+    @staticmethod
     def supports_reasoning_effort(provider_name: str) -> bool:
         provider = PROVIDERS.get(provider_name)
         return bool(provider and provider.reasoning_efforts)
