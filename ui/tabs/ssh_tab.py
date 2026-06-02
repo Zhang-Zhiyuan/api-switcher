@@ -296,16 +296,16 @@ class SSHTab(ctk.CTkScrollableFrame):
         push_button_frame.grid(row=2, column=3, sticky="e", pady=(12, 0))
         self._sync_current_button = ctk.CTkButton(
             push_button_frame,
-            text="推送当前",
-            width=118,
+            text="推送当前生效",
+            width=132,
             command=self._sync_current,
             **button_style("primary", compact=True),
         )
         self._sync_current_button.pack(side="left", padx=(0, 6))
         self._sync_selected_button = ctk.CTkButton(
             push_button_frame,
-            text="推送所选",
-            width=118,
+            text="推送所选配置",
+            width=132,
             command=self._sync_selected,
             **button_style("primary", compact=True),
         )
@@ -1135,14 +1135,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             summary = f"已选目标: {self._format_server_target(selected)}"
             hint = "所有写入/部署操作使用已选目标；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。"
             summary_color = COLORS["accent"]
-            current_text = "推送当前"
-            selected_text = "推送所选"
+            current_text = "推送当前生效"
+            selected_text = "推送所选配置"
         else:
             summary = "未选择目标服务器"
             hint = "请先在上方服务器卡片勾选目标。选 1 台就是单台操作，选多台就是批量。"
             summary_color = COLORS["warning"]
-            current_text = "推送当前"
-            selected_text = "推送所选"
+            current_text = "推送当前生效"
+            selected_text = "推送所选配置"
 
         if self._target_summary_label:
             self._target_summary_label.configure(text=summary, text_color=summary_color)
@@ -2232,7 +2232,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not self._codex_wire_api_hint:
             return
         if self._selected_sync_kind() == "codex_api":
-            text = "影响“推送所选”和“推送当前生效”里的 Codex API；远端自测会在服务器上各跑 3 次并回写最稳选项。"
+            text = "影响“推送所选配置”和“推送当前生效”里的 Codex API；远端自测会在服务器上各跑 3 次并回写最稳选项。"
         else:
             text = "仅影响“推送当前生效”里的 Codex API；推送 Claude 或账号快照时会自动忽略。"
         self._codex_wire_api_hint.configure(text=text)
