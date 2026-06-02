@@ -373,7 +373,7 @@ def test_script_generation():
     codex_script = generate_codex_error_recovery_script(settings_path)
     print(f"  脚本长度: {len(codex_script)} 字符")
     print(f"  包含错误分类: {'Get-ErrorType' in codex_script}")
-    print(f"  包含压缩命令: {'compress' in codex_script}")
+    print(f"  包含压缩命令: {'compact' in codex_script}")
     assert "context.*window.*(limit|full|exceed|overflow)" in codex_script
     assert "model.*reached.*context.*window.*limit" in codex_script
     assert "content_length_exceeds_threshold" in codex_script
@@ -392,7 +392,7 @@ def test_script_generation():
     assert "disconnect/reset before headers" in codex_script
     assert "connection termination" in codex_script
     assert "backend-api/codex/responses/compact" in codex_script
-    assert 'commands = @("/compress", "继续")' in codex_script
+    assert 'command = "compact"' in codex_script
     assert "压缩任务连接中断" in codex_script
     assert "error_retry_initial_delay_seconds" in codex_script
     assert "error_retry_max_delay_seconds" in codex_script
@@ -1807,7 +1807,10 @@ def test_local_codex_error_hook_outputs_clean_json_with_git_snapshot(tmp_path):
     assert not result.stdout.lstrip().startswith(("False", "True"))
     output = json.loads(result.stdout)
     assert output["recover"] is True
-    assert output["commands"] == ["/compress", "继续"]
+    assert output["decision"] == "recover"
+    assert output["commands"][0]["type"] == "slash_command"
+    assert output["commands"][0]["command"] == "compact"
+    assert output["commands"][1]["type"] == "user_message"
     assert "AsHashtable" not in result.stderr
 
     second = subprocess.run(
@@ -1886,14 +1889,17 @@ def test_local_codex_error_hook_uses_configured_backoff_for_disconnects(tmp_path
     first_output = json.loads(first.stdout)
     assert first_output["recover"] is True
     assert first_output["wait"] == 7
-    assert first_output["commands"][0] == "/compress"
+    assert first_output["decision"] == "recover"
+    assert first_output["commands"][0]["type"] == "slash_command"
+    assert first_output["commands"][0]["command"] == "compact"
 
     second = run_hook()
     assert second.returncode == 0, second.stderr
     second_output = json.loads(second.stdout)
     assert second_output["recover"] is True
     assert second_output["wait"] == 10
-    assert second_output["commands"][0] == "/compress"
+    assert second_output["commands"][0]["type"] == "slash_command"
+    assert second_output["commands"][0]["command"] == "compact"
 
     third = run_hook()
     assert third.returncode == 0, third.stderr
@@ -3235,12 +3241,14 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     prompt_commands = event_commands("UserPromptSubmit")
     session_commands = event_commands("SessionStart")
     error_commands = event_commands("Error")
+    response_error_commands = event_commands("ResponseError")
     assert "powershell.exe -File user_stop.ps1" in stop_commands
     assert any("auto_continue_stop.ps1" in command for command in stop_commands)
     assert any("auto_continue_stop.ps1" in command for command in prompt_commands)
     assert any("auto_continue_stop.ps1" in command for command in session_commands)
     assert "powershell.exe -File user_error.ps1" in error_commands
     assert any("error_recovery.ps1" in command for command in error_commands)
+    assert any("error_recovery.ps1" in command for command in response_error_commands)
     assert provider.is_hook_registered()
     assert provider.is_error_recovery_installed() is False
     try:
@@ -3262,10 +3270,12 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     prompt_commands = event_commands("UserPromptSubmit")
     session_commands = event_commands("SessionStart")
     error_commands = event_commands("Error")
+    response_error_commands = event_commands("ResponseError")
     assert stop_commands == ["powershell.exe -File user_stop.ps1"]
     assert prompt_commands == []
     assert session_commands == []
     assert error_commands == ["powershell.exe -File user_error.ps1"]
+    assert response_error_commands == []
     config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
     assert config["features"]["codex_hooks"] is True
 

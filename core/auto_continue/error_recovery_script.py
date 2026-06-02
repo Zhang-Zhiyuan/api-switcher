@@ -815,6 +815,7 @@ try {{
         # 压缩并继续
         $output = @{{
             decision = "recover"
+            recover = $true
             commands = @(
                 @{{
                     type = "slash_command"
@@ -835,6 +836,7 @@ try {{
 
         $output = @{{
             decision = "recover"
+            recover = $true
             commands = @(
                 @{{
                     type = "wait"
@@ -1410,13 +1412,25 @@ try {{
     $output = $null
 
     if ($errorType -eq "content_length") {{
-        # Codex CLI 使用 /compress 命令
+        # Codex CLI uses the compact slash command. Emit the structured command
+        # shape accepted by current hooks instead of the legacy /compress text.
         $output = @{{
+            decision = "recover"
             recover = $true
-            commands = @("/compress", "继续")
+            commands = @(
+                @{{
+                    type = "slash_command"
+                    command = "compact"
+                }},
+                @{{
+                    type = "user_message"
+                    message = "继续"
+                }}
+            )
+            suppressOutput = $true
             userMessage = "对话内容过长，正在自动压缩并继续..."
-        }} | ConvertTo-Json
-        Write-Log "Recovery: /compress + continue" "INFO"
+        }} | ConvertTo-Json -Depth 10
+        Write-Log "Recovery: compact + continue" "INFO"
 
     }} elseif ($errorType -eq "rate_limit") {{
         # 等待后重试
@@ -1435,15 +1449,26 @@ try {{
         $commands = @("继续")
         $userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
         if ($errorMessage -match "remote compact task|backend-api/codex/responses/compact|responses/compact") {{
-            $commands = @("/compress", "继续")
+            $commands = @(
+                @{{
+                    type = "slash_command"
+                    command = "compact"
+                }},
+                @{{
+                    type = "user_message"
+                    message = "继续"
+                }}
+            )
             $userMessage = "压缩任务连接中断，等待 $backoffSeconds 秒后重新压缩并继续..."
         }}
         $output = @{{
+            decision = "recover"
             recover = $true
             wait = $backoffSeconds
             commands = $commands
+            suppressOutput = $true
             userMessage = $userMessage
-        }} | ConvertTo-Json
+        }} | ConvertTo-Json -Depth 10
         Write-Log "Recovery: backoff $backoffSeconds seconds + continue" "INFO"
 
     }} elseif ($errorType -in @("auth", "quota", "permission")) {{

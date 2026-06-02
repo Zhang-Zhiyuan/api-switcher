@@ -84,6 +84,10 @@ def _codex_event_has_command(data: dict, event_name: str, marker: str) -> bool:
     return any(marker in str(hook.get("command", "")) for hook in candidates)
 
 
+def _codex_events_have_command(data: dict, event_names: tuple[str, ...], marker: str) -> bool:
+    return all(_codex_event_has_command(data, event_name, marker) for event_name in event_names)
+
+
 def _codex_hooks_has_entries(hooks: dict) -> bool:
     if not isinstance(hooks, dict):
         return False
@@ -189,6 +193,8 @@ def _read_codex_hooks_json(path: Path, *, recover: bool = False) -> dict | None:
 
 class CodexProvider(AutoContinueProvider):
     """Auto-continue provider for Codex CLI."""
+
+    ERROR_RECOVERY_EVENTS = ("Error", "ResponseError")
 
     def __init__(self):
         super().__init__("codex")
@@ -491,14 +497,17 @@ Only stop when you encounter a genuine blocker that requires user input or decis
 
         hooks = _codex_hooks_container(data, migrate_legacy=True)
 
-        # 注册 Error hook
+        # Register both event names. Older Codex builds used Error, while newer
+        # hook payloads and the settings UI refer to ResponseError.
         script_path = str(self.get_error_recovery_script_path()).replace("\\", "\\\\")
-        _upsert_codex_event_hook(hooks, "Error", {
+        hook_def = {
             "type": "command",
             "command": f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
             "timeout": 10,
             "statusMessage": "Checking for Codex API errors and auto-recovery"
-        }, "error_recovery.ps1")
+        }
+        for event_name in self.ERROR_RECOVERY_EVENTS:
+            _upsert_codex_event_hook(hooks, event_name, hook_def, "error_recovery.ps1")
 
         # 写入 hooks.json
         atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
@@ -525,7 +534,9 @@ Only stop when you encounter a genuine blocker that requires user input or decis
                 return
             hooks = _codex_hooks_container(data, migrate_legacy=True)
 
-            changed = _remove_codex_event_hook(hooks, "Error", "error_recovery.ps1")
+            changed = False
+            for event_name in self.ERROR_RECOVERY_EVENTS:
+                changed = _remove_codex_event_hook(hooks, event_name, "error_recovery.ps1") or changed
 
             atomic_write_text(hooks_path, json.dumps(data, indent=2, ensure_ascii=False))
 
@@ -551,7 +562,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
             if not isinstance(data, dict):
                 return False
 
-            return _codex_event_has_command(data, "Error", "error_recovery.ps1")
+            return _codex_events_have_command(data, self.ERROR_RECOVERY_EVENTS, "error_recovery.ps1")
         except Exception:
             return False
 
