@@ -631,7 +631,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
         for site_id, enabled in raw_sites.items():
             site_key = str(site_id or "").strip()
             if site_key in LOCAL_PROXY_BUILTIN_SITE_IDS:
-                builtin_sites[site_key] = bool(enabled)
+                builtin_sites[site_key] = _coerce_bool(enabled)
 
     custom_targets = []
     seen_custom = set()
@@ -653,7 +653,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
                 "target": normalized["target"],
                 "kind": normalized["kind"],
                 "value": normalized["value"],
-                "enabled": bool(item.get("enabled", True)),
+                "enabled": _coerce_bool(item.get("enabled"), True),
                 "created_at": str(item.get("created_at") or remote_proxy._now_iso()),
             })
 
@@ -665,14 +665,31 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
             last_node = None
 
     return {
-        "start_on_login": bool(raw.get("start_on_login")),
-        "keep_running_on_exit": bool(raw.get("keep_running_on_exit", True)),
-        "proxy_non_cn": bool(raw.get("proxy_non_cn")),
+        "start_on_login": _coerce_bool(raw.get("start_on_login")),
+        "keep_running_on_exit": _coerce_bool(raw.get("keep_running_on_exit"), True),
+        "proxy_non_cn": _coerce_bool(raw.get("proxy_non_cn")),
         "builtin_sites": builtin_sites,
         "custom_targets": custom_targets,
         "last_node": last_node,
         "updated_at": str(raw.get("updated_at") or ""),
     }
+
+
+def _coerce_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 
 def _extract_host_from_target(raw: str) -> str:

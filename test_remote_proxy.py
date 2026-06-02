@@ -1235,6 +1235,32 @@ def test_local_proxy_keep_running_on_exit_defaults_to_enabled(monkeypatch, tmp_p
     assert local_proxy.local_proxy_keep_running_on_exit_enabled() is True
 
 
+def test_local_proxy_preferences_parse_string_booleans(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    payload = {
+        "start_on_login": "false",
+        "keep_running_on_exit": "off",
+        "proxy_non_cn": "yes",
+        "builtin_sites": {"github": "true", "youtube": "0"},
+        "custom_targets": [
+            {"target": "example.com", "enabled": "false"},
+            {"target": "8.8.8.8", "enabled": "on"},
+        ],
+    }
+    local_proxy.LOCAL_PROXY_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    local_proxy.LOCAL_PROXY_PREFS_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    preferences = local_proxy.load_local_proxy_preferences()
+
+    assert preferences["start_on_login"] is False
+    assert preferences["keep_running_on_exit"] is False
+    assert preferences["proxy_non_cn"] is True
+    assert preferences["builtin_sites"]["github"] is True
+    assert preferences["builtin_sites"]["youtube"] is False
+    assert preferences["custom_targets"][0]["enabled"] is False
+    assert preferences["custom_targets"][1]["enabled"] is True
+
+
 def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
