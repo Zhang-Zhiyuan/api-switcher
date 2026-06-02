@@ -102,6 +102,7 @@ def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
 
 
 def test_reasoning_efforts_follow_model_family():
+    assert ProviderRegistry.model_supports_max_reasoning("claude-notopus-model") is False
     assert ProviderRegistry.get_reasoning_efforts_for_model("layer4", "gpt-5.5") == [
         "minimal",
         "low",
@@ -132,6 +133,11 @@ def test_reasoning_efforts_follow_model_family():
     ]
     assert ProviderRegistry.get_default_reasoning_effort_for_model("layer4", "gpt-5.5") == "xhigh"
     assert ProviderRegistry.get_default_reasoning_effort_for_model("layer4", "claude-opus-4-7") == "max"
+    assert ProviderRegistry.get_default_reasoning_effort_for_model(
+        "relay",
+        "claude-opus-4-7",
+        custom_name="Custom",
+    ) == "max"
 
 
 def check_claude_provider(provider_id, model, base_url, writes_effort):

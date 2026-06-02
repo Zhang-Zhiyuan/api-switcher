@@ -24,6 +24,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._test_busy = False
         self._refresh_busy = False
         self._refresh_buttons = []
+        self._last_model_for_effort_options = None
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -424,17 +425,19 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             pass
 
     def _on_model_change(self) -> None:
+        model = self._fields["model"][0].get().strip() if "model" in self._fields else ""
+        force_model_default = model != self._last_model_for_effort_options
         if self._profile_type == "claude":
             self._refresh_reasoning_effort_options(
                 "effort_level",
                 self._current_claude_provider(),
-                force_model_default=True,
+                force_model_default=force_model_default,
             )
         else:
             self._refresh_reasoning_effort_options(
                 "model_reasoning_effort",
                 self._current_codex_provider(),
-                force_model_default=True,
+                force_model_default=force_model_default,
             )
 
     def _refresh_reasoning_effort_options(self, field_key: str, provider, force_model_default: bool = False) -> None:
@@ -442,27 +445,34 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             return
         effort_widget, _ = self._fields[field_key]
         effort_row = effort_widget.master
-        model = self._fields["model"][0].get()
+        model = self._fields["model"][0].get().strip()
+        custom_name = getattr(self._profile, "custom_name", None)
         efforts = ProviderRegistry.get_reasoning_efforts_for_model(
             provider.name if provider else "",
             model,
-            getattr(self._profile, "custom_name", None),
+            custom_name,
         )
         if not efforts:
             effort_row.pack_forget()
+            self._last_model_for_effort_options = model
             return
 
         effort_row.pack(fill="x", pady=5)
         effort_widget.configure(values=efforts)
 
         current = str(effort_widget.get() or "").strip()
-        preferred = ProviderRegistry.get_default_reasoning_effort_for_model(provider.name if provider else "", model)
+        preferred = ProviderRegistry.get_default_reasoning_effort_for_model(
+            provider.name if provider else "",
+            model,
+            custom_name,
+        )
         should_use_preferred = current not in efforts
         if force_model_default and preferred in efforts and current in {"", "high", "xhigh"} and current != preferred:
             should_use_preferred = True
 
         if should_use_preferred:
             effort_widget.set(preferred if preferred in efforts else efforts[0])
+        self._last_model_for_effort_options = model
 
     def _on_claude_provider_change(self, provider_display_name):
         """当 Claude Provider 改变时更新相关字段"""

@@ -251,7 +251,12 @@ class ProviderRegistry:
         normalized = str(model or "").strip().lower()
         if not normalized:
             return False
-        return "opus" in normalized
+        if normalized in {"opus", "opus[1m]", "opusplan"}:
+            return True
+        tokenized = normalized
+        for separator in ["[", "]", "_", ".", "/", "\\", ":", " "]:
+            tokenized = tokenized.replace(separator, "-")
+        return "opus" in {token for token in tokenized.split("-") if token}
 
     @staticmethod
     def get_reasoning_efforts_for_model(
@@ -271,8 +276,12 @@ class ProviderRegistry:
         return efforts
 
     @staticmethod
-    def get_default_reasoning_effort_for_model(provider_name: str, model: str | None) -> str:
-        efforts = ProviderRegistry.get_reasoning_efforts_for_model(provider_name, model)
+    def get_default_reasoning_effort_for_model(
+        provider_name: str,
+        model: str | None,
+        custom_name: str | None = None,
+    ) -> str:
+        efforts = ProviderRegistry.get_reasoning_efforts_for_model(provider_name, model, custom_name)
         if ProviderRegistry.model_supports_max_reasoning(model) and "max" in efforts:
             return "max"
         if "xhigh" in efforts:
