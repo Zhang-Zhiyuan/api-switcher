@@ -1,5 +1,6 @@
 import importlib
 import logging
+import os
 import threading
 
 import customtkinter as ctk
@@ -37,6 +38,7 @@ class App(ctk.CTk):
         self._exit_requested = False
         self._tray_hint_shown = False
         self._close_dialog = None
+        self._force_exit_timer_started = False
         self._tab_frames = {}
         self._tab_class_cache = {}
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
@@ -533,9 +535,61 @@ class App(ctk.CTk):
             return
         self._exit_requested = True
         logger.info("Exiting application")
-        self.tray_manager.stop()
-        self.quit()
-        self.destroy()
+        self._schedule_force_exit_fallback()
+        self._shutdown_runtime_resources()
+        try:
+            self.quit()
+        except Exception as e:
+            logger.debug("Failed to quit mainloop cleanly: %s", e)
+        try:
+            self.destroy()
+        except Exception as e:
+            logger.debug("Failed to destroy main window cleanly: %s", e)
+
+    def _schedule_force_exit_fallback(self) -> None:
+        """Ensure a requested exit cannot leave the Python process stuck forever."""
+        if self._force_exit_timer_started:
+            return
+        self._force_exit_timer_started = True
+
+        def force_exit_if_still_alive() -> None:
+            logger.error("Forced process exit after graceful shutdown timeout")
+            os._exit(0)
+
+        timer = threading.Timer(6.0, force_exit_if_still_alive)
+        timer.daemon = True
+        timer.start()
+
+    def _shutdown_runtime_resources(self) -> None:
+        """Best-effort cleanup for resources that can keep the process alive."""
+        try:
+            if self._close_dialog and self._close_dialog.winfo_exists():
+                self._close_dialog.destroy()
+        except Exception as e:
+            logger.debug("Failed to close exit dialog: %s", e)
+        self._close_dialog = None
+
+        for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
+            tab = getattr(self, attr, None)
+            if tab is None:
+                continue
+            try:
+                if tab.winfo_exists():
+                    tab.destroy()
+            except Exception as e:
+                logger.debug("Failed to destroy tab %s: %s", attr, e)
+
+        try:
+            self.tray_manager.stop()
+        except Exception as e:
+            logger.warning("Failed to stop tray manager during exit: %s", e)
+
+        try:
+            from core.ssh_manager import ssh_manager
+
+            ssh_manager.disconnect_all()
+        except Exception as e:
+            logger.warning("Failed to disconnect SSH sessions during exit: %s", e)
 
     def _on_startup_changed_from_tray(self):
         def refresh_startup():

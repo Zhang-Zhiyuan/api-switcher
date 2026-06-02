@@ -30,3 +30,30 @@ def test_tray_menu_accepts_profile_actions(monkeypatch):
 
     assert menu
     assert any(item is pystray_module.Menu.SEPARATOR for item in menu)
+
+
+def test_tray_stop_stops_icon_and_joins_thread():
+    stopped = []
+    joined = []
+
+    class FakeIcon:
+        def stop(self):
+            stopped.append(True)
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            joined.append(timeout)
+
+    manager = tray_manager.TrayManager(lambda *_: None, lambda *_: None)
+    manager.icon = FakeIcon()
+    manager._thread = FakeThread()
+
+    manager.stop(timeout=0.25)
+
+    assert stopped == [True]
+    assert joined == [0.25]
+    assert manager.icon is None
+    assert manager._thread is None

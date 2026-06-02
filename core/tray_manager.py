@@ -299,14 +299,24 @@ class TrayManager:
         self._thread.start()
         logger.info("Tray icon thread started")
 
-    def stop(self):
+    def stop(self, timeout: float = 2.0):
         """Stop the tray icon."""
         if not self.icon:
             return
         logger.info("Stopping tray icon")
         icon = self.icon
         self.icon = None
-        icon.stop()
+        try:
+            icon.stop()
+        except Exception as e:
+            logger.warning("Error stopping tray icon: %s", e)
+
+        thread = self._thread
+        if thread and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                logger.warning("Tray icon thread did not stop within %.1f seconds", timeout)
+        self._thread = None
 
     def is_running(self) -> bool:
         """Check if tray icon is running."""
