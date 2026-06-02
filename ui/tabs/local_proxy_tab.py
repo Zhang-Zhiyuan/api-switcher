@@ -30,6 +30,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._periodic_update_running = False
         self._startup_refresh_after_id = None
         self._start_on_login_var = ctk.BooleanVar(value=False)
+        self._keep_running_on_exit_var = ctk.BooleanVar(value=True)
         self._proxy_non_cn_var = ctk.BooleanVar(value=False)
         self._builtin_site_vars = {}
         self._custom_target_entry = None
@@ -91,6 +92,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         startup_box.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         startup_box.grid_columnconfigure(0, weight=1)
         startup_box.grid_columnconfigure(1, weight=1)
+        startup_box.grid_columnconfigure(2, weight=1)
         ctk.CTkCheckBox(
             startup_box,
             text="开机自动启动本机代理",
@@ -103,6 +105,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).grid(row=0, column=0, sticky="w", padx=(0, 16))
         ctk.CTkCheckBox(
             startup_box,
+            text="退出程序后继续运行",
+            variable=self._keep_running_on_exit_var,
+            command=self._on_keep_running_on_exit_toggle,
+            checkbox_width=18,
+            checkbox_height=18,
+            text_color=COLORS["text"],
+            font=font(12),
+        ).grid(row=0, column=1, sticky="w", padx=(0, 16))
+        ctk.CTkCheckBox(
+            startup_box,
             text="代理大陆境外 IP",
             variable=self._proxy_non_cn_var,
             command=self._on_proxy_non_cn_toggle,
@@ -110,7 +122,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             checkbox_height=18,
             text_color=COLORS["text"],
             font=font(12),
-        ).grid(row=0, column=1, sticky="w")
+        ).grid(row=0, column=2, sticky="w")
         self._apply_routing_button = ctk.CTkButton(
             startup_box,
             text="应用规则",
@@ -118,7 +130,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             command=self._apply_saved_routing,
             **button_style("secondary", compact=True),
         )
-        self._apply_routing_button.grid(row=0, column=2, sticky="e")
+        self._apply_routing_button.grid(row=0, column=3, sticky="e")
 
         ctk.CTkLabel(
             policy,
@@ -490,6 +502,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _load_proxy_preferences_ui(self):
         preferences = local_proxy.load_local_proxy_preferences()
         self._start_on_login_var.set(bool(preferences.get("start_on_login")))
+        self._keep_running_on_exit_var.set(bool(preferences.get("keep_running_on_exit", True)))
         self._proxy_non_cn_var.set(bool(preferences.get("proxy_non_cn")))
         builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
         for site_id, var in self._builtin_site_vars.items():
@@ -609,6 +622,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             f"{suffix}。",
             "success",
         )
+
+    def _on_keep_running_on_exit_toggle(self):
+        enabled = bool(self._keep_running_on_exit_var.get())
+        try:
+            local_proxy.set_local_proxy_keep_running_on_exit(enabled)
+        except Exception as e:
+            message = f"保存退出后代理运行策略失败: {e}"
+            self._load_proxy_preferences_ui()
+            self._set_routing_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        if enabled:
+            self._set_routing_status("已设置为退出程序后继续保持 Win11 本机代理运行。", "success")
+        else:
+            self._set_routing_status("已设置为退出程序时停止 Win11 本机代理并恢复启动前代理设置。", "warning")
 
     def _on_proxy_non_cn_toggle(self):
         enabled = bool(self._proxy_non_cn_var.get())

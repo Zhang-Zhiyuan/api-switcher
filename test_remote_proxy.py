@@ -1221,6 +1221,20 @@ def test_local_proxy_preferences_build_custom_routing_rules(monkeypatch, tmp_pat
     assert "IP-CIDR,8.8.8.8/32,AI-PROXY,no-resolve" not in updated
 
 
+def test_local_proxy_keep_running_on_exit_defaults_to_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+
+    assert local_proxy.local_proxy_keep_running_on_exit_enabled() is True
+
+    saved = local_proxy.set_local_proxy_keep_running_on_exit(False)
+    assert saved["keep_running_on_exit"] is False
+    assert local_proxy.local_proxy_keep_running_on_exit_enabled() is False
+
+    saved = local_proxy.set_local_proxy_keep_running_on_exit(True)
+    assert saved["keep_running_on_exit"] is True
+    assert local_proxy.local_proxy_keep_running_on_exit_enabled() is True
+
+
 def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")

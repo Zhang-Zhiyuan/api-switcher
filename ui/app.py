@@ -585,6 +585,17 @@ class App(ctk.CTk):
             logger.warning("Failed to stop tray manager during exit: %s", e)
 
         try:
+            from core import local_proxy
+
+            if local_proxy.local_proxy_keep_running_on_exit_enabled():
+                logger.info("Win11 local proxy configured to keep running after app exit")
+            else:
+                message = local_proxy.stop_local_ai_proxy(restore_settings=True)
+                logger.info("Stopped Win11 local proxy during app exit: %s", message)
+        except Exception as e:
+            logger.warning("Failed to apply Win11 local proxy exit policy: %s", e)
+
+        try:
             from core.ssh_manager import ssh_manager
 
             ssh_manager.disconnect_all()

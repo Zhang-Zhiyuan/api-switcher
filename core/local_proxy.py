@@ -157,6 +157,14 @@ def set_local_proxy_start_on_login(enabled: bool) -> dict:
     return save_local_proxy_preferences(start_on_login=bool(enabled))
 
 
+def local_proxy_keep_running_on_exit_enabled() -> bool:
+    return bool(load_local_proxy_preferences().get("keep_running_on_exit", True))
+
+
+def set_local_proxy_keep_running_on_exit(enabled: bool) -> dict:
+    return save_local_proxy_preferences(keep_running_on_exit=bool(enabled))
+
+
 def set_local_proxy_startup_node(proxy_text: str) -> str:
     proxy_node = remote_proxy.parse_proxy_node(proxy_text)
     _save_last_proxy_node_strict(proxy_node)
@@ -658,6 +666,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
 
     return {
         "start_on_login": bool(raw.get("start_on_login")),
+        "keep_running_on_exit": bool(raw.get("keep_running_on_exit", True)),
         "proxy_non_cn": bool(raw.get("proxy_non_cn")),
         "builtin_sites": builtin_sites,
         "custom_targets": custom_targets,
