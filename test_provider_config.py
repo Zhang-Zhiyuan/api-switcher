@@ -138,6 +138,15 @@ def test_reasoning_efforts_follow_model_family():
         "claude-opus-4-7",
         custom_name="Custom",
     ) == "max"
+    assert ProviderRegistry.get_reasoning_efforts_for_model("relay", "gpt-5.5") == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert ProviderRegistry.get_default_reasoning_effort_for_model("relay", "claude-opus-4-7") == "max"
+    assert ProviderRegistry.get_reasoning_efforts_for_model("openai", "claude-opus-4-7") == []
 
 
 def check_claude_provider(provider_id, model, base_url, writes_effort):

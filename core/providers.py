@@ -264,9 +264,12 @@ class ProviderRegistry:
         model: str | None,
         custom_name: str | None = None,
     ) -> list[str]:
-        provider = PROVIDERS.get(provider_name)
+        normalized_provider_name = str(provider_name or "").strip()
+        provider = PROVIDERS.get(normalized_provider_name)
         if not provider and custom_name:
             provider = ProviderRegistry.get_provider_by_display_name(custom_name)
+        if not provider and normalized_provider_name and normalized_provider_name != "openai":
+            provider = PROVIDERS.get("custom")
         if not provider or not provider.reasoning_efforts:
             return []
 

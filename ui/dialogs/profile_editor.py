@@ -411,10 +411,22 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _current_codex_provider(self):
         display_name = self._fields["codex_provider"][0].get()
-        return ProviderRegistry.get_provider_by_display_name(display_name)
+        provider = ProviderRegistry.get_provider_by_display_name(display_name)
+        if provider:
+            return provider
+        return ProviderRegistry.get_provider("custom")
 
     def _current_claude_provider(self):
         return ProviderRegistry.get_provider_by_display_name(self._fields["provider"][0].get())
+
+    def _current_custom_provider_name(self) -> str | None:
+        for key in ("custom_name", "custom_provider_name"):
+            if key not in self._fields:
+                continue
+            value = str(self._fields[key][0].get() or "").strip()
+            if value:
+                return value
+        return getattr(self._profile, "custom_name", None) or getattr(self._profile, "custom_provider_name", None)
 
     def _bind_model_effort_refresh(self, model_widget) -> None:
         model_widget.configure(command=lambda _value: self._on_model_change())
@@ -446,7 +458,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         effort_widget, _ = self._fields[field_key]
         effort_row = effort_widget.master
         model = self._fields["model"][0].get().strip()
-        custom_name = getattr(self._profile, "custom_name", None)
+        custom_name = self._current_custom_provider_name()
         efforts = ProviderRegistry.get_reasoning_efforts_for_model(
             provider.name if provider else "",
             model,
