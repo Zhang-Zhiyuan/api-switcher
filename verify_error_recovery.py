@@ -17,6 +17,21 @@ from core.auto_continue.manager import auto_continue_manager
 from core.auto_continue.error_analyzer import get_analyzer
 
 
+def iter_hook_commands(value):
+    """Yield command strings from Codex/Claude legacy and nested hook shapes."""
+    if isinstance(value, dict):
+        command = value.get("command")
+        if isinstance(command, str):
+            yield command
+        nested = value.get("hooks")
+        if isinstance(nested, list):
+            for item in nested:
+                yield from iter_hook_commands(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_hook_commands(item)
+
+
 class Colors:
     """终端颜色"""
     GREEN = '\033[92m'
@@ -116,10 +131,10 @@ def check_provider(provider_name: str) -> Tuple[bool, List[str]]:
         print("\n4. 检查 Hook 注册...")
         if provider_name.lower() == "claude":
             config_path = Path.home() / ".claude" / "settings.json"
-            hook_event = "ResponseError"
+            hook_events = ("ResponseError",)
         else:
             config_path = Path.home() / ".codex" / "hooks.json"
-            hook_event = "Error"
+            hook_events = ("Error", "ResponseError")
 
         if config_path.exists():
             print_success(f"配置文件存在: {config_path}")
@@ -131,27 +146,23 @@ def check_provider(provider_name: str) -> Tuple[bool, List[str]]:
 
                 if provider_name.lower() == "claude":
                     hooks = config.get("hooks", {})
-                    error_hooks = hooks.get(hook_event, [])
-
-                    found = False
-                    for hook_group in error_hooks:
-                        for hook in hook_group.get("hooks", []):
-                            if "error_recovery.ps1" in hook.get("command", ""):
-                                found = True
-                                break
-
-                    if found:
-                        print_success(f"Hook 已注册到 {hook_event} 事件")
-                    else:
-                        print_warning(f"Hook 未注册到 {hook_event} 事件")
-                        issues.append(f"{provider_name}: Hook 未注册")
                 else:
-                    error_hook = config.get(hook_event, {})
-                    if "error_recovery.ps1" in error_hook.get("command", ""):
-                        print_success(f"Hook 已注册到 {hook_event} 事件")
-                    else:
-                        print_warning(f"Hook 未注册到 {hook_event} 事件")
-                        issues.append(f"{provider_name}: Hook 未注册")
+                    hooks = config.get("hooks", {}) if isinstance(config.get("hooks"), dict) else config
+
+                found_events = [
+                    event_name
+                    for event_name in hook_events
+                    if any(
+                        "error_recovery.ps1" in command
+                        for command in iter_hook_commands(hooks.get(event_name, []))
+                    )
+                ]
+                if len(found_events) == len(hook_events):
+                    print_success(f"Hook 已注册到 {', '.join(found_events)} 事件")
+                else:
+                    missing = [event_name for event_name in hook_events if event_name not in found_events]
+                    print_warning(f"Hook 未注册到 {', '.join(missing)} 事件")
+                    issues.append(f"{provider_name}: Hook 未注册")
 
             except Exception as e:
                 print_error(f"读取配置文件失败: {e}")
@@ -192,7 +203,7 @@ def check_provider(provider_name: str) -> Tuple[bool, List[str]]:
             print_success(f"状态文件存在: {state_path}")
 
             try:
-                with open(state_path, 'r', encoding='utf-8') as f:
+                with open(state_path, 'r', encoding='utf-8-sig') as f:
                     state = json.load(f)
                 print_info(f"记录的会话数: {len(state)}")
             except Exception as e:

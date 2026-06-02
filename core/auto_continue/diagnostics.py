@@ -98,7 +98,7 @@ def load_auto_continue_events(provider_name: str, limit: int = 100) -> list[Auto
             if source == "API恢复":
                 decision = str(raw.get("action") or "")
                 reason = str(raw.get("error_type") or raw.get("error_code") or "")
-                hook_event = "Error"
+                hook_event = str(raw.get("hook_event_name") or raw.get("hook_event") or "Error/ResponseError")
                 recovery_count = raw.get("recovery_count", "")
                 count = ""
                 match = str(raw.get("recovery_strategy") or "")
@@ -144,6 +144,7 @@ def format_auto_continue_diagnostics(provider_name: str, limit: int = 100) -> st
     """Return a copy-friendly diagnostic report."""
     provider_key = str(provider_name or "").strip().lower()
     events = load_auto_continue_events(provider_key, limit=limit)
+    status = auto_continue_manager.get_status(provider_key)
     settings = auto_continue_manager.get_settings(provider_key) or AutoContinueSettings()
     template = training_prompt_template_by_key(settings.training_prompt_template_key)["name"]
     block_count = sum(1 for event in events if event.decision == "block_stop")
@@ -155,6 +156,8 @@ def format_auto_continue_diagnostics(provider_name: str, limit: int = 100) -> st
         f"Stop续跑: {'ON' if settings.enabled else 'OFF'}",
         f"训练续跑: {'ON' if settings.training_auto_continue_enabled else 'OFF'} ({template})",
         f"API恢复: {'ON' if settings.error_recovery_enabled else 'OFF'}",
+        f"Stop Hook: {'OK' if status.hook_script_exists and status.hook_registered else 'MISSING'}",
+        f"API恢复 Hook: {'OK' if status.error_recovery_installed else 'MISSING'}",
         f"Git快照: {'ON' if settings.git_auto_snapshot else 'OFF'}",
         f"Events: {len(events)} | block_stop={block_count} | allow_stop={allow_count} | API恢复={recovery_count}",
         "",

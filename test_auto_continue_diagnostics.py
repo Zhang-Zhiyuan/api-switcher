@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from core.auto_continue import diagnostics
 from models.auto_continue import AutoContinueSettings
@@ -31,6 +32,15 @@ def test_auto_continue_diagnostics_reads_stop_and_recovery_logs(tmp_path, monkey
         "get_settings",
         lambda _provider: settings,
     )
+    monkeypatch.setattr(
+        diagnostics.auto_continue_manager,
+        "get_status",
+        lambda _provider: SimpleNamespace(
+            hook_script_exists=True,
+            hook_registered=True,
+            error_recovery_installed=True,
+        ),
+    )
 
     state_dir = tmp_path / "tmp"
     state_dir.mkdir()
@@ -57,6 +67,7 @@ def test_auto_continue_diagnostics_reads_stop_and_recovery_logs(tmp_path, monkey
             {
                 "timestamp": "2026-05-21T10:01:00+08:00",
                 "session_id": "s1",
+                "hook_event_name": "ResponseError",
                 "error_type": "network",
                 "recovery_strategy": "retry_with_backoff",
                 "action": "attempting_recovery",
@@ -75,6 +86,11 @@ def test_auto_continue_diagnostics_reads_stop_and_recovery_logs(tmp_path, monkey
     assert "Provider: codex" in report
     assert "block_stop=1" in report
     assert "API恢复=1" in report
+    assert "Stop Hook: OK" in report
+    assert "API恢复 Hook: OK" in report
     assert "Git=abc1234" in report
     assert "恢复次数=3" in report
     assert "分类/表格模型" in report
+
+    events = diagnostics.load_auto_continue_events("Codex", 20)
+    assert any(event.hook_event == "ResponseError" for event in events)
