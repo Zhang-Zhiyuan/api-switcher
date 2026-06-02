@@ -178,7 +178,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         for column in range(3):
             overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
         overview_items = [
-            ("1 选择目标", "单台下拉或勾选卡片批量操作", "primary"),
+            ("1 勾选目标", "在服务器卡片选择 1 台或多台目标", "primary"),
             ("2 同步配置", "推送/拉取 API、账号和 Git 登录", "accent"),
             ("3 部署能力", "远端 AI 代理与自动续跑", "success"),
         ]
