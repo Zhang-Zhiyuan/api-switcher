@@ -1,10 +1,12 @@
 """Regression checks for password-protected portable profile migration."""
+import base64
 import json
 import posixpath
 import stat
 import tempfile
 import warnings
 import zipfile
+import zlib
 from io import BytesIO
 from pathlib import Path
 
@@ -409,6 +411,39 @@ def test_session_migration_rejects_oversized_manifest(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="manifest 过大"):
         session_migration.inspect_package(package)
+
+
+def test_browser_restore_rejects_size_mismatch_without_profile_leftover(tmp_path, monkeypatch):
+    _set_data_dir(tmp_path)
+    _reset_store()
+    target = paths.STORAGE_DIR / "browser_profiles" / "chrome_BadImport"
+    payload = zlib.compress(b'{"ok":true}')
+    browser_data = {
+        "BadImport": {
+            "profile": {
+                "name": "BadImport",
+                "browser_type": "chrome",
+                "profile_mode": "managed",
+                "user_data_dir": str(target),
+                "created_by_app": True,
+            },
+            "files": [{
+                "path": "Default/Preferences",
+                "size": 999,
+                "compression": "zlib",
+                "data": base64.b64encode(payload).decode("ascii"),
+            }],
+        }
+    }
+
+    restored_files, restored_bytes, skipped, restored_profiles = portable_migration._restore_browser_data(browser_data)
+
+    assert restored_files == 0
+    assert restored_bytes == 0
+    assert restored_profiles == set()
+    assert any("文件大小校验失败" in item for item in skipped)
+    assert any("没有成功恢复任何浏览器文件" in item for item in skipped)
+    assert not target.exists()
 
 
 class _RemoteAttr:

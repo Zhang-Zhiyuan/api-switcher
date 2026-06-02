@@ -90,6 +90,27 @@ def test_profile_store_normalization_removes_bad_entries(tmp_path, monkeypatch):
     assert persisted["codex_profiles"] == []
 
 
+def test_profile_store_normalization_strips_names_before_deduping(tmp_path, monkeypatch):
+    profiles_file = tmp_path / "profiles.json"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    store = profile_manager._get_default_store()
+    store["claude_profiles"] = [
+        {"name": "  Trimmed  ", "auth_token_ref": "claude:one", "base_url": ""},
+        {"name": "Trimmed", "auth_token_ref": "claude:two", "base_url": ""},
+    ]
+    store["active_claude_profile"] = "  Trimmed  "
+    profiles_file.parent.mkdir(parents=True, exist_ok=True)
+    profiles_file.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = profile_manager._load_store()
+
+    assert [item["name"] for item in loaded["claude_profiles"]] == ["Trimmed"]
+    assert loaded["active_claude_profile"] == "Trimmed"
+    persisted = json.loads(profiles_file.read_text(encoding="utf-8"))
+    assert [item["name"] for item in persisted["claude_profiles"]] == ["Trimmed"]
+    assert persisted["active_claude_profile"] == "Trimmed"
+
+
 def test_profile_models_coerce_dirty_persisted_values(tmp_path, monkeypatch):
     profiles_file = tmp_path / "profiles.json"
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)

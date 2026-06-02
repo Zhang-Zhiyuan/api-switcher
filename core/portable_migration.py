@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from core import profile_manager, security
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 
 
 BUNDLE_FORMAT = "api-switcher-portable-profiles"
@@ -480,9 +480,24 @@ def _restore_browser_data(browser_data: dict[str, Any]) -> tuple[int, int, list[
                 except Exception as e:
                     skipped.append(f"{name}/{rel_path}: 解码失败 ({e})")
                     continue
+                declared_size = file_entry.get("size")
+                try:
+                    declared_size_int = int(declared_size) if declared_size is not None else len(content)
+                except (TypeError, ValueError):
+                    skipped.append(f"{name}/{rel_path}: 文件大小元数据异常")
+                    continue
+                if declared_size_int != len(content):
+                    skipped.append(f"{name}/{rel_path}: 文件大小校验失败")
+                    continue
+                if len(content) > MAX_BROWSER_FILE_BYTES:
+                    skipped.append(f"{name}/{rel_path}: 文件过大，已跳过")
+                    continue
+                if restored_bytes + len(content) > MAX_BROWSER_TOTAL_BYTES:
+                    skipped.append(f"{name}/{rel_path}: 浏览器数据超过导入上限，已跳过")
+                    continue
                 dest = target / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(content)
+                atomic_write_bytes(dest, content)
                 restored_files += 1
                 profile_file_count += 1
                 restored_bytes += len(content)

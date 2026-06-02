@@ -96,6 +96,11 @@ def _normalize_store(store: dict) -> bool:
                 logger.warning(f"Profile entry in {key}[{idx}] has no valid name, removing")
                 changed = True
                 continue
+            normalized_name = name.strip()
+            if normalized_name != name:
+                item["name"] = normalized_name
+                name = normalized_name
+                changed = True
             if name in seen_names:
                 logger.warning(f"Duplicate profile name {name!r} in {key}, keeping first entry")
                 changed = True
@@ -110,6 +115,11 @@ def _normalize_store(store: dict) -> bool:
             logger.warning(f"Invalid active profile field: {key}, resetting to None")
             store[key] = None
             changed = True
+        elif isinstance(store.get(key), str):
+            active_name = store[key].strip()
+            if active_name != store[key]:
+                store[key] = active_name or None
+                changed = True
 
     active_links = {
         "active_claude_profile": "claude_profiles",

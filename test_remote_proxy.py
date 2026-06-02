@@ -1261,6 +1261,26 @@ def test_local_proxy_preferences_parse_string_booleans(monkeypatch, tmp_path):
     assert preferences["custom_targets"][1]["enabled"] is True
 
 
+def test_local_proxy_preference_setters_parse_string_booleans(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+
+    local_proxy.set_local_proxy_start_on_login("false")
+    local_proxy.set_local_proxy_keep_running_on_exit("off")
+    local_proxy.set_local_proxy_non_cn_mode("yes")
+    local_proxy.set_builtin_proxy_site_enabled("github", "true")
+    disabled = local_proxy.add_custom_proxy_target("example.com", enabled="false")
+    enabled = local_proxy.add_custom_proxy_target("8.8.8.8", enabled="on")
+
+    preferences = local_proxy.load_local_proxy_preferences()
+
+    assert preferences["start_on_login"] is False
+    assert preferences["keep_running_on_exit"] is False
+    assert preferences["proxy_non_cn"] is True
+    assert preferences["builtin_sites"]["github"] is True
+    assert disabled["enabled"] is False
+    assert enabled["enabled"] is True
+
+
 def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")

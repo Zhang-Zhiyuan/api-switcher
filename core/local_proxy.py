@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser
+from core.atomic_io import atomic_write_text
 
 
 DEFAULT_LOCAL_MIXED_PORT = 17897
@@ -140,12 +141,10 @@ def save_local_proxy_preferences(**updates) -> dict:
         preferences = _normalize_local_proxy_preferences(preferences)
         preferences["updated_at"] = remote_proxy._now_iso()
         _ensure_local_dirs()
-        temp_path = LOCAL_PROXY_PREFS_PATH.with_name(f"{LOCAL_PROXY_PREFS_PATH.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            temp_path.write_text(json.dumps(preferences, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp_path.replace(LOCAL_PROXY_PREFS_PATH)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        atomic_write_text(
+            LOCAL_PROXY_PREFS_PATH,
+            json.dumps(preferences, ensure_ascii=False, indent=2),
+        )
         return preferences
 
 
@@ -154,7 +153,7 @@ def local_proxy_start_on_login_enabled() -> bool:
 
 
 def set_local_proxy_start_on_login(enabled: bool) -> dict:
-    return save_local_proxy_preferences(start_on_login=bool(enabled))
+    return save_local_proxy_preferences(start_on_login=_coerce_bool(enabled))
 
 
 def local_proxy_keep_running_on_exit_enabled() -> bool:
@@ -162,7 +161,7 @@ def local_proxy_keep_running_on_exit_enabled() -> bool:
 
 
 def set_local_proxy_keep_running_on_exit(enabled: bool) -> dict:
-    return save_local_proxy_preferences(keep_running_on_exit=bool(enabled))
+    return save_local_proxy_preferences(keep_running_on_exit=_coerce_bool(enabled))
 
 
 def set_local_proxy_startup_node(proxy_text: str) -> str:
@@ -177,7 +176,7 @@ def local_proxy_startup_node_summary() -> str:
 
 
 def set_local_proxy_non_cn_mode(enabled: bool) -> dict:
-    return save_local_proxy_preferences(proxy_non_cn=bool(enabled))
+    return save_local_proxy_preferences(proxy_non_cn=_coerce_bool(enabled))
 
 
 def set_builtin_proxy_site_enabled(site_id: str, enabled: bool) -> dict:
@@ -186,7 +185,7 @@ def set_builtin_proxy_site_enabled(site_id: str, enabled: bool) -> dict:
         raise ValueError(f"未知内置站点: {site_id}")
     preferences = load_local_proxy_preferences()
     builtin_sites = dict(preferences.get("builtin_sites") or {})
-    builtin_sites[site_key] = bool(enabled)
+    builtin_sites[site_key] = _coerce_bool(enabled)
     return save_local_proxy_preferences(builtin_sites=builtin_sites)
 
 
@@ -199,7 +198,7 @@ def add_custom_proxy_target(target: str, enabled: bool = True) -> dict:
             str(entry.get("kind") or "") == normalized["kind"]
             and str(entry.get("value") or "").casefold() == normalized["value"].casefold()
         ):
-            entry["enabled"] = bool(enabled)
+            entry["enabled"] = _coerce_bool(enabled, True)
             entry["target"] = normalized["target"]
             save_local_proxy_preferences(custom_targets=entries)
             return entry
@@ -208,7 +207,7 @@ def add_custom_proxy_target(target: str, enabled: bool = True) -> dict:
         "target": normalized["target"],
         "kind": normalized["kind"],
         "value": normalized["value"],
-        "enabled": bool(enabled),
+        "enabled": _coerce_bool(enabled, True),
         "created_at": remote_proxy._now_iso(),
     }
     entries.append(entry)
@@ -234,7 +233,7 @@ def set_custom_proxy_target_enabled(target_id: str, enabled: bool) -> dict:
     entries = list(preferences.get("custom_targets") or [])
     for entry in entries:
         if str(entry.get("id") or "") == target_key:
-            entry["enabled"] = bool(enabled)
+            entry["enabled"] = _coerce_bool(enabled, True)
             save_local_proxy_preferences(custom_targets=entries)
             return entry
     raise ValueError("没有找到要修改的自定义代理目标")
@@ -728,7 +727,7 @@ def _routing_options_from_preferences(preferences: dict | None = None) -> dict:
         if builtin_sites.get(str(site["id"])):
             domains.extend(str(target) for target in site.get("targets") or ())
     for entry in preferences.get("custom_targets") or []:
-        if not isinstance(entry, dict) or not entry.get("enabled", True):
+        if not isinstance(entry, dict) or not _coerce_bool(entry.get("enabled"), True):
             continue
         if entry.get("kind") == "ip-cidr":
             ip_cidrs.append(str(entry.get("value") or ""))
@@ -737,7 +736,7 @@ def _routing_options_from_preferences(preferences: dict | None = None) -> dict:
     return {
         "extra_proxy_domains": tuple(domains),
         "extra_proxy_ip_cidrs": tuple(ip_cidrs),
-        "proxy_non_cn": bool(preferences.get("proxy_non_cn")),
+        "proxy_non_cn": _coerce_bool(preferences.get("proxy_non_cn")),
     }
 
 
