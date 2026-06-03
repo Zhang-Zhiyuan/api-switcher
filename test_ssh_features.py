@@ -236,15 +236,15 @@ def test_sync_codex_to_server_writes_openai_key_fallback_for_provider_env(isolat
 
 
 def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, monkeypatch):
-    security.set_secret("codex:layer4:api_key", "sk-layer4")
+    security.set_secret("codex:openai:api_key", "sk-openai")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
-            name="layer4",
-            api_key_ref="codex:layer4:api_key",
+            name="openai",
+            api_key_ref="codex:openai:api_key",
             model="gpt-5.5",
-            model_provider="layer4",
-            custom_base_url="https://layer4.example.com/v1",
+            model_provider="openai",
+            custom_base_url="https://openai.example.com/v1",
             custom_wire_api="responses",
         )
     )
@@ -268,24 +268,24 @@ def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, mo
         ),
     )
 
-    message = sync_manager.sync_codex_to_server("remote", "layer4")
+    message = sync_manager.sync_codex_to_server("remote", "openai")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert writes[0]["model_providers"]["openai"]["wire_api"] == "responses"
     assert "wire_api=responses" in message
     assert "responses 3/3" in message
 
 
 def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh, monkeypatch):
-    security.set_secret("codex:layer4:api_key", "sk-layer4")
+    security.set_secret("codex:openai:api_key", "sk-openai")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
-            name="layer4",
-            api_key_ref="codex:layer4:api_key",
+            name="openai",
+            api_key_ref="codex:openai:api_key",
             model="gpt-5.5",
-            model_provider="layer4",
-            custom_base_url="https://layer4.example.com/v1",
+            model_provider="openai",
+            custom_base_url="https://openai.example.com/v1",
             custom_wire_api="responses",
         )
     )
@@ -304,23 +304,23 @@ def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh,
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("manual wire_api must not benchmark")),
     )
 
-    message = sync_manager.sync_codex_to_server("remote", "layer4", wire_api_mode="chat")
+    message = sync_manager.sync_codex_to_server("remote", "openai", wire_api_mode="chat")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert writes[0]["model_providers"]["openai"]["wire_api"] == "responses"
     assert "wire_api=responses" in message
 
 
 def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolated_ssh, monkeypatch):
-    security.set_secret("codex:layer4:api_key", "sk-layer4")
+    security.set_secret("codex:openai:api_key", "sk-openai")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
-            name="layer4",
-            api_key_ref="codex:layer4:api_key",
+            name="openai",
+            api_key_ref="codex:openai:api_key",
             model="gpt-5.5",
-            model_provider="layer4",
-            custom_base_url="https://layer4.example.com/v1",
+            model_provider="openai",
+            custom_base_url="https://openai.example.com/v1",
             custom_wire_api=None,
         )
     )
@@ -339,22 +339,22 @@ def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolate
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("profile mode must not benchmark")),
     )
 
-    message = sync_manager.sync_codex_to_server("remote", "layer4", wire_api_mode="profile")
+    message = sync_manager.sync_codex_to_server("remote", "openai", wire_api_mode="profile")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert writes[0]["model_providers"]["openai"]["wire_api"] == "responses"
     assert "wire_api=responses" in message
 
 
 def test_remote_codex_wire_api_benchmark_handles_empty_output(monkeypatch):
     profile = CodexProfile(
-        name="layer4",
+        name="openai",
         model="gpt-5.5",
-        model_provider="layer4",
-        custom_base_url="https://layer4.example.com/v1",
+        model_provider="openai",
+        custom_base_url="https://openai.example.com/v1",
     )
 
-    monkeypatch.setattr(sync_manager, "_remote_codex_base_url", lambda config, p: "https://layer4.example.com/v1")
+    monkeypatch.setattr(sync_manager, "_remote_codex_base_url", lambda config, p: "https://openai.example.com/v1")
     monkeypatch.setattr(sync_manager, "_remote_codex_model", lambda config, p: "gpt-5.5")
     monkeypatch.setattr(
         sync_manager.ssh_manager,
@@ -370,13 +370,13 @@ def test_remote_codex_wire_api_benchmark_handles_empty_output(monkeypatch):
 
 def test_remote_codex_wire_api_benchmark_uses_remote_error(monkeypatch):
     profile = CodexProfile(
-        name="layer4",
+        name="openai",
         model="gpt-5.5",
-        model_provider="layer4",
-        custom_base_url="https://layer4.example.com/v1",
+        model_provider="openai",
+        custom_base_url="https://openai.example.com/v1",
     )
 
-    monkeypatch.setattr(sync_manager, "_remote_codex_base_url", lambda config, p: "https://layer4.example.com/v1")
+    monkeypatch.setattr(sync_manager, "_remote_codex_base_url", lambda config, p: "https://openai.example.com/v1")
     monkeypatch.setattr(sync_manager, "_remote_codex_model", lambda config, p: "gpt-5.5")
     monkeypatch.setattr(
         sync_manager.ssh_manager,
@@ -678,11 +678,11 @@ def test_clear_remote_codex_api_info_removes_active_provider_auth_and_env(isolat
     written = {}
     deleted = {}
     remote_config_data = {
-        "model": "layer4-model",
-        "model_provider": "layer4",
+        "model": "openai-model",
+        "model_provider": "openai",
         "model_providers": {
-            "layer4": {
-                "base_url": "https://layer4.example.com/v1",
+            "openai": {
+                "base_url": "https://openai.example.com/v1",
                 "env_key": "LAYER4_API_KEY",
                 "wire_api": "responses",
             },
@@ -719,7 +719,7 @@ def test_clear_remote_codex_api_info_removes_active_provider_auth_and_env(isolat
     assert cleaned_config["model_provider"] == "openai"
     assert cleaned_config["model"] == "gpt-5.5"
     assert cleaned_config["cli_auth_credentials_store"] == "file"
-    assert "layer4" not in cleaned_config["model_providers"]
+    assert "openai" not in cleaned_config["model_providers"]
     assert cleaned_config["model_providers"]["other"]["env_key"] == "OTHER_KEY"
     assert written["auth"][1]["auth_mode"] == "chatgpt"
     assert "OPENAI_API_KEY" not in written["auth"][1]
@@ -796,15 +796,15 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
         remote_config,
         "read_remote_codex_config",
         lambda client, profile=None: {
-            "model_provider": "layer4",
-            "model": "layer4-model",
-            "model_providers": {"layer4": {"name": "Layer4", "base_url": "https://layer4.example.com/v1"}},
+            "model_provider": "openai",
+            "model": "openai-model",
+            "model_providers": {"openai": {"name": "OpenAI", "base_url": "https://openai.example.com/v1"}},
         },
     )
     monkeypatch.setattr(
         remote_config,
         "read_remote_codex_auth",
-        lambda client, profile=None: {"OPENAI_API_KEY": "sk-layer4"},
+        lambda client, profile=None: {"OPENAI_API_KEY": "sk-openai"},
     )
 
     candidates = sync_manager.inspect_remote_configs("remote")
@@ -814,7 +814,7 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
     assert "读取失败" in candidates[0].reason
     assert candidates[2].kind == "codex"
     assert candidates[2].importable is True
-    assert candidates[2].provider_label == "Layer4"
+    assert candidates[2].provider_label == "OpenAI"
 
 
 def test_pull_official_accounts_from_server(isolated_ssh, monkeypatch):
@@ -1159,7 +1159,7 @@ def test_pull_codex_from_server_skips_empty_api_key(isolated_ssh, monkeypatch):
     monkeypatch.setattr(
         remote_config,
         "read_remote_codex_config",
-        lambda client, profile=None: {"model_provider": "layer4", "model": "layer4-model"},
+        lambda client, profile=None: {"model_provider": "openai", "model": "openai-model"},
     )
     monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {"OPENAI_API_KEY": "  "})
 

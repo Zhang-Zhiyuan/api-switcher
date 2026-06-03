@@ -56,61 +56,61 @@ def test_codex_runtime_env_keys_include_openai_fallback():
     assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(openai_profile) == ["OPENAI_API_KEY"]
 
 
-def test_layer4_codex_preset_uses_responses_wire_api():
-    provider = ProviderRegistry.get_provider("layer4")
+def test_openai_codex_preset_uses_responses_wire_api():
+    provider = ProviderRegistry.get_provider("openai")
     assert provider is not None
     assert provider.codex_supported is True
     assert provider.claude_supported is False
-    assert provider.base_url_for_codex() == "https://layer4.cc/v1"
+    assert provider.base_url_for_codex() == "https://openai.cc/v1"
     assert provider.wire_api == "responses"
     assert provider.codex_env_key == "OPENAI_API_KEY"
 
     profile = CodexProfile(
-        name="layer4",
+        name="openai",
         model=provider.default_model,
-        model_provider="layer4",
+        model_provider="openai",
     )
     config = apply_codex_profile({}, profile)
-    layer4 = config["model_providers"]["layer4"]
+    openai = config["model_providers"]["openai"]
 
     assert config["model"] == "gpt-5.5"
-    assert layer4["base_url"] == "https://layer4.cc/v1"
-    assert layer4["wire_api"] == "responses"
-    assert layer4["env_key"] == "OPENAI_API_KEY"
+    assert openai["base_url"] == "https://openai.cc/v1"
+    assert openai["wire_api"] == "responses"
+    assert openai["env_key"] == "OPENAI_API_KEY"
 
 
 def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
-    provider = ProviderRegistry.get_provider("layer4")
+    provider = ProviderRegistry.get_provider("openai")
     assert provider is not None
 
-    assert ProviderRegistry.get_codex_wire_api("layer4") == "responses"
-    assert ProviderRegistry.get_codex_wire_api("layer4", "auto") == "responses"
-    assert ProviderRegistry.get_codex_wire_api("layer4", "invalid") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("openai") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("openai", "auto") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("openai", "invalid") == "responses"
     assert ProviderRegistry.get_codex_wire_api("custom", "") == "responses"
 
     config = apply_codex_profile(
         {},
         CodexProfile(
-            name="layer4",
+            name="openai",
             model="gpt-5.5",
-            model_provider="layer4",
+            model_provider="openai",
             custom_wire_api="invalid",
         ),
     )
 
-    assert config["model_providers"]["layer4"]["wire_api"] == "responses"
+    assert config["model_providers"]["openai"]["wire_api"] == "responses"
 
 
 def test_reasoning_efforts_follow_model_family():
     assert ProviderRegistry.model_supports_max_reasoning("claude-notopus-model") is False
-    assert ProviderRegistry.get_reasoning_efforts_for_model("layer4", "gpt-5.5") == [
+    assert ProviderRegistry.get_reasoning_efforts_for_model("openai", "gpt-5.5") == [
         "minimal",
         "low",
         "medium",
         "high",
         "xhigh",
     ]
-    assert ProviderRegistry.get_reasoning_efforts_for_model("layer4", "claude-opus-4-7") == [
+    assert ProviderRegistry.get_reasoning_efforts_for_model("openai", "claude-opus-4-7") == [
         "minimal",
         "low",
         "medium",
@@ -131,8 +131,8 @@ def test_reasoning_efforts_follow_model_family():
         "high",
         "xhigh",
     ]
-    assert ProviderRegistry.get_default_reasoning_effort_for_model("layer4", "gpt-5.5") == "xhigh"
-    assert ProviderRegistry.get_default_reasoning_effort_for_model("layer4", "claude-opus-4-7") == "max"
+    assert ProviderRegistry.get_default_reasoning_effort_for_model("openai", "gpt-5.5") == "xhigh"
+    assert ProviderRegistry.get_default_reasoning_effort_for_model("openai", "claude-opus-4-7") == "max"
     assert ProviderRegistry.get_default_reasoning_effort_for_model(
         "relay",
         "claude-opus-4-7",
@@ -330,17 +330,17 @@ def test_health_check_codex_uses_provider_base_url_and_wire_api(monkeypatch):
     from core.validator import ConfigValidator
 
     profile = CodexProfile(
-        name="layer4",
-        api_key_ref="codex:layer4:api_key",
+        name="openai",
+        api_key_ref="codex:openai:api_key",
         model="gpt-5.5",
-        model_provider="layer4",
+        model_provider="openai",
     )
     captured = {}
 
     monkeypatch.setattr(profile_manager, "get_current_claude_name", lambda: None)
-    monkeypatch.setattr(profile_manager, "get_current_codex_name", lambda: "layer4")
+    monkeypatch.setattr(profile_manager, "get_current_codex_name", lambda: "openai")
     monkeypatch.setattr(profile_manager, "list_switchable_codex_profiles", lambda: [profile])
-    monkeypatch.setattr(security, "get_secret", lambda ref: "sk-test" if ref == "codex:layer4:api_key" else None)
+    monkeypatch.setattr(security, "get_secret", lambda ref: "sk-test" if ref == "codex:openai:api_key" else None)
 
     def fake_test_openai_api(api_key, base_url, model, timeout=10, wire_api="chat"):
         captured.update(
@@ -358,7 +358,7 @@ def test_health_check_codex_uses_provider_base_url_and_wire_api(monkeypatch):
 
     assert captured == {
         "api_key": "sk-test",
-        "base_url": "https://layer4.cc/v1",
+        "base_url": "https://openai.cc/v1",
         "model": "gpt-5.5",
         "timeout": 10,
         "wire_api": "responses",
@@ -369,7 +369,7 @@ def main():
     check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "responses", True)
     check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "responses", False)
     check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "responses", False)
-    check_codex_provider("layer4", "gpt-5.5", "https://layer4.cc/v1", "responses", True)
+    check_codex_provider("openai", "gpt-5.5", "https://openai.cc/v1", "responses", True)
 
     check_claude_provider("deepseek", "deepseek-v4-pro", "https://api.deepseek.com/anthropic", True)
     check_claude_provider("glm", "GLM-5.1", "", False)

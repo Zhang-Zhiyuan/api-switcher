@@ -167,7 +167,7 @@ def test_error_parser():
                 "error_message": (
                     "Reconnecting... 1/5\nReconnecting... 5/5\n"
                     "stream disconnected before completion: error sending request for url "
-                    "(https://layer4.cc/v1/responses)"
+                    "(https://openai.cc/v1/responses)"
                 )
             },
             "expected_type": ErrorType.NETWORK_ERROR,
