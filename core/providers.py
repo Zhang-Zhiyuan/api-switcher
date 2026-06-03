@@ -175,8 +175,8 @@ PROVIDERS = {
         codex_env_key="OPENAI_API_KEY",
         claude_supported=False,
         notes=(
-            "Layer4 is configured with the Responses wire API because current Codex CLI builds "
-            "reject provider tables that contain wire_api=chat."
+            "Layer4 使用当前 Codex CLI 兼容的 Responses API；"
+            "Codex 配置会写入 wire_api=responses。"
         ),
     ),
     "custom": ProviderConfig(

@@ -303,10 +303,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 ) or "high"
             )
 
-        self._add_field(parent, "自定义端点", "custom_base_url", p.custom_base_url if p else "")
-        self._add_field(parent, "自定义名称", "custom_name", p.custom_name if p else "")
-        wire_api_widget = self._add_field(parent, "Wire API", "custom_wire_api", ["auto", "responses"], "combo")
-        wire_api_widget.set(self._display_wire_api(p.custom_wire_api if p else None))
+        self._add_field(parent, "API 端点", "custom_base_url", p.custom_base_url if p else "")
+        self._add_field(parent, "Provider 名称", "custom_name", p.custom_name if p else "")
         self._add_field(parent, "环境变量名", "custom_env_key", p.custom_env_key if p else "OPENAI_API_KEY")
 
         self._add_field(parent, "审批策略", "approval_policy", ["never", "auto", "manual"], "combo")
@@ -332,7 +330,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._fields["custom_base_url"][0].insert(0, p.custom_base_url or "")
                 self._fields["custom_name"][0].delete(0, "end")
                 self._fields["custom_name"][0].insert(0, p.custom_name or "")
-                self._set_wire_api_value(p.custom_wire_api)
                 self._fields["custom_env_key"][0].delete(0, "end")
                 self._fields["custom_env_key"][0].insert(0, p.custom_env_key or ProviderRegistry.get_codex_env_key_for_profile(p))
                 self._refresh_reasoning_effort_options("model_reasoning_effort", self._current_codex_provider())
@@ -345,21 +342,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             return widget.get()
         else:
             return widget.get()
-
-    def _display_wire_api(self, wire_api: str | None) -> str:
-        wire_api = str(wire_api or "").strip().lower()
-        return wire_api if wire_api == "responses" else "auto"
-
-    def _set_wire_api_value(self, wire_api: str | None) -> None:
-        if "custom_wire_api" not in self._fields:
-            return
-        widget, _ = self._fields["custom_wire_api"]
-        value = self._display_wire_api(wire_api)
-        try:
-            widget.set(value)
-        except Exception:
-            widget.delete(0, "end")
-            widget.insert(0, value)
 
     def _show_error(self, message: str) -> None:
         self._error_label.configure(text=message, text_color=COLORS["danger"])
@@ -381,7 +363,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             parts.append("该 provider 不暴露推理力度；保存时会自动忽略推理力度字段。")
 
         if is_codex:
-            parts.append(f"Codex wire_api: {provider.wire_api}；默认环境变量: {provider.codex_env_key}。")
+            parts.append(f"默认环境变量: {provider.codex_env_key}。")
         if provider.name == "kimi":
             parts.append("Kimi 国际平台默认使用 .ai；中国平台密钥可把端点改为 https://api.moonshot.cn/v1。")
         if provider.name == "glm":
@@ -532,10 +514,14 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._fields["custom_base_url"][0].delete(0, "end")
             self._fields["custom_base_url"][0].insert(0, provider.base_url_for_codex())
         if "custom_name" in self._fields:
-            self._fields["custom_name"][0].delete(0, "end")
-            self._fields["custom_name"][0].insert(0, provider.display_name)
-        if "custom_wire_api" in self._fields:
-            self._set_wire_api_value(provider.wire_api)
+            custom_name_widget, _ = self._fields["custom_name"]
+            custom_name_widget.delete(0, "end")
+            custom_name_widget.insert(0, provider.display_name)
+            custom_name_row = custom_name_widget.master
+            if provider.name == "custom":
+                custom_name_row.pack(fill="x", pady=5)
+            else:
+                custom_name_row.pack_forget()
         if "custom_env_key" in self._fields:
             self._fields["custom_env_key"][0].delete(0, "end")
             self._fields["custom_env_key"][0].insert(0, provider.codex_env_key)
@@ -633,8 +619,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         if getattr(result, "selected_model", None) and "model" in self._fields:
             self._fields["model"][0].set(result.selected_model)
             self._on_model_change()
-        if getattr(result, "recommended_wire_api", None) and "custom_wire_api" in self._fields:
-            self._set_wire_api_value(result.recommended_wire_api)
         self._show_test_result(result, profile_name)
 
     def _show_test_result(self, result, profile_name: str):
@@ -788,24 +772,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             pass
         return (provider.default_model if provider else "") or ("gpt-5.5" if is_codex else "claude-sonnet-4")
 
-    def _recommend_wire_api_for_save(self, api_key: str, base_url: str, model: str, provider) -> str:
-        from core.api_tester import APITester
-
-        try:
-            result = APITester.benchmark_openai_wire_apis(
-                api_key,
-                base_url,
-                model,
-                timeout=8,
-                repeat_count=3,
-                wire_apis=("responses",),
-            )
-            if result.recommended_wire_api:
-                return result.recommended_wire_api
-        except Exception:
-            pass
-        return (provider.wire_api if provider else "") or "responses"
-
     def _save(self):
         data = self._collect_data()
 
@@ -854,11 +820,6 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 self._show_error("第三方或自定义 Provider 需要 API 端点")
                 return
             api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
-            wire_api = str(data.get("custom_wire_api") or "").strip().lower()
-            data["custom_wire_api"] = "" if wire_api == "auto" else wire_api
-            if data["custom_wire_api"] and data["custom_wire_api"] != "responses":
-                self._show_error("Wire API 只能选择 auto 或 responses")
-                return
             if not data.get("model"):
                 self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
                 self.update_idletasks()
@@ -871,15 +832,11 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             if not data.get("model"):
                 self._show_error("无法自动选择模型，请手动填写模型名称")
                 return
-            if not data.get("custom_wire_api"):
-                self._show_status("Wire API 为空，正在三轮测试 responses 可用性...", "warning")
-                self.update_idletasks()
-                data["custom_wire_api"] = self._recommend_wire_api_for_save(
-                    api_key,
-                    data["custom_base_url"],
-                    data["model"],
-                    provider,
-                )
+            data["custom_wire_api"] = ProviderRegistry.get_codex_wire_api(
+                data["model_provider"],
+                None,
+                data.get("custom_name"),
+            )
 
         if self._on_save:
             self._on_save(data, self._profile)

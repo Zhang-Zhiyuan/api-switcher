@@ -6,9 +6,8 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, font,
 class APITestResultDialog(ctk.CTkToplevel):
     """Dialog showing API connection test results."""
 
-    def __init__(self, parent, test_result, profile_name: str = "", on_apply_wire_api=None):
+    def __init__(self, parent, test_result, profile_name: str = ""):
         super().__init__(parent)
-        self._on_apply_wire_api = on_apply_wire_api
 
         self.title("API 连接测试")
         self.geometry("620x520")
@@ -145,20 +144,6 @@ class APITestResultDialog(ctk.CTkToplevel):
         button_frame = ctk.CTkFrame(container, fg_color="transparent")
         button_frame.pack(fill="x")
 
-        if self._on_apply_wire_api:
-            recommended = str(getattr(result, "recommended_wire_api", "") or "").strip().lower()
-            for wire_api in ["responses"]:
-                label = f"切换到 {wire_api}"
-                if wire_api == recommended:
-                    label += "（推荐）"
-                ctk.CTkButton(
-                    button_frame,
-                    text=label,
-                    width=132 if wire_api == recommended else 104,
-                    command=lambda value=wire_api: self._apply_wire_api(value),
-                    **button_style("accent" if wire_api == recommended else "secondary")
-                ).pack(side="left", padx=(0, 8))
-
         close_btn = ctk.CTkButton(
             button_frame,
             text="关闭",
@@ -167,13 +152,6 @@ class APITestResultDialog(ctk.CTkToplevel):
             **button_style("primary")
         )
         close_btn.pack(side="right")
-
-    def _apply_wire_api(self, wire_api: str) -> None:
-        try:
-            if self._on_apply_wire_api:
-                self._on_apply_wire_api(wire_api)
-        finally:
-            self.destroy()
 
     def _add_detail_row(self, parent, label: str, value: str, value_color: str = None):
         """Add a detail row to the dialog."""
