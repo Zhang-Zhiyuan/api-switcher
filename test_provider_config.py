@@ -61,7 +61,7 @@ def test_openai_codex_preset_uses_responses_wire_api():
     assert provider is not None
     assert provider.codex_supported is True
     assert provider.claude_supported is False
-    assert provider.base_url_for_codex() == "https://openai.cc/v1"
+    assert provider.base_url_for_codex() == "https://api.openai.com/v1"
     assert provider.wire_api == "responses"
     assert provider.codex_env_key == "OPENAI_API_KEY"
 
@@ -71,34 +71,33 @@ def test_openai_codex_preset_uses_responses_wire_api():
         model_provider="openai",
     )
     config = apply_codex_profile({}, profile)
-    openai = config["model_providers"]["openai"]
 
     assert config["model"] == "gpt-5.5"
-    assert openai["base_url"] == "https://openai.cc/v1"
-    assert openai["wire_api"] == "responses"
-    assert openai["env_key"] == "OPENAI_API_KEY"
+    assert config["model_provider"] == "openai"
+    # OpenAI official does not write model_providers table
+    assert "model_providers" not in config or not config.get("model_providers")
 
 
 def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
-    provider = ProviderRegistry.get_provider("openai")
+    provider = ProviderRegistry.get_provider("deepseek")
     assert provider is not None
 
-    assert ProviderRegistry.get_codex_wire_api("openai") == "responses"
-    assert ProviderRegistry.get_codex_wire_api("openai", "auto") == "responses"
-    assert ProviderRegistry.get_codex_wire_api("openai", "invalid") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("deepseek") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("deepseek", "auto") == "responses"
+    assert ProviderRegistry.get_codex_wire_api("deepseek", "invalid") == "responses"
     assert ProviderRegistry.get_codex_wire_api("custom", "") == "responses"
 
     config = apply_codex_profile(
         {},
         CodexProfile(
-            name="openai",
-            model="gpt-5.5",
-            model_provider="openai",
+            name="deepseek",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
             custom_wire_api="invalid",
         ),
     )
 
-    assert config["model_providers"]["openai"]["wire_api"] == "responses"
+    assert config["model_providers"]["deepseek"]["wire_api"] == "responses"
 
 
 def test_reasoning_efforts_follow_model_family():
@@ -146,7 +145,8 @@ def test_reasoning_efforts_follow_model_family():
         "xhigh",
     ]
     assert ProviderRegistry.get_default_reasoning_effort_for_model("relay", "claude-opus-4-7") == "max"
-    assert ProviderRegistry.get_reasoning_efforts_for_model("openai", "claude-opus-4-7") == []
+    # Kimi provider has no reasoning_efforts, so any model returns []
+    assert ProviderRegistry.get_reasoning_efforts_for_model("kimi", "gpt-5.5") == []
 
 
 def check_claude_provider(provider_id, model, base_url, writes_effort):
@@ -330,17 +330,17 @@ def test_health_check_codex_uses_provider_base_url_and_wire_api(monkeypatch):
     from core.validator import ConfigValidator
 
     profile = CodexProfile(
-        name="openai",
-        api_key_ref="codex:openai:api_key",
-        model="gpt-5.5",
-        model_provider="openai",
+        name="deepseek",
+        api_key_ref="codex:deepseek:api_key",
+        model="deepseek-v4-flash",
+        model_provider="deepseek",
     )
     captured = {}
 
     monkeypatch.setattr(profile_manager, "get_current_claude_name", lambda: None)
-    monkeypatch.setattr(profile_manager, "get_current_codex_name", lambda: "openai")
+    monkeypatch.setattr(profile_manager, "get_current_codex_name", lambda: "deepseek")
     monkeypatch.setattr(profile_manager, "list_switchable_codex_profiles", lambda: [profile])
-    monkeypatch.setattr(security, "get_secret", lambda ref: "sk-test" if ref == "codex:openai:api_key" else None)
+    monkeypatch.setattr(security, "get_secret", lambda ref: "sk-test" if ref == "codex:deepseek:api_key" else None)
 
     def fake_test_openai_api(api_key, base_url, model, timeout=10, wire_api="chat"):
         captured.update(
@@ -358,8 +358,8 @@ def test_health_check_codex_uses_provider_base_url_and_wire_api(monkeypatch):
 
     assert captured == {
         "api_key": "sk-test",
-        "base_url": "https://openai.cc/v1",
-        "model": "gpt-5.5",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
         "timeout": 10,
         "wire_api": "responses",
     }
