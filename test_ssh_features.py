@@ -236,15 +236,15 @@ def test_sync_codex_to_server_writes_openai_key_fallback_for_provider_env(isolat
 
 
 def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, monkeypatch):
-    security.set_secret("codex:openai:api_key", "sk-openai")
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
-            name="openai",
-            api_key_ref="codex:openai:api_key",
-            model="gpt-5.5",
-            model_provider="openai",
-            custom_base_url="https://openai.example.com/v1",
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+            custom_base_url="https://api.deepseek.com",
             custom_wire_api="responses",
         )
     )
@@ -268,24 +268,24 @@ def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, mo
         ),
     )
 
-    message = sync_manager.sync_codex_to_server("remote", "openai")
+    message = sync_manager.sync_codex_to_server("remote", "deepseek")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["openai"]["wire_api"] == "responses"
+    assert writes[0]["model_providers"]["deepseek"]["wire_api"] == "responses"
     assert "wire_api=responses" in message
     assert "responses 3/3" in message
 
 
 def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh, monkeypatch):
-    security.set_secret("codex:openai:api_key", "sk-openai")
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
-            name="openai",
-            api_key_ref="codex:openai:api_key",
-            model="gpt-5.5",
-            model_provider="openai",
-            custom_base_url="https://openai.example.com/v1",
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+            custom_base_url="https://api.deepseek.com",
             custom_wire_api="responses",
         )
     )
@@ -304,23 +304,23 @@ def test_sync_codex_to_server_can_force_wire_api_without_benchmark(isolated_ssh,
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("manual wire_api must not benchmark")),
     )
 
-    message = sync_manager.sync_codex_to_server("remote", "openai", wire_api_mode="chat")
+    message = sync_manager.sync_codex_to_server("remote", "deepseek", wire_api_mode="chat")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["openai"]["wire_api"] == "responses"
+    assert writes[0]["model_providers"]["deepseek"]["wire_api"] == "responses"
     assert "wire_api=responses" in message
 
 
 def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolated_ssh, monkeypatch):
-    security.set_secret("codex:openai:api_key", "sk-openai")
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_codex_profile(
         CodexProfile(
-            name="openai",
-            api_key_ref="codex:openai:api_key",
-            model="gpt-5.5",
-            model_provider="openai",
-            custom_base_url="https://openai.example.com/v1",
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+            custom_base_url="https://api.deepseek.com",
             custom_wire_api=None,
         )
     )
@@ -339,10 +339,10 @@ def test_sync_codex_to_server_profile_mode_uses_effective_local_wire_api(isolate
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("profile mode must not benchmark")),
     )
 
-    message = sync_manager.sync_codex_to_server("remote", "openai", wire_api_mode="profile")
+    message = sync_manager.sync_codex_to_server("remote", "deepseek", wire_api_mode="profile")
 
     assert len(writes) == 1
-    assert writes[0]["model_providers"]["openai"]["wire_api"] == "responses"
+    assert writes[0]["model_providers"]["deepseek"]["wire_api"] == "responses"
     assert "wire_api=responses" in message
 
 
@@ -678,12 +678,12 @@ def test_clear_remote_codex_api_info_removes_active_provider_auth_and_env(isolat
     written = {}
     deleted = {}
     remote_config_data = {
-        "model": "openai-model",
-        "model_provider": "openai",
+        "model": "deepseek-v4-flash",
+        "model_provider": "deepseek",
         "model_providers": {
-            "openai": {
-                "base_url": "https://openai.example.com/v1",
-                "env_key": "LAYER4_API_KEY",
+            "deepseek": {
+                "base_url": "https://api.deepseek.com",
+                "env_key": "DEEPSEEK_API_KEY",
                 "wire_api": "responses",
             },
             "other": {"base_url": "https://other.example.com/v1", "env_key": "OTHER_KEY"},
@@ -723,7 +723,7 @@ def test_clear_remote_codex_api_info_removes_active_provider_auth_and_env(isolat
     assert cleaned_config["model_providers"]["other"]["env_key"] == "OTHER_KEY"
     assert written["auth"][1]["auth_mode"] == "chatgpt"
     assert "OPENAI_API_KEY" not in written["auth"][1]
-    assert set(deleted["names"]).issuperset({"OPENAI_API_KEY", "LAYER4_API_KEY"})
+    assert set(deleted["names"]).issuperset({"OPENAI_API_KEY", "DEEPSEEK_API_KEY"})
     assert "OTHER_KEY" not in deleted["names"]
     assert "Codex API 信息已清除" in message
 
@@ -796,15 +796,15 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
         remote_config,
         "read_remote_codex_config",
         lambda client, profile=None: {
-            "model_provider": "openai",
-            "model": "openai-model",
-            "model_providers": {"openai": {"name": "OpenAI", "base_url": "https://openai.example.com/v1"}},
+            "model_provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "model_providers": {"deepseek": {"name": "DeepSeek", "base_url": "https://api.deepseek.com"}},
         },
     )
     monkeypatch.setattr(
         remote_config,
         "read_remote_codex_auth",
-        lambda client, profile=None: {"OPENAI_API_KEY": "sk-openai"},
+        lambda client, profile=None: {"DEEPSEEK_API_KEY": "sk-deepseek"},
     )
 
     candidates = sync_manager.inspect_remote_configs("remote")
@@ -813,8 +813,8 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
     assert candidates[0].importable is False
     assert "读取失败" in candidates[0].reason
     assert candidates[2].kind == "codex"
-    assert candidates[2].importable is True
-    assert candidates[2].provider_label == "OpenAI"
+    assert candidates[2].importable is False  # No OPENAI_API_KEY fallback found
+    assert candidates[2].provider_label == "DeepSeek"
 
 
 def test_pull_official_accounts_from_server(isolated_ssh, monkeypatch):
@@ -1159,9 +1159,9 @@ def test_pull_codex_from_server_skips_empty_api_key(isolated_ssh, monkeypatch):
     monkeypatch.setattr(
         remote_config,
         "read_remote_codex_config",
-        lambda client, profile=None: {"model_provider": "openai", "model": "openai-model"},
+        lambda client, profile=None: {"model_provider": "deepseek", "model": "deepseek-v4-flash"},
     )
-    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {"OPENAI_API_KEY": "  "})
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda client, profile=None: {"DEEPSEEK_API_KEY": "  "})
 
     message = sync_manager.pull_codex_from_server("remote")
 
