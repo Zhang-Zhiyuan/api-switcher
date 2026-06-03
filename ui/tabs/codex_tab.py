@@ -7,7 +7,6 @@ from ui.dialogs.profile_editor import ProfileEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from models.profile import CodexProfile
 from core import profile_manager, switcher, security
-from core.providers import ProviderRegistry
 from ui.theme import COLORS, bind_wraplength, button_style, font
 
 
