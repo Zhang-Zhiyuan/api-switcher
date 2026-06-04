@@ -368,10 +368,12 @@ def test_health_check_codex_uses_provider_base_url_and_wire_api(monkeypatch):
 def main():
     check_codex_provider("deepseek", "deepseek-v4-flash", "https://api.deepseek.com", "responses", True)
     check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "responses", False)
+    check_codex_provider("qwen", "qwen-max", "https://dashscope.aliyuncs.com/compatible-mode/v1", "responses", False)
+    check_codex_provider("gemini", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai/", "responses", False)
     check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "responses", False)
-    check_codex_provider("openai", "gpt-5.5", "https://openai.cc/v1", "responses", True)
 
     check_claude_provider("deepseek", "deepseek-v4-pro", "https://api.deepseek.com/anthropic", True)
+    check_claude_provider("gemini", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai/", False)
     check_claude_provider("glm", "GLM-5.1", "", False)
     test_claude_stale_fields_are_removed()
     test_malformed_config_shapes_are_repaired()
