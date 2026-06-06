@@ -14,6 +14,7 @@ TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", True),
     (ENV_TAB_LABEL, "_env_tab", "ui.tabs.env_tab", "EnvTab", False),
+    ("环境检测", "_network_diagnostics_tab", "ui.tabs.network_diagnostics_tab", "NetworkDiagnosticsTab", False),
     ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
     ("会话迁移", "_session_migration_tab", "ui.tabs.session_migration_tab", "SessionMigrationTab", False),
     ("SSH 服务器", "_ssh_tab", "ui.tabs.ssh_tab", "SSHTab", False),
