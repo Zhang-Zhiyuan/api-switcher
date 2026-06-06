@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core import local_proxy, remote_proxy
+from core import local_proxy, network_diagnostic_settings, network_diagnostics, remote_proxy
 
 
 def test_parse_proxy_node_accepts_clash_inline_map():
@@ -363,6 +363,121 @@ proxies:
         "香港 unmeasured",
         "香港 failed",
     ]
+
+
+def test_assess_proxy_node_quality_classifies_proxycheck_residential():
+    node = remote_proxy.parse_proxy_node(
+        "{ name: Claude 家宽, type: vless, server: node.example.com, port: 443 }"
+    )
+
+    def resolver(host, *_args, **_kwargs):
+        assert host == "node.example.com"
+        return [(None, None, None, "", ("198.51.100.77", 0))]
+
+    def http_get(url, _timeout):
+        if "proxycheck.io/v3/198.51.100.77" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "status": "ok",
+                        "198.51.100.77": {
+                            "network": {
+                                "type": "Residential",
+                                "provider": "Example Fiber",
+                                "asn": "64500",
+                            },
+                            "detections": {
+                                "proxy": False,
+                                "vpn": False,
+                                "tor": False,
+                                "relay": False,
+                                "hosting": False,
+                                "risk": 8,
+                            },
+                        },
+                    }
+                ),
+            )
+        if "ipwho.is/198.51.100.77" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "success": True,
+                        "country": "United States",
+                        "city": "San Jose",
+                        "connection": {
+                            "asn": 64500,
+                            "org": "Example Fiber",
+                            "isp": "Example Fiber Broadband",
+                        },
+                    }
+                ),
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_PROXYCHECK},
+        {},
+    )
+
+    result = remote_proxy.assess_proxy_node_quality(
+        node,
+        http_get=http_get,
+        resolver=resolver,
+        settings=settings,
+    )
+
+    assert result.ok is True
+    assert result.ip == "198.51.100.77"
+    assert result.quality_label == "家宽高质"
+    assert result.quality_score >= 90
+    assert result.risk_score == 8
+    assert remote_proxy.proxy_node_quality_for_claude_ok(result) is True
+
+
+def test_quality_preferred_sorting_selects_claude_residential_over_faster_idc():
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        """
+proxies:
+  - { name: 日本 机房, type: vless, server: jp.example.com, port: 443 }
+  - { name: 美国 家宽, type: vless, server: us.example.com, port: 443 }
+"""
+    )
+    idc_key = remote_proxy.proxy_node_key(nodes[0].node)
+    home_key = remote_proxy.proxy_node_key(nodes[1].node)
+    latencies = {
+        idc_key: remote_proxy.ProxyNodeLatencyResult(idc_key, True, latency_ms=10),
+        home_key: remote_proxy.ProxyNodeLatencyResult(home_key, True, latency_ms=70),
+    }
+    qualities = {
+        idc_key: remote_proxy.ProxyNodeQualityResult(
+            idc_key,
+            True,
+            ip_type="IDC/云机房",
+            risk_score=62,
+            quality_score=28,
+            quality_label="机房风险",
+        ),
+        home_key: remote_proxy.ProxyNodeQualityResult(
+            home_key,
+            True,
+            ip_type="家庭宽带/住宅 IP",
+            risk_score=12,
+            quality_score=96,
+            quality_label="家宽高质",
+        ),
+    }
+
+    sorted_nodes = remote_proxy.sort_proxy_subscription_nodes(nodes, latencies, qualities, prefer_quality=True)
+    best = remote_proxy.best_proxy_subscription_node_for_claude(nodes, qualities, latencies)
+
+    assert sorted_nodes[0].node["name"] == "美国 家宽"
+    assert best is not None
+    assert best.node["name"] == "美国 家宽"
 
 
 def test_measure_proxy_node_latency_success(monkeypatch):

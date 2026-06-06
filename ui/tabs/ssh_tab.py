@@ -66,6 +66,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_fetch_button = None
         self._proxy_use_node_button = None
         self._proxy_latency_button = None
+        self._proxy_quality_button = None
         self._proxy_quality_settings_button = None
         self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
         self._proxy_auto_refresh_check = None
@@ -79,6 +80,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_options = {}
         self._proxy_latency_results = {}
         self._proxy_latency_server_count = 0
+        self._proxy_quality_results = {}
+        self._proxy_prefer_quality_sort = False
         self._proxy_busy = False
         self._proxy_saved_subscription_loaded = False
         self._proxy_node_text = None
@@ -620,6 +623,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_quality_button = ctk.CTkButton(
+            proxy_node_actions,
+            text="测质选家宽",
+            width=98,
+            command=self._measure_proxy_subscription_qualities,
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_quality_button.pack(anchor="e", pady=(0, 6))
         self._proxy_use_node_button = ctk.CTkButton(
             proxy_node_actions,
             text="填入待部署",
@@ -1321,6 +1333,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         for button in (
             self._proxy_fetch_button,
             self._proxy_latency_button,
+            self._proxy_quality_button,
             self._proxy_use_node_button,
             self._proxy_quality_settings_button,
             self._proxy_load_file_button,
@@ -1332,7 +1345,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             if not button:
                 continue
             try:
-                if button in (self._proxy_use_node_button, self._proxy_latency_button) and not self._proxy_subscription_options:
+                if button in (self._proxy_use_node_button, self._proxy_latency_button, self._proxy_quality_button) and not self._proxy_subscription_options:
                     button.configure(state="disabled")
                 else:
                     button.configure(state=state)
@@ -1377,6 +1390,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if cached and cached.nodes:
             self._proxy_latency_results = {}
             self._proxy_latency_server_count = 0
+            self._proxy_quality_results = remote_proxy.load_proxy_subscription_qualities()
+            self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
             self._set_proxy_subscription_nodes(cached.nodes)
             self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
             self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
@@ -1520,6 +1535,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 result = payload["result"]
                 self._proxy_latency_results = {}
                 self._proxy_latency_server_count = 0
+                self._proxy_quality_results = remote_proxy.load_proxy_subscription_qualities()
+                self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
                 self._set_proxy_subscription_nodes(result.nodes)
                 self._set_proxy_cache_status(f"本机缓存: SSH 定时更新已保存 {len(result.nodes)} 个节点", "success")
                 batch = payload.get("batch") or {}
@@ -1563,7 +1580,12 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _set_proxy_subscription_nodes(self, nodes, preserve_key: str = ""):
         current_key = preserve_key or self._selected_proxy_subscription_node_key()
         self._proxy_subscription_nodes = list(
-            remote_proxy.sort_proxy_subscription_nodes(nodes or [], self._proxy_latency_results)
+            remote_proxy.sort_proxy_subscription_nodes(
+                nodes or [],
+                self._proxy_latency_results,
+                self._proxy_quality_results,
+                self._proxy_prefer_quality_sort,
+            )
         )
         options = {}
         for item in self._proxy_subscription_nodes:
@@ -1572,7 +1594,12 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         if not self._proxy_subscription_picker:
             return
-        self._proxy_subscription_picker.set_nodes(self._proxy_subscription_nodes, self._proxy_latency_results, current_key)
+        self._proxy_subscription_picker.set_nodes(
+            self._proxy_subscription_nodes,
+            self._proxy_latency_results,
+            current_key,
+            self._proxy_quality_results,
+        )
         self._proxy_subscription_picker.set_enabled(bool(options) and not self._proxy_busy)
         if current_key:
             self._select_proxy_subscription_node_by_key(current_key)
@@ -1580,6 +1607,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_use_node_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_latency_button:
             self._proxy_latency_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+        if self._proxy_quality_button:
+            self._proxy_quality_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
 
     def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
@@ -1626,6 +1655,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 state = remote_proxy.load_proxy_subscription_state()
                 self._proxy_latency_results = {}
                 self._proxy_latency_server_count = 0
+                self._proxy_quality_results = remote_proxy.load_proxy_subscription_qualities()
+                self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
                 self._set_proxy_subscription_nodes(result.nodes)
                 if not self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or "")):
                     self._use_selected_proxy_subscription_node(show_message=False)
@@ -1683,6 +1714,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             server_results = result.get("results", {})
             self._proxy_latency_server_count = len(server_names)
             self._proxy_latency_results = self._aggregate_proxy_latency_results(server_results, len(server_names))
+            self._proxy_prefer_quality_sort = False
             self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
             fastest = self._fastest_proxy_subscription_node()
             ok_nodes = sum(1 for item in self._proxy_latency_results.values() if remote_proxy.proxy_node_latency_ok(item))
@@ -1718,6 +1750,121 @@ class SSHTab(ctk.CTkScrollableFrame):
             lambda: self._measure_proxy_nodes_for_servers(server_names),
             on_done=done,
         )
+
+    def _proxy_quality_candidate_nodes(self):
+        candidates = []
+        measured_any = False
+        for item in self._proxy_subscription_nodes:
+            result = self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
+            if result is not None:
+                measured_any = True
+            if remote_proxy.proxy_node_latency_ok(result):
+                candidates.append(item)
+        return candidates if measured_any else list(self._proxy_subscription_nodes)
+
+    def _measure_proxy_subscription_qualities(self):
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "远端代理操作正在进行中，请稍等", is_error=True)
+            return
+        if not self._proxy_subscription_nodes:
+            message = "请先拉取订阅，再检测节点 IP 质量"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        candidates = self._proxy_quality_candidate_nodes()
+        if not candidates:
+            message = "当前远端测速结果里没有可连节点；请先重新测速，再检测 Claude 高质量节点。"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+
+        node_count = len(candidates)
+        self._set_proxy_busy(True)
+        self._set_proxy_status(
+            f"正在检测 {node_count} 个候选订阅节点的服务器 IP 质量；完成后会优先选择家宽、低风险节点..."
+        )
+
+        def run():
+            try:
+                results = remote_proxy.assess_proxy_node_qualities(
+                    tuple(candidates),
+                    timeout=5.0,
+                    max_workers=8,
+                )
+                payload = {"ok": True, "result": results, "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_proxy_busy(False)
+                if not payload["ok"]:
+                    message = f"节点 IP 质量检测失败: {payload['error']}"
+                    self._set_proxy_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                self._proxy_quality_results.update(payload["result"] or {})
+                self._proxy_prefer_quality_sort = True
+                save_error = ""
+                try:
+                    remote_proxy.save_proxy_subscription_qualities(self._proxy_quality_results)
+                except Exception as exc:
+                    save_error = str(exc)
+
+                self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
+                best = remote_proxy.best_proxy_subscription_node_for_claude(
+                    self._proxy_subscription_nodes,
+                    self._proxy_quality_results,
+                    self._proxy_latency_results,
+                )
+                tested_count = sum(
+                    1
+                    for item in self._proxy_subscription_nodes
+                    if remote_proxy.proxy_node_quality_measured(
+                        self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
+                    )
+                )
+                high_count = sum(
+                    1
+                    for item in self._proxy_subscription_nodes
+                    if remote_proxy.proxy_node_quality_for_claude_ok(
+                        self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
+                    )
+                )
+                if not best:
+                    message = f"质量检测完成: 本次 {len(payload['result'] or {})} 个；暂无可用质量结果。"
+                    if save_error:
+                        message += f" 质量结果缓存失败: {save_error}"
+                    self._set_proxy_status(message, "warning")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+
+                best_key = remote_proxy.proxy_node_key(best.node)
+                self._select_proxy_subscription_node_by_key(best_key)
+                self._use_selected_proxy_subscription_node(show_message=False)
+                quality = self._proxy_quality_results.get(best_key)
+                region = remote_proxy.proxy_node_region(best.node)
+                label = remote_proxy.proxy_node_quality_label(quality)
+                score = remote_proxy.proxy_node_quality_score(quality)
+                severity = "success" if remote_proxy.proxy_node_quality_for_claude_ok(quality) and not save_error else "warning"
+                message = (
+                    f"质量检测完成: 家宽高质 {high_count}/{tested_count}；"
+                    f"已选择【{region}】{label} 评分{score}。"
+                )
+                if save_error:
+                    message += f" 质量结果缓存失败: {save_error}"
+                self._set_proxy_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _measure_proxy_nodes_for_servers(self, server_names: list[str]) -> dict:
         results = {}

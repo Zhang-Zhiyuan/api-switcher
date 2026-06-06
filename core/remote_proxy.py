@@ -4,6 +4,7 @@ import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
+import ipaddress
 import json
 import posixpath
 import re
@@ -23,7 +24,7 @@ from urllib import request as urlrequest
 import yaml
 
 from config.paths import STORAGE_DIR
-from core import profile_manager, remote_config
+from core import network_diagnostic_settings, network_diagnostics, profile_manager, remote_config
 from core.ssh_manager import ssh_manager
 
 
@@ -207,6 +208,32 @@ class ProxyNodeLatencyResult:
         if self.ok and self.latency_ms is not None:
             return f"{self.latency_ms}ms"
         return "不可连"
+
+
+@dataclass(frozen=True)
+class ProxyNodeQualityResult:
+    node_key: str
+    ok: bool
+    host: str = ""
+    ip: str = ""
+    region: str = ""
+    ip_type: str = ""
+    risk_score: int | None = None
+    risk_label: str = ""
+    quality_score: int = 0
+    quality_label: str = ""
+    detail: str = ""
+    checked_at: str = ""
+
+    def label(self) -> str:
+        if not self.ok:
+            return "质量未测"
+        pieces = [self.quality_label or self.ip_type or "质量已测"]
+        if self.risk_score is not None:
+            pieces.append(f"风险{self.risk_score}%")
+        if self.quality_score:
+            pieces.append(f"评分{self.quality_score}")
+        return " ".join(pieces)
 
 
 @dataclass(frozen=True)
@@ -424,6 +451,28 @@ def save_proxy_subscription_latencies(latencies: dict[str, ProxyNodeLatencyResul
     return save_proxy_subscription_state(node_latencies=payload, node_latencies_updated_at=measured_at)
 
 
+def save_proxy_subscription_qualities(qualities: dict[str, ProxyNodeQualityResult | dict]) -> dict:
+    payload = {}
+    for key, result in (qualities or {}).items():
+        node_key = str(key or "").strip()
+        if not node_key:
+            continue
+        payload[node_key] = {
+            "ok": proxy_node_quality_measured(result),
+            "host": proxy_node_quality_host(result),
+            "ip": proxy_node_quality_ip(result),
+            "region": proxy_node_quality_region(result),
+            "ip_type": proxy_node_quality_ip_type(result),
+            "risk_score": proxy_node_quality_risk_score(result),
+            "risk_label": proxy_node_quality_risk_label(result),
+            "quality_score": proxy_node_quality_score(result),
+            "quality_label": proxy_node_quality_label(result),
+            "detail": proxy_node_quality_detail(result),
+            "checked_at": proxy_node_quality_checked_at(result) or _now_iso(),
+        }
+    return save_proxy_subscription_state(node_qualities=payload, node_qualities_updated_at=_now_iso())
+
+
 def load_proxy_subscription_latencies() -> dict[str, dict]:
     state = load_proxy_subscription_state()
     raw = state.get("node_latencies")
@@ -447,6 +496,34 @@ def load_proxy_subscription_latencies() -> dict[str, dict]:
             "detail": str(value.get("detail") or "")[:160],
             "attempts": _int_or_default(value.get("attempts"), 0),
             "measured_at": str(value.get("measured_at") or ""),
+        }
+    return results
+
+
+def load_proxy_subscription_qualities() -> dict[str, dict]:
+    state = load_proxy_subscription_state()
+    raw = state.get("node_qualities")
+    if not isinstance(raw, dict):
+        return {}
+    results = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        node_key = str(key or "").strip()
+        if not node_key:
+            continue
+        results[node_key] = {
+            "ok": bool(value.get("ok")),
+            "host": str(value.get("host") or "")[:180],
+            "ip": str(value.get("ip") or "")[:80],
+            "region": str(value.get("region") or "")[:40],
+            "ip_type": str(value.get("ip_type") or "")[:80],
+            "risk_score": _optional_int(value.get("risk_score")),
+            "risk_label": str(value.get("risk_label") or "")[:40],
+            "quality_score": max(0, min(100, _int_or_default(value.get("quality_score"), 0))),
+            "quality_label": str(value.get("quality_label") or "")[:60],
+            "detail": str(value.get("detail") or "")[:220],
+            "checked_at": str(value.get("checked_at") or "")[:40],
         }
     return results
 
@@ -493,14 +570,23 @@ def ping0_detail_url_for_proxy_node(node: dict) -> str:
 def sort_proxy_subscription_nodes(
     nodes,
     latency_results: dict[str, ProxyNodeLatencyResult | dict] | None = None,
+    quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
+    prefer_quality: bool = False,
 ) -> tuple[ProxySubscriptionNode, ...]:
     items = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
     latencies = latency_results or {}
+    qualities = quality_results or {}
 
     def sort_key(item: ProxySubscriptionNode):
+        node_key = proxy_node_key(item.node)
         region = proxy_node_region(item.node)
         region_index = PROXY_REGION_ORDER.index(region) if region in PROXY_REGION_ORDER else len(PROXY_REGION_ORDER)
-        latency_result = latencies.get(proxy_node_key(item.node))
+        quality_result = qualities.get(node_key)
+        quality_score = proxy_node_quality_score(quality_result)
+        quality_measured_sort = 0 if proxy_node_quality_measured(quality_result) else 1
+        quality_sort = -quality_score if prefer_quality else 0
+        claude_sort = 0 if proxy_node_quality_for_claude_ok(quality_result) else 1
+        latency_result = latencies.get(node_key)
         latency = proxy_node_latency_ms(latency_result)
         if proxy_node_latency_ok(latency_result):
             status_sort = 0
@@ -509,9 +595,31 @@ def sort_proxy_subscription_nodes(
         else:
             status_sort = 2
         latency_sort = latency if latency is not None else 10**9
+        if prefer_quality:
+            return (claude_sort, quality_measured_sort, quality_sort, status_sort, latency_sort, region_index, region, item.display_name().lower())
         return (region_index, region, status_sort, latency_sort, item.display_name().lower())
 
     return tuple(sorted(items, key=sort_key))
+
+
+def best_proxy_subscription_node_for_claude(
+    nodes,
+    quality_results: dict[str, ProxyNodeQualityResult | dict],
+    latency_results: dict[str, ProxyNodeLatencyResult | dict] | None = None,
+) -> ProxySubscriptionNode | None:
+    ranked = sort_proxy_subscription_nodes(
+        nodes,
+        latency_results=latency_results,
+        quality_results=quality_results,
+        prefer_quality=True,
+    )
+    for item in ranked:
+        if proxy_node_quality_for_claude_ok(quality_results.get(proxy_node_key(item.node))):
+            return item
+    for item in ranked:
+        if proxy_node_quality_measured(quality_results.get(proxy_node_key(item.node))):
+            return item
+    return None
 
 
 def measure_proxy_node_latency(node: dict, timeout: float = 3.0, attempts: int = 2) -> ProxyNodeLatencyResult:
@@ -576,6 +684,127 @@ def measure_proxy_node_latencies(
     results: dict[str, ProxyNodeLatencyResult] = {}
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [executor.submit(measure_proxy_node_latency, node, timeout, attempts) for node in items]
+        for future in as_completed(futures):
+            result = future.result()
+            results[result.node_key] = result
+    return results
+
+
+def assess_proxy_node_quality(
+    node: dict,
+    timeout: float = 5.0,
+    *,
+    http_get=None,
+    resolver=None,
+    settings=None,
+    enabled_services=None,
+) -> ProxyNodeQualityResult:
+    normalized = _normalize_proxy_node(node)
+    node_key = proxy_node_key(normalized)
+    host = str(normalized.get("server") or "")
+    region = proxy_node_region(normalized)
+    try:
+        ip = _resolve_proxy_node_ip(normalized, resolver=resolver)
+    except Exception as exc:
+        return ProxyNodeQualityResult(
+            node_key=node_key,
+            ok=False,
+            host=host,
+            region=region,
+            quality_label="解析失败",
+            detail=str(exc).splitlines()[0][:180] or "节点服务器解析失败",
+            checked_at=_now_iso(),
+        )
+
+    settings = settings or network_diagnostic_settings.load_settings()
+    if enabled_services is not None:
+        services = enabled_services
+    elif hasattr(settings, "enabled_services"):
+        services = settings.enabled_services()
+    else:
+        services = []
+    http_get = http_get or network_diagnostics._http_get
+    reputation = network_diagnostics.lookup_reputation(
+        ip,
+        timeout,
+        http_get,
+        enabled_services=services,
+        proxycheck_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_PROXYCHECK),
+        ipqs_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_IPQS),
+        vpnapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_VPNAPI),
+    )
+    geo = network_diagnostics.lookup_geo(ip, timeout, http_get)
+    classification = network_diagnostics.classify_ip(geo, reputation=reputation)
+    quality_score = _proxy_quality_score(classification)
+    quality_label = _proxy_quality_label(classification, quality_score)
+    detail_parts = []
+    if geo.ok and geo.owner_text() != "-":
+        detail_parts.append(geo.owner_text())
+    for item in reputation:
+        if item.ok:
+            detail_parts.append(item.summary_text())
+        elif item.error:
+            detail_parts.append(f"{item.source_label}: {item.error}")
+    return ProxyNodeQualityResult(
+        node_key=node_key,
+        ok=True,
+        host=host,
+        ip=ip,
+        region=region,
+        ip_type=classification.ip_type,
+        risk_score=classification.risk_score,
+        risk_label=classification.risk_label,
+        quality_score=quality_score,
+        quality_label=quality_label,
+        detail="；".join(detail_parts[:3])[:220],
+        checked_at=_now_iso(),
+    )
+
+
+def assess_proxy_node_qualities(
+    nodes,
+    timeout: float = 5.0,
+    max_workers: int = 8,
+    *,
+    http_get=None,
+    resolver=None,
+    settings=None,
+    enabled_services=None,
+) -> dict[str, ProxyNodeQualityResult]:
+    items = []
+    seen = set()
+    for item in nodes or []:
+        node = item.node if isinstance(item, ProxySubscriptionNode) else item
+        if not isinstance(node, dict):
+            continue
+        try:
+            normalized = _normalize_proxy_node(node)
+            node_key = proxy_node_key(normalized)
+        except Exception:
+            continue
+        if node_key in seen:
+            continue
+        seen.add(node_key)
+        items.append(normalized)
+    if not items:
+        return {}
+
+    settings = settings or network_diagnostic_settings.load_settings()
+    worker_count = min(max(1, _int_or_default(max_workers, 8)), len(items))
+    results: dict[str, ProxyNodeQualityResult] = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                assess_proxy_node_quality,
+                node,
+                timeout,
+                http_get=http_get,
+                resolver=resolver,
+                settings=settings,
+                enabled_services=enabled_services,
+            )
+            for node in items
+        ]
         for future in as_completed(futures):
             result = future.result()
             results[result.node_key] = result
@@ -677,6 +906,109 @@ def proxy_node_latency_label(result: ProxyNodeLatencyResult | dict | None) -> st
     if result is None:
         return "未测"
     return "不可连"
+
+
+def proxy_node_quality_measured(result: ProxyNodeQualityResult | dict | None) -> bool:
+    if isinstance(result, ProxyNodeQualityResult):
+        return bool(result.ok)
+    if isinstance(result, dict):
+        return bool(result.get("ok"))
+    return False
+
+
+def proxy_node_quality_score(result: ProxyNodeQualityResult | dict | None) -> int:
+    if isinstance(result, ProxyNodeQualityResult):
+        value = result.quality_score
+    elif isinstance(result, dict):
+        value = result.get("quality_score")
+    else:
+        value = 0
+    return max(0, min(100, _int_or_default(value, 0)))
+
+
+def proxy_node_quality_label(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return result.quality_label or ("质量已测" if result.ok else "质量未测")
+    if isinstance(result, dict):
+        return str(result.get("quality_label") or ("质量已测" if result.get("ok") else "质量未测"))
+    return "质量未测"
+
+
+def proxy_node_quality_detail(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.detail or "")[:220]
+    if isinstance(result, dict):
+        return str(result.get("detail") or "")[:220]
+    return ""
+
+
+def proxy_node_quality_ip_type(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.ip_type or "")
+    if isinstance(result, dict):
+        return str(result.get("ip_type") or "")
+    return ""
+
+
+def proxy_node_quality_ip(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.ip or "")
+    if isinstance(result, dict):
+        return str(result.get("ip") or "")
+    return ""
+
+
+def proxy_node_quality_host(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.host or "")
+    if isinstance(result, dict):
+        return str(result.get("host") or "")
+    return ""
+
+
+def proxy_node_quality_region(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.region or "")
+    if isinstance(result, dict):
+        return str(result.get("region") or "")
+    return ""
+
+
+def proxy_node_quality_risk_score(result: ProxyNodeQualityResult | dict | None) -> int | None:
+    if isinstance(result, ProxyNodeQualityResult):
+        value = result.risk_score
+    elif isinstance(result, dict):
+        value = result.get("risk_score")
+    else:
+        value = None
+    return _optional_int(value)
+
+
+def proxy_node_quality_risk_label(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.risk_label or "")
+    if isinstance(result, dict):
+        return str(result.get("risk_label") or "")
+    return ""
+
+
+def proxy_node_quality_checked_at(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.checked_at or "")
+    if isinstance(result, dict):
+        return str(result.get("checked_at") or "")
+    return ""
+
+
+def proxy_node_quality_for_claude_ok(result: ProxyNodeQualityResult | dict | None) -> bool:
+    if not proxy_node_quality_measured(result):
+        return False
+    ip_type = proxy_node_quality_ip_type(result)
+    label = proxy_node_quality_label(result)
+    risk = proxy_node_quality_risk_score(result)
+    score = proxy_node_quality_score(result)
+    residential = any(marker in ip_type or marker in label for marker in ("家庭", "住宅", "运营商/宽带", "家宽"))
+    return residential and score >= 80 and (risk is None or risk <= 35)
 
 
 def _normalize_proxy_node(node: dict) -> dict:
@@ -1747,6 +2079,113 @@ def _normalize_timeout(value, default: float) -> float:
     except (TypeError, ValueError):
         timeout = default
     return min(max(timeout, 0.2), 15.0)
+
+
+def _optional_int(value) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+
+
+def _diagnostic_settings_keys(settings, service: str) -> list[str]:
+    if not settings:
+        return []
+    if hasattr(settings, "keys_for"):
+        try:
+            return list(settings.keys_for(service))
+        except Exception:
+            return []
+    if isinstance(settings, dict):
+        raw = settings.get(service) or settings.get(str(service))
+        if isinstance(raw, dict):
+            raw = raw.get("api_keys") or raw.get("keys")
+        if isinstance(raw, str):
+            return network_diagnostic_settings.parse_api_keys(raw)
+        if isinstance(raw, (list, tuple, set)):
+            return network_diagnostic_settings.parse_api_keys(list(raw))
+    return []
+
+
+def _resolve_proxy_node_ip(node: dict, resolver=None) -> str:
+    normalized = _normalize_proxy_node(node)
+    server = str(normalized.get("server") or "").strip().strip("[]")
+    if not server:
+        raise ValueError("代理节点缺少服务器地址")
+    try:
+        ipaddress.ip_address(server)
+        return server
+    except ValueError:
+        pass
+
+    resolver = resolver or socket.getaddrinfo
+    try:
+        infos = resolver(server, None, type=socket.SOCK_STREAM)
+    except TypeError:
+        infos = resolver(server)
+    candidates: list[str] = []
+    for info in infos or []:
+        sockaddr = info[4] if isinstance(info, tuple) and len(info) >= 5 else None
+        address = sockaddr[0] if isinstance(sockaddr, tuple) and sockaddr else None
+        if not address:
+            continue
+        text = str(address).strip().strip("[]")
+        try:
+            ipaddress.ip_address(text)
+        except ValueError:
+            continue
+        if text not in candidates:
+            candidates.append(text)
+    if not candidates:
+        raise ValueError(f"无法解析节点服务器: {server}")
+
+    def rank(value: str) -> tuple[int, int]:
+        parsed = ipaddress.ip_address(value)
+        return (0 if parsed.version == 4 else 1, 0 if parsed.is_global else 1)
+
+    return sorted(candidates, key=rank)[0]
+
+
+def _proxy_quality_score(classification: network_diagnostics.IpClassification) -> int:
+    risk = max(0, min(100, int(classification.risk_score)))
+    score = 100 - risk
+    ip_type = str(classification.ip_type or "")
+    if any(marker in ip_type for marker in ("家庭宽带", "住宅", "家庭/非IDC", "运营商/宽带")):
+        score += 18
+    elif "蜂窝" in ip_type or "移动网络" in ip_type:
+        score -= 8
+    elif "企业" in ip_type or "商宽" in ip_type:
+        score -= 12
+    elif "IDC" in ip_type or "机房" in ip_type:
+        score -= 38
+    elif "代理" in ip_type or "VPN" in ip_type or "Tor" in ip_type or "匿名" in ip_type:
+        score -= 65
+    return max(0, min(100, score))
+
+
+def _proxy_quality_label(classification: network_diagnostics.IpClassification, score: int) -> str:
+    ip_type = str(classification.ip_type or "")
+    risk = int(classification.risk_score)
+    if any(marker in ip_type for marker in ("家庭宽带", "住宅", "家庭/非IDC", "运营商/宽带")):
+        if score >= 80 and risk <= 35:
+            return "家宽高质"
+        return "家宽可用"
+    if "蜂窝" in ip_type or "移动网络" in ip_type:
+        return "移动网络"
+    if "企业" in ip_type or "商宽" in ip_type:
+        return "商宽中等"
+    if "IDC" in ip_type or "机房" in ip_type:
+        return "机房风险"
+    if "代理" in ip_type or "VPN" in ip_type or "Tor" in ip_type or "匿名" in ip_type:
+        return "代理风险"
+    if score >= 75 and risk <= 35:
+        return "低风险"
+    return "质量未知"
 
 
 def _download_proxy_subscription(
