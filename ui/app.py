@@ -656,9 +656,9 @@ class App(ctk.CTk):
             self._proxy_quality_dialog = None
 
         try:
-            from ui.dialogs.network_diagnostics_dialog import NetworkDiagnosticsDialog
+            from ui.dialogs.proxy_quality_dialog import ProxyQualityDialog
 
-            dialog = NetworkDiagnosticsDialog(self, on_close=lambda: setattr(self, "_proxy_quality_dialog", None))
+            dialog = ProxyQualityDialog(self, on_close=lambda: setattr(self, "_proxy_quality_dialog", None))
             self._proxy_quality_dialog = dialog
             self._status.configure(text="已打开代理质量检测")
             return dialog
@@ -672,9 +672,6 @@ class App(ctk.CTk):
             except Exception:
                 pass
             return None
-
-    def _show_network_diagnostics_tab(self):
-        return self._show_proxy_quality_dialog()
 
     def refresh_all(self):
         """Refresh all tabs."""

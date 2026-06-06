@@ -33,14 +33,18 @@ def test_proxy_quality_is_not_a_primary_tab():
     labels = [label for label, *_spec in app_module.TAB_SPECS]
 
     assert "环境检测" not in labels
+    assert "环境监测" not in labels
     assert app_module.PROXY_QUALITY_DIALOG_LABEL not in labels
     assert hasattr(app_module.App, "_show_proxy_quality_dialog")
+    assert not hasattr(app_module.App, "_show_network_diagnostics_tab")
 
 
 def test_proxy_quality_dialog_module_is_importable():
-    from ui.dialogs.network_diagnostics_dialog import NetworkDiagnosticsDialog
+    from ui.dialogs.proxy_quality_dialog import ProxyQualityDialog
+    from ui.widgets.proxy_quality_panel import ProxyQualityPanel
 
-    assert NetworkDiagnosticsDialog.__name__ == "NetworkDiagnosticsDialog"
+    assert ProxyQualityDialog.__name__ == "ProxyQualityDialog"
+    assert ProxyQualityPanel.__name__ == "ProxyQualityPanel"
 
 
 def test_parse_args_supports_no_splash_and_minimized_aliases():

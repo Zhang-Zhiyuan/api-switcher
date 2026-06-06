@@ -1,10 +1,10 @@
 import customtkinter as ctk
 
-from ui.tabs.network_diagnostics_tab import NetworkDiagnosticsTab
+from ui.widgets.proxy_quality_panel import ProxyQualityPanel
 from ui.theme import COLORS, center_window
 
 
-class NetworkDiagnosticsDialog(ctk.CTkToplevel):
+class ProxyQualityDialog(ctk.CTkToplevel):
     """Proxy quality diagnostics window launched from proxy pages."""
 
     def __init__(self, master, on_close=None):
@@ -18,7 +18,7 @@ class NetworkDiagnosticsDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Destroy>", self._on_destroy, add="+")
 
-        self.panel = NetworkDiagnosticsTab(self)
+        self.panel = ProxyQualityPanel(self)
         self.panel.pack(fill="both", expand=True)
 
         center_window(self, master)

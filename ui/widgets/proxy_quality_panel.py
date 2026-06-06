@@ -9,7 +9,7 @@ from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
 
 
-class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
+class ProxyQualityPanel(ctk.CTkScrollableFrame):
     """Panel for public network and proxy exit quality diagnostics."""
 
     def __init__(self, master, **kwargs):
