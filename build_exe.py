@@ -182,6 +182,7 @@ coll = COLLECT(
         "cryptography",
         "pystray",
         "ui.dialogs.close_choice_dialog",
+        "ui.dialogs.network_diagnostics_dialog",
         *UI_TAB_HIDDEN_IMPORTS,
     ]
 

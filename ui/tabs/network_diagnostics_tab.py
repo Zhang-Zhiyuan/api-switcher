@@ -10,7 +10,7 @@ from ui.widgets.toast import show_toast
 
 
 class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
-    """Tab for public network exit diagnostics."""
+    """Panel for public network and proxy exit quality diagnostics."""
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -44,13 +44,13 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         title_area.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             title_area,
-            text="环境检测",
+            text="代理质量检测",
             text_color=COLORS["text"],
             font=font(18, "bold"),
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="先测速筛选可连通出口，再用 Ping0、ProxyCheck、IPQS、VPNAPI 做 IP 质量检测",
+            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Ping0、ProxyCheck、IPQS、VPNAPI 评估 IP 质量",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -331,7 +331,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         if self._settings_status_label:
             self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["success"])
         if show_message:
-            show_toast(self.winfo_toplevel(), "环境检测设置已保存")
+            show_toast(self.winfo_toplevel(), "代理质量检测设置已保存")
         return settings
 
     def _settings_status_text(self, settings) -> str:
@@ -354,7 +354,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
 
     def _start_detection(self):
         if self._busy:
-            show_toast(self.winfo_toplevel(), "环境检测正在进行中", is_error=True)
+            show_toast(self.winfo_toplevel(), "代理质量检测正在进行中", is_error=True)
             return
 
         self._busy = True

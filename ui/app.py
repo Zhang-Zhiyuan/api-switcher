@@ -9,7 +9,7 @@ from core.tray_manager import TrayManager
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
-NETWORK_DIAGNOSTICS_TAB_LABEL = "环境检测"
+PROXY_QUALITY_DIALOG_LABEL = "代理质量检测"
 ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
 QUICK_SWITCH_TITLE = "快速切换 API"
 CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
@@ -18,7 +18,6 @@ TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", True),
     (ENV_TAB_LABEL, "_env_tab", "ui.tabs.env_tab", "EnvTab", False),
-    (NETWORK_DIAGNOSTICS_TAB_LABEL, "_network_diagnostics_tab", "ui.tabs.network_diagnostics_tab", "NetworkDiagnosticsTab", False),
     ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
     ("会话迁移", "_session_migration_tab", "ui.tabs.session_migration_tab", "SessionMigrationTab", False),
     ("SSH 服务器", "_ssh_tab", "ui.tabs.ssh_tab", "SSHTab", False),
@@ -44,6 +43,7 @@ class App(ctk.CTk):
         self._tray_hint_shown = False
         self._close_dialog = None
         self._force_exit_timer_started = False
+        self._proxy_quality_dialog = None
         self._tab_frames = {}
         self._tab_class_cache = {}
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
@@ -645,12 +645,24 @@ class App(ctk.CTk):
             tab.refresh()
         self._status.configure(text="已打开环境变量管理")
 
+    def _show_proxy_quality_dialog(self):
+        try:
+            existing = self._proxy_quality_dialog
+            if existing is not None and existing.winfo_exists():
+                existing.focus()
+                return existing
+        except Exception:
+            self._proxy_quality_dialog = None
+
+        from ui.dialogs.network_diagnostics_dialog import NetworkDiagnosticsDialog
+
+        dialog = NetworkDiagnosticsDialog(self, on_close=lambda: setattr(self, "_proxy_quality_dialog", None))
+        self._proxy_quality_dialog = dialog
+        self._status.configure(text="已打开代理质量检测")
+        return dialog
+
     def _show_network_diagnostics_tab(self):
-        self._tabview.set(NETWORK_DIAGNOSTICS_TAB_LABEL)
-        tab = self._ensure_tab(NETWORK_DIAGNOSTICS_TAB_LABEL)
-        if tab and hasattr(tab, "refresh"):
-            tab.refresh()
-        self._status.configure(text="已打开环境检测")
+        return self._show_proxy_quality_dialog()
 
     def refresh_all(self):
         """Refresh all tabs."""

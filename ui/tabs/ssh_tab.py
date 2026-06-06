@@ -643,9 +643,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_use_node_button.pack(anchor="e")
         self._proxy_quality_settings_button = ctk.CTkButton(
             proxy_node_actions,
-            text="IP质量设置",
+            text="质量检测源",
             width=98,
-            command=self._open_network_diagnostics_tab,
+            command=self._open_proxy_quality_dialog,
             **button_style("primary", compact=True),
         )
         self._proxy_quality_settings_button.pack(anchor="e", pady=(6, 0))
@@ -1678,13 +1678,17 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _open_network_diagnostics_tab(self):
+    def _open_proxy_quality_dialog(self):
         top = self.winfo_toplevel()
+        if hasattr(top, "_show_proxy_quality_dialog"):
+            top._show_proxy_quality_dialog()
+            show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            return
         if hasattr(top, "_show_network_diagnostics_tab"):
             top._show_network_diagnostics_tab()
-            show_toast(top, "已打开环境检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
             return
-        show_toast(top, "请切换到“环境检测”页配置 IP 质量检测源", is_error=True)
+        show_toast(top, "无法打开代理质量检测窗口", is_error=True)
 
     def _measure_proxy_subscription_latencies(self):
         if self._proxy_busy:
