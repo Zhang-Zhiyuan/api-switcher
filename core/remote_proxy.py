@@ -716,25 +716,33 @@ def assess_proxy_node_quality(
             checked_at=_now_iso(),
         )
 
-    settings = settings or network_diagnostic_settings.load_settings()
-    if enabled_services is not None:
-        services = enabled_services
-    elif hasattr(settings, "enabled_services"):
-        services = settings.enabled_services()
-    else:
-        services = []
-    http_get = http_get or network_diagnostics._http_get
-    reputation = network_diagnostics.lookup_reputation(
-        ip,
-        timeout,
-        http_get,
-        enabled_services=services,
-        proxycheck_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_PROXYCHECK),
-        ipqs_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_IPQS),
-        vpnapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_VPNAPI),
-    )
-    geo = network_diagnostics.lookup_geo(ip, timeout, http_get)
-    classification = network_diagnostics.classify_ip(geo, reputation=reputation)
+    try:
+        settings = settings or network_diagnostic_settings.load_settings()
+        if enabled_services is not None:
+            services = enabled_services
+        elif hasattr(settings, "enabled_services"):
+            services = settings.enabled_services()
+        else:
+            services = []
+        http_get = http_get or network_diagnostics._http_get
+        reputation = network_diagnostics.lookup_reputation(
+            ip,
+            timeout,
+            http_get,
+            enabled_services=services,
+            proxycheck_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_PROXYCHECK),
+            ipqs_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_IPQS),
+            vpnapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_VPNAPI),
+        )
+        geo = network_diagnostics.lookup_geo(ip, timeout, http_get)
+        classification = network_diagnostics.classify_ip(geo, reputation=reputation)
+    except Exception as exc:
+        return _proxy_node_quality_error_result(
+            normalized,
+            "检测失败",
+            str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
+            ip=ip,
+        )
     quality_score = _proxy_quality_score(classification)
     quality_label = _proxy_quality_label(classification, quality_score)
     detail_parts = []
@@ -793,7 +801,7 @@ def assess_proxy_node_qualities(
     worker_count = min(max(1, _int_or_default(max_workers, 8)), len(items))
     results: dict[str, ProxyNodeQualityResult] = {}
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
+        futures = {
             executor.submit(
                 assess_proxy_node_quality,
                 node,
@@ -802,11 +810,19 @@ def assess_proxy_node_qualities(
                 resolver=resolver,
                 settings=settings,
                 enabled_services=enabled_services,
-            )
+            ): node
             for node in items
-        ]
+        }
         for future in as_completed(futures):
-            result = future.result()
+            node = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = _proxy_node_quality_error_result(
+                    node,
+                    "检测失败",
+                    str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
+                )
             results[result.node_key] = result
     return results
 
@@ -2110,6 +2126,20 @@ def _diagnostic_settings_keys(settings, service: str) -> list[str]:
         if isinstance(raw, (list, tuple, set)):
             return network_diagnostic_settings.parse_api_keys(list(raw))
     return []
+
+
+def _proxy_node_quality_error_result(node: dict, quality_label: str, detail: str, ip: str = "") -> ProxyNodeQualityResult:
+    normalized = _normalize_proxy_node(node)
+    return ProxyNodeQualityResult(
+        node_key=proxy_node_key(normalized),
+        ok=False,
+        host=str(normalized.get("server") or ""),
+        ip=str(ip or ""),
+        region=proxy_node_region(normalized),
+        quality_label=str(quality_label or "检测失败")[:60],
+        detail=str(detail or "节点服务器 IP 质量检测失败")[:220],
+        checked_at=_now_iso(),
+    )
 
 
 def _resolve_proxy_node_ip(node: dict, resolver=None) -> str:

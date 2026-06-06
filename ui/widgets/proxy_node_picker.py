@@ -40,38 +40,41 @@ class ProxyNodePicker(ctk.CTkFrame):
             placeholder_text="搜索节点名、地区、类型、服务器",
             **input_style(),
         )
-        self._search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self._search_entry.grid(row=0, column=0, columnspan=4, sticky="ew")
         self._search_entry.bind("<KeyRelease>", lambda _event: self._render_nodes())
 
+        filter_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
+        filter_bar.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
         self._filter_combo = ctk.CTkComboBox(
-            toolbar,
+            filter_bar,
             values=list(self.FILTER_OPTIONS),
             width=108,
             command=lambda _value: self._render_nodes(),
             **combo_style(),
         )
         self._filter_combo.set("全部")
-        self._filter_combo.grid(row=0, column=1, sticky="e")
+        self._filter_combo.pack(side="left", padx=(0, 8))
 
         self._region_combo = ctk.CTkComboBox(
-            toolbar,
+            filter_bar,
             values=[self.REGION_ALL],
             width=112,
             command=lambda _value: self._render_nodes(),
             **combo_style(),
         )
         self._region_combo.set(self.REGION_ALL)
-        self._region_combo.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self._region_combo.pack(side="left", padx=(0, 8))
 
         self._quality_combo = ctk.CTkComboBox(
-            toolbar,
+            filter_bar,
             values=list(self.QUALITY_OPTIONS),
             width=112,
             command=lambda _value: self._render_nodes(),
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
-        self._quality_combo.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self._quality_combo.pack(side="left")
 
         self._summary_label = ctk.CTkLabel(
             self,
@@ -96,8 +99,8 @@ class ProxyNodePicker(ctk.CTkFrame):
 
     def set_nodes(self, nodes, latency_results=None, selected_key: str = "", quality_results=None):
         self._nodes = list(nodes or [])
-        self._latency_results = latency_results or {}
-        self._quality_results = quality_results or {}
+        self._latency_results = latency_results if isinstance(latency_results, dict) else {}
+        self._quality_results = quality_results if isinstance(quality_results, dict) else {}
         self._update_region_options()
         available_keys = {self._node_key(item) for item in self._nodes}
         if selected_key and selected_key in available_keys:
@@ -172,7 +175,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not visible:
             ctk.CTkLabel(
                 self._list_frame,
-                text="没有匹配的节点",
+                text=self._empty_message(total, quality_count),
                 text_color=COLORS["muted"],
                 font=font(12),
             ).pack(fill="x", padx=12, pady=16)
@@ -252,7 +255,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             text=latency_label,
             text_color=latency_color,
             font=font(12, "bold"),
-            width=76,
+            width=64,
             anchor="e",
         ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 10))
 
@@ -267,8 +270,8 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         ctk.CTkButton(
             row,
-            text="Ping0质量",
-            width=76,
+            text="Ping0",
+            width=64,
             command=lambda current=node: self._open_ping0(current),
             **button_style("accent", compact=True),
         ).grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 8), pady=8)
@@ -283,8 +286,14 @@ class ProxyNodePicker(ctk.CTkFrame):
     def _filtered_nodes(self):
         query = self._search_text()
         mode = self._filter_combo.get() if self._filter_combo else "全部"
+        if mode not in self.FILTER_OPTIONS:
+            mode = "全部"
         region_filter = self._region_combo.get() if self._region_combo else self.REGION_ALL
+        if not region_filter:
+            region_filter = self.REGION_ALL
         quality_filter = self._quality_combo.get() if self._quality_combo else "全部质量"
+        if quality_filter not in self.QUALITY_OPTIONS:
+            quality_filter = "全部质量"
         matches = []
         for item in self._nodes:
             latency = self._latency_for(item)
@@ -303,6 +312,14 @@ class ProxyNodePicker(ctk.CTkFrame):
                 continue
             matches.append(item)
         return matches
+
+    def _empty_message(self, total: int, quality_count: int) -> str:
+        if total <= 0:
+            return "暂无节点，请先拉取订阅"
+        mode = self._quality_combo.get() if self._quality_combo else "全部质量"
+        if mode and mode != "全部质量" and quality_count <= 0:
+            return "暂无质量结果，可先点击“测质选家宽”"
+        return "没有匹配的节点"
 
     def _search_text(self) -> str:
         if not self._search_entry:
@@ -366,17 +383,19 @@ class ProxyNodePicker(ctk.CTkFrame):
             return not measured
         if not measured:
             return False
+        label_text = label.casefold()
+        ip_type_text = ip_type.casefold()
         if mode == "家宽高质":
             return remote_proxy.proxy_node_quality_for_ai_proxy_ok(result)
         if mode == "家宽/运营商":
-            return any(marker in label or marker in ip_type for marker in ("家宽", "家庭", "住宅", "运营商/宽带"))
+            return any(marker in label_text or marker in ip_type_text for marker in ("家宽", "家庭", "住宅", "residential", "home", "broadband", "运营商/宽带"))
         if mode == "低风险":
             return remote_proxy.proxy_node_quality_score(result) >= 75 and (risk is None or risk <= 35)
         if mode == "机房/商宽":
-            return any(marker in label or marker in ip_type for marker in ("机房", "IDC", "商宽", "企业"))
+            return any(marker in label_text or marker in ip_type_text for marker in ("机房", "idc", "hosting", "datacenter", "business", "商宽", "企业"))
         if mode == "代理风险":
             return remote_proxy.proxy_node_quality_score(result) <= 40 or any(
-                marker in label or marker in ip_type for marker in ("代理", "VPN", "Tor", "匿名")
+                marker in label_text or marker in ip_type_text for marker in ("代理", "vpn", "tor", "proxy", "匿名")
             )
         return True
 

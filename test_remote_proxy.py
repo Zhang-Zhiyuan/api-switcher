@@ -439,6 +439,66 @@ def test_assess_proxy_node_quality_classifies_proxycheck_residential():
     assert remote_proxy.proxy_node_quality_for_ai_proxy_ok(result) is True
 
 
+def test_assess_proxy_node_quality_returns_failure_when_provider_raises():
+    node = remote_proxy.parse_proxy_node(
+        "{ name: 检测失败节点, type: vless, server: node.example.com, port: 443 }"
+    )
+
+    result = remote_proxy.assess_proxy_node_quality(
+        node,
+        http_get=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("quota exploded")),
+        resolver=lambda *_args, **_kwargs: [(None, None, None, "", ("198.51.100.88", 0))],
+        settings=network_diagnostic_settings.settings_from_values(
+            {network_diagnostic_settings.SERVICE_PROXYCHECK},
+            {},
+        ),
+    )
+
+    assert result.ok is False
+    assert result.ip == "198.51.100.88"
+    assert result.quality_label == "检测失败"
+    assert "quota exploded" in result.detail
+
+
+def test_assess_proxy_node_qualities_isolates_single_node_failure(monkeypatch):
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        """
+proxies:
+  - { name: good, type: vless, server: good.example.com, port: 443 }
+  - { name: bad, type: vless, server: bad.example.com, port: 443 }
+"""
+    )
+
+    def fake_assess(node, *_args, **_kwargs):
+        if node["name"] == "bad":
+            raise RuntimeError("bad node boom")
+        node_key = remote_proxy.proxy_node_key(node)
+        return remote_proxy.ProxyNodeQualityResult(
+            node_key,
+            True,
+            host=node["server"],
+            ip="198.51.100.90",
+            ip_type="家庭宽带/住宅 IP",
+            risk_score=9,
+            quality_score=95,
+            quality_label="家宽高质",
+        )
+
+    monkeypatch.setattr(remote_proxy, "assess_proxy_node_quality", fake_assess)
+
+    results = remote_proxy.assess_proxy_node_qualities(
+        nodes,
+        settings=network_diagnostic_settings.settings_from_values(set(), {}),
+    )
+
+    good_key = remote_proxy.proxy_node_key(nodes[0].node)
+    bad_key = remote_proxy.proxy_node_key(nodes[1].node)
+    assert results[good_key].ok is True
+    assert results[bad_key].ok is False
+    assert results[bad_key].quality_label == "检测失败"
+    assert "bad node boom" in results[bad_key].detail
+
+
 def test_quality_preferred_sorting_selects_ai_proxy_residential_over_faster_idc():
     nodes = remote_proxy.parse_proxy_subscription_content(
         """
