@@ -130,6 +130,53 @@ def test_ping0_free_geo_is_used_without_api_key():
     assert "完整风控" in quality.quality_text()
 
 
+def test_probe_public_ip_accepts_text_response_with_extra_label():
+    result = network_diagnostics.probe_public_ip(
+        "IPv4",
+        "https://example.test/ip",
+        1.0,
+        _fake_http_get({"https://example.test/ip": "current ip: 198.51.100.44\n"}),
+    )
+
+    assert result.ok is True
+    assert result.ip == "198.51.100.44"
+
+
+def test_ping0_paid_api_parses_nested_payload_and_string_values():
+    ip = "198.51.100.45"
+    mapping = {
+        "https://ping0.cc/apiloc/apikey(key-a)/ip(198.51.100.45)": {
+            "code": 0,
+            "data": {
+                "ip": ip,
+                "location": "中国 香港 香港",
+                "asn": 9304,
+                "asn_name": "HGC Global Communications Limited",
+                "organization": "HGC Global Communications Limited",
+                "is_idc": "false",
+                "ip_risk": "12.0",
+                "is_native": "yes",
+            },
+        },
+    }
+
+    quality = network_diagnostics.lookup_ping0_quality(
+        ip,
+        "IPv4",
+        1.0,
+        _fake_http_get(mapping),
+        api_keys=["key-a"],
+    )
+
+    assert quality.ok is True
+    assert quality.has_paid_quality is True
+    assert quality.asn == "AS9304"
+    assert quality.isidc is False
+    assert quality.iprisk == 12
+    assert quality.isnative is True
+    assert quality.api_key_label == "Key #1"
+
+
 def test_classify_ip_marks_broadband_like_owner_as_lower_risk():
     geo = network_diagnostics.GeoInfo(
         ip="198.51.100.20",
@@ -236,6 +283,30 @@ def test_proxycheck_hosting_classifies_data_center():
     assert "IDC" in diagnostic.reputation[0].summary_text()
 
 
+def test_proxycheck_legacy_vpn_type_is_parsed_as_anonymous_flag():
+    ip = "203.0.113.36"
+    mapping = {
+        f"https://proxycheck.io/v3/{ip}?p=0&tag=0": {
+            "status": "ok",
+            ip: {
+                "proxy": "yes",
+                "type": "VPN",
+                "risk": "86.0",
+                "provider": "Example VPN",
+                "asn": "AS64501",
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_proxycheck_reputation(ip, 1.0, _fake_http_get(mapping))
+
+    assert info.ok is True
+    assert info.network_type == ""
+    assert info.flags["proxy"] is True
+    assert info.flags["vpn"] is True
+    assert info.risk_score == 86
+
+
 def test_vpnapi_flags_anonymous_network_when_key_is_present():
     ip = "203.0.113.32"
     mapping = {
@@ -275,6 +346,30 @@ def test_vpnapi_flags_anonymous_network_when_key_is_present():
     assert diagnostic.classification.ip_type == "代理/VPN/Tor 可疑"
     assert diagnostic.classification.risk_score >= 78
     assert any("VPNAPI.io security: VPN" in signal for signal in diagnostic.classification.signals)
+
+
+def test_vpnapi_parses_nested_payload_and_string_booleans():
+    ip = "203.0.113.37"
+    mapping = {
+        f"https://vpnapi.io/api/{ip}?key=vpn-key": {
+            "data": {
+                "security": {"vpn": "true", "proxy": "false", "tor": "0", "relay": "1"},
+                "network": {
+                    "asn": 64502,
+                    "organization": "Example Relay Network",
+                },
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_vpnapi_reputation(ip, 1.0, _fake_http_get(mapping), api_keys=["vpn-key"])
+
+    assert info.ok is True
+    assert info.flags["vpn"] is True
+    assert info.flags["relay"] is True
+    assert info.flags["proxy"] is False
+    assert info.asn == "AS64502"
+    assert info.provider == "Example Relay Network"
 
 
 def test_ipqs_fraud_score_and_connection_type_are_used_with_key():
@@ -323,6 +418,31 @@ def test_ipqs_fraud_score_and_connection_type_are_used_with_key():
     assert diagnostic.classification.ip_type == "住宅代理/匿名出口可疑"
     assert diagnostic.classification.risk_score == 82
     assert any("IPQS fraud_score=82" in signal for signal in diagnostic.classification.signals)
+
+
+def test_ipqs_key_pool_rotates_after_success_false_string():
+    ip = "203.0.113.38"
+    first_url = f"https://ipqualityscore.com/api/json/ip/expired-key/{ip}?strictness=1&allow_public_access_points=true&fast=true"
+    second_url = f"https://ipqualityscore.com/api/json/ip/ok-key/{ip}?strictness=1&allow_public_access_points=true&fast=true"
+    mapping = {
+        first_url: {"result": {"success": "false", "message": "quota exhausted"}},
+        second_url: {
+            "success": "true",
+            "connection_type": "Business",
+            "fraud_score": "31.0",
+            "proxy": "false",
+            "vpn": "false",
+            "tor": "false",
+        },
+    }
+
+    info = network_diagnostics.lookup_ipqs_reputation(ip, 1.0, _fake_http_get(mapping), api_keys=["expired-key", "ok-key"])
+
+    assert info.ok is True
+    assert info.api_key_label == "Key #2"
+    assert info.network_type == "Business"
+    assert info.fraud_score == 31
+    assert info.attempts == ["Key #1 失败: quota exhausted", "Key #2 成功"]
 
 
 def test_user_can_disable_quality_services():

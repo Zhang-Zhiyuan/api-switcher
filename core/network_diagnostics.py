@@ -17,6 +17,7 @@ from core.network_diagnostic_settings import (
     SERVICE_PING0,
     SERVICE_PROXYCHECK,
     SERVICE_VPNAPI,
+    normalize_services,
     parse_api_keys,
 )
 
@@ -448,9 +449,9 @@ def probe_public_ip(label: str, url: str, timeout: float, http_get: HttpGetter) 
     try:
         data = json.loads(result.text)
     except json.JSONDecodeError:
-        data = {"ip": result.text.strip()}
+        data = result.text.strip()
 
-    ip = str(data.get("ip") or "").strip() if isinstance(data, dict) else ""
+    ip = _extract_ip_value(data)
     if not _valid_ip(ip):
         return EndpointProbe(
             label=label,
@@ -534,24 +535,29 @@ def _lookup_ping0_paid_quality(
     if not isinstance(data, dict):
         quality.error = "Ping0 API 返回结构异常"
         return quality
-    if data.get("ip") and str(data.get("ip")) != quality.ip:
-        quality.error = f"Ping0 API 返回 IP 不匹配: {data.get('ip')}"
+    payload = _payload_dict(data, "data", "result", "ipdata")
+    if _payload_is_error(data) or (payload is not data and _payload_is_error(payload)):
+        quality.error = _payload_error_text(payload, _payload_error_text(data, "Ping0 API 查询失败"))
+        return quality
+    returned_ip = _first_text(payload, "ip", "query", "address")
+    if returned_ip and _valid_ip(returned_ip) and returned_ip != quality.ip:
+        quality.error = f"Ping0 API 返回 IP 不匹配: {returned_ip}"
         return quality
 
     quality.ok = True
-    quality.raw = data
-    quality.location = str(data.get("location") or "")
-    quality.country = str(data.get("country") or "")
-    quality.province = str(data.get("province") or "")
-    quality.city = str(data.get("city") or "")
-    quality.asn = _normalize_asn(data.get("asn"))
-    quality.asn_name = str(data.get("asnname") or "")
-    quality.org = str(data.get("org") or "")
-    quality.isidc = _optional_bool(data.get("isidc"))
-    quality.iprisk = _optional_int(data.get("iprisk"))
-    quality.isnative = _optional_bool(data.get("isnative"))
-    quality.asntype = str(data.get("asntype") or "")
-    quality.orgtype = str(data.get("orgtype") or "")
+    quality.raw = payload
+    quality.location = _first_text(payload, "location", "loc")
+    quality.country = _first_text(payload, "country")
+    quality.province = _first_text(payload, "province", "region", "state")
+    quality.city = _first_text(payload, "city")
+    quality.asn = _normalize_asn(_first_value(payload, "asn", "as"))
+    quality.asn_name = _first_text(payload, "asnname", "asn_name", "asname")
+    quality.org = _first_text(payload, "org", "organization", "organisation")
+    quality.isidc = _optional_bool(_first_value(payload, "isidc", "is_idc", "idc"))
+    quality.iprisk = _optional_int(_first_value(payload, "iprisk", "ip_risk", "risk", "risk_score"))
+    quality.isnative = _optional_bool(_first_value(payload, "isnative", "is_native", "native"))
+    quality.asntype = _first_text(payload, "asntype", "asn_type")
+    quality.orgtype = _first_text(payload, "orgtype", "org_type")
     return quality
 
 
@@ -675,8 +681,8 @@ def _lookup_proxycheck_reputation_once(
     if not isinstance(data, dict):
         info.error = "ProxyCheck 返回结构异常"
         return info
-    if str(data.get("status") or "").lower() in {"denied", "error"}:
-        info.error = str(data.get("message") or data.get("status") or "ProxyCheck 查询失败")
+    if _payload_is_error(data):
+        info.error = _payload_error_text(data, "ProxyCheck 查询失败")
         return info
 
     record = _extract_proxycheck_record(data, ip)
@@ -688,12 +694,13 @@ def _lookup_proxycheck_reputation_once(
     detections = record.get("detections") if isinstance(record.get("detections"), dict) else record
     info.ok = True
     info.raw = record
-    info.network_type = str(network.get("type") or record.get("type") or "")
-    info.provider = str(network.get("provider") or record.get("provider") or "")
-    info.organization = str(network.get("organisation") or network.get("organization") or record.get("organisation") or record.get("organization") or "")
-    info.asn = _normalize_asn(network.get("asn") or record.get("asn") or "")
-    info.risk_score = _optional_int(detections.get("risk") or record.get("risk") or data.get("risk"))
-    info.confidence_score = _optional_int(detections.get("confidence") or record.get("confidence"))
+    record_type = _first_text(record, "type", "connection_type", "network_type")
+    info.network_type = _proxycheck_network_type(record_type, network)
+    info.provider = _first_text(network, "provider", "isp") or _first_text(record, "provider", "isp")
+    info.organization = _first_text(network, "organisation", "organization", "org") or _first_text(record, "organisation", "organization", "org")
+    info.asn = _normalize_asn(_first_value(network, "asn", "as") or _first_value(record, "asn", "as"))
+    info.risk_score = _optional_int(_first_value(detections, "risk", "risk_score", "score") or _first_value(record, "risk", "risk_score", "score") or data.get("risk"))
+    info.confidence_score = _optional_int(_first_value(detections, "confidence", "confidence_score") or _first_value(record, "confidence", "confidence_score"))
     info.flags = _extract_bool_flags(
         detections,
         (
@@ -708,6 +715,10 @@ def _lookup_proxycheck_reputation_once(
             "residential_proxy",
         ),
     )
+    if not info.flags:
+        info.flags = _extract_bool_flags(record, ("anonymous", "proxy", "vpn", "tor", "relay", "hosting"))
+    if _proxycheck_anonymous_type(record_type):
+        info.flags[record_type.strip().lower()] = True
     if info.network_type:
         info.signals.append(f"ProxyCheck network.type={info.network_type}")
     active = _active_flag_names(info.flags)
@@ -769,20 +780,20 @@ def _lookup_ipqs_reputation_once(
     if not isinstance(data, dict):
         info.error = "IPQualityScore 返回结构异常"
         return info
-    if data.get("success") is False:
-        info.error = str(data.get("message") or "IPQualityScore 查询失败")
+    payload = _payload_dict(data, "data", "result")
+    if _payload_is_error(data) or (payload is not data and _payload_is_error(payload)):
+        info.error = _payload_error_text(payload, _payload_error_text(data, "IPQualityScore 查询失败"))
         return info
-
     info.ok = True
-    info.raw = data
-    info.network_type = str(data.get("connection_type") or "")
-    info.provider = str(data.get("ISP") or data.get("isp") or "")
-    info.organization = str(data.get("organization") or data.get("Organization") or "")
-    info.asn = _normalize_asn(data.get("ASN") or data.get("asn") or "")
-    info.fraud_score = _optional_int(data.get("fraud_score"))
+    info.raw = payload
+    info.network_type = _first_text(payload, "connection_type", "network_type", "type")
+    info.provider = _first_text(payload, "ISP", "isp", "provider")
+    info.organization = _first_text(payload, "organization", "Organization", "org")
+    info.asn = _normalize_asn(_first_value(payload, "ASN", "asn", "as"))
+    info.fraud_score = _optional_int(_first_value(payload, "fraud_score", "risk_score", "risk"))
     info.risk_score = info.fraud_score
     info.flags = _extract_bool_flags(
-        data,
+        payload,
         (
             "proxy",
             "vpn",
@@ -853,17 +864,17 @@ def _lookup_vpnapi_reputation_once(
     if not isinstance(data, dict):
         info.error = "VPNAPI.io 返回结构异常"
         return info
-    if data.get("message") and not data.get("security"):
-        info.error = str(data.get("message"))
+    payload = _payload_dict(data, "data", "result")
+    if (_payload_is_error(data) or data.get("message") or (payload is not data and _payload_is_error(payload))) and not payload.get("security"):
+        info.error = _payload_error_text(payload, _payload_error_text(data, "VPNAPI.io 查询失败"))
         return info
-
-    security = data.get("security") if isinstance(data.get("security"), dict) else {}
-    network = data.get("network") if isinstance(data.get("network"), dict) else {}
+    security = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+    network = payload.get("network") if isinstance(payload.get("network"), dict) else {}
     info.ok = True
-    info.raw = data
-    info.provider = str(network.get("autonomous_system_organization") or "")
+    info.raw = payload
+    info.provider = _first_text(network, "autonomous_system_organization", "organization", "org")
     info.organization = info.provider
-    info.asn = _normalize_asn(network.get("autonomous_system_number") or "")
+    info.asn = _normalize_asn(_first_value(network, "autonomous_system_number", "asn", "as"))
     info.flags = _extract_bool_flags(security, ("vpn", "proxy", "tor", "relay"))
     active = _active_flag_names(info.flags)
     if active:
@@ -887,7 +898,7 @@ def lookup_geo(ip: str, timeout: float, http_get: HttpGetter) -> GeoInfo:
 
     if not isinstance(data, dict):
         return GeoInfo(ip=ip, source="ipwho.is", ok=False, error="返回结构异常")
-    if data.get("success") is False:
+    if _optional_boolish(data.get("success")) is False:
         return GeoInfo(ip=ip, source="ipwho.is", ok=False, error=str(data.get("message") or "查询失败"))
 
     connection = data.get("connection") if isinstance(data.get("connection"), dict) else {}
@@ -910,7 +921,11 @@ def lookup_geo(ip: str, timeout: float, http_get: HttpGetter) -> GeoInfo:
         asn_name=str(connection.get("org") or ""),
         org=str(connection.get("org") or data.get("org") or ""),
         isp=str(connection.get("isp") or data.get("isp") or ""),
-        security={key: bool(value) for key, value in security.items() if isinstance(value, bool)},
+        security={
+            key: parsed
+            for key, value in security.items()
+            if (parsed := _optional_boolish(value)) is not None
+        },
     )
 
 
@@ -1159,7 +1174,7 @@ def _enabled_services(
     vpnapi_keys: list[str],
 ) -> set[str]:
     if enabled_services is not None:
-        return {str(service).strip().lower() for service in enabled_services if str(service).strip()}
+        return set(normalize_services(enabled_services))
 
     services = {SERVICE_PING0, SERVICE_PROXYCHECK}
     if ipqs_keys:
@@ -1182,6 +1197,96 @@ def _disabled_ping0_quality(ip: str) -> Ping0Quality:
 
 def _key_label(index: int) -> str:
     return f"Key #{index + 1}"
+
+
+def _extract_ip_value(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("ip", "query", "address", "public_ip", "ip_address"):
+            candidate = _extract_ip_value(value.get(key))
+            if candidate:
+                return candidate
+        for key in ("data", "result"):
+            nested = value.get(key)
+            candidate = _extract_ip_value(nested)
+            if candidate:
+                return candidate
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            candidate = _extract_ip_value(item)
+            if candidate:
+                return candidate
+        return ""
+    text = str(value or "").strip().strip('"\'`[](){}')
+    if _valid_ip(text):
+        return text
+    for token in re_split_ip_candidates(text):
+        cleaned = token.strip().strip('"\'`[](){}<>,;')
+        if _valid_ip(cleaned):
+            return cleaned
+    return ""
+
+
+def re_split_ip_candidates(text: str) -> list[str]:
+    return [part for part in text.replace("\r", "\n").split() if part]
+
+
+def _payload_dict(data: dict[str, Any], *nested_keys: str) -> dict[str, Any]:
+    for key in nested_keys:
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return data
+
+
+def _payload_is_error(data: dict[str, Any]) -> bool:
+    if _optional_boolish(data.get("success")) is False:
+        return True
+    status = str(data.get("status") or "").strip().lower()
+    if status in {"denied", "error", "fail", "failed", "invalid"}:
+        return True
+    code = _optional_int(data.get("code"))
+    if code is not None and code not in {0, 200}:
+        return True
+    return bool(data.get("error") and _optional_boolish(data.get("success")) is not True)
+
+
+def _payload_error_text(data: dict[str, Any], fallback: str) -> str:
+    for key in ("message", "error", "reason", "detail", "status"):
+        value = data.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return fallback
+
+
+def _first_value(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data and data[key] not in (None, ""):
+            return data[key]
+    lowered = {str(key).lower(): value for key, value in data.items()}
+    for key in keys:
+        value = lowered.get(str(key).lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _first_text(data: dict[str, Any], *keys: str) -> str:
+    value = _first_value(data, *keys)
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def _proxycheck_network_type(record_type: str, network: dict[str, Any]) -> str:
+    network_type = _first_text(network, "type", "connection_type", "network_type")
+    if network_type and _network_type_category(network_type):
+        return network_type
+    if record_type and _network_type_category(record_type):
+        return record_type
+    return ""
+
+
+def _proxycheck_anonymous_type(value: str) -> bool:
+    return str(value or "").strip().lower() in {"anonymous", "proxy", "vpn", "tor", "relay", "socks"}
 
 
 def summarize_report(report: NetworkDiagnosticReport) -> str:
@@ -1274,13 +1379,13 @@ def _network_type_label(value: str) -> str:
 
 def _network_type_category(value: str) -> str:
     normalized = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
-    if normalized in {"residential", "consumer", "home broadband"}:
+    if normalized in {"residential", "consumer", "home broadband", "isp", "fixed line"}:
         return "residential"
-    if normalized in {"business", "corporate", "education", "enterprise"}:
+    if normalized in {"business", "corporate", "commercial", "education", "enterprise", "organization"}:
         return "business"
-    if normalized in {"wireless", "cellular", "mobile", "carrier grade nat", "cg nat", "cgnat"}:
+    if normalized in {"wireless", "cellular", "mobile", "mobile isp", "carrier grade nat", "cg nat", "cgnat"}:
         return "mobile"
-    if normalized in {"hosting", "data center", "datacenter", "cloud", "server"}:
+    if normalized in {"hosting", "data center", "datacenter", "data centre", "cloud", "server", "hosting provider"}:
         return "hosting"
     return ""
 
@@ -1375,17 +1480,7 @@ def _normalize_asn(value: Any) -> str:
 
 
 def _optional_bool(value: Any) -> Optional[bool]:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "1", "yes"}:
-            return True
-        if lowered in {"false", "0", "no"}:
-            return False
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
-    return None
+    return _optional_boolish(value)
 
 
 def _optional_int(value: Any) -> Optional[int]:
@@ -1394,7 +1489,10 @@ def _optional_int(value: Any) -> Optional[int]:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return None
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
 
 
 def _valid_ip(value: str) -> bool:

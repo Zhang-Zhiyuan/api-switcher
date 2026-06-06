@@ -19,6 +19,19 @@ SERVICE_PROXYCHECK = "proxycheck"
 SERVICE_IPQS = "ipqs"
 SERVICE_VPNAPI = "vpnapi"
 SERVICE_ORDER = (SERVICE_PING0, SERVICE_PROXYCHECK, SERVICE_IPQS, SERVICE_VPNAPI)
+SERVICE_SET = set(SERVICE_ORDER)
+
+SERVICE_ALIASES = {
+    "ping0": SERVICE_PING0,
+    "ping0.cc": SERVICE_PING0,
+    "proxycheck": SERVICE_PROXYCHECK,
+    "proxycheck.io": SERVICE_PROXYCHECK,
+    "ipqs": SERVICE_IPQS,
+    "ipqualityscore": SERVICE_IPQS,
+    "ipqualityscore.com": SERVICE_IPQS,
+    "vpnapi": SERVICE_VPNAPI,
+    "vpnapi.io": SERVICE_VPNAPI,
+}
 
 SERVICE_LABELS = {
     SERVICE_PING0: "Ping0",
@@ -119,7 +132,7 @@ def save_settings(settings: NetworkDiagnosticSettings) -> None:
 
 
 def settings_from_values(enabled_services: list[str] | set[str], api_keys: dict[str, list[str] | str]) -> NetworkDiagnosticSettings:
-    enabled = set(enabled_services)
+    enabled = set(normalize_services(enabled_services))
     settings = NetworkDiagnosticSettings()
     for service in SERVICE_ORDER:
         settings.services[service] = DiagnosticServiceSettings(
@@ -133,12 +146,40 @@ def parse_api_keys(value: list[str] | tuple[str, ...] | str | None) -> list[str]
     if value is None:
         return []
     if isinstance(value, str):
-        parts = re.split(r"[\s,;，；]+", value)
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return parse_api_keys(parsed)
+        stripped = "\n".join(_clean_key_line(line) for line in stripped.splitlines())
+        parts = re.split(r"[\s,;，；、|]+", stripped)
     else:
         parts: list[str] = []
         for item in value:
             parts.extend(parse_api_keys(str(item)))
     return _dedupe(parts)
+
+
+def normalize_service(value: str) -> str:
+    text = str(value or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    return SERVICE_ALIASES.get(text, text if text in SERVICE_SET else "")
+
+
+def normalize_services(values: list[str] | set[str] | tuple[str, ...] | None) -> list[str]:
+    if not values:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        service = normalize_service(str(value))
+        if not service or service in seen:
+            continue
+        seen.add(service)
+        normalized.append(service)
+    return normalized
 
 
 def masked_key_summary(keys: list[str]) -> str:
@@ -179,12 +220,25 @@ def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for value in values:
-        text = str(value or "").strip()
+        text = _clean_key_token(value)
         if not text or text in seen:
             continue
         seen.add(text)
         result.append(text)
     return result
+
+
+def _clean_key_token(value: str) -> str:
+    text = _clean_key_line(str(value or ""))
+    if not text:
+        return ""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'", "`"}:
+        text = text[1:-1].strip()
+    return text.strip()
+
+
+def _clean_key_line(value: str) -> str:
+    return re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", str(value or "").strip())
 
 
 def _mask_key(value: str) -> str:

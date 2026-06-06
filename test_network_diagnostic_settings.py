@@ -3,6 +3,16 @@ from core import network_diagnostic_settings
 
 def test_parse_api_keys_splits_and_deduplicates():
     assert network_diagnostic_settings.parse_api_keys(" a, b；a\nc  ") == ["a", "b", "c"]
+    assert network_diagnostic_settings.parse_api_keys('["a", "b", "a"]') == ["a", "b"]
+    assert network_diagnostic_settings.parse_api_keys(["- c", "1. d"]) == ["c", "d"]
+
+
+def test_normalize_services_accepts_common_aliases():
+    assert network_diagnostic_settings.normalize_services(["proxycheck.io", "IPQualityScore", "VPN API", "unknown"]) == [
+        network_diagnostic_settings.SERVICE_PROXYCHECK,
+        network_diagnostic_settings.SERVICE_IPQS,
+        network_diagnostic_settings.SERVICE_VPNAPI,
+    ]
 
 
 def test_save_and_load_settings_store_api_keys_as_secret_refs(tmp_path, monkeypatch):
