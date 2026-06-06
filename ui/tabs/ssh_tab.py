@@ -1683,17 +1683,22 @@ class SSHTab(ctk.CTkScrollableFrame):
         if hasattr(top, "_show_proxy_quality_dialog"):
             dialog = top._show_proxy_quality_dialog()
             if dialog is not None:
+                self._set_proxy_status("已打开代理质量检测；可配置检测源和 API Key 池。")
                 show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
             else:
+                self._set_proxy_status("代理质量检测窗口打开失败。", "error")
                 show_toast(top, "代理质量检测窗口打开失败", is_error=True)
             return
         if hasattr(top, "_show_network_diagnostics_tab"):
             dialog = top._show_network_diagnostics_tab()
             if dialog is not None:
+                self._set_proxy_status("已打开代理质量检测；可配置检测源和 API Key 池。")
                 show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
             else:
+                self._set_proxy_status("代理质量检测窗口打开失败。", "error")
                 show_toast(top, "代理质量检测窗口打开失败", is_error=True)
             return
+        self._set_proxy_status("无法打开代理质量检测窗口。", "error")
         show_toast(top, "无法打开代理质量检测窗口", is_error=True)
 
     def _measure_proxy_subscription_latencies(self):

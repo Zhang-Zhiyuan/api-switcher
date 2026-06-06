@@ -29,6 +29,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._service_key_frames = {}
         self._service_count_labels = {}
         self._service_cards = {}
+        self._settings_controls = []
         self._settings_status_label = None
         self._save_settings_button = None
         self._status_label = None
@@ -116,6 +117,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             **button_style("secondary"),
         )
         self._save_settings_button.pack(side="right", padx=(10, 0), pady=(2, 0))
+        self._settings_controls.append(self._save_settings_button)
         saved_settings = network_diagnostic_settings.load_settings()
         service_rows = [
             (
@@ -188,7 +190,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         top = ctk.CTkFrame(card, fg_color="transparent")
         top.pack(fill="x", padx=12, pady=(10, 6))
         top.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
+        service_check = ctk.CTkCheckBox(
             top,
             text=label,
             variable=var,
@@ -198,7 +200,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             width=132,
             checkbox_width=18,
             checkbox_height=18,
-        ).grid(row=0, column=0, sticky="w")
+        )
+        service_check.grid(row=0, column=0, sticky="w")
+        self._settings_controls.append(service_check)
         desc = ctk.CTkLabel(
             top,
             text=description,
@@ -216,13 +220,15 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             anchor="e",
         )
         self._service_count_labels[service].grid(row=0, column=2, sticky="e", padx=(0, 8))
-        ctk.CTkButton(
+        add_button = ctk.CTkButton(
             top,
             text="添加 Key",
             width=82,
             command=lambda service=service: self._add_key_row(service, focus=True),
             **button_style("secondary", compact=True),
-        ).grid(row=0, column=3, sticky="e")
+        )
+        add_button.grid(row=0, column=3, sticky="e")
+        self._settings_controls.append(add_button)
 
         key_frame = ctk.CTkFrame(card, fg_color="transparent")
         key_frame.pack(fill="x", padx=12, pady=(0, 10))
@@ -256,14 +262,16 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview(), add="+")
         except TypeError:
             entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview())
-        ctk.CTkButton(
+        delete_button = ctk.CTkButton(
             row,
             text="删除",
             width=58,
             command=lambda service=service, entry=entry, row=row: self._remove_key_row(service, entry, row),
             **button_style("secondary", compact=True),
-        ).grid(row=0, column=1, padx=(6, 0), sticky="e")
+        )
+        delete_button.grid(row=0, column=1, padx=(6, 0), sticky="e")
         self._service_key_entries.setdefault(service, []).append(entry)
+        self._settings_controls.extend([entry.entry, entry.toggle_btn, delete_button])
         self._update_settings_preview()
         if focus:
             try:
@@ -325,6 +333,15 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         if self._settings_status_label:
             self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["muted_soft"])
 
+    def _set_settings_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for widget in list(self._settings_controls):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(state=state)
+            except Exception:
+                pass
+
     def _save_detection_settings(self, show_message: bool = False):
         settings = self._collect_detection_settings()
         network_diagnostic_settings.save_settings(settings)
@@ -358,6 +375,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             return
 
         self._busy = True
+        self._set_settings_enabled(False)
         if self._run_button:
             self._run_button.configure(text="检测中...", state="disabled")
         if self._copy_button:
@@ -368,6 +386,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             detection_settings = self._save_detection_settings(show_message=False)
         except Exception as exc:
             self._busy = False
+            self._set_settings_enabled(True)
             if self._run_button:
                 self._run_button.configure(text="开始检测", state="normal")
             self._set_status(f"保存检测设置失败: {exc}", "error")
@@ -395,9 +414,10 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
                 payload = {"ok": False, "report": None, "error": str(exc)}
 
             def finish():
-                if not self.winfo_exists():
+                if not self._is_alive():
                     return
                 self._busy = False
+                self._set_settings_enabled(True)
                 if self._run_button:
                     self._run_button.configure(text="重新检测", state="normal")
                 if not payload["ok"]:
@@ -428,7 +448,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             [
                 "当前页不会自动上传网络信息。",
                 "勾选的检测源才会被调用；开始检测前会自动保存当前设置。",
-                "每个检测源可以保存多个 API Key，多个 Key 用逗号分隔。",
+                "每个检测源可以通过“添加 Key”保存多个 API Key。",
                 "检测时会按顺序尝试 Key；遇到失败或限额会自动换下一个。",
             ],
         )
@@ -518,7 +538,10 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         ).pack(fill="x", padx=14, pady=(12, 4))
         body = ctk.CTkFrame(card, fg_color="transparent")
         body.pack(fill="x", padx=14, pady=(0, 12))
-        for line in lines:
+        clean_lines = [str(line) for line in (lines or []) if str(line)]
+        if not clean_lines:
+            clean_lines = ["-"]
+        for line in clean_lines:
             label = ctk.CTkLabel(
                 body,
                 text=line,
@@ -536,6 +559,12 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         for child in self._content_frame.winfo_children():
             child.destroy()
 
+    def _is_alive(self) -> bool:
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
     def _set_status(self, message: str, severity: str = "info"):
         if not self._status_label:
             return
@@ -549,18 +578,24 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
     def _set_report_text(self, text: str):
         if not self._report_box:
             return
-        self._report_box.configure(state="normal")
-        self._report_box.delete("1.0", "end")
-        self._report_box.insert("1.0", text)
-        self._report_box.configure(state="disabled")
+        try:
+            self._report_box.configure(state="normal")
+            self._report_box.delete("1.0", "end")
+            self._report_box.insert("1.0", str(text or ""))
+            self._report_box.configure(state="disabled")
+        except Exception:
+            pass
 
     def _copy_report(self):
         if not self._last_report:
             return
-        text = self._format_report(self._last_report)
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        show_toast(self.winfo_toplevel(), "检测报告已复制")
+        try:
+            text = self._format_report(self._last_report)
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            show_toast(self.winfo_toplevel(), "检测报告已复制")
+        except Exception as exc:
+            show_toast(self.winfo_toplevel(), f"复制报告失败: {exc}", is_error=True)
 
     def _format_probe(self, probe: network_diagnostics.EndpointProbe) -> str:
         elapsed = f"{probe.response_time:.2f}s" if probe.response_time is not None else "-"
@@ -623,15 +658,21 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
     def _open_fastest_ping0(self):
         if not self._last_report or not self._last_report.diagnostics:
             return
-        fastest = min(
-            self._last_report.diagnostics,
-            key=lambda diagnostic: diagnostic.probe.response_time if diagnostic.probe.response_time is not None else float("inf"),
-        )
-        webbrowser.open(fastest.ping0.detail_url)
-        show_toast(self.winfo_toplevel(), "已打开最快出口的 Ping0 详情页")
+        try:
+            fastest = min(
+                self._last_report.diagnostics,
+                key=lambda diagnostic: diagnostic.probe.response_time if diagnostic.probe.response_time is not None else float("inf"),
+            )
+            webbrowser.open(fastest.ping0.detail_url)
+            show_toast(self.winfo_toplevel(), "已打开最快出口的 Ping0 详情页")
+        except Exception as exc:
+            show_toast(self.winfo_toplevel(), f"打开 Ping0 失败: {exc}", is_error=True)
 
     def _format_seconds(self, value: float | None) -> str:
-        return f"{value:.2f}s" if value is not None else "-"
+        try:
+            return f"{float(value):.2f}s" if value is not None else "-"
+        except (TypeError, ValueError):
+            return "-"
 
 
 def _risk_border(score: int) -> str:
