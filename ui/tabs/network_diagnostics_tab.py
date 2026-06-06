@@ -1,9 +1,12 @@
 import threading
+import os
+import webbrowser
 
 import customtkinter as ctk
 
 from core import network_diagnostics
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
+from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
 
 
@@ -17,6 +20,8 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._last_report = None
         self._run_button = None
         self._copy_button = None
+        self._open_ping0_button = None
+        self._ping0_key_entry = None
         self._status_label = None
         self._content_frame = None
         self._report_box = None
@@ -36,7 +41,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="当前网络出口、ASN、位置、IPv4/IPv6 与启发式风险",
+            text="先测速筛选可连通出口，再用 Ping0 做 IP 质量检测",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -64,12 +69,49 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             **button_style("secondary"),
         )
         self._copy_button.pack(side="left", padx=(8, 0))
+        self._open_ping0_button = ctk.CTkButton(
+            action_bar,
+            text="打开最快 Ping0",
+            width=124,
+            command=self._open_fastest_ping0,
+            state="disabled",
+            **button_style("accent"),
+        )
+        self._open_ping0_button.pack(side="left", padx=(8, 0))
+
+        settings_card = ctk.CTkFrame(self, **card_frame_kwargs())
+        settings_card.pack(fill="x", padx=14, pady=(0, 10))
+        settings_grid = ctk.CTkFrame(settings_card, fg_color="transparent")
+        settings_grid.pack(fill="x", padx=14, pady=12)
+        settings_grid.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            settings_grid,
+            text="Ping0 API Key",
+            text_color=COLORS["muted"],
+            width=108,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._ping0_key_entry = MaskedEntry(settings_grid, placeholder="可选；留空则只生成 Ping0 链接和免费 Geo", width=420)
+        self._ping0_key_entry.grid(row=0, column=1, sticky="ew")
+        env_key = os.environ.get("PING0_API_KEY", "").strip()
+        if env_key:
+            self._ping0_key_entry.set(env_key)
+        note = ctk.CTkLabel(
+            settings_grid,
+            text="不填写 Key 时不会调用指定 IP 付费接口；填写后会对测速可连通 IP 调用 Ping0 官方 API。",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+            justify="left",
+        )
+        note.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        bind_wraplength(settings_grid, note, padding=20)
 
         status_card = ctk.CTkFrame(self, **card_frame_kwargs())
         status_card.pack(fill="x", padx=14, pady=(0, 10))
         self._status_label = ctk.CTkLabel(
             status_card,
-            text="未检测。公开查询只会在点击“开始检测”后发起。",
+            text="未检测。点击后会先测速，再只对可连通 IP 调用 Ping0。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -100,14 +142,17 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             self._run_button.configure(text="检测中...", state="disabled")
         if self._copy_button:
             self._copy_button.configure(state="disabled")
-        self._set_status("正在检测公网出口、Geo/ASN 和反向 DNS...")
+        if self._open_ping0_button:
+            self._open_ping0_button.configure(state="disabled")
+        ping0_api_key = self._ping0_key_entry.get().strip() if self._ping0_key_entry else ""
+        self._set_status("正在测速公网出口；可连通后再调用 Ping0...")
         self._clear_content()
-        self._add_info_card("检测中", ["正在请求公开端点，请稍等。"])
+        self._add_info_card("检测中", ["正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 做 Ping0 检测。"])
         self._set_report_text("检测中...")
 
         def worker():
             try:
-                report = network_diagnostics.detect_network()
+                report = network_diagnostics.detect_network(ping0_api_key=ping0_api_key)
                 payload = {"ok": True, "report": report, "error": ""}
             except Exception as exc:
                 payload = {"ok": False, "report": None, "error": str(exc)}
@@ -129,6 +174,8 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
                 self._render_report(payload["report"])
                 if self._copy_button:
                     self._copy_button.configure(state="normal")
+                if self._open_ping0_button and payload["report"].diagnostics:
+                    self._open_ping0_button.configure(state="normal")
 
             try:
                 self.after(0, finish)
@@ -143,7 +190,8 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             "待检测",
             [
                 "当前页不会自动上传网络信息。",
-                "启发式结果会明确标注数据来源和限制。",
+                "点击后会先测速，再对可连通 IP 生成 Ping0 详情链接。",
+                "填写 Ping0 API Key 后可直接返回 isidc、iprisk、isnative 等质量字段。",
             ],
         )
 
@@ -177,12 +225,27 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         geo = diagnostic.geo
         border = _risk_border(cls.risk_score)
         lines = [
+            f"测速: {self._format_seconds(diagnostic.probe.response_time)}",
             f"类型: {cls.ip_type}  |  启发式风险: {cls.risk_score}% {cls.risk_label}  |  置信度: {cls.confidence}",
+            f"Ping0: {diagnostic.ping0.quality_text()}",
             f"位置: {geo.location_text()}",
             f"ASN: {geo.owner_text()}",
             f"企业/ISP: {geo.org or '-'} / {geo.isp or '-'}",
             f"反向 DNS: {diagnostic.reverse_dns or '-'}",
+            f"Ping0 详情: {diagnostic.ping0.detail_url}",
+            f"Ping0 Ping: {diagnostic.ping0.ping_url}",
         ]
+        if diagnostic.ping0.ok and diagnostic.ping0.source == "ping0-api":
+            lines.extend(
+                [
+                    f"Ping0 位置: {diagnostic.ping0.location or '-'}",
+                    f"Ping0 ASN: {diagnostic.ping0.asn or '-'} {diagnostic.ping0.asn_name or diagnostic.ping0.org or ''}".strip(),
+                ]
+            )
+        elif diagnostic.ping0.ok and diagnostic.ping0.source == "ping0-free-geo":
+            lines.append(f"Ping0 免费 Geo: {diagnostic.ping0.location or '-'} | {diagnostic.ping0.asn or '-'} | {diagnostic.ping0.org or '-'}")
+        elif diagnostic.ping0.error:
+            lines.append(f"Ping0 状态: {diagnostic.ping0.error}")
         if geo.latitude is not None and geo.longitude is not None:
             lines.append(f"经纬度: {geo.latitude}, {geo.longitude}")
         if geo.timezone:
@@ -271,14 +334,26 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             lines.extend(
                 [
                     f"- {diagnostic.label}: {diagnostic.ip}",
+                    f"  测速: {self._format_seconds(diagnostic.probe.response_time)}",
+                    f"  Ping0: {diagnostic.ping0.quality_text()}",
                     f"  类型: {cls.ip_type}",
-                    f"  启发式风险: {cls.risk_score}% {cls.risk_label}",
+                    f"  风险: {cls.risk_score}% {cls.risk_label}",
                     f"  位置: {geo.location_text()}",
                     f"  ASN: {geo.owner_text()}",
                     f"  企业/ISP: {geo.org or '-'} / {geo.isp or '-'}",
                     f"  反向 DNS: {diagnostic.reverse_dns or '-'}",
+                    f"  Ping0 详情: {diagnostic.ping0.detail_url}",
+                    f"  Ping0 Ping: {diagnostic.ping0.ping_url}",
                 ]
             )
+            if diagnostic.ping0.ok:
+                lines.append(f"  Ping0 数据源: {diagnostic.ping0.source}")
+                if diagnostic.ping0.location:
+                    lines.append(f"  Ping0 位置: {diagnostic.ping0.location}")
+                if diagnostic.ping0.asn or diagnostic.ping0.asn_name or diagnostic.ping0.org:
+                    lines.append(f"  Ping0 ASN/企业: {diagnostic.ping0.asn or '-'} {diagnostic.ping0.asn_name or diagnostic.ping0.org}")
+            elif diagnostic.ping0.error:
+                lines.append(f"  Ping0 状态: {diagnostic.ping0.error}")
             for signal in cls.signals:
                 lines.append(f"  信号: {signal}")
         lines.append("")
@@ -286,6 +361,19 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         for notice in report.notices + _collect_limitations(report):
             lines.append(f"- {notice}")
         return "\n".join(lines)
+
+    def _open_fastest_ping0(self):
+        if not self._last_report or not self._last_report.diagnostics:
+            return
+        fastest = min(
+            self._last_report.diagnostics,
+            key=lambda diagnostic: diagnostic.probe.response_time if diagnostic.probe.response_time is not None else float("inf"),
+        )
+        webbrowser.open(fastest.ping0.detail_url)
+        show_toast(self.winfo_toplevel(), "已打开最快出口的 Ping0 详情页")
+
+    def _format_seconds(self, value: float | None) -> str:
+        return f"{value:.2f}s" if value is not None else "-"
 
 
 def _risk_border(score: int) -> str:

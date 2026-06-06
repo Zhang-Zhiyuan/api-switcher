@@ -22,6 +22,15 @@ PUBLIC_IP_ENDPOINTS = (
     ("默认出口", "https://api64.ipify.org?format=json"),
 )
 
+PING0_FREE_GEO_ENDPOINTS = {
+    "IPv4": "https://ipv4.ping0.cc/geo",
+    "IPv6": "https://ipv6.ping0.cc/geo",
+    "默认出口": "https://ping0.cc/geo",
+}
+PING0_DETAIL_URL = "https://ping0.cc/ip/{ip}"
+PING0_PING_URL = "https://ping0.cc/ping/{ip}"
+PING0_API_URL = "https://ping0.cc/apiloc/apikey({api_key})/ip({ip})"
+
 
 IDC_KEYWORDS = (
     "akamai",
@@ -172,6 +181,46 @@ class IpClassification:
 
 
 @dataclass
+class Ping0Quality:
+    """Ping0 quality data or links for a reachable IP."""
+
+    ip: str
+    ok: bool = False
+    source: str = ""
+    detail_url: str = ""
+    ping_url: str = ""
+    response_time: Optional[float] = None
+    error: str = ""
+    location: str = ""
+    country: str = ""
+    province: str = ""
+    city: str = ""
+    asn: str = ""
+    asn_name: str = ""
+    org: str = ""
+    isidc: Optional[bool] = None
+    iprisk: Optional[int] = None
+    isnative: Optional[bool] = None
+    asntype: str = ""
+    orgtype: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_paid_quality(self) -> bool:
+        return self.ok and self.source == "ping0-api" and (self.isidc is not None or self.iprisk is not None)
+
+    def quality_text(self) -> str:
+        if not self.ok:
+            return f"Ping0 未完成: {self.error or '未获取到结果'}"
+        if self.has_paid_quality:
+            ip_type = "IDC机房IP" if self.isidc else "家庭/非IDC宽带IP"
+            risk = str(self.iprisk) if self.iprisk is not None else "-"
+            native = "原生IP" if self.isnative else ("广播IP" if self.isnative is False else "未知")
+            return f"{ip_type} | 风控值 {risk} | {native}"
+        return "Ping0 免费 Geo 已返回；完整风控/IP 类型需要 Ping0 API Key"
+
+
+@dataclass
 class IpDiagnostic:
     """Complete diagnostic for one observed public IP."""
 
@@ -179,6 +228,7 @@ class IpDiagnostic:
     ip: str
     probe: EndpointProbe
     geo: GeoInfo
+    ping0: Ping0Quality
     reverse_dns: str = ""
     classification: IpClassification = field(
         default_factory=lambda: IpClassification(
@@ -215,10 +265,11 @@ ReverseResolver = Callable[[str], str]
 
 def detect_network(
     timeout: float = DEFAULT_TIMEOUT,
+    ping0_api_key: str = "",
     http_get: Optional[HttpGetter] = None,
     reverse_resolver: Optional[ReverseResolver] = None,
 ) -> NetworkDiagnosticReport:
-    """Detect public network exits and enrich them with free public data."""
+    """Speed-test public exits and enrich reachable IPs with Ping0 data."""
 
     http_get = http_get or _http_get
     reverse_resolver = reverse_resolver or _reverse_dns
@@ -233,15 +284,17 @@ def detect_network(
             continue
 
         seen_ips.add(probe.ip)
+        ping0 = lookup_ping0_quality(probe.ip, probe.label, timeout, http_get, ping0_api_key)
         geo = lookup_geo(probe.ip, timeout, http_get)
         rdns = reverse_resolver(probe.ip)
-        classification = classify_ip(geo, rdns)
+        classification = classify_ip(geo, rdns, ping0)
         diagnostics.append(
             IpDiagnostic(
                 label=label,
                 ip=probe.ip,
                 probe=probe,
                 geo=geo,
+                ping0=ping0,
                 reverse_dns=rdns,
                 classification=classification,
             )
@@ -252,8 +305,9 @@ def detect_network(
         probes=probes,
         diagnostics=diagnostics,
         notices=[
-            "当前版本使用公开数据源和关键词启发式，不包含私有历史风控库。",
-            "IP 类型、风险分仅供排查网络环境使用，不能等同于平台真实风控结论。",
+            "检测流程为先测速，再只对可连通公网出口调用 Ping0。",
+            "未填写 Ping0 API Key 时，只使用 Ping0 免费 Geo 和详情页链接；指定 IP 风控值需要官方付费 API。",
+            "没有 Ping0 付费结果时，IP 类型、风险分仅为公开数据源和关键词启发式。",
         ],
     )
     report.summary = summarize_report(report)
@@ -298,6 +352,116 @@ def probe_public_ip(label: str, url: str, timeout: float, http_get: HttpGetter) 
     )
 
 
+def lookup_ping0_quality(
+    ip: str,
+    label: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str = "",
+) -> Ping0Quality:
+    """Look up Ping0 quality for a reachable IP.
+
+    The paid API is used only when an API key is provided. Without a key, this
+    uses Ping0's free current-visitor Geo endpoint for the matching stack and
+    still exposes the Ping0 detail and Ping pages for the IP.
+    """
+
+    quality = Ping0Quality(
+        ip=ip,
+        detail_url=PING0_DETAIL_URL.format(ip=urllib.parse.quote(ip, safe=":.")),
+        ping_url=PING0_PING_URL.format(ip=urllib.parse.quote(ip, safe=":.")),
+    )
+    api_key = (api_key or "").strip()
+    if api_key:
+        return _lookup_ping0_paid_quality(quality, timeout, http_get, api_key)
+    return _lookup_ping0_free_geo(quality, label, timeout, http_get)
+
+
+def _lookup_ping0_paid_quality(
+    quality: Ping0Quality,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str,
+) -> Ping0Quality:
+    url = PING0_API_URL.format(
+        api_key=urllib.parse.quote(api_key, safe=""),
+        ip=urllib.parse.quote(quality.ip, safe=":."),
+    )
+    result = http_get(url, timeout)
+    quality.response_time = result.response_time
+    quality.source = "ping0-api"
+    if not result.ok:
+        quality.error = result.error or "Ping0 API 请求失败"
+        return quality
+
+    try:
+        data = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        quality.error = f"Ping0 API JSON 解析失败: {exc}"
+        return quality
+
+    if not isinstance(data, dict):
+        quality.error = "Ping0 API 返回结构异常"
+        return quality
+    if data.get("ip") and str(data.get("ip")) != quality.ip:
+        quality.error = f"Ping0 API 返回 IP 不匹配: {data.get('ip')}"
+        return quality
+
+    quality.ok = True
+    quality.raw = data
+    quality.location = str(data.get("location") or "")
+    quality.country = str(data.get("country") or "")
+    quality.province = str(data.get("province") or "")
+    quality.city = str(data.get("city") or "")
+    quality.asn = _normalize_asn(data.get("asn"))
+    quality.asn_name = str(data.get("asnname") or "")
+    quality.org = str(data.get("org") or "")
+    quality.isidc = _optional_bool(data.get("isidc"))
+    quality.iprisk = _optional_int(data.get("iprisk"))
+    quality.isnative = _optional_bool(data.get("isnative"))
+    quality.asntype = str(data.get("asntype") or "")
+    quality.orgtype = str(data.get("orgtype") or "")
+    return quality
+
+
+def _lookup_ping0_free_geo(
+    quality: Ping0Quality,
+    label: str,
+    timeout: float,
+    http_get: HttpGetter,
+) -> Ping0Quality:
+    url = PING0_FREE_GEO_ENDPOINTS.get(label) or PING0_FREE_GEO_ENDPOINTS["默认出口"]
+    result = http_get(url, timeout)
+    quality.response_time = result.response_time
+    quality.source = "ping0-free-geo"
+    if not result.ok:
+        quality.error = result.error or "Ping0 免费 Geo 请求失败"
+        return quality
+
+    lines = [line.strip() for line in result.text.splitlines() if line.strip()]
+    if not lines:
+        quality.error = "Ping0 免费 Geo 未返回内容"
+        return quality
+    returned_ip = lines[0]
+    if _valid_ip(returned_ip) and returned_ip != quality.ip:
+        quality.error = f"Ping0 免费 Geo 返回 IP 不匹配: {returned_ip}"
+        return quality
+
+    quality.ok = True
+    if _valid_ip(returned_ip):
+        quality.ip = returned_ip
+    quality.location = lines[1] if len(lines) > 1 else ""
+    quality.asn = _normalize_asn(lines[2] if len(lines) > 2 else "")
+    quality.org = lines[3] if len(lines) > 3 else ""
+    quality.raw = {
+        "ip": quality.ip,
+        "location": quality.location,
+        "asn": quality.asn,
+        "org": quality.org,
+    }
+    return quality
+
+
 def lookup_geo(ip: str, timeout: float, http_get: HttpGetter) -> GeoInfo:
     safe_ip = urllib.parse.quote(ip, safe=":.")
     url = f"https://ipwho.is/{safe_ip}"
@@ -339,7 +503,35 @@ def lookup_geo(ip: str, timeout: float, http_get: HttpGetter) -> GeoInfo:
     )
 
 
-def classify_ip(geo: GeoInfo, reverse_dns: str = "") -> IpClassification:
+def classify_ip(geo: GeoInfo, reverse_dns: str = "", ping0: Optional[Ping0Quality] = None) -> IpClassification:
+    if ping0 and ping0.has_paid_quality:
+        signals = ["Ping0 指定 IP 接口已返回质量字段"]
+        if ping0.isidc is not None:
+            signals.append(f"isidc={ping0.isidc}")
+        if ping0.isnative is not None:
+            signals.append(f"isnative={ping0.isnative}")
+        if ping0.asntype or ping0.orgtype:
+            signals.append(f"asntype={ping0.asntype or '-'} orgtype={ping0.orgtype or '-'}")
+        risk = ping0.iprisk if ping0.iprisk is not None else (52 if ping0.isidc is True else 18)
+        risk = max(0, min(100, int(risk)))
+        if ping0.isidc is True:
+            ip_type = "IDC/云机房"
+        elif ping0.isidc is False:
+            ip_type = "家庭/非IDC宽带"
+        else:
+            ip_type = "Ping0质量已返回"
+        return IpClassification(
+            ip_type=ip_type,
+            risk_score=risk,
+            risk_label=_risk_label(risk),
+            confidence="高",
+            signals=signals,
+            limitations=[
+                "Ping0 数据来自其官方接口，准确性和额度以 Ping0 服务为准。",
+                "适用场景仍建议结合实际业务登录、请求和平台反馈验证。",
+            ],
+        )
+
     text = " ".join(
         part
         for part in (
@@ -417,9 +609,15 @@ def summarize_report(report: NetworkDiagnosticReport) -> str:
         return f"未检测到可用公网出口；{failed} 个公开端点请求失败。"
 
     stack = "IPv4/IPv6 双栈" if report.has_ipv4 and report.has_ipv6 else ("仅 IPv6" if report.has_ipv6 else "仅 IPv4")
+    fastest = min(
+        report.diagnostics,
+        key=lambda diag: diag.probe.response_time if diag.probe.response_time is not None else float("inf"),
+    )
     highest = max(report.diagnostics, key=lambda diag: diag.classification.risk_score)
+    fastest_time = f"{fastest.probe.response_time:.2f}s" if fastest.probe.response_time is not None else "-"
     return (
-        f"检测到 {stack}；最高启发式风险为 "
+        f"检测到 {stack}；最快可连通出口 {fastest.ip} "
+        f"({fastest_time})；最高风险为 "
         f"{highest.classification.risk_score}%（{highest.classification.risk_label}，{highest.ip}）。"
     )
 
@@ -478,6 +676,36 @@ def _risk_label(score: int) -> str:
     if score <= 70:
         return "偏高"
     return "高风险"
+
+
+def _normalize_asn(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if text.upper().startswith("AS") else f"AS{text}"
+
+
+def _optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _valid_ip(value: str) -> bool:
