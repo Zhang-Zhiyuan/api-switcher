@@ -22,6 +22,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._copy_button = None
         self._open_ping0_button = None
         self._ping0_key_entry = None
+        self._proxycheck_key_entry = None
+        self._ipqs_key_entry = None
+        self._vpnapi_key_entry = None
         self._status_label = None
         self._content_frame = None
         self._report_box = None
@@ -41,7 +44,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="先测速筛选可连通出口，再用 Ping0 做 IP 质量检测",
+            text="先测速筛选可连通出口，再用 Ping0、ProxyCheck、IPQS、VPNAPI 做 IP 质量检测",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -96,22 +99,58 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         env_key = os.environ.get("PING0_API_KEY", "").strip()
         if env_key:
             self._ping0_key_entry.set(env_key)
+        ctk.CTkLabel(
+            settings_grid,
+            text="ProxyCheck Key",
+            text_color=COLORS["muted"],
+            width=108,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self._proxycheck_key_entry = MaskedEntry(settings_grid, placeholder="可选；留空也会使用无 Key 免费检测", width=420)
+        self._proxycheck_key_entry.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        proxycheck_key = os.environ.get("PROXYCHECK_API_KEY", "").strip()
+        if proxycheck_key:
+            self._proxycheck_key_entry.set(proxycheck_key)
+        ctk.CTkLabel(
+            settings_grid,
+            text="IPQS API Key",
+            text_color=COLORS["muted"],
+            width=108,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self._ipqs_key_entry = MaskedEntry(settings_grid, placeholder="可选；填写后返回欺诈分、代理/VPN/Tor 和连接类型", width=420)
+        self._ipqs_key_entry.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        ipqs_key = (os.environ.get("IPQS_API_KEY") or os.environ.get("IPQUALITYSCORE_API_KEY") or "").strip()
+        if ipqs_key:
+            self._ipqs_key_entry.set(ipqs_key)
+        ctk.CTkLabel(
+            settings_grid,
+            text="VPNAPI.io Key",
+            text_color=COLORS["muted"],
+            width=108,
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self._vpnapi_key_entry = MaskedEntry(settings_grid, placeholder="可选；填写后返回 VPN、Proxy、Tor、Relay 布尔检测", width=420)
+        self._vpnapi_key_entry.grid(row=3, column=1, sticky="ew", pady=(8, 0))
+        vpnapi_key = (os.environ.get("VPNAPI_KEY") or os.environ.get("VPNAPI_API_KEY") or "").strip()
+        if vpnapi_key:
+            self._vpnapi_key_entry.set(vpnapi_key)
         note = ctk.CTkLabel(
             settings_grid,
-            text="不填写 Key 时不会调用指定 IP 付费接口；填写后会对测速可连通 IP 调用 Ping0 官方 API。",
+            text="ProxyCheck 会默认检测可连通 IP；IPQS/VPNAPI 只有填写 Key 才调用。所有检测结果只用于辅助分类，不做自动拦截。",
             text_color=COLORS["muted_soft"],
             font=font(11),
             anchor="w",
             justify="left",
         )
-        note.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        note.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         bind_wraplength(settings_grid, note, padding=20)
 
         status_card = ctk.CTkFrame(self, **card_frame_kwargs())
         status_card.pack(fill="x", padx=14, pady=(0, 10))
         self._status_label = ctk.CTkLabel(
             status_card,
-            text="未检测。点击后会先测速，再只对可连通 IP 调用 Ping0。",
+            text="未检测。点击后会先测速，再只对可连通 IP 调用 Ping0 和信誉检测接口。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -145,14 +184,22 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         if self._open_ping0_button:
             self._open_ping0_button.configure(state="disabled")
         ping0_api_key = self._ping0_key_entry.get().strip() if self._ping0_key_entry else ""
-        self._set_status("正在测速公网出口；可连通后再调用 Ping0...")
+        proxycheck_api_key = self._proxycheck_key_entry.get().strip() if self._proxycheck_key_entry else ""
+        ipqs_api_key = self._ipqs_key_entry.get().strip() if self._ipqs_key_entry else ""
+        vpnapi_api_key = self._vpnapi_key_entry.get().strip() if self._vpnapi_key_entry else ""
+        self._set_status("正在测速公网出口；可连通后再调用 Ping0/ProxyCheck/IPQS/VPNAPI...")
         self._clear_content()
-        self._add_info_card("检测中", ["正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 做 Ping0 检测。"])
+        self._add_info_card("检测中", ["正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 做质量检测。"])
         self._set_report_text("检测中...")
 
         def worker():
             try:
-                report = network_diagnostics.detect_network(ping0_api_key=ping0_api_key)
+                report = network_diagnostics.detect_network(
+                    ping0_api_key=ping0_api_key,
+                    proxycheck_api_key=proxycheck_api_key,
+                    ipqs_api_key=ipqs_api_key,
+                    vpnapi_api_key=vpnapi_api_key,
+                )
                 payload = {"ok": True, "report": report, "error": ""}
             except Exception as exc:
                 payload = {"ok": False, "report": None, "error": str(exc)}
@@ -190,8 +237,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             "待检测",
             [
                 "当前页不会自动上传网络信息。",
-                "点击后会先测速，再对可连通 IP 生成 Ping0 详情链接。",
+                "点击后会先测速，再对可连通 IP 生成 Ping0 详情链接并调用 ProxyCheck。",
                 "填写 Ping0 API Key 后可直接返回 isidc、iprisk、isnative 等质量字段。",
+                "填写 IPQS/VPNAPI Key 后会叠加欺诈分、VPN、Proxy、Tor、Relay 等检测信号。",
             ],
         )
 
@@ -226,15 +274,21 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         border = _risk_border(cls.risk_score)
         lines = [
             f"测速: {self._format_seconds(diagnostic.probe.response_time)}",
-            f"类型: {cls.ip_type}  |  启发式风险: {cls.risk_score}% {cls.risk_label}  |  置信度: {cls.confidence}",
+            f"类型: {cls.ip_type}  |  风险: {cls.risk_score}% {cls.risk_label}  |  置信度: {cls.confidence}",
             f"Ping0: {diagnostic.ping0.quality_text()}",
-            f"位置: {geo.location_text()}",
-            f"ASN: {geo.owner_text()}",
-            f"企业/ISP: {geo.org or '-'} / {geo.isp or '-'}",
-            f"反向 DNS: {diagnostic.reverse_dns or '-'}",
-            f"Ping0 详情: {diagnostic.ping0.detail_url}",
-            f"Ping0 Ping: {diagnostic.ping0.ping_url}",
         ]
+        if diagnostic.reputation:
+            lines.extend(f"信誉检测: {item.summary_text()}" for item in diagnostic.reputation)
+        lines.extend(
+            [
+                f"位置: {geo.location_text()}",
+                f"ASN: {geo.owner_text()}",
+                f"企业/ISP: {geo.org or '-'} / {geo.isp or '-'}",
+                f"反向 DNS: {diagnostic.reverse_dns or '-'}",
+                f"Ping0 详情: {diagnostic.ping0.detail_url}",
+                f"Ping0 Ping: {diagnostic.ping0.ping_url}",
+            ]
+        )
         if diagnostic.ping0.ok and diagnostic.ping0.source == "ping0-api":
             lines.extend(
                 [
@@ -346,6 +400,10 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
                     f"  Ping0 Ping: {diagnostic.ping0.ping_url}",
                 ]
             )
+            if diagnostic.reputation:
+                lines.append("  信誉检测:")
+                for item in diagnostic.reputation:
+                    lines.append(f"  - {item.summary_text()}")
             if diagnostic.ping0.ok:
                 lines.append(f"  Ping0 数据源: {diagnostic.ping0.source}")
                 if diagnostic.ping0.location:

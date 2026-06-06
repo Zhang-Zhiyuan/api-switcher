@@ -30,6 +30,9 @@ PING0_FREE_GEO_ENDPOINTS = {
 PING0_DETAIL_URL = "https://ping0.cc/ip/{ip}"
 PING0_PING_URL = "https://ping0.cc/ping/{ip}"
 PING0_API_URL = "https://ping0.cc/apiloc/apikey({api_key})/ip({ip})"
+PROXYCHECK_API_URL = "https://proxycheck.io/v3/{ip}"
+IPQS_API_URL = "https://ipqualityscore.com/api/json/ip/{api_key}/{ip}"
+VPNAPI_URL = "https://vpnapi.io/api/{ip}"
 
 
 IDC_KEYWORDS = (
@@ -221,6 +224,56 @@ class Ping0Quality:
 
 
 @dataclass
+class ReputationInfo:
+    """Normalized IP reputation result from an external provider."""
+
+    ip: str
+    source: str
+    ok: bool = False
+    response_time: Optional[float] = None
+    network_type: str = ""
+    provider: str = ""
+    organization: str = ""
+    asn: str = ""
+    risk_score: Optional[int] = None
+    fraud_score: Optional[int] = None
+    confidence_score: Optional[int] = None
+    flags: dict[str, bool] = field(default_factory=dict)
+    signals: list[str] = field(default_factory=list)
+    error: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def source_label(self) -> str:
+        return {
+            "proxycheck": "ProxyCheck",
+            "ipqs": "IPQualityScore",
+            "vpnapi": "VPNAPI.io",
+        }.get(self.source, self.source)
+
+    @property
+    def network_type_label(self) -> str:
+        return _network_type_label(self.network_type)
+
+    def summary_text(self) -> str:
+        if not self.ok:
+            return f"{self.source_label}: 未完成 ({self.error or '请求失败'})"
+        parts = [self.source_label]
+        if self.network_type:
+            parts.append(f"类型 {self.network_type_label}")
+        if self.risk_score is not None:
+            parts.append(f"风险 {self.risk_score}%")
+        if self.fraud_score is not None:
+            parts.append(f"欺诈分 {self.fraud_score}")
+        active_flags = _active_flag_names(self.flags)
+        if active_flags:
+            parts.append("命中 " + "/".join(active_flags))
+        if self.provider or self.organization:
+            parts.append(self.provider or self.organization)
+        return " | ".join(parts)
+
+
+@dataclass
 class IpDiagnostic:
     """Complete diagnostic for one observed public IP."""
 
@@ -229,6 +282,7 @@ class IpDiagnostic:
     probe: EndpointProbe
     geo: GeoInfo
     ping0: Ping0Quality
+    reputation: list[ReputationInfo] = field(default_factory=list)
     reverse_dns: str = ""
     classification: IpClassification = field(
         default_factory=lambda: IpClassification(
@@ -266,10 +320,13 @@ ReverseResolver = Callable[[str], str]
 def detect_network(
     timeout: float = DEFAULT_TIMEOUT,
     ping0_api_key: str = "",
+    proxycheck_api_key: str = "",
+    ipqs_api_key: str = "",
+    vpnapi_api_key: str = "",
     http_get: Optional[HttpGetter] = None,
     reverse_resolver: Optional[ReverseResolver] = None,
 ) -> NetworkDiagnosticReport:
-    """Speed-test public exits and enrich reachable IPs with Ping0 data."""
+    """Speed-test public exits and enrich reachable IPs with quality data."""
 
     http_get = http_get or _http_get
     reverse_resolver = reverse_resolver or _reverse_dns
@@ -285,9 +342,17 @@ def detect_network(
 
         seen_ips.add(probe.ip)
         ping0 = lookup_ping0_quality(probe.ip, probe.label, timeout, http_get, ping0_api_key)
+        reputation = lookup_reputation(
+            probe.ip,
+            timeout,
+            http_get,
+            proxycheck_api_key=proxycheck_api_key,
+            ipqs_api_key=ipqs_api_key,
+            vpnapi_api_key=vpnapi_api_key,
+        )
         geo = lookup_geo(probe.ip, timeout, http_get)
         rdns = reverse_resolver(probe.ip)
-        classification = classify_ip(geo, rdns, ping0)
+        classification = classify_ip(geo, rdns, ping0, reputation)
         diagnostics.append(
             IpDiagnostic(
                 label=label,
@@ -295,20 +360,30 @@ def detect_network(
                 probe=probe,
                 geo=geo,
                 ping0=ping0,
+                reputation=reputation,
                 reverse_dns=rdns,
                 classification=classification,
             )
         )
 
+    notices = [
+        "检测流程为先测速，再只对可连通公网出口调用 Ping0、ProxyCheck 等质量接口。",
+        "ProxyCheck 默认可无 Key 调用；填写 PROXYCHECK_API_KEY 可使用注册免费额度并获得更稳定缓存。",
+        "IPQS 和 VPNAPI.io 只有填写 Key 时才会调用；留空不会产生接口请求。",
+        "多源分类会优先标记 VPN、Proxy、Tor、Relay 等匿名网络；家宽/商宽/蜂窝/机房以各服务返回的网络类型为准。",
+    ]
+    if not ping0_api_key.strip():
+        notices.append("未填写 Ping0 API Key 时，只使用 Ping0 免费 Geo 和详情页链接；指定 IP 风控值需要 Ping0 官方 API。")
+    if not ipqs_api_key.strip():
+        notices.append("未填写 IPQS API Key，已跳过 IPQualityScore。")
+    if not vpnapi_api_key.strip():
+        notices.append("未填写 VPNAPI.io Key，已跳过 VPNAPI.io。")
+
     report = NetworkDiagnosticReport(
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         probes=probes,
         diagnostics=diagnostics,
-        notices=[
-            "检测流程为先测速，再只对可连通公网出口调用 Ping0。",
-            "未填写 Ping0 API Key 时，只使用 Ping0 免费 Geo 和详情页链接；指定 IP 风控值需要官方付费 API。",
-            "没有 Ping0 付费结果时，IP 类型、风险分仅为公开数据源和关键词启发式。",
-        ],
+        notices=notices,
     )
     report.summary = summarize_report(report)
     return report
@@ -462,6 +537,207 @@ def _lookup_ping0_free_geo(
     return quality
 
 
+def lookup_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    proxycheck_api_key: str = "",
+    ipqs_api_key: str = "",
+    vpnapi_api_key: str = "",
+) -> list[ReputationInfo]:
+    """Look up reputation sources that can classify residential/hosting/proxy usage."""
+
+    results = [
+        lookup_proxycheck_reputation(ip, timeout, http_get, proxycheck_api_key),
+    ]
+    if (ipqs_api_key or "").strip():
+        results.append(lookup_ipqs_reputation(ip, timeout, http_get, ipqs_api_key))
+    if (vpnapi_api_key or "").strip():
+        results.append(lookup_vpnapi_reputation(ip, timeout, http_get, vpnapi_api_key))
+    return results
+
+
+def lookup_proxycheck_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str = "",
+) -> ReputationInfo:
+    safe_ip = urllib.parse.quote(ip, safe=":.")
+    params = {"p": "0", "tag": "0"}
+    api_key = (api_key or "").strip()
+    if api_key:
+        params["key"] = api_key
+    url = f"{PROXYCHECK_API_URL.format(ip=safe_ip)}?{urllib.parse.urlencode(params)}"
+    result = http_get(url, timeout)
+    info = ReputationInfo(ip=ip, source="proxycheck", response_time=result.response_time)
+    if not result.ok:
+        info.error = result.error or "ProxyCheck 请求失败"
+        return info
+
+    try:
+        data = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        info.error = f"ProxyCheck JSON 解析失败: {exc}"
+        return info
+
+    if not isinstance(data, dict):
+        info.error = "ProxyCheck 返回结构异常"
+        return info
+    if str(data.get("status") or "").lower() in {"denied", "error"}:
+        info.error = str(data.get("message") or data.get("status") or "ProxyCheck 查询失败")
+        return info
+
+    record = _extract_proxycheck_record(data, ip)
+    if not isinstance(record, dict):
+        info.error = "ProxyCheck 未返回当前 IP 记录"
+        return info
+
+    network = record.get("network") if isinstance(record.get("network"), dict) else record
+    detections = record.get("detections") if isinstance(record.get("detections"), dict) else record
+    info.ok = True
+    info.raw = record
+    info.network_type = str(network.get("type") or record.get("type") or "")
+    info.provider = str(network.get("provider") or record.get("provider") or "")
+    info.organization = str(network.get("organisation") or network.get("organization") or record.get("organisation") or record.get("organization") or "")
+    info.asn = _normalize_asn(network.get("asn") or record.get("asn") or "")
+    info.risk_score = _optional_int(detections.get("risk") or record.get("risk") or data.get("risk"))
+    info.confidence_score = _optional_int(detections.get("confidence") or record.get("confidence"))
+    info.flags = _extract_bool_flags(
+        detections,
+        (
+            "anonymous",
+            "proxy",
+            "vpn",
+            "tor",
+            "relay",
+            "hosting",
+            "scraper",
+            "compromised",
+            "residential_proxy",
+        ),
+    )
+    if info.network_type:
+        info.signals.append(f"ProxyCheck network.type={info.network_type}")
+    active = _active_flag_names(info.flags)
+    if active:
+        info.signals.append("ProxyCheck detections: " + ", ".join(active))
+    if info.risk_score is not None:
+        info.signals.append(f"ProxyCheck risk={info.risk_score}")
+    return info
+
+
+def lookup_ipqs_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str,
+) -> ReputationInfo:
+    safe_ip = urllib.parse.quote(ip, safe=":.")
+    safe_key = urllib.parse.quote((api_key or "").strip(), safe="")
+    params = {
+        "strictness": "1",
+        "allow_public_access_points": "true",
+        "fast": "true",
+    }
+    url = f"{IPQS_API_URL.format(api_key=safe_key, ip=safe_ip)}?{urllib.parse.urlencode(params)}"
+    result = http_get(url, timeout)
+    info = ReputationInfo(ip=ip, source="ipqs", response_time=result.response_time)
+    if not result.ok:
+        info.error = result.error or "IPQualityScore 请求失败"
+        return info
+
+    try:
+        data = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        info.error = f"IPQualityScore JSON 解析失败: {exc}"
+        return info
+
+    if not isinstance(data, dict):
+        info.error = "IPQualityScore 返回结构异常"
+        return info
+    if data.get("success") is False:
+        info.error = str(data.get("message") or "IPQualityScore 查询失败")
+        return info
+
+    info.ok = True
+    info.raw = data
+    info.network_type = str(data.get("connection_type") or "")
+    info.provider = str(data.get("ISP") or data.get("isp") or "")
+    info.organization = str(data.get("organization") or data.get("Organization") or "")
+    info.asn = _normalize_asn(data.get("ASN") or data.get("asn") or "")
+    info.fraud_score = _optional_int(data.get("fraud_score"))
+    info.risk_score = info.fraud_score
+    info.flags = _extract_bool_flags(
+        data,
+        (
+            "proxy",
+            "vpn",
+            "tor",
+            "active_vpn",
+            "active_tor",
+            "recent_abuse",
+            "frequent_abuser",
+            "high_risk_attacks",
+            "bot_status",
+            "shared_connection",
+            "dynamic_connection",
+            "mobile",
+        ),
+    )
+    if info.network_type:
+        info.signals.append(f"IPQS connection_type={info.network_type}")
+    active = _active_flag_names(info.flags)
+    if active:
+        info.signals.append("IPQS flags: " + ", ".join(active))
+    if info.fraud_score is not None:
+        info.signals.append(f"IPQS fraud_score={info.fraud_score}")
+    return info
+
+
+def lookup_vpnapi_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str,
+) -> ReputationInfo:
+    safe_ip = urllib.parse.quote(ip, safe=":.")
+    url = f"{VPNAPI_URL.format(ip=safe_ip)}?{urllib.parse.urlencode({'key': (api_key or '').strip()})}"
+    result = http_get(url, timeout)
+    info = ReputationInfo(ip=ip, source="vpnapi", response_time=result.response_time)
+    if not result.ok:
+        info.error = result.error or "VPNAPI.io 请求失败"
+        return info
+
+    try:
+        data = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        info.error = f"VPNAPI.io JSON 解析失败: {exc}"
+        return info
+
+    if not isinstance(data, dict):
+        info.error = "VPNAPI.io 返回结构异常"
+        return info
+    if data.get("message") and not data.get("security"):
+        info.error = str(data.get("message"))
+        return info
+
+    security = data.get("security") if isinstance(data.get("security"), dict) else {}
+    network = data.get("network") if isinstance(data.get("network"), dict) else {}
+    info.ok = True
+    info.raw = data
+    info.provider = str(network.get("autonomous_system_organization") or "")
+    info.organization = info.provider
+    info.asn = _normalize_asn(network.get("autonomous_system_number") or "")
+    info.flags = _extract_bool_flags(security, ("vpn", "proxy", "tor", "relay"))
+    active = _active_flag_names(info.flags)
+    if active:
+        info.signals.append("VPNAPI.io security: " + ", ".join(active))
+    else:
+        info.signals.append("VPNAPI.io 未命中 VPN/Proxy/Tor/Relay")
+    return info
+
+
 def lookup_geo(ip: str, timeout: float, http_get: HttpGetter) -> GeoInfo:
     safe_ip = urllib.parse.quote(ip, safe=":.")
     url = f"https://ipwho.is/{safe_ip}"
@@ -503,15 +779,22 @@ def lookup_geo(ip: str, timeout: float, http_get: HttpGetter) -> GeoInfo:
     )
 
 
-def classify_ip(geo: GeoInfo, reverse_dns: str = "", ping0: Optional[Ping0Quality] = None) -> IpClassification:
+def classify_ip(
+    geo: GeoInfo,
+    reverse_dns: str = "",
+    ping0: Optional[Ping0Quality] = None,
+    reputation: Optional[list[ReputationInfo]] = None,
+) -> IpClassification:
+    reputation = reputation or []
+    reputation_classification = _classify_from_reputation(reputation)
+    if reputation_classification:
+        if ping0 and ping0.has_paid_quality:
+            reputation_classification.signals.extend(_ping0_signals(ping0))
+            reputation_classification.limitations.append("Ping0 与第三方信誉源可能存在差异，最终以多源交叉结果和实际业务反馈为准。")
+        return reputation_classification
+
     if ping0 and ping0.has_paid_quality:
-        signals = ["Ping0 指定 IP 接口已返回质量字段"]
-        if ping0.isidc is not None:
-            signals.append(f"isidc={ping0.isidc}")
-        if ping0.isnative is not None:
-            signals.append(f"isnative={ping0.isnative}")
-        if ping0.asntype or ping0.orgtype:
-            signals.append(f"asntype={ping0.asntype or '-'} orgtype={ping0.orgtype or '-'}")
+        signals = _ping0_signals(ping0)
         risk = ping0.iprisk if ping0.iprisk is not None else (52 if ping0.isidc is True else 18)
         risk = max(0, min(100, int(risk)))
         if ping0.isidc is True:
@@ -596,11 +879,134 @@ def classify_ip(geo: GeoInfo, reverse_dns: str = "", ping0: Optional[Ping0Qualit
         confidence=confidence,
         signals=signals,
         limitations=[
-            "没有 IP 段人工标注，无法可靠区分真实家宽、商宽和机房转售段。",
+            "没有外部信誉源明确分类时，无法可靠区分真实家宽、商宽和机房转售段。",
             "没有攻击/垃圾邮件/爆破历史，风险分只是当前公开信息的启发式结果。",
             "没有注册地与广播路径历史，暂不判断原生 IP 或广播 IP。",
         ],
     )
+
+
+def _classify_from_reputation(reputation: list[ReputationInfo]) -> Optional[IpClassification]:
+    ok_results = [item for item in reputation if item.ok]
+    if not ok_results:
+        return None
+
+    signals = _reputation_signals(ok_results)
+    suspicious = [
+        item
+        for item in ok_results
+        if _has_anonymity_flag(item.flags) or (item.risk_score is not None and item.risk_score >= 75)
+    ]
+    if suspicious:
+        risk = max(78, max((item.risk_score or item.fraud_score or 0) for item in suspicious))
+        risk = max(0, min(100, risk))
+        residentialish = any(_network_type_category(item.network_type) in {"residential", "mobile"} for item in ok_results)
+        ip_type = "住宅代理/匿名出口可疑" if residentialish else "代理/VPN/Tor 可疑"
+        confidence = "高" if len(suspicious) >= 2 or risk >= 85 else "中"
+        return IpClassification(
+            ip_type=ip_type,
+            risk_score=risk,
+            risk_label=_risk_label(risk),
+            confidence=confidence,
+            signals=signals,
+            limitations=[
+                "信誉接口的命中代表第三方观测结果，可能存在短期误报或漏报。",
+                "住宅代理可能仍显示为家宽归属，需同时关注 Proxy/VPN/Tor/Relay 等匿名信号。",
+            ],
+        )
+
+    explicit_types = [item for item in ok_results if item.network_type]
+    if not explicit_types:
+        return None
+
+    hosting = [item for item in explicit_types if _network_type_category(item.network_type) == "hosting"]
+    business = [item for item in explicit_types if _network_type_category(item.network_type) == "business"]
+    mobile = [item for item in explicit_types if _network_type_category(item.network_type) == "mobile"]
+    residential = [item for item in explicit_types if _network_type_category(item.network_type) == "residential"]
+
+    if hosting:
+        base_risk = max(_reputation_score(item, 55) for item in hosting)
+        risk = max(52, min(100, base_risk))
+        return IpClassification(
+            ip_type="IDC/云机房",
+            risk_score=risk,
+            risk_label=_risk_label(risk),
+            confidence="高" if len(hosting) >= 2 else "中",
+            signals=signals,
+            limitations=[
+                "机房分类来自第三方网络类型字段，转售、CDN 和企业出口可能造成边界模糊。",
+            ],
+        )
+
+    if residential:
+        risk = min(74, max(_reputation_score(item, 16) for item in residential))
+        return IpClassification(
+            ip_type="家庭宽带/住宅 IP",
+            risk_score=max(0, risk),
+            risk_label=_risk_label(max(0, risk)),
+            confidence="高" if len(residential) >= 2 else "中",
+            signals=signals,
+            limitations=[
+                "家宽分类表示 IP 段归属更像住宅网络，不代表该 IP 从未被代理池或滥用记录使用。",
+            ],
+        )
+
+    if mobile:
+        risk = min(74, max(_reputation_score(item, 24) for item in mobile))
+        return IpClassification(
+            ip_type="蜂窝/移动网络",
+            risk_score=max(0, risk),
+            risk_label=_risk_label(max(0, risk)),
+            confidence="中",
+            signals=signals,
+            limitations=[
+                "移动网络常有 CGNAT 和多人共享出口，正常用户与代理流量的边界需要结合业务行为判断。",
+            ],
+        )
+
+    if business:
+        risk = min(74, max(_reputation_score(item, 34) for item in business))
+        return IpClassification(
+            ip_type="企业/商宽 IP",
+            risk_score=max(0, risk),
+            risk_label=_risk_label(max(0, risk)),
+            confidence="中",
+            signals=signals,
+            limitations=[
+                "企业/商宽出口可能是办公室、学校、公共 Wi-Fi 或公司网关，不一定等同个人家宽。",
+            ],
+        )
+
+    return None
+
+
+def _reputation_score(result: ReputationInfo, default: int) -> int:
+    if result.risk_score is not None:
+        return result.risk_score
+    if result.fraud_score is not None:
+        return result.fraud_score
+    return default
+
+
+def _reputation_signals(results: list[ReputationInfo]) -> list[str]:
+    signals: list[str] = []
+    for result in results:
+        if result.signals:
+            signals.extend(result.signals)
+        else:
+            signals.append(result.summary_text())
+    return signals
+
+
+def _ping0_signals(ping0: Ping0Quality) -> list[str]:
+    signals = ["Ping0 指定 IP 接口已返回质量字段"]
+    if ping0.isidc is not None:
+        signals.append(f"isidc={ping0.isidc}")
+    if ping0.isnative is not None:
+        signals.append(f"isnative={ping0.isnative}")
+    if ping0.asntype or ping0.orgtype:
+        signals.append(f"asntype={ping0.asntype or '-'} orgtype={ping0.orgtype or '-'}")
+    return signals
 
 
 def summarize_report(report: NetworkDiagnosticReport) -> str:
@@ -676,6 +1082,114 @@ def _risk_label(score: int) -> str:
     if score <= 70:
         return "偏高"
     return "高风险"
+
+
+def _network_type_label(value: str) -> str:
+    category = _network_type_category(value)
+    if category == "residential":
+        return "家庭宽带/住宅"
+    if category == "business":
+        return "企业/商宽"
+    if category == "mobile":
+        return "蜂窝/移动网络"
+    if category == "hosting":
+        return "IDC/云机房"
+    return value or "-"
+
+
+def _network_type_category(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    if normalized in {"residential", "consumer", "home broadband"}:
+        return "residential"
+    if normalized in {"business", "corporate", "education", "enterprise"}:
+        return "business"
+    if normalized in {"wireless", "cellular", "mobile", "carrier grade nat", "cg nat", "cgnat"}:
+        return "mobile"
+    if normalized in {"hosting", "data center", "datacenter", "cloud", "server"}:
+        return "hosting"
+    return ""
+
+
+def _has_anonymity_flag(flags: dict[str, bool]) -> bool:
+    return any(
+        flags.get(key, False)
+        for key in (
+            "anonymous",
+            "proxy",
+            "vpn",
+            "tor",
+            "relay",
+            "active_vpn",
+            "active_tor",
+            "scraper",
+            "compromised",
+            "residential_proxy",
+            "recent_abuse",
+            "frequent_abuser",
+            "high_risk_attacks",
+            "bot_status",
+        )
+    )
+
+
+def _active_flag_names(flags: dict[str, bool]) -> list[str]:
+    labels = {
+        "anonymous": "Anonymous",
+        "proxy": "Proxy",
+        "vpn": "VPN",
+        "tor": "Tor",
+        "relay": "Relay",
+        "hosting": "Hosting",
+        "scraper": "Scraper",
+        "compromised": "Compromised",
+        "residential_proxy": "Residential Proxy",
+        "active_vpn": "Active VPN",
+        "active_tor": "Active Tor",
+        "recent_abuse": "Recent Abuse",
+        "frequent_abuser": "Frequent Abuser",
+        "high_risk_attacks": "High Risk Attacks",
+        "bot_status": "Bot",
+        "shared_connection": "Shared",
+        "dynamic_connection": "Dynamic",
+        "mobile": "Mobile",
+    }
+    return [labels.get(key, key) for key, value in flags.items() if value]
+
+
+def _extract_bool_flags(data: dict[str, Any], keys: tuple[str, ...]) -> dict[str, bool]:
+    return {key: parsed for key in keys if (parsed := _optional_boolish(data.get(key))) is not None}
+
+
+def _extract_proxycheck_record(data: dict[str, Any], ip: str) -> Optional[dict[str, Any]]:
+    if isinstance(data.get(ip), dict):
+        return data[ip]
+    if isinstance(data.get("result"), dict):
+        result = data["result"]
+        if isinstance(result.get(ip), dict):
+            return result[ip]
+        return result
+    for key, value in data.items():
+        if key in {"status", "message", "query time", "node", "warning"}:
+            continue
+        if isinstance(value, dict) and _valid_ip(str(key)):
+            return value
+    if "network" in data or "detections" in data:
+        return data
+    return None
+
+
+def _optional_boolish(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "0", "no", "n"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return None
 
 
 def _normalize_asn(value: Any) -> str:
