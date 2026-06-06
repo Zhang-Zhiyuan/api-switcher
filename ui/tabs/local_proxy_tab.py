@@ -6,7 +6,8 @@ import customtkinter as ctk
 
 from core import local_proxy, remote_proxy, startup_manager
 from ui.dialogs.confirm_dialog import ConfirmDialog
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, input_style, textbox_style
+from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.toast import show_toast
 
 
@@ -17,7 +18,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._subscription_entry = None
-        self._subscription_combo = None
+        self._subscription_picker = None
         self._fetch_button = None
         self._use_node_button = None
         self._latency_button = None
@@ -295,14 +296,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         ).grid(row=4, column=0, sticky="w", pady=(8, 0))
-        self._subscription_combo = ctk.CTkComboBox(
+        self._subscription_picker = ProxyNodePicker(
             controls,
-            values=["请先拉取订阅"],
-            state="disabled",
-            **combo_style(),
+            on_select=lambda _item: self._use_selected_subscription_node(show_message=False),
         )
-        self._subscription_combo.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-        self._subscription_combo.set("请先拉取订阅")
+        self._subscription_picker.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_picker.set_enabled(False)
         node_actions = ctk.CTkFrame(controls, fg_color="transparent")
         node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
         self._latency_button = ctk.CTkButton(
@@ -492,10 +491,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._periodic_update_check.configure(state=state)
             except Exception:
                 pass
-        if self._subscription_combo:
+        if self._subscription_picker:
             try:
-                combo_state = "disabled" if busy or not self._subscription_options else "normal"
-                self._subscription_combo.configure(state=combo_state)
+                self._subscription_picker.set_enabled((not busy) and bool(self._subscription_options))
             except Exception:
                 pass
 
@@ -761,13 +759,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._schedule_periodic_update(initial=True)
 
     def _select_subscription_node_by_key(self, node_key: str) -> bool:
-        if not node_key or not self._subscription_combo:
+        if not node_key or not self._subscription_picker:
             return False
-        for label, item in self._subscription_options.items():
-            if remote_proxy.proxy_node_key(item.node) == node_key:
-                self._subscription_combo.set(label)
-                return True
-        return False
+        return self._subscription_picker.select_by_key(node_key)
 
     def _on_auto_refresh_toggle(self):
         enabled = bool(self._auto_refresh_var.get())
@@ -904,42 +898,28 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         return self._subscription_entry.get().strip()
 
     def _selected_subscription_node_key(self) -> str:
-        if not self._subscription_combo:
+        if not self._subscription_picker:
             return ""
-        selected = self._subscription_combo.get()
-        item = self._subscription_options.get(selected)
-        if not item:
-            return ""
-        return remote_proxy.proxy_node_key(item.node)
+        return self._subscription_picker.selected_key()
 
     def _set_subscription_nodes(self, nodes, preserve_key: str = ""):
         current_key = preserve_key or self._selected_subscription_node_key()
         self._subscription_nodes = list(remote_proxy.sort_proxy_subscription_nodes(nodes or [], self._latency_results))
         options = {}
         for item in self._subscription_nodes:
-            label = self._subscription_option_label(item)
-            if label in options:
-                label = f"{label} #{item.index}"
-            options[label] = item
+            options[remote_proxy.proxy_node_key(item.node)] = item
         self._subscription_options = options
 
-        if not self._subscription_combo:
+        if not self._subscription_picker:
             return
-        values = list(options.keys()) or ["没有识别到可用节点"]
-        self._subscription_combo.configure(values=values, state="normal" if options else "disabled")
-        self._subscription_combo.set(values[0])
+        self._subscription_picker.set_nodes(self._subscription_nodes, self._latency_results, current_key)
+        self._subscription_picker.set_enabled(bool(options) and not self._busy)
         if current_key:
             self._select_subscription_node_by_key(current_key)
         if self._use_node_button:
             self._use_node_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._latency_button:
             self._latency_button.configure(state="normal" if options and not self._busy else "disabled")
-
-    def _subscription_option_label(self, item) -> str:
-        key = remote_proxy.proxy_node_key(item.node)
-        region = remote_proxy.proxy_node_region(item.node)
-        latency = remote_proxy.proxy_node_latency_label(self._latency_results.get(key))
-        return f"【{region}】 {latency} · {item.display_name()}"
 
     def _fetch_subscription(self, auto: bool = False, show_message: bool = True):
         if self._busy:
@@ -1083,10 +1063,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         return fastest
 
     def _use_selected_subscription_node(self, show_message: bool = True, persist_selection: bool = True):
-        if not self._subscription_combo:
+        if not self._subscription_picker:
             return
-        selected = self._subscription_combo.get()
-        item = self._subscription_options.get(selected)
+        item = self._subscription_picker.selected_item()
         if not item:
             message = "请先拉取订阅并选择一个节点"
             self._set_status(message, "warning")

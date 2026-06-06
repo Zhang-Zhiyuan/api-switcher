@@ -18,6 +18,7 @@ from core import (
 from core.auto_continue.manager import auto_continue_manager
 from models.auto_continue import training_prompt_template_by_key
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
+from ui.widgets.proxy_node_picker import ProxyNodePicker
 
 
 def _format_server_batch_item(server_name: str, result) -> str:
@@ -61,7 +62,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._batch_select_all_button = None
         self._batch_clear_button = None
         self._proxy_subscription_entry = None
-        self._proxy_subscription_combo = None
+        self._proxy_subscription_picker = None
         self._proxy_fetch_button = None
         self._proxy_use_node_button = None
         self._proxy_latency_button = None
@@ -601,14 +602,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         ).grid(row=4, column=0, sticky="w", pady=(8, 0))
-        self._proxy_subscription_combo = ctk.CTkComboBox(
+        self._proxy_subscription_picker = ProxyNodePicker(
             proxy_controls,
-            values=["请先拉取订阅"],
-            state="disabled",
-            **combo_style(),
+            on_select=lambda _item: self._use_selected_proxy_subscription_node(show_message=False),
         )
-        self._proxy_subscription_combo.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-        self._proxy_subscription_combo.set("请先拉取订阅")
+        self._proxy_subscription_picker.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_subscription_picker.set_enabled(False)
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
         self._proxy_latency_button = ctk.CTkButton(
@@ -1339,10 +1338,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._proxy_periodic_update_check.configure(state=state)
             except Exception:
                 pass
-        if self._proxy_subscription_combo:
+        if self._proxy_subscription_picker:
             try:
-                combo_state = "disabled" if busy or not self._proxy_subscription_options else "normal"
-                self._proxy_subscription_combo.configure(state=combo_state)
+                self._proxy_subscription_picker.set_enabled((not busy) and bool(self._proxy_subscription_options))
             except Exception:
                 pass
 
@@ -1388,13 +1386,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._schedule_proxy_periodic_update(initial=True)
 
     def _select_proxy_subscription_node_by_key(self, node_key: str) -> bool:
-        if not node_key or not self._proxy_subscription_combo:
+        if not node_key or not self._proxy_subscription_picker:
             return False
-        for label, item in self._proxy_subscription_options.items():
-            if remote_proxy.proxy_node_key(item.node) == node_key:
-                self._proxy_subscription_combo.set(label)
-                return True
-        return False
+        return self._proxy_subscription_picker.select_by_key(node_key)
 
     def _on_proxy_auto_refresh_toggle(self):
         enabled = bool(self._proxy_auto_refresh_var.get())
@@ -1552,13 +1546,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         return self._proxy_subscription_entry.get().strip()
 
     def _selected_proxy_subscription_node_key(self) -> str:
-        if not self._proxy_subscription_combo:
+        if not self._proxy_subscription_picker:
             return ""
-        selected = self._proxy_subscription_combo.get()
-        item = self._proxy_subscription_options.get(selected)
-        if not item:
-            return ""
-        return remote_proxy.proxy_node_key(item.node)
+        return self._proxy_subscription_picker.selected_key()
 
     def _set_proxy_subscription_nodes(self, nodes, preserve_key: str = ""):
         current_key = preserve_key or self._selected_proxy_subscription_node_key()
@@ -1567,33 +1557,19 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         options = {}
         for item in self._proxy_subscription_nodes:
-            label = self._proxy_subscription_option_label(item)
-            if label in options:
-                label = f"{label} #{item.index}"
-            options[label] = item
+            options[remote_proxy.proxy_node_key(item.node)] = item
         self._proxy_subscription_options = options
 
-        if not self._proxy_subscription_combo:
+        if not self._proxy_subscription_picker:
             return
-        values = list(options.keys()) or ["没有识别到可用节点"]
-        self._proxy_subscription_combo.configure(values=values, state="normal" if options else "disabled")
-        self._proxy_subscription_combo.set(values[0])
+        self._proxy_subscription_picker.set_nodes(self._proxy_subscription_nodes, self._proxy_latency_results, current_key)
+        self._proxy_subscription_picker.set_enabled(bool(options) and not self._proxy_busy)
         if current_key:
             self._select_proxy_subscription_node_by_key(current_key)
         if self._proxy_use_node_button:
             self._proxy_use_node_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_latency_button:
             self._proxy_latency_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
-
-    def _proxy_subscription_option_label(self, item) -> str:
-        key = remote_proxy.proxy_node_key(item.node)
-        region = remote_proxy.proxy_node_region(item.node)
-        latency = remote_proxy.proxy_node_latency_label(self._proxy_latency_results.get(key))
-        if self._proxy_latency_server_count > 1:
-            detail = remote_proxy.proxy_node_latency_detail(self._proxy_latency_results.get(key))
-            if detail:
-                latency = f"{detail} · {latency}"
-        return f"【{region}】 {latency} · {item.display_name()}"
 
     def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
@@ -1789,10 +1765,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         return fastest
 
     def _use_selected_proxy_subscription_node(self, show_message: bool = True, persist_selection: bool = True):
-        if not self._proxy_subscription_combo:
+        if not self._proxy_subscription_picker:
             return
-        selected = self._proxy_subscription_combo.get()
-        item = self._proxy_subscription_options.get(selected)
+        item = self._proxy_subscription_picker.selected_item()
         if not item:
             message = "请先拉取订阅并选择一个节点"
             self._set_proxy_status(message, "warning")
