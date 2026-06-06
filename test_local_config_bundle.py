@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core import backup_manager, local_config_bundle, profile_manager, security
+from core import backup_manager, local_config_bundle, network_diagnostic_settings, profile_manager, security
 from core.ssh_manager import ssh_manager
 from models.profile import (
     BrowserProfile,
@@ -27,6 +27,7 @@ def isolated_local_config(tmp_path, monkeypatch):
     monkeypatch.setattr(security, "set_secret_json", lambda key, data: secret_store.__setitem__(key, json.dumps(data)))
     monkeypatch.setattr(security, "get_secret_json", lambda key: json.loads(secret_store[key]) if key in secret_store else None)
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", tmp_path / "network_diagnostics.json")
     monkeypatch.setattr(
         backup_manager,
         "create_backup",
@@ -146,6 +147,40 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
         assert security.get_secret(ref) == f"{name}-secret"
     assert security.get_secret("codex:Keep:api_key") == "keep-secret"
     assert security.get_secret("codex:All:old_api_key") is None
+
+
+def test_local_config_zip_includes_network_diagnostic_key_pool(isolated_local_config, tmp_path):
+    package = tmp_path / "local-config.zip"
+    settings = network_diagnostic_settings.settings_from_values(
+        {
+            network_diagnostic_settings.SERVICE_PROXYCHECK,
+            network_diagnostic_settings.SERVICE_VPNAPI,
+        },
+        {
+            network_diagnostic_settings.SERVICE_PROXYCHECK: "proxy-a, proxy-b",
+            network_diagnostic_settings.SERVICE_VPNAPI: "vpn-a",
+        },
+    )
+    network_diagnostic_settings.save_settings(settings)
+
+    exported = local_config_bundle.export_local_config_zip(package, "strong-password")
+
+    assert exported.secret_count == 3
+    assert exported.missing_secret_refs == []
+
+    network_diagnostic_settings.SETTINGS_FILE.unlink()
+    isolated_local_config.clear()
+
+    imported = local_config_bundle.import_local_config_zip(package, "strong-password")
+    loaded = network_diagnostic_settings.load_settings()
+
+    assert imported.secret_count == 3
+    assert loaded.enabled_services() == [
+        network_diagnostic_settings.SERVICE_PROXYCHECK,
+        network_diagnostic_settings.SERVICE_VPNAPI,
+    ]
+    assert loaded.keys_for(network_diagnostic_settings.SERVICE_PROXYCHECK) == ["proxy-a", "proxy-b"]
+    assert loaded.keys_for(network_diagnostic_settings.SERVICE_VPNAPI) == ["vpn-a"]
 
 
 def test_local_config_zip_disconnects_imported_ssh_profiles(isolated_local_config, tmp_path, monkeypatch):

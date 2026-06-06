@@ -1,10 +1,9 @@
 import threading
-import os
 import webbrowser
 
 import customtkinter as ctk
 
-from core import network_diagnostics
+from core import network_diagnostic_settings, network_diagnostics
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
 from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
@@ -25,6 +24,10 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._proxycheck_key_entry = None
         self._ipqs_key_entry = None
         self._vpnapi_key_entry = None
+        self._service_vars = {}
+        self._service_key_entries = {}
+        self._settings_status_label = None
+        self._save_settings_button = None
         self._status_label = None
         self._content_frame = None
         self._report_box = None
@@ -87,57 +90,35 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         settings_grid = ctk.CTkFrame(settings_card, fg_color="transparent")
         settings_grid.pack(fill="x", padx=14, pady=12)
         settings_grid.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(
-            settings_grid,
-            text="Ping0 API Key",
-            text_color=COLORS["muted"],
-            width=108,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self._ping0_key_entry = MaskedEntry(settings_grid, placeholder="可选；留空则只生成 Ping0 链接和免费 Geo", width=420)
-        self._ping0_key_entry.grid(row=0, column=1, sticky="ew")
-        env_key = os.environ.get("PING0_API_KEY", "").strip()
-        if env_key:
-            self._ping0_key_entry.set(env_key)
-        ctk.CTkLabel(
-            settings_grid,
-            text="ProxyCheck Key",
-            text_color=COLORS["muted"],
-            width=108,
-            anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        self._proxycheck_key_entry = MaskedEntry(settings_grid, placeholder="可选；留空也会使用无 Key 免费检测", width=420)
-        self._proxycheck_key_entry.grid(row=1, column=1, sticky="ew", pady=(8, 0))
-        proxycheck_key = os.environ.get("PROXYCHECK_API_KEY", "").strip()
-        if proxycheck_key:
-            self._proxycheck_key_entry.set(proxycheck_key)
-        ctk.CTkLabel(
-            settings_grid,
-            text="IPQS API Key",
-            text_color=COLORS["muted"],
-            width=108,
-            anchor="w",
-        ).grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        self._ipqs_key_entry = MaskedEntry(settings_grid, placeholder="可选；填写后返回欺诈分、代理/VPN/Tor 和连接类型", width=420)
-        self._ipqs_key_entry.grid(row=2, column=1, sticky="ew", pady=(8, 0))
-        ipqs_key = (os.environ.get("IPQS_API_KEY") or os.environ.get("IPQUALITYSCORE_API_KEY") or "").strip()
-        if ipqs_key:
-            self._ipqs_key_entry.set(ipqs_key)
-        ctk.CTkLabel(
-            settings_grid,
-            text="VPNAPI.io Key",
-            text_color=COLORS["muted"],
-            width=108,
-            anchor="w",
-        ).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        self._vpnapi_key_entry = MaskedEntry(settings_grid, placeholder="可选；填写后返回 VPN、Proxy、Tor、Relay 布尔检测", width=420)
-        self._vpnapi_key_entry.grid(row=3, column=1, sticky="ew", pady=(8, 0))
-        vpnapi_key = (os.environ.get("VPNAPI_KEY") or os.environ.get("VPNAPI_API_KEY") or "").strip()
-        if vpnapi_key:
-            self._vpnapi_key_entry.set(vpnapi_key)
+        saved_settings = network_diagnostic_settings.load_settings()
+        service_rows = [
+            (
+                network_diagnostic_settings.SERVICE_PING0,
+                "Ping0",
+                "多个 Key 用逗号分隔；留空则只生成 Ping0 链接和免费 Geo",
+            ),
+            (
+                network_diagnostic_settings.SERVICE_PROXYCHECK,
+                "ProxyCheck",
+                "多个 Key 用逗号分隔；留空也会使用无 Key 免费检测",
+            ),
+            (
+                network_diagnostic_settings.SERVICE_IPQS,
+                "IPQS",
+                "多个 Key 用逗号分隔；填写后返回欺诈分、代理/VPN/Tor 和连接类型",
+            ),
+            (
+                network_diagnostic_settings.SERVICE_VPNAPI,
+                "VPNAPI.io",
+                "多个 Key 用逗号分隔；填写后返回 VPN、Proxy、Tor、Relay 布尔检测",
+            ),
+        ]
+        for row, (service, label, placeholder) in enumerate(service_rows):
+            self._add_service_setting_row(settings_grid, row, service, label, placeholder, saved_settings)
+
         note = ctk.CTkLabel(
             settings_grid,
-            text="ProxyCheck 会默认检测可连通 IP；IPQS/VPNAPI 只有填写 Key 才调用。所有检测结果只用于辅助分类，不做自动拦截。",
+            text="勾选后才会调用对应检测源。多个 Key 会从左到右尝试；某个 Key 限额或失败后自动换下一个。",
             text_color=COLORS["muted_soft"],
             font=font(11),
             anchor="w",
@@ -145,6 +126,25 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         )
         note.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         bind_wraplength(settings_grid, note, padding=20)
+        settings_actions = ctk.CTkFrame(settings_grid, fg_color="transparent")
+        settings_actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self._save_settings_button = ctk.CTkButton(
+            settings_actions,
+            text="保存检测设置",
+            width=116,
+            command=lambda: self._save_detection_settings(show_message=True),
+            **button_style("secondary"),
+        )
+        self._save_settings_button.pack(side="left")
+        self._settings_status_label = ctk.CTkLabel(
+            settings_actions,
+            text=self._settings_status_text(saved_settings),
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+        )
+        self._settings_status_label.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        bind_wraplength(settings_actions, self._settings_status_label, padding=140)
 
         status_card = ctk.CTkFrame(self, **card_frame_kwargs())
         status_card.pack(fill="x", padx=14, pady=(0, 10))
@@ -167,6 +167,67 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._report_box.pack(fill="x", padx=14, pady=(0, 14))
         self._set_report_text("等待检测结果...")
 
+    def _add_service_setting_row(self, parent, row: int, service: str, label: str, placeholder: str, saved_settings):
+        service_settings = saved_settings.service(service)
+        var = ctk.BooleanVar(value=service_settings.enabled)
+        self._service_vars[service] = var
+        ctk.CTkCheckBox(
+            parent,
+            text=label,
+            variable=var,
+            text_color=COLORS["muted"],
+            width=132,
+            checkbox_width=18,
+            checkbox_height=18,
+        ).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=(0 if row == 0 else 8, 0))
+        entry = MaskedEntry(parent, placeholder=placeholder, width=420)
+        entry.grid(row=row, column=1, sticky="ew", pady=(0 if row == 0 else 8, 0))
+        entry.set(", ".join(service_settings.api_keys))
+        self._service_key_entries[service] = entry
+        if service == network_diagnostic_settings.SERVICE_PING0:
+            self._ping0_key_entry = entry
+        elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
+            self._proxycheck_key_entry = entry
+        elif service == network_diagnostic_settings.SERVICE_IPQS:
+            self._ipqs_key_entry = entry
+        elif service == network_diagnostic_settings.SERVICE_VPNAPI:
+            self._vpnapi_key_entry = entry
+
+    def _collect_detection_settings(self):
+        enabled = [
+            service
+            for service, var in self._service_vars.items()
+            if bool(var.get())
+        ]
+        api_keys = {
+            service: entry.get()
+            for service, entry in self._service_key_entries.items()
+        }
+        return network_diagnostic_settings.settings_from_values(enabled, api_keys)
+
+    def _save_detection_settings(self, show_message: bool = False):
+        settings = self._collect_detection_settings()
+        network_diagnostic_settings.save_settings(settings)
+        if self._settings_status_label:
+            self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["success"])
+        if show_message:
+            show_toast(self.winfo_toplevel(), "环境检测设置已保存")
+        return settings
+
+    def _settings_status_text(self, settings) -> str:
+        enabled_labels = []
+        key_counts = []
+        for service in network_diagnostic_settings.SERVICE_ORDER:
+            service_settings = settings.service(service)
+            label = network_diagnostic_settings.SERVICE_LABELS.get(service, service)
+            if service_settings.enabled:
+                enabled_labels.append(label)
+            if service_settings.api_keys:
+                key_counts.append(f"{label} {len(service_settings.api_keys)} 个 Key")
+        enabled_text = "、".join(enabled_labels) if enabled_labels else "未启用检测源"
+        keys_text = "；".join(key_counts) if key_counts else "未保存 API Key"
+        return f"已启用: {enabled_text}  |  {keys_text}"
+
     def refresh(self):
         if self._last_report:
             self._render_report(self._last_report)
@@ -183,22 +244,31 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             self._copy_button.configure(state="disabled")
         if self._open_ping0_button:
             self._open_ping0_button.configure(state="disabled")
-        ping0_api_key = self._ping0_key_entry.get().strip() if self._ping0_key_entry else ""
-        proxycheck_api_key = self._proxycheck_key_entry.get().strip() if self._proxycheck_key_entry else ""
-        ipqs_api_key = self._ipqs_key_entry.get().strip() if self._ipqs_key_entry else ""
-        vpnapi_api_key = self._vpnapi_key_entry.get().strip() if self._vpnapi_key_entry else ""
-        self._set_status("正在测速公网出口；可连通后再调用 Ping0/ProxyCheck/IPQS/VPNAPI...")
+        try:
+            detection_settings = self._save_detection_settings(show_message=False)
+        except Exception as exc:
+            self._busy = False
+            if self._run_button:
+                self._run_button.configure(text="开始检测", state="normal")
+            self._set_status(f"保存检测设置失败: {exc}", "error")
+            show_toast(self.winfo_toplevel(), f"保存检测设置失败: {exc}", is_error=True)
+            return
+
+        enabled_services = detection_settings.enabled_services()
+        enabled_text = "、".join(network_diagnostic_settings.SERVICE_LABELS.get(item, item) for item in enabled_services) or "无"
+        self._set_status(f"正在测速公网出口；可连通后调用已启用检测源: {enabled_text}...")
         self._clear_content()
-        self._add_info_card("检测中", ["正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 做质量检测。"])
+        self._add_info_card("检测中", [f"正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 调用: {enabled_text}。"])
         self._set_report_text("检测中...")
 
         def worker():
             try:
                 report = network_diagnostics.detect_network(
-                    ping0_api_key=ping0_api_key,
-                    proxycheck_api_key=proxycheck_api_key,
-                    ipqs_api_key=ipqs_api_key,
-                    vpnapi_api_key=vpnapi_api_key,
+                    enabled_services=enabled_services,
+                    ping0_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_PING0),
+                    proxycheck_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_PROXYCHECK),
+                    ipqs_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_IPQS),
+                    vpnapi_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_VPNAPI),
                 )
                 payload = {"ok": True, "report": report, "error": ""}
             except Exception as exc:
@@ -237,9 +307,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             "待检测",
             [
                 "当前页不会自动上传网络信息。",
-                "点击后会先测速，再对可连通 IP 生成 Ping0 详情链接并调用 ProxyCheck。",
-                "填写 Ping0 API Key 后可直接返回 isidc、iprisk、isnative 等质量字段。",
-                "填写 IPQS/VPNAPI Key 后会叠加欺诈分、VPN、Proxy、Tor、Relay 等检测信号。",
+                "勾选的检测源才会被调用；开始检测前会自动保存当前设置。",
+                "每个检测源可以保存多个 API Key，多个 Key 用逗号分隔。",
+                "检测时会按顺序尝试 Key；遇到失败或限额会自动换下一个。",
             ],
         )
 
@@ -278,7 +348,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             f"Ping0: {diagnostic.ping0.quality_text()}",
         ]
         if diagnostic.reputation:
-            lines.extend(f"信誉检测: {item.summary_text()}" for item in diagnostic.reputation)
+            for item in diagnostic.reputation:
+                lines.append(f"信誉检测: {item.summary_text()}")
+                lines.extend(f"{item.source_label} Key: {attempt}" for attempt in item.attempts)
         lines.extend(
             [
                 f"位置: {geo.location_text()}",
@@ -296,8 +368,12 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
                     f"Ping0 ASN: {diagnostic.ping0.asn or '-'} {diagnostic.ping0.asn_name or diagnostic.ping0.org or ''}".strip(),
                 ]
             )
+            if diagnostic.ping0.attempts:
+                lines.extend(f"Ping0 Key: {attempt}" for attempt in diagnostic.ping0.attempts)
         elif diagnostic.ping0.ok and diagnostic.ping0.source == "ping0-free-geo":
             lines.append(f"Ping0 免费 Geo: {diagnostic.ping0.location or '-'} | {diagnostic.ping0.asn or '-'} | {diagnostic.ping0.org or '-'}")
+            if diagnostic.ping0.attempts:
+                lines.extend(f"Ping0 Key: {attempt}" for attempt in diagnostic.ping0.attempts)
         elif diagnostic.ping0.error:
             lines.append(f"Ping0 状态: {diagnostic.ping0.error}")
         if geo.latitude is not None and geo.longitude is not None:
@@ -404,12 +480,16 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
                 lines.append("  信誉检测:")
                 for item in diagnostic.reputation:
                     lines.append(f"  - {item.summary_text()}")
+                    for attempt in item.attempts:
+                        lines.append(f"    Key 尝试: {attempt}")
             if diagnostic.ping0.ok:
                 lines.append(f"  Ping0 数据源: {diagnostic.ping0.source}")
                 if diagnostic.ping0.location:
                     lines.append(f"  Ping0 位置: {diagnostic.ping0.location}")
                 if diagnostic.ping0.asn or diagnostic.ping0.asn_name or diagnostic.ping0.org:
                     lines.append(f"  Ping0 ASN/企业: {diagnostic.ping0.asn or '-'} {diagnostic.ping0.asn_name or diagnostic.ping0.org}")
+                for attempt in diagnostic.ping0.attempts:
+                    lines.append(f"  Ping0 Key 尝试: {attempt}")
             elif diagnostic.ping0.error:
                 lines.append(f"  Ping0 状态: {diagnostic.ping0.error}")
             for signal in cls.signals:

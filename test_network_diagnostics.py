@@ -325,6 +325,94 @@ def test_ipqs_fraud_score_and_connection_type_are_used_with_key():
     assert any("IPQS fraud_score=82" in signal for signal in diagnostic.classification.signals)
 
 
+def test_user_can_disable_quality_services():
+    ip = "203.0.113.34"
+    mapping = {
+        "https://api.ipify.org?format=json": {"ip": ip},
+        "https://api6.ipify.org?format=json": network_diagnostics.HttpResult(
+            url="https://api6.ipify.org?format=json",
+            ok=False,
+            error="network unreachable",
+        ),
+        "https://api64.ipify.org?format=json": {"ip": ip},
+        f"https://ipwho.is/{ip}": {
+            "success": True,
+            "country": "United States",
+            "connection": {"asn": 7922, "org": "Comcast Cable Communications", "isp": "Comcast Broadband"},
+        },
+    }
+    seen_urls = []
+
+    def fake(url, timeout):
+        seen_urls.append(url)
+        return _fake_http_get(mapping)(url, timeout)
+
+    report = network_diagnostics.detect_network(
+        enabled_services=[],
+        http_get=fake,
+        reverse_resolver=lambda _ip: "c-203-0-113-34.hsd1.ca.comcast.net",
+    )
+
+    diagnostic = report.diagnostics[0]
+    assert diagnostic.ping0.source == "disabled"
+    assert diagnostic.reputation == []
+    assert diagnostic.classification.ip_type == "运营商/宽带"
+    assert not any("ping0.cc" in url or "proxycheck.io" in url or "ipqualityscore.com" in url or "vpnapi.io" in url for url in seen_urls)
+
+
+def test_ipqs_key_pool_rotates_after_limited_key():
+    ip = "203.0.113.35"
+    first_url = f"https://ipqualityscore.com/api/json/ip/limited-key/{ip}?strictness=1&allow_public_access_points=true&fast=true"
+    second_url = f"https://ipqualityscore.com/api/json/ip/fresh-key/{ip}?strictness=1&allow_public_access_points=true&fast=true"
+    mapping = {
+        "https://api.ipify.org?format=json": {"ip": ip},
+        "https://api6.ipify.org?format=json": network_diagnostics.HttpResult(
+            url="https://api6.ipify.org?format=json",
+            ok=False,
+            error="network unreachable",
+        ),
+        "https://api64.ipify.org?format=json": {"ip": ip},
+        first_url: network_diagnostics.HttpResult(url=first_url, ok=False, status_code=429, error="HTTP 429"),
+        second_url: {
+            "success": True,
+            "proxy": False,
+            "vpn": False,
+            "tor": False,
+            "connection_type": "Residential",
+            "fraud_score": 9,
+            "ISP": "Comcast Cable",
+            "organization": "Comcast Cable Communications",
+            "ASN": 7922,
+        },
+        f"https://ipwho.is/{ip}": {
+            "success": True,
+            "country": "United States",
+            "connection": {"asn": 7922, "org": "Comcast Cable Communications", "isp": "Comcast Broadband"},
+        },
+    }
+    seen_urls = []
+
+    def fake(url, timeout):
+        seen_urls.append(url)
+        return _fake_http_get(mapping)(url, timeout)
+
+    report = network_diagnostics.detect_network(
+        enabled_services=[network_diagnostics.SERVICE_IPQS],
+        ipqs_api_keys=["limited-key", "fresh-key"],
+        http_get=fake,
+        reverse_resolver=lambda _ip: "",
+    )
+
+    diagnostic = report.diagnostics[0]
+    assert first_url in seen_urls
+    assert second_url in seen_urls
+    assert len(diagnostic.reputation) == 1
+    assert diagnostic.reputation[0].ok is True
+    assert diagnostic.reputation[0].api_key_label == "Key #2"
+    assert diagnostic.reputation[0].attempts == ["Key #1 失败: HTTP 429", "Key #2 成功"]
+    assert diagnostic.classification.ip_type == "家庭宽带/住宅 IP"
+
+
 def test_probe_public_ip_rejects_invalid_endpoint_response():
     result = network_diagnostics.probe_public_ip(
         "IPv4",

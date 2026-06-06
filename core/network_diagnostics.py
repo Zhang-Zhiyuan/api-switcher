@@ -12,6 +12,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from core.network_diagnostic_settings import (
+    SERVICE_IPQS,
+    SERVICE_PING0,
+    SERVICE_PROXYCHECK,
+    SERVICE_VPNAPI,
+    parse_api_keys,
+)
+
 
 USER_AGENT = "API-Switcher-Network-Diagnostics/1.0"
 DEFAULT_TIMEOUT = 8.0
@@ -206,6 +214,8 @@ class Ping0Quality:
     isnative: Optional[bool] = None
     asntype: str = ""
     orgtype: str = ""
+    api_key_label: str = ""
+    attempts: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -213,13 +223,16 @@ class Ping0Quality:
         return self.ok and self.source == "ping0-api" and (self.isidc is not None or self.iprisk is not None)
 
     def quality_text(self) -> str:
+        if self.source == "disabled":
+            return "Ping0 未启用"
         if not self.ok:
             return f"Ping0 未完成: {self.error or '未获取到结果'}"
         if self.has_paid_quality:
             ip_type = "IDC机房IP" if self.isidc else "家庭/非IDC宽带IP"
             risk = str(self.iprisk) if self.iprisk is not None else "-"
             native = "原生IP" if self.isnative else ("广播IP" if self.isnative is False else "未知")
-            return f"{ip_type} | 风控值 {risk} | {native}"
+            key = f" | {self.api_key_label}" if self.api_key_label else ""
+            return f"{ip_type} | 风控值 {risk} | {native}{key}"
         return "Ping0 免费 Geo 已返回；完整风控/IP 类型需要 Ping0 API Key"
 
 
@@ -240,6 +253,8 @@ class ReputationInfo:
     confidence_score: Optional[int] = None
     flags: dict[str, bool] = field(default_factory=dict)
     signals: list[str] = field(default_factory=list)
+    api_key_label: str = ""
+    attempts: list[str] = field(default_factory=list)
     error: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -265,6 +280,8 @@ class ReputationInfo:
             parts.append(f"风险 {self.risk_score}%")
         if self.fraud_score is not None:
             parts.append(f"欺诈分 {self.fraud_score}")
+        if self.api_key_label:
+            parts.append(self.api_key_label)
         active_flags = _active_flag_names(self.flags)
         if active_flags:
             parts.append("命中 " + "/".join(active_flags))
@@ -323,6 +340,11 @@ def detect_network(
     proxycheck_api_key: str = "",
     ipqs_api_key: str = "",
     vpnapi_api_key: str = "",
+    enabled_services: Optional[list[str] | set[str] | tuple[str, ...]] = None,
+    ping0_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    proxycheck_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    ipqs_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    vpnapi_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     http_get: Optional[HttpGetter] = None,
     reverse_resolver: Optional[ReverseResolver] = None,
 ) -> NetworkDiagnosticReport:
@@ -330,6 +352,17 @@ def detect_network(
 
     http_get = http_get or _http_get
     reverse_resolver = reverse_resolver or _reverse_dns
+    ping0_keys = _key_pool(ping0_api_keys, ping0_api_key)
+    proxycheck_keys = _key_pool(proxycheck_api_keys, proxycheck_api_key)
+    ipqs_keys = _key_pool(ipqs_api_keys, ipqs_api_key)
+    vpnapi_keys = _key_pool(vpnapi_api_keys, vpnapi_api_key)
+    services = _enabled_services(
+        enabled_services,
+        ping0_keys=ping0_keys,
+        proxycheck_keys=proxycheck_keys,
+        ipqs_keys=ipqs_keys,
+        vpnapi_keys=vpnapi_keys,
+    )
     probes: list[EndpointProbe] = []
     diagnostics: list[IpDiagnostic] = []
     seen_ips: set[str] = set()
@@ -341,14 +374,18 @@ def detect_network(
             continue
 
         seen_ips.add(probe.ip)
-        ping0 = lookup_ping0_quality(probe.ip, probe.label, timeout, http_get, ping0_api_key)
+        if SERVICE_PING0 in services:
+            ping0 = lookup_ping0_quality(probe.ip, probe.label, timeout, http_get, api_keys=ping0_keys)
+        else:
+            ping0 = _disabled_ping0_quality(probe.ip)
         reputation = lookup_reputation(
             probe.ip,
             timeout,
             http_get,
-            proxycheck_api_key=proxycheck_api_key,
-            ipqs_api_key=ipqs_api_key,
-            vpnapi_api_key=vpnapi_api_key,
+            enabled_services=services,
+            proxycheck_api_keys=proxycheck_keys,
+            ipqs_api_keys=ipqs_keys,
+            vpnapi_api_keys=vpnapi_keys,
         )
         geo = lookup_geo(probe.ip, timeout, http_get)
         rdns = reverse_resolver(probe.ip)
@@ -367,17 +404,24 @@ def detect_network(
         )
 
     notices = [
-        "检测流程为先测速，再只对可连通公网出口调用 Ping0、ProxyCheck 等质量接口。",
-        "ProxyCheck 默认可无 Key 调用；填写 PROXYCHECK_API_KEY 可使用注册免费额度并获得更稳定缓存。",
-        "IPQS 和 VPNAPI.io 只有填写 Key 时才会调用；留空不会产生接口请求。",
+        "检测流程为先测速，再只对可连通公网出口调用用户启用的质量接口。",
+        "多个 API Key 会按顺序尝试；某个 Key 失败或限额后会自动使用下一个。",
         "多源分类会优先标记 VPN、Proxy、Tor、Relay 等匿名网络；家宽/商宽/蜂窝/机房以各服务返回的网络类型为准。",
     ]
-    if not ping0_api_key.strip():
+    if SERVICE_PROXYCHECK in services:
+        notices.append("ProxyCheck 可无 Key 调用；配置多个 Key 后会优先使用 Key 池。")
+    if SERVICE_PING0 not in services:
+        notices.append("Ping0 已由用户关闭。")
+    elif not ping0_keys:
         notices.append("未填写 Ping0 API Key 时，只使用 Ping0 免费 Geo 和详情页链接；指定 IP 风控值需要 Ping0 官方 API。")
-    if not ipqs_api_key.strip():
-        notices.append("未填写 IPQS API Key，已跳过 IPQualityScore。")
-    if not vpnapi_api_key.strip():
-        notices.append("未填写 VPNAPI.io Key，已跳过 VPNAPI.io。")
+    if SERVICE_IPQS not in services:
+        notices.append("IPQualityScore 已由用户关闭。")
+    elif not ipqs_keys:
+        notices.append("IPQualityScore 已启用但未配置 Key，本次不会发起 IPQS 请求。")
+    if SERVICE_VPNAPI not in services:
+        notices.append("VPNAPI.io 已由用户关闭。")
+    elif not vpnapi_keys:
+        notices.append("VPNAPI.io 已启用但未配置 Key，本次不会发起 VPNAPI.io 请求。")
 
     report = NetworkDiagnosticReport(
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -433,6 +477,7 @@ def lookup_ping0_quality(
     timeout: float,
     http_get: HttpGetter,
     api_key: str = "",
+    api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
 ) -> Ping0Quality:
     """Look up Ping0 quality for a reachable IP.
 
@@ -446,9 +491,18 @@ def lookup_ping0_quality(
         detail_url=PING0_DETAIL_URL.format(ip=urllib.parse.quote(ip, safe=":.")),
         ping_url=PING0_PING_URL.format(ip=urllib.parse.quote(ip, safe=":.")),
     )
-    api_key = (api_key or "").strip()
-    if api_key:
-        return _lookup_ping0_paid_quality(quality, timeout, http_get, api_key)
+    keys = _key_pool(api_keys, api_key)
+    attempts: list[str] = []
+    for index, key in enumerate(keys):
+        paid_quality = _lookup_ping0_paid_quality(quality, timeout, http_get, key)
+        paid_quality.api_key_label = _key_label(index)
+        if paid_quality.ok:
+            paid_quality.attempts = attempts + [f"{_key_label(index)} 成功"]
+            return paid_quality
+        attempts.append(f"{_key_label(index)} 失败: {paid_quality.error or '请求失败'}")
+
+    if attempts:
+        quality.attempts = attempts
     return _lookup_ping0_free_geo(quality, label, timeout, http_get)
 
 
@@ -458,6 +512,8 @@ def _lookup_ping0_paid_quality(
     http_get: HttpGetter,
     api_key: str,
 ) -> Ping0Quality:
+    quality.ok = False
+    quality.error = ""
     url = PING0_API_URL.format(
         api_key=urllib.parse.quote(api_key, safe=""),
         ip=urllib.parse.quote(quality.ip, safe=":."),
@@ -544,20 +600,55 @@ def lookup_reputation(
     proxycheck_api_key: str = "",
     ipqs_api_key: str = "",
     vpnapi_api_key: str = "",
+    enabled_services: Optional[list[str] | set[str] | tuple[str, ...]] = None,
+    proxycheck_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    ipqs_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    vpnapi_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
 ) -> list[ReputationInfo]:
     """Look up reputation sources that can classify residential/hosting/proxy usage."""
 
-    results = [
-        lookup_proxycheck_reputation(ip, timeout, http_get, proxycheck_api_key),
-    ]
-    if (ipqs_api_key or "").strip():
-        results.append(lookup_ipqs_reputation(ip, timeout, http_get, ipqs_api_key))
-    if (vpnapi_api_key or "").strip():
-        results.append(lookup_vpnapi_reputation(ip, timeout, http_get, vpnapi_api_key))
+    proxycheck_keys = _key_pool(proxycheck_api_keys, proxycheck_api_key)
+    ipqs_keys = _key_pool(ipqs_api_keys, ipqs_api_key)
+    vpnapi_keys = _key_pool(vpnapi_api_keys, vpnapi_api_key)
+    services = _enabled_services(
+        enabled_services,
+        ping0_keys=[],
+        proxycheck_keys=proxycheck_keys,
+        ipqs_keys=ipqs_keys,
+        vpnapi_keys=vpnapi_keys,
+    )
+    results: list[ReputationInfo] = []
+    if SERVICE_PROXYCHECK in services:
+        results.append(lookup_proxycheck_reputation(ip, timeout, http_get, api_keys=proxycheck_keys))
+    if SERVICE_IPQS in services:
+        results.append(lookup_ipqs_reputation(ip, timeout, http_get, api_keys=ipqs_keys))
+    if SERVICE_VPNAPI in services:
+        results.append(lookup_vpnapi_reputation(ip, timeout, http_get, api_keys=vpnapi_keys))
     return results
 
 
 def lookup_proxycheck_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str = "",
+    api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+) -> ReputationInfo:
+    keys = _key_pool(api_keys, api_key)
+    keys_to_try = keys + [""] if keys else [""]
+    attempts: list[str] = []
+    for index, key in enumerate(keys_to_try):
+        info = _lookup_proxycheck_reputation_once(ip, timeout, http_get, key)
+        info.api_key_label = _key_label(index) if key else "无 Key"
+        if info.ok:
+            info.attempts = attempts + [f"{info.api_key_label} 成功"]
+            return info
+        attempts.append(f"{info.api_key_label} 失败: {info.error or '请求失败'}")
+    info.attempts = attempts
+    return info
+
+
+def _lookup_proxycheck_reputation_once(
     ip: str,
     timeout: float,
     http_get: HttpGetter,
@@ -631,6 +722,28 @@ def lookup_ipqs_reputation(
     ip: str,
     timeout: float,
     http_get: HttpGetter,
+    api_key: str = "",
+    api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+) -> ReputationInfo:
+    keys = _key_pool(api_keys, api_key)
+    if not keys:
+        return ReputationInfo(ip=ip, source="ipqs", error="未配置 IPQualityScore API Key")
+    attempts: list[str] = []
+    for index, key in enumerate(keys):
+        info = _lookup_ipqs_reputation_once(ip, timeout, http_get, key)
+        info.api_key_label = _key_label(index)
+        if info.ok:
+            info.attempts = attempts + [f"{info.api_key_label} 成功"]
+            return info
+        attempts.append(f"{info.api_key_label} 失败: {info.error or '请求失败'}")
+    info.attempts = attempts
+    return info
+
+
+def _lookup_ipqs_reputation_once(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
     api_key: str,
 ) -> ReputationInfo:
     safe_ip = urllib.parse.quote(ip, safe=":.")
@@ -696,6 +809,28 @@ def lookup_ipqs_reputation(
 
 
 def lookup_vpnapi_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str = "",
+    api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+) -> ReputationInfo:
+    keys = _key_pool(api_keys, api_key)
+    if not keys:
+        return ReputationInfo(ip=ip, source="vpnapi", error="未配置 VPNAPI.io API Key")
+    attempts: list[str] = []
+    for index, key in enumerate(keys):
+        info = _lookup_vpnapi_reputation_once(ip, timeout, http_get, key)
+        info.api_key_label = _key_label(index)
+        if info.ok:
+            info.attempts = attempts + [f"{info.api_key_label} 成功"]
+            return info
+        attempts.append(f"{info.api_key_label} 失败: {info.error or '请求失败'}")
+    info.attempts = attempts
+    return info
+
+
+def _lookup_vpnapi_reputation_once(
     ip: str,
     timeout: float,
     http_get: HttpGetter,
@@ -1007,6 +1142,46 @@ def _ping0_signals(ping0: Ping0Quality) -> list[str]:
     if ping0.asntype or ping0.orgtype:
         signals.append(f"asntype={ping0.asntype or '-'} orgtype={ping0.orgtype or '-'}")
     return signals
+
+
+def _key_pool(keys: Optional[list[str] | tuple[str, ...] | str], legacy_key: str = "") -> list[str]:
+    values = parse_api_keys(keys)
+    values.extend(parse_api_keys(legacy_key))
+    return list(dict.fromkeys(values))
+
+
+def _enabled_services(
+    enabled_services: Optional[list[str] | set[str] | tuple[str, ...]],
+    *,
+    ping0_keys: list[str],
+    proxycheck_keys: list[str],
+    ipqs_keys: list[str],
+    vpnapi_keys: list[str],
+) -> set[str]:
+    if enabled_services is not None:
+        return {str(service).strip().lower() for service in enabled_services if str(service).strip()}
+
+    services = {SERVICE_PING0, SERVICE_PROXYCHECK}
+    if ipqs_keys:
+        services.add(SERVICE_IPQS)
+    if vpnapi_keys:
+        services.add(SERVICE_VPNAPI)
+    return services
+
+
+def _disabled_ping0_quality(ip: str) -> Ping0Quality:
+    return Ping0Quality(
+        ip=ip,
+        ok=False,
+        source="disabled",
+        detail_url=PING0_DETAIL_URL.format(ip=urllib.parse.quote(ip, safe=":.")),
+        ping_url=PING0_PING_URL.format(ip=urllib.parse.quote(ip, safe=":.")),
+        error="用户未启用 Ping0",
+    )
+
+
+def _key_label(index: int) -> str:
+    return f"Key #{index + 1}"
 
 
 def summarize_report(report: NetworkDiagnosticReport) -> str:

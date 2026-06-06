@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from core import backup_manager, profile_manager, security
+from core import backup_manager, network_diagnostic_settings, profile_manager, security
 from core.atomic_io import atomic_write_text, replace_with_retry, temp_path_for
 
 
@@ -199,6 +199,27 @@ def _collect_secret_refs(store: dict[str, Any]) -> set[str]:
     return refs
 
 
+def _load_network_diagnostic_settings_payload() -> dict[str, Any]:
+    path = network_diagnostic_settings.SETTINGS_FILE
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _collect_network_diagnostic_secret_refs(settings_payload: dict[str, Any]) -> set[str]:
+    services = settings_payload.get("services") if isinstance(settings_payload.get("services"), dict) else {}
+    refs: set[str] = set()
+    for raw in services.values():
+        if not isinstance(raw, dict):
+            continue
+        refs.update(str(item) for item in raw.get("key_refs", []) if str(item).strip())
+    return refs
+
+
 def _normalized_store_for_import(store: dict[str, Any]) -> dict[str, Any]:
     normalized = profile_manager._get_default_store()
     if isinstance(store, dict):
@@ -371,7 +392,11 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
         raise ValueError("迁移密码至少需要 8 个字符")
 
     store = _normalized_store_for_import(profile_manager._load_store())
-    secret_refs = sorted(_collect_secret_refs(store))
+    network_diagnostics = _load_network_diagnostic_settings_payload()
+    secret_refs = sorted(
+        _collect_secret_refs(store)
+        | _collect_network_diagnostic_secret_refs(network_diagnostics)
+    )
     secrets: dict[str, str] = {}
     missing: list[str] = []
     for ref in secret_refs:
@@ -386,10 +411,11 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
         "payload_version": PAYLOAD_VERSION,
         "exported_at": created_at,
         "store": store,
+        "network_diagnostics": network_diagnostics,
         "secrets": secrets,
         "missing_secret_refs": missing,
         "notes": [
-            "完整本地配置 ZIP：包含 Profile 元数据、活动选择和被 Profile 引用的密钥。",
+            "完整本地配置 ZIP：包含 Profile 元数据、活动选择、环境检测设置和被引用的密钥。",
             "密钥已用迁移密码加密；ZIP 本身仅用于打包，不依赖 ZipCrypto。",
             "私钥认证的 SSH Profile 会保存私钥文件路径和私钥口令；不会复制私钥文件本体。",
         ],
@@ -402,6 +428,7 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
         "profile_counts": _profile_counts_by_type(store),
         "secret_count": len(secrets),
         "missing_secret_count": len(missing),
+        "network_diagnostics": bool(network_diagnostics),
         "payload": PAYLOAD_NAME,
     }
 
@@ -462,6 +489,9 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
     if not isinstance(imported_store, dict):
         raise ValueError("完整配置 ZIP 中没有有效配置数据")
     imported_store = _normalized_store_for_import(imported_store)
+    imported_network_diagnostics = payload.get("network_diagnostics")
+    if imported_network_diagnostics is not None and not isinstance(imported_network_diagnostics, dict):
+        raise ValueError("完整配置 ZIP 中的环境检测设置无效")
 
     secrets = payload.get("secrets", {})
     if not isinstance(secrets, dict):
@@ -502,6 +532,11 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     profile_manager._normalize_store(new_store)
     profile_manager._save_store(new_store)
+    if isinstance(imported_network_diagnostics, dict):
+        atomic_write_text(
+            network_diagnostic_settings.SETTINGS_FILE,
+            json.dumps(imported_network_diagnostics, ensure_ascii=False, indent=2),
+        )
     _disconnect_imported_ssh_profiles(imported_store)
     skipped.extend(_delete_unreferenced_replaced_secrets(existing_store, new_store))
     skipped.extend(f"{ref} (源包缺少密钥)" for ref in missing_from_source)
