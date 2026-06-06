@@ -475,6 +475,64 @@ def test_ipqs_fraud_score_and_connection_type_are_used_with_key():
     assert any("IPQS fraud_score=82" in signal for signal in diagnostic.classification.signals)
 
 
+def test_multisource_residential_business_conflict_lowers_confidence():
+    ip = "203.0.113.39"
+    geo = network_diagnostics.GeoInfo(ip=ip, ok=True)
+    classification = network_diagnostics.classify_ip(
+        geo,
+        reputation=[
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="proxycheck",
+                ok=True,
+                network_type="Residential",
+                risk_score=7,
+            ),
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="ipqs",
+                ok=True,
+                network_type="Business",
+                risk_score=22,
+            ),
+        ],
+    )
+
+    assert classification.ip_type == "家宽/商宽冲突"
+    assert classification.risk_score > 35
+    assert classification.confidence == "中"
+    assert any("多源冲突" in signal for signal in classification.signals)
+
+
+def test_ping0_idc_conflict_overrides_third_party_residential_for_ai_safety():
+    ip = "203.0.113.40"
+    geo = network_diagnostics.GeoInfo(ip=ip, ok=True)
+    ping0 = network_diagnostics.Ping0Quality(
+        ip=ip,
+        ok=True,
+        source="ping0-api",
+        isidc=True,
+        iprisk=18,
+    )
+    classification = network_diagnostics.classify_ip(
+        geo,
+        ping0=ping0,
+        reputation=[
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="proxycheck",
+                ok=True,
+                network_type="Residential",
+                risk_score=8,
+            ),
+        ],
+    )
+
+    assert classification.ip_type == "IDC/云机房"
+    assert classification.risk_score >= 62
+    assert any("家宽信号与 IDC/机房信号" in signal for signal in classification.signals)
+
+
 def test_ipqs_key_pool_rotates_after_success_false_string():
     ip = "203.0.113.38"
     first_url = f"https://ipqualityscore.com/api/json/ip/expired-key/{ip}?strictness=1&allow_public_access_points=true&fast=true"

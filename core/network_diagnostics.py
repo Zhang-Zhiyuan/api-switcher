@@ -938,11 +938,8 @@ def classify_ip(
     reputation: Optional[list[ReputationInfo]] = None,
 ) -> IpClassification:
     reputation = reputation or []
-    reputation_classification = _classify_from_reputation(reputation)
+    reputation_classification = _classify_from_reputation(reputation, ping0)
     if reputation_classification:
-        if ping0 and ping0.has_paid_quality:
-            reputation_classification.signals.extend(_ping0_signals(ping0))
-            reputation_classification.limitations.append("Ping0 与第三方信誉源可能存在差异，最终以多源交叉结果和实际业务反馈为准。")
         return reputation_classification
 
     if ping0 and ping0.has_paid_quality:
@@ -1038,23 +1035,51 @@ def classify_ip(
     )
 
 
-def _classify_from_reputation(reputation: list[ReputationInfo]) -> Optional[IpClassification]:
+def _classify_from_reputation(
+    reputation: list[ReputationInfo],
+    ping0: Optional[Ping0Quality] = None,
+) -> Optional[IpClassification]:
     ok_results = [item for item in reputation if item.ok]
     if not ok_results:
         return None
 
     signals = _reputation_signals(ok_results)
+    if ping0 and ping0.has_paid_quality:
+        signals.extend(_ping0_signals(ping0))
+
+    categories = _reputation_category_votes(ok_results, ping0)
+    category_summary = _category_vote_summary(categories)
+    if category_summary:
+        signals.append("多源类型投票: " + category_summary)
+
+    if ping0 and ping0.has_paid_quality and ping0.iprisk is not None and ping0.iprisk >= 75:
+        signals.append(f"Ping0 高风控值: {ping0.iprisk}")
+
     suspicious = [
         item
         for item in ok_results
-        if _has_anonymity_flag(item.flags) or (item.risk_score is not None and item.risk_score >= 75)
+        if _has_anonymity_flag(item.flags) or (_explicit_reputation_score(item) or 0) >= 75
     ]
-    if suspicious:
-        risk = max(78, max((item.risk_score or item.fraud_score or 0) for item in suspicious))
+    ping0_suspicious = bool(
+        ping0 and ping0.has_paid_quality and ping0.iprisk is not None and ping0.iprisk >= 75
+    )
+    if suspicious or ping0_suspicious:
+        has_anonymity_signal = any(_has_anonymity_flag(item.flags) for item in suspicious)
+        risk_values = [_reputation_score(item, 78) for item in suspicious]
+        if ping0_suspicious and ping0 and ping0.iprisk is not None:
+            risk_values.append(ping0.iprisk)
+        risk = max(78, max(risk_values or [78]))
         risk = max(0, min(100, risk))
-        residentialish = any(_network_type_category(item.network_type) in {"residential", "mobile"} for item in ok_results)
-        ip_type = "住宅代理/匿名出口可疑" if residentialish else "代理/VPN/Tor 可疑"
-        confidence = "高" if len(suspicious) >= 2 or risk >= 85 else "中"
+        residentialish = bool(categories["residential"] or categories["mobile"])
+        if has_anonymity_signal and residentialish:
+            ip_type = "住宅代理/匿名出口可疑"
+        elif has_anonymity_signal:
+            ip_type = "代理/VPN/Tor 可疑"
+        elif residentialish:
+            ip_type = "住宅 IP 高风险"
+        else:
+            ip_type = "高风险出口可疑"
+        confidence = "高" if len(suspicious) >= 2 or risk >= 85 or ping0_suspicious else "中"
         return IpClassification(
             ip_type=ip_type,
             risk_score=risk,
@@ -1067,43 +1092,56 @@ def _classify_from_reputation(reputation: list[ReputationInfo]) -> Optional[IpCl
             ],
         )
 
-    explicit_types = [item for item in ok_results if item.network_type]
-    hosting_flag_results = [item for item in ok_results if item.flags.get("hosting")]
-    if hosting_flag_results and not any(_network_type_category(item.network_type) == "hosting" for item in explicit_types):
-        explicit_types.extend(hosting_flag_results)
-    if not explicit_types:
+    if not any(categories.values()):
         return None
 
-    hosting = [
-        item
-        for item in explicit_types
-        if _network_type_category(item.network_type) == "hosting" or item.flags.get("hosting")
-    ]
-    business = [item for item in explicit_types if _network_type_category(item.network_type) == "business"]
-    mobile = [item for item in explicit_types if _network_type_category(item.network_type) == "mobile"]
-    residential = [item for item in explicit_types if _network_type_category(item.network_type) == "residential"]
+    hosting = categories["hosting"]
+    business = categories["business"]
+    mobile = categories["mobile"]
+    residential = categories["residential"]
 
     if hosting:
-        base_risk = max(_reputation_score(item, 55) for item in hosting)
-        risk = max(52, min(100, base_risk))
+        base_risk = max(_category_vote_risk(item, 55) for item in hosting)
+        risk_floor = 62 if residential else 52
+        risk = max(risk_floor, min(100, base_risk))
+        if residential:
+            signals.append("多源冲突: 家宽信号与 IDC/机房信号同时存在，按更保守的机房风险处理。")
         return IpClassification(
             ip_type="IDC/云机房",
             risk_score=risk,
             risk_label=_risk_label(risk),
-            confidence="高" if len(hosting) >= 2 else "中",
+            confidence="高" if len(hosting) >= 2 or residential else "中",
             signals=signals,
             limitations=[
                 "机房分类来自第三方网络类型字段，转售、CDN 和企业出口可能造成边界模糊。",
+                "当家宽与机房来源冲突时，AI 代理筛选会按风险更高的一侧处理。",
             ],
         )
 
     if residential:
-        risk = min(74, max(_reputation_score(item, 16) for item in residential))
+        base_risk = max(_category_vote_risk(item, 16) for item in residential)
+        conflict_votes = business + mobile
+        if conflict_votes:
+            conflict_label = "商宽" if business else "移动网络"
+            risk = max(38, min(74, base_risk + 16))
+            signals.append(f"多源冲突: 家宽信号与{conflict_label}信号同时存在，降低高质量候选置信度。")
+            return IpClassification(
+                ip_type=f"家宽/{conflict_label}冲突",
+                risk_score=max(0, risk),
+                risk_label=_risk_label(max(0, risk)),
+                confidence="中",
+                signals=signals,
+                limitations=[
+                    "家宽分类存在其他来源冲突，暂不按高质量家宽直接优先。",
+                    "企业、校园、公共 Wi-Fi、CGNAT 或代理池可能造成第三方来源判断不一致。",
+                ],
+            )
+        risk = min(74, base_risk)
         return IpClassification(
             ip_type="家庭宽带/住宅 IP",
             risk_score=max(0, risk),
             risk_label=_risk_label(max(0, risk)),
-            confidence="高" if len(residential) >= 2 else "中",
+            confidence="高" if len(residential) >= 2 or len(ok_results) >= 2 else "中",
             signals=signals,
             limitations=[
                 "家宽分类表示 IP 段归属更像住宅网络，不代表该 IP 从未被代理池或滥用记录使用。",
@@ -1111,7 +1149,7 @@ def _classify_from_reputation(reputation: list[ReputationInfo]) -> Optional[IpCl
         )
 
     if mobile:
-        risk = min(74, max(_reputation_score(item, 24) for item in mobile))
+        risk = min(74, max(_category_vote_risk(item, 24) for item in mobile))
         return IpClassification(
             ip_type="蜂窝/移动网络",
             risk_score=max(0, risk),
@@ -1124,7 +1162,7 @@ def _classify_from_reputation(reputation: list[ReputationInfo]) -> Optional[IpCl
         )
 
     if business:
-        risk = min(74, max(_reputation_score(item, 34) for item in business))
+        risk = min(74, max(_category_vote_risk(item, 34) for item in business))
         return IpClassification(
             ip_type="企业/商宽 IP",
             risk_score=max(0, risk),
@@ -1145,6 +1183,65 @@ def _reputation_score(result: ReputationInfo, default: int) -> int:
     if result.fraud_score is not None:
         return result.fraud_score
     return default
+
+
+def _explicit_reputation_score(result: ReputationInfo) -> Optional[int]:
+    if result.risk_score is not None:
+        return result.risk_score
+    if result.fraud_score is not None:
+        return result.fraud_score
+    return None
+
+
+def _category_vote_risk(result: ReputationInfo | str, default: int) -> int:
+    if isinstance(result, ReputationInfo):
+        risk = _reputation_score(result, default)
+        if result.flags.get("shared_connection"):
+            risk = max(risk, 42)
+        if result.flags.get("dynamic_connection") and _network_type_category(result.network_type) == "residential":
+            risk = min(risk, 24)
+        return risk
+    return default
+
+
+def _reputation_category_votes(
+    results: list[ReputationInfo],
+    ping0: Optional[Ping0Quality] = None,
+) -> dict[str, list[ReputationInfo | str]]:
+    categories: dict[str, list[ReputationInfo | str]] = {
+        "hosting": [],
+        "residential": [],
+        "business": [],
+        "mobile": [],
+    }
+    for result in results:
+        category = _network_type_category(result.network_type)
+        if not category and result.flags.get("hosting"):
+            category = "hosting"
+        if category in categories:
+            categories[category].append(result)
+
+    if ping0 and ping0.has_paid_quality:
+        if ping0.isidc is True:
+            categories["hosting"].append("Ping0 isidc=True")
+        elif ping0.isidc is False:
+            categories["residential"].append("Ping0 isidc=False")
+    return categories
+
+
+def _category_vote_summary(categories: dict[str, list[ReputationInfo | str]]) -> str:
+    labels = {
+        "residential": "家宽",
+        "business": "商宽",
+        "mobile": "移动",
+        "hosting": "机房",
+    }
+    parts = []
+    for key in ("residential", "business", "mobile", "hosting"):
+        votes = categories.get(key) or []
+        if votes:
+            parts.append(f"{labels[key]}{len(votes)}")
+    return "、".join(parts)
 
 
 def _reputation_signals(results: list[ReputationInfo]) -> list[str]:

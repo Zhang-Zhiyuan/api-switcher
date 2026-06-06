@@ -441,6 +441,79 @@ def test_assess_proxy_node_quality_classifies_proxycheck_residential():
     assert remote_proxy.proxy_node_quality_for_ai_proxy_ok(result) is True
 
 
+def test_assess_proxy_node_quality_rejects_residential_business_conflict_for_ai_proxy():
+    node = remote_proxy.parse_proxy_node(
+        "{ name: AI代理冲突, type: vless, server: mixed.example.com, port: 443 }"
+    )
+
+    def resolver(host, *_args, **_kwargs):
+        assert host == "mixed.example.com"
+        return [(None, None, None, "", ("198.51.100.78", 0))]
+
+    def http_get(url, _timeout):
+        if "proxycheck.io/v3/198.51.100.78" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "status": "ok",
+                        "198.51.100.78": {
+                            "network": {"type": "Residential", "provider": "Example Fiber"},
+                            "detections": {"anonymous": False, "risk": 7},
+                        },
+                    }
+                ),
+            )
+        if "ipqualityscore.com/api/json/ip/ipqs-key/198.51.100.78" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "success": True,
+                        "connection_type": "Business",
+                        "fraud_score": 22,
+                        "proxy": False,
+                        "vpn": False,
+                        "tor": False,
+                    }
+                ),
+            )
+        if "ipwho.is/198.51.100.78" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "success": True,
+                        "country": "United States",
+                        "connection": {"asn": 64500, "org": "Example Fiber", "isp": "Example ISP"},
+                    }
+                ),
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_PROXYCHECK, network_diagnostic_settings.SERVICE_IPQS},
+        {network_diagnostic_settings.SERVICE_IPQS: "ipqs-key"},
+    )
+
+    result = remote_proxy.assess_proxy_node_quality(
+        node,
+        http_get=http_get,
+        resolver=resolver,
+        settings=settings,
+    )
+
+    assert result.ok is True
+    assert result.ip_type == "家宽/商宽冲突"
+    assert result.risk_score and result.risk_score > 35
+    assert result.quality_label == "来源冲突"
+    assert "多源冲突" in result.detail
+    assert remote_proxy.proxy_node_quality_for_ai_proxy_ok(result) is False
+
+
 def test_assess_proxy_node_quality_returns_failure_when_provider_raises():
     node = remote_proxy.parse_proxy_node(
         "{ name: 检测失败节点, type: vless, server: node.example.com, port: 443 }"
