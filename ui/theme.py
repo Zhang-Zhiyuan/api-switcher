@@ -1,4 +1,5 @@
 import re
+import tkinter
 import customtkinter as ctk
 from typing import Optional
 
@@ -30,6 +31,37 @@ COLORS = {
     "accent": "#14a6a8",
     "accent_hover": "#0d8688",
 }
+
+
+def _event_inside_child_scroll_area(widget, parent_canvas) -> bool:
+    current = widget
+    while current is not None:
+        if current == parent_canvas:
+            return False
+        if isinstance(current, (tkinter.Canvas, tkinter.Text)):
+            return True
+        if current.__class__.__name__ == "CTkTextbox":
+            return True
+        current = getattr(current, "master", None)
+    return False
+
+
+def _patch_nested_scrollable_frame_mousewheel() -> None:
+    scrollable_cls = ctk.CTkScrollableFrame
+    if getattr(scrollable_cls, "_api_switcher_nested_scroll_guard", False):
+        return
+    original_mouse_wheel_all = scrollable_cls._mouse_wheel_all
+
+    def guarded_mouse_wheel_all(self, event):
+        if _event_inside_child_scroll_area(event.widget, self._parent_canvas):
+            return None
+        return original_mouse_wheel_all(self, event)
+
+    scrollable_cls._mouse_wheel_all = guarded_mouse_wheel_all
+    scrollable_cls._api_switcher_nested_scroll_guard = True
+
+
+_patch_nested_scrollable_frame_mousewheel()
 
 
 def font(size: int, weight: Optional[str] = None, family: Optional[str] = None) -> ctk.CTkFont:

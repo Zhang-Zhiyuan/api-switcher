@@ -985,108 +985,115 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if getattr(p, "remote_codex_dir", None):
                     remote_dirs.append(f"Codex: {p.remote_codex_dir}")
                 if remote_dirs:
-                    info.append("远端目录: " + "  ·  ".join(remote_dirs))
+                    info.append("目录 " + "  ·  ".join(remote_dirs))
 
                 card_frame = ctk.CTkFrame(
                     self._cards_frame,
                     **card_frame_kwargs(COLORS["success"] if is_connected else COLORS["border_soft"]),
                 )
-                card_frame.pack(fill="x", pady=5)
+                card_frame.pack(fill="x", pady=3)
 
-                top = ctk.CTkFrame(card_frame, fg_color="transparent")
-                top.pack(fill="x", padx=14, pady=(12, 4))
+                row = ctk.CTkFrame(card_frame, fg_color="transparent")
+                row.pack(fill="x", padx=10, pady=8)
+                row.grid_columnconfigure(2, weight=1)
 
                 selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
                 ctk.CTkCheckBox(
-                    top,
+                    row,
                     text="目标",
-                    width=58,
-                    checkbox_width=18,
-                    checkbox_height=18,
+                    width=52,
+                    checkbox_width=16,
+                    checkbox_height=16,
                     text_color=COLORS["muted"],
-                    font=font(12),
+                    font=font(11),
                     variable=selected_var,
                     command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
-                ).pack(side="left", padx=(0, 10))
+                ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 8))
 
                 status_pill = ctk.CTkLabel(
-                    top,
+                    row,
                     text=status,
                     fg_color=COLORS["success"] if is_connected else COLORS["surface_alt"],
                     corner_radius=999,
                     text_color=COLORS["text"] if is_connected else COLORS["muted"],
                     font=font(11, "bold"),
-                    padx=8,
-                    pady=2,
+                    padx=7,
+                    pady=1,
                 )
-                status_pill.pack(side="left", padx=(0, 8))
+                status_pill.grid(row=0, column=1, rowspan=2, sticky="w", padx=(0, 8))
 
-                name_label = ctk.CTkLabel(top, text=p.name, text_color=COLORS["text"], font=font(15, "bold"))
-                name_label.pack(side="left", padx=(0, 0))
+                text_area = ctk.CTkFrame(row, fg_color="transparent")
+                text_area.grid(row=0, column=2, rowspan=2, sticky="ew")
+                title_line = ctk.CTkFrame(text_area, fg_color="transparent")
+                title_line.pack(fill="x")
+
+                name_label = ctk.CTkLabel(
+                    title_line,
+                    text=p.name,
+                    text_color=COLORS["text"],
+                    font=font(14, "bold"),
+                    anchor="w",
+                )
+                name_label.pack(side="left")
 
                 if is_active:
                     ctk.CTkLabel(
-                        top,
+                        title_line,
                         text="当前",
                         fg_color=COLORS["primary"],
                         corner_radius=999,
                         text_color=COLORS["text"],
                         font=font(11, "bold"),
-                        padx=8,
-                        pady=2,
+                        padx=7,
+                        pady=1,
                     ).pack(side="left", padx=(8, 0))
 
-                ctk.CTkFrame(top, fg_color="transparent").pack(side="left", fill="x", expand=True)
+                info_label = ctk.CTkLabel(
+                    text_area,
+                    text="  |  ".join(info),
+                    text_color=COLORS["muted"],
+                    font=font(11),
+                    anchor="w",
+                    justify="left",
+                )
+                info_label.pack(fill="x", pady=(1, 0))
+                bind_wraplength(text_area, info_label, padding=24, min_width=260, max_width=860)
 
-                btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-                btn_frame.pack(side="right")
+                btn_frame = ctk.CTkFrame(row, fg_color="transparent")
+                btn_frame.grid(row=0, column=3, rowspan=2, sticky="e", padx=(10, 0))
 
                 if is_connected:
                     ctk.CTkButton(
                         btn_frame,
                         text="断开",
-                        width=62,
+                        width=54,
                         command=lambda n=p.name: self._disconnect(n),
                         **button_style("danger", compact=True),
-                    ).pack(side="left", padx=(0, 6))
+                    ).pack(side="left", padx=(0, 5))
                 else:
                     ctk.CTkButton(
                         btn_frame,
                         text="连接",
-                        width=62,
+                        width=54,
                         command=lambda n=p.name: self._connect(n),
                         **button_style("primary", compact=True),
-                    ).pack(side="left", padx=(0, 6))
+                    ).pack(side="left", padx=(0, 5))
 
                 ctk.CTkButton(
                     btn_frame,
                     text="编辑",
-                    width=58,
+                    width=50,
                     command=lambda n=p.name: self._edit_server(n),
                     **button_style("secondary", compact=True),
-                ).pack(side="left", padx=(0, 6))
+                ).pack(side="left", padx=(0, 5))
 
                 ctk.CTkButton(
                     btn_frame,
                     text="删除",
-                    width=58,
+                    width=50,
                     command=lambda n=p.name: self._delete_server(n),
                     **button_style("danger", compact=True),
                 ).pack(side="left")
-
-                info_frame = ctk.CTkFrame(card_frame, fg_color="transparent")
-                info_frame.pack(fill="x", padx=14, pady=(0, 12))
-                for line in info:
-                    lbl = ctk.CTkLabel(
-                        info_frame,
-                        text=line,
-                        text_color=COLORS["muted"],
-                        font=font(12),
-                        anchor="w",
-                        justify="left",
-                    )
-                    lbl.pack(fill="x")
-                    bind_wraplength(info_frame, lbl, padding=4)
 
         server_names = [p.name for p in profiles]
         previous_selection = set(self._selected_server_names)
