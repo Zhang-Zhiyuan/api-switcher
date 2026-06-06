@@ -26,6 +26,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._vpnapi_key_entry = None
         self._service_vars = {}
         self._service_key_entries = {}
+        self._service_key_frames = {}
+        self._service_count_labels = {}
+        self._service_cards = {}
         self._settings_status_label = None
         self._save_settings_button = None
         self._status_label = None
@@ -85,57 +88,62 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         )
         self._open_ping0_button.pack(side="left", padx=(8, 0))
 
-        settings_card = ctk.CTkFrame(self, **card_frame_kwargs())
-        settings_card.pack(fill="x", padx=14, pady=(0, 10))
-        settings_grid = ctk.CTkFrame(settings_card, fg_color="transparent")
-        settings_grid.pack(fill="x", padx=14, pady=12)
-        settings_grid.grid_columnconfigure(1, weight=1)
+        settings_section = ctk.CTkFrame(self, fg_color="transparent")
+        settings_section.pack(fill="x", padx=14, pady=(0, 10))
+        settings_header = ctk.CTkFrame(settings_section, fg_color="transparent")
+        settings_header.pack(fill="x", pady=(0, 6))
+        settings_title = ctk.CTkFrame(settings_header, fg_color="transparent")
+        settings_title.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            settings_title,
+            text="检测源",
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            settings_title,
+            text="勾选检测源，按顺序轮换 Key 池",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+        ).pack(anchor="w", pady=(1, 0))
+        self._save_settings_button = ctk.CTkButton(
+            settings_header,
+            text="保存设置",
+            width=92,
+            command=lambda: self._save_detection_settings(show_message=True),
+            **button_style("secondary"),
+        )
+        self._save_settings_button.pack(side="right", padx=(10, 0), pady=(2, 0))
         saved_settings = network_diagnostic_settings.load_settings()
         service_rows = [
             (
                 network_diagnostic_settings.SERVICE_PING0,
                 "Ping0",
-                "多个 Key 用逗号分隔；留空则只生成 Ping0 链接和免费 Geo",
+                "免费 Geo；Key 返回 isidc、iprisk、isnative",
             ),
             (
                 network_diagnostic_settings.SERVICE_PROXYCHECK,
                 "ProxyCheck",
-                "多个 Key 用逗号分隔；留空也会使用无 Key 免费检测",
+                "可无 Key；Key 池用于更稳定额度",
             ),
             (
                 network_diagnostic_settings.SERVICE_IPQS,
                 "IPQS",
-                "多个 Key 用逗号分隔；填写后返回欺诈分、代理/VPN/Tor 和连接类型",
+                "欺诈分、连接类型、Proxy/VPN/Tor",
             ),
             (
                 network_diagnostic_settings.SERVICE_VPNAPI,
                 "VPNAPI.io",
-                "多个 Key 用逗号分隔；填写后返回 VPN、Proxy、Tor、Relay 布尔检测",
+                "VPN、Proxy、Tor、Relay",
             ),
         ]
-        for row, (service, label, placeholder) in enumerate(service_rows):
-            self._add_service_setting_row(settings_grid, row, service, label, placeholder, saved_settings)
+        for service, label, description in service_rows:
+            self._add_service_setting_row(settings_section, service, label, description, saved_settings)
 
-        note = ctk.CTkLabel(
-            settings_grid,
-            text="勾选后才会调用对应检测源。多个 Key 会从左到右尝试；某个 Key 限额或失败后自动换下一个。",
-            text_color=COLORS["muted_soft"],
-            font=font(11),
-            anchor="w",
-            justify="left",
-        )
-        note.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        bind_wraplength(settings_grid, note, padding=20)
-        settings_actions = ctk.CTkFrame(settings_grid, fg_color="transparent")
-        settings_actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self._save_settings_button = ctk.CTkButton(
-            settings_actions,
-            text="保存检测设置",
-            width=116,
-            command=lambda: self._save_detection_settings(show_message=True),
-            **button_style("secondary"),
-        )
-        self._save_settings_button.pack(side="left")
+        settings_actions = ctk.CTkFrame(settings_section, fg_color="transparent")
+        settings_actions.pack(fill="x", pady=(4, 0))
         self._settings_status_label = ctk.CTkLabel(
             settings_actions,
             text=self._settings_status_text(saved_settings),
@@ -143,8 +151,9 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             font=font(11),
             anchor="w",
         )
-        self._settings_status_label.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        bind_wraplength(settings_actions, self._settings_status_label, padding=140)
+        self._settings_status_label.pack(fill="x")
+        bind_wraplength(settings_actions, self._settings_status_label, padding=20)
+        self._update_settings_preview()
 
         status_card = ctk.CTkFrame(self, **card_frame_kwargs())
         status_card.pack(fill="x", padx=14, pady=(0, 10))
@@ -167,31 +176,118 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         self._report_box.pack(fill="x", padx=14, pady=(0, 14))
         self._set_report_text("等待检测结果...")
 
-    def _add_service_setting_row(self, parent, row: int, service: str, label: str, placeholder: str, saved_settings):
+    def _add_service_setting_row(self, parent, service: str, label: str, description: str, saved_settings):
         service_settings = saved_settings.service(service)
         var = ctk.BooleanVar(value=service_settings.enabled)
         self._service_vars[service] = var
+        border = COLORS["success"] if service_settings.enabled else COLORS["border_soft"]
+        card = ctk.CTkFrame(parent, **card_frame_kwargs(border))
+        card.pack(fill="x", pady=5)
+        self._service_cards[service] = card
+
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 6))
+        top.grid_columnconfigure(1, weight=1)
         ctk.CTkCheckBox(
-            parent,
+            top,
             text=label,
             variable=var,
-            text_color=COLORS["muted"],
+            command=self._update_settings_preview,
+            text_color=COLORS["text"],
+            font=font(13, "bold"),
             width=132,
             checkbox_width=18,
             checkbox_height=18,
-        ).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=(0 if row == 0 else 8, 0))
-        entry = MaskedEntry(parent, placeholder=placeholder, width=420)
-        entry.grid(row=row, column=1, sticky="ew", pady=(0 if row == 0 else 8, 0))
-        entry.set(", ".join(service_settings.api_keys))
-        self._service_key_entries[service] = entry
+        ).grid(row=0, column=0, sticky="w")
+        desc = ctk.CTkLabel(
+            top,
+            text=description,
+            text_color=COLORS["muted"],
+            font=font(11),
+            anchor="w",
+        )
+        desc.grid(row=0, column=1, sticky="ew", padx=(10, 8))
+        self._service_count_labels[service] = ctk.CTkLabel(
+            top,
+            text="",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            width=72,
+            anchor="e",
+        )
+        self._service_count_labels[service].grid(row=0, column=2, sticky="e", padx=(0, 8))
+        ctk.CTkButton(
+            top,
+            text="添加 Key",
+            width=82,
+            command=lambda service=service: self._add_key_row(service, focus=True),
+            **button_style("secondary", compact=True),
+        ).grid(row=0, column=3, sticky="e")
+
+        key_frame = ctk.CTkFrame(card, fg_color="transparent")
+        key_frame.pack(fill="x", padx=12, pady=(0, 10))
+        self._service_key_frames[service] = key_frame
+        self._service_key_entries[service] = []
+        keys = service_settings.api_keys or [""]
+        for key in keys:
+            self._add_key_row(service, key)
         if service == network_diagnostic_settings.SERVICE_PING0:
-            self._ping0_key_entry = entry
+            self._ping0_key_entry = self._service_key_entries[service][0]
         elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
-            self._proxycheck_key_entry = entry
+            self._proxycheck_key_entry = self._service_key_entries[service][0]
         elif service == network_diagnostic_settings.SERVICE_IPQS:
-            self._ipqs_key_entry = entry
+            self._ipqs_key_entry = self._service_key_entries[service][0]
         elif service == network_diagnostic_settings.SERVICE_VPNAPI:
-            self._vpnapi_key_entry = entry
+            self._vpnapi_key_entry = self._service_key_entries[service][0]
+        bind_wraplength(top, desc, padding=320, min_width=180, max_width=620)
+
+    def _add_key_row(self, service: str, value: str = "", focus: bool = False):
+        key_frame = self._service_key_frames.get(service)
+        if key_frame is None:
+            return
+        row = ctk.CTkFrame(key_frame, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 5))
+        row.grid_columnconfigure(0, weight=1)
+        key_index = len(self._service_key_entries.get(service, [])) + 1
+        entry = MaskedEntry(row, placeholder=f"Key #{key_index}", width=420)
+        entry.grid(row=0, column=0, sticky="ew")
+        entry.set(value)
+        try:
+            entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview(), add="+")
+        except TypeError:
+            entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview())
+        ctk.CTkButton(
+            row,
+            text="删除",
+            width=58,
+            command=lambda service=service, entry=entry, row=row: self._remove_key_row(service, entry, row),
+            **button_style("secondary", compact=True),
+        ).grid(row=0, column=1, padx=(6, 0), sticky="e")
+        self._service_key_entries.setdefault(service, []).append(entry)
+        self._update_settings_preview()
+        if focus:
+            try:
+                entry.entry.focus_set()
+            except Exception:
+                pass
+
+    def _remove_key_row(self, service: str, entry: MaskedEntry, row):
+        entries = self._service_key_entries.get(service, [])
+        if len(entries) <= 1:
+            entry.set("")
+            self._update_settings_preview()
+            return
+        self._service_key_entries[service] = [item for item in entries if item is not entry]
+        row.destroy()
+        self._renumber_key_placeholders(service)
+        self._update_settings_preview()
+
+    def _renumber_key_placeholders(self, service: str):
+        for index, entry in enumerate(self._service_key_entries.get(service, []), start=1):
+            try:
+                entry.entry.configure(placeholder_text=f"Key #{index}")
+            except Exception:
+                pass
 
     def _collect_detection_settings(self):
         enabled = [
@@ -200,10 +296,34 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
             if bool(var.get())
         ]
         api_keys = {
-            service: entry.get()
-            for service, entry in self._service_key_entries.items()
+            service: [entry.get() for entry in entries]
+            for service, entries in self._service_key_entries.items()
         }
         return network_diagnostic_settings.settings_from_values(enabled, api_keys)
+
+    def _update_settings_preview(self):
+        try:
+            settings = self._collect_detection_settings()
+        except Exception:
+            return
+        for service in network_diagnostic_settings.SERVICE_ORDER:
+            service_settings = settings.service(service)
+            count_label = self._service_count_labels.get(service)
+            if count_label:
+                count = len(service_settings.api_keys)
+                if count:
+                    count_label.configure(text=f"{count} 个 Key", text_color=COLORS["success"])
+                elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
+                    count_label.configure(text="可无 Key", text_color=COLORS["muted_soft"])
+                elif service == network_diagnostic_settings.SERVICE_PING0:
+                    count_label.configure(text="免费 Geo", text_color=COLORS["muted_soft"])
+                else:
+                    count_label.configure(text="需 Key", text_color=COLORS["warning"])
+            card = self._service_cards.get(service)
+            if card:
+                card.configure(border_color=COLORS["success"] if service_settings.enabled else COLORS["border_soft"])
+        if self._settings_status_label:
+            self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["muted_soft"])
 
     def _save_detection_settings(self, show_message: bool = False):
         settings = self._collect_detection_settings()
