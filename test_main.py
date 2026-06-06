@@ -5,6 +5,7 @@ import sys
 from types import ModuleType
 
 import main
+from ui import app as app_module
 from ui.startup_splash import (
     SPLASH_ARG,
     StartupSplash,
@@ -19,6 +20,12 @@ def test_parse_args_defaults_to_splash_enabled():
 
     assert args.start_minimized is False
     assert args.no_splash is False
+
+
+def test_quick_switch_labels_identify_target_tools():
+    assert app_module.QUICK_SWITCH_TITLE == "快速切换 API"
+    assert app_module.CLAUDE_QUICK_SWITCH_LABEL == "Claude Code 使用"
+    assert app_module.CODEX_QUICK_SWITCH_LABEL == "Codex CLI 使用"
 
 
 def test_parse_args_supports_no_splash_and_minimized_aliases():

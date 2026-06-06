@@ -10,6 +10,9 @@ from core.tray_manager import TrayManager
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
 ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
+QUICK_SWITCH_TITLE = "快速切换 API"
+CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
+CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", True),
@@ -103,29 +106,47 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             switch_frame,
-            text="快速切换 API",
+            text=QUICK_SWITCH_TITLE,
             text_color=COLORS["muted"],
-            font=font(11),
-        ).pack(side="left", padx=(0, 8))
+            font=font(11, "bold"),
+        ).pack(side="left", padx=(0, 10))
 
         # Claude quick switch
+        claude_switch_group = ctk.CTkFrame(switch_frame, fg_color="transparent")
+        claude_switch_group.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(
+            claude_switch_group,
+            text=CLAUDE_QUICK_SWITCH_LABEL,
+            text_color=COLORS["muted_soft"],
+            font=font(10),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
         self.claude_switch = ctk.CTkComboBox(
-            switch_frame,
-            width=148,
+            claude_switch_group,
+            width=172,
             command=self._quick_switch_claude,
             **combo_style(),
         )
-        self.claude_switch.pack(side="left", padx=(0, 6))
+        self.claude_switch.pack(anchor="w")
         self.claude_switch.set("Claude API")
 
         # Codex quick switch
+        codex_switch_group = ctk.CTkFrame(switch_frame, fg_color="transparent")
+        codex_switch_group.pack(side="left")
+        ctk.CTkLabel(
+            codex_switch_group,
+            text=CODEX_QUICK_SWITCH_LABEL,
+            text_color=COLORS["muted_soft"],
+            font=font(10),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
         self.codex_switch = ctk.CTkComboBox(
-            switch_frame,
-            width=148,
+            codex_switch_group,
+            width=172,
             command=self._quick_switch_codex,
             **combo_style(),
         )
-        self.codex_switch.pack(side="left")
+        self.codex_switch.pack(anchor="w")
         self.codex_switch.set("Codex API")
 
         # 按钮区域
