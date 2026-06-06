@@ -123,6 +123,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         ok_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_latency_ok(self._latency_for(item)))
         measured_count = sum(1 for item in self._nodes if self._latency_for(item) is not None)
         visible = matches[: self.MAX_VISIBLE_ROWS]
+        selected_item = self.selected_item()
+        if selected_item in matches and selected_item not in visible:
+            visible = [selected_item] + visible[: max(0, self.MAX_VISIBLE_ROWS - 1)]
 
         suffix = ""
         if len(matches) > len(visible):
