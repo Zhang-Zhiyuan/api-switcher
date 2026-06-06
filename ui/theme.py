@@ -33,16 +33,55 @@ COLORS = {
 }
 
 
-def _event_inside_child_scroll_area(widget, parent_canvas) -> bool:
+def _child_scroll_widget(widget, parent_canvas):
     current = widget
     while current is not None:
         if current == parent_canvas:
-            return False
-        if isinstance(current, (tkinter.Canvas, tkinter.Text)):
-            return True
+            return None
         if current.__class__.__name__ == "CTkTextbox":
-            return True
+            return getattr(current, "_textbox", current)
+        child_canvas = getattr(current, "_parent_canvas", None)
+        if child_canvas is not None and child_canvas != parent_canvas:
+            return child_canvas
+        if isinstance(current, (tkinter.Canvas, tkinter.Text)):
+            return current
         current = getattr(current, "master", None)
+    return None
+
+
+def _wheel_delta(event) -> int:
+    delta = int(getattr(event, "delta", 0) or 0)
+    if delta:
+        return delta
+    button_num = int(getattr(event, "num", 0) or 0)
+    if button_num == 4:
+        return 1
+    if button_num == 5:
+        return -1
+    return 0
+
+
+def _scroll_view(widget, horizontal: bool = False) -> tuple[float, float]:
+    method_name = "xview" if horizontal else "yview"
+    method = getattr(widget, method_name, None)
+    if not callable(method):
+        return (0.0, 1.0)
+    try:
+        first, last = method()
+        return float(first), float(last)
+    except Exception:
+        return (0.0, 1.0)
+
+
+def _scroll_widget_can_consume(widget, event, horizontal: bool = False) -> bool:
+    first, last = _scroll_view(widget, horizontal=horizontal)
+    if first <= 0.0 and last >= 1.0:
+        return False
+    delta = _wheel_delta(event)
+    if delta > 0:
+        return first > 0.001
+    if delta < 0:
+        return last < 0.999
     return False
 
 
@@ -53,7 +92,12 @@ def _patch_nested_scrollable_frame_mousewheel() -> None:
     original_mouse_wheel_all = scrollable_cls._mouse_wheel_all
 
     def guarded_mouse_wheel_all(self, event):
-        if _event_inside_child_scroll_area(event.widget, self._parent_canvas):
+        child_scroll = _child_scroll_widget(event.widget, self._parent_canvas)
+        if child_scroll is not None and _scroll_widget_can_consume(
+            child_scroll,
+            event,
+            horizontal=bool(getattr(self, "_shift_pressed", False)),
+        ):
             return None
         return original_mouse_wheel_all(self, event)
 
