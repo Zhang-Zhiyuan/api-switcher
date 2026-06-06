@@ -37,6 +37,12 @@ def test_proxy_quality_is_not_a_primary_tab():
     assert hasattr(app_module.App, "_show_proxy_quality_dialog")
 
 
+def test_proxy_quality_dialog_module_is_importable():
+    from ui.dialogs.network_diagnostics_dialog import NetworkDiagnosticsDialog
+
+    assert NetworkDiagnosticsDialog.__name__ == "NetworkDiagnosticsDialog"
+
+
 def test_parse_args_supports_no_splash_and_minimized_aliases():
     args = main.parse_args(["--tray", "--no-splash", "--ignored"])
 

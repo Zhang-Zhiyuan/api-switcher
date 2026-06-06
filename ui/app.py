@@ -649,17 +649,29 @@ class App(ctk.CTk):
         try:
             existing = self._proxy_quality_dialog
             if existing is not None and existing.winfo_exists():
+                existing.lift()
                 existing.focus()
                 return existing
         except Exception:
             self._proxy_quality_dialog = None
 
-        from ui.dialogs.network_diagnostics_dialog import NetworkDiagnosticsDialog
+        try:
+            from ui.dialogs.network_diagnostics_dialog import NetworkDiagnosticsDialog
 
-        dialog = NetworkDiagnosticsDialog(self, on_close=lambda: setattr(self, "_proxy_quality_dialog", None))
-        self._proxy_quality_dialog = dialog
-        self._status.configure(text="已打开代理质量检测")
-        return dialog
+            dialog = NetworkDiagnosticsDialog(self, on_close=lambda: setattr(self, "_proxy_quality_dialog", None))
+            self._proxy_quality_dialog = dialog
+            self._status.configure(text="已打开代理质量检测")
+            return dialog
+        except Exception as exc:
+            logger.error("Failed to open proxy quality dialog: %s", exc, exc_info=True)
+            self._status.configure(text=f"代理质量检测打开失败: {exc}")
+            try:
+                from ui.widgets.toast import show_toast
+
+                show_toast(self, f"代理质量检测打开失败: {exc}", is_error=True)
+            except Exception:
+                pass
+            return None
 
     def _show_network_diagnostics_tab(self):
         return self._show_proxy_quality_dialog()

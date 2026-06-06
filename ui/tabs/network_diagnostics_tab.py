@@ -41,7 +41,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         header.pack(fill="x", padx=14, pady=(14, 8))
 
         title_area = ctk.CTkFrame(header, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        title_area.pack(fill="x")
         ctk.CTkLabel(
             title_area,
             text="代理质量检测",
@@ -60,7 +60,7 @@ class NetworkDiagnosticsTab(ctk.CTkScrollableFrame):
         bind_wraplength(title_area, subtitle, padding=24, min_width=260, max_width=760)
 
         action_bar = ctk.CTkFrame(header, fg_color="transparent")
-        action_bar.pack(side="right", padx=(12, 0))
+        action_bar.pack(anchor="w", pady=(8, 0))
         self._run_button = ctk.CTkButton(
             action_bar,
             text="开始检测",

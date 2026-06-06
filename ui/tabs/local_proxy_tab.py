@@ -1218,12 +1218,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _open_proxy_quality_dialog(self):
         top = self.winfo_toplevel()
         if hasattr(top, "_show_proxy_quality_dialog"):
-            top._show_proxy_quality_dialog()
-            show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            dialog = top._show_proxy_quality_dialog()
+            if dialog is not None:
+                show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            else:
+                show_toast(top, "代理质量检测窗口打开失败", is_error=True)
             return
         if hasattr(top, "_show_network_diagnostics_tab"):
-            top._show_network_diagnostics_tab()
-            show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            dialog = top._show_network_diagnostics_tab()
+            if dialog is not None:
+                show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            else:
+                show_toast(top, "代理质量检测窗口打开失败", is_error=True)
             return
         show_toast(top, "无法打开代理质量检测窗口", is_error=True)
 
