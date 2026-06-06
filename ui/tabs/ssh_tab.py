@@ -66,6 +66,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_fetch_button = None
         self._proxy_use_node_button = None
         self._proxy_latency_button = None
+        self._proxy_quality_settings_button = None
         self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
         self._proxy_auto_refresh_check = None
         self._proxy_periodic_update_var = ctk.BooleanVar(value=False)
@@ -628,6 +629,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("accent", compact=True),
         )
         self._proxy_use_node_button.pack(anchor="e")
+        self._proxy_quality_settings_button = ctk.CTkButton(
+            proxy_node_actions,
+            text="IP质量设置",
+            width=98,
+            command=self._open_network_diagnostics_tab,
+            **button_style("primary", compact=True),
+        )
+        self._proxy_quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
             text="待部署节点: 未选择",
@@ -1313,6 +1322,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_fetch_button,
             self._proxy_latency_button,
             self._proxy_use_node_button,
+            self._proxy_quality_settings_button,
             self._proxy_load_file_button,
             self._proxy_deploy_button,
             self._proxy_inspect_button,
@@ -1637,6 +1647,14 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _open_network_diagnostics_tab(self):
+        top = self.winfo_toplevel()
+        if hasattr(top, "_show_network_diagnostics_tab"):
+            top._show_network_diagnostics_tab()
+            show_toast(top, "已打开环境检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            return
+        show_toast(top, "请切换到“环境检测”页配置 IP 质量检测源", is_error=True)
+
     def _measure_proxy_subscription_latencies(self):
         if self._proxy_busy:
             show_toast(self.winfo_toplevel(), "远端代理操作正在进行中，请稍等", is_error=True)
@@ -1647,6 +1665,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
 
         target_label = self._format_server_target(server_names)
         node_count = len(self._proxy_subscription_nodes)
@@ -1823,6 +1843,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _deploy_ai_proxy(self):
         server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
         proxy_text = self._proxy_node_input()
         try:
             proxy_node = remote_proxy.parse_proxy_node(proxy_text)
@@ -1873,6 +1895,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _inspect_ai_proxy(self):
         server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
         target_label = self._format_server_target(server_names)
 
         def done(payload):
@@ -1894,6 +1918,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _probe_ai_proxy(self):
         server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
         target_label = self._format_server_target(server_names)
 
         def done(payload):
@@ -1915,6 +1941,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _cleanup_ai_proxy(self):
         server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
         target_label = self._format_server_target(server_names)
 
         def do_cleanup():

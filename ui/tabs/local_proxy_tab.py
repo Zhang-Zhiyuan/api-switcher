@@ -22,6 +22,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._fetch_button = None
         self._use_node_button = None
         self._latency_button = None
+        self._quality_settings_button = None
         self._auto_refresh_var = ctk.BooleanVar(value=False)
         self._auto_refresh_check = None
         self._periodic_update_var = ctk.BooleanVar(value=False)
@@ -322,6 +323,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("accent", compact=True),
         )
         self._use_node_button.pack(anchor="e")
+        self._quality_settings_button = ctk.CTkButton(
+            node_actions,
+            text="IP质量设置",
+            width=104,
+            command=self._open_network_diagnostics_tab,
+            **button_style("primary", compact=True),
+        )
+        self._quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._selected_label = ctk.CTkLabel(
             controls,
             text="待启动节点: 未选择",
@@ -465,6 +474,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._fetch_button,
             self._latency_button,
             self._use_node_button,
+            self._quality_settings_button,
             self._load_file_button,
             self._start_button,
             self._inspect_button,
@@ -1023,12 +1033,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     return
 
                 self._latency_results = payload["result"] or {}
-                remote_proxy.save_proxy_subscription_latencies(self._latency_results)
+                save_error = ""
+                try:
+                    remote_proxy.save_proxy_subscription_latencies(self._latency_results)
+                except Exception as exc:
+                    save_error = str(exc)
                 self._set_subscription_nodes(self._subscription_nodes)
                 fastest = self._fastest_subscription_node()
                 ok_count = sum(1 for item in self._latency_results.values() if remote_proxy.proxy_node_latency_ok(item))
                 if not fastest:
                     message = f"测速完成: {ok_count}/{node_count} 个节点可连；未找到可用节点，已按地区展示。"
+                    if save_error:
+                        message += f" 测速结果缓存失败: {save_error}"
                     self._set_status(message, "warning")
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
@@ -1039,8 +1055,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 latency = remote_proxy.proxy_node_latency_label(self._latency_results.get(fastest_key))
                 region = remote_proxy.proxy_node_region(fastest.node)
                 message = f"测速完成: {ok_count}/{node_count} 个节点可连；已选择最快节点【{region}】{latency}。"
-                self._set_status(message, "success")
-                show_toast(self.winfo_toplevel(), message)
+                severity = "warning" if save_error else "success"
+                if save_error:
+                    message += f" 测速结果缓存失败: {save_error}"
+                self._set_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
 
             try:
                 self.after(0, finish)
@@ -1048,6 +1067,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pass
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _open_network_diagnostics_tab(self):
+        top = self.winfo_toplevel()
+        if hasattr(top, "_show_network_diagnostics_tab"):
+            top._show_network_diagnostics_tab()
+            show_toast(top, "已打开环境检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
+            return
+        show_toast(top, "请切换到“环境检测”页配置 IP 质量检测源", is_error=True)
 
     def _fastest_subscription_node(self):
         fastest = None

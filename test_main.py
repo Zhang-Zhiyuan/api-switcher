@@ -23,6 +23,7 @@ def test_parse_args_defaults_to_splash_enabled():
 
 
 def test_quick_switch_labels_identify_target_tools():
+    assert app_module.NETWORK_DIAGNOSTICS_TAB_LABEL == "环境检测"
     assert app_module.QUICK_SWITCH_TITLE == "快速切换 API"
     assert app_module.CLAUDE_QUICK_SWITCH_LABEL == "Claude Code 使用"
     assert app_module.CODEX_QUICK_SWITCH_LABEL == "Codex CLI 使用"

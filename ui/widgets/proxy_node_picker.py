@@ -215,8 +215,8 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         ctk.CTkButton(
             row,
-            text="Ping0",
-            width=58,
+            text="Ping0质量",
+            width=76,
             command=lambda current=node: self._open_ping0(current),
             **button_style("accent", compact=True),
         ).grid(row=0, column=3, rowspan=2, sticky="e", padx=(0, 8), pady=8)

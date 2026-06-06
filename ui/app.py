@@ -9,6 +9,7 @@ from core.tray_manager import TrayManager
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
+NETWORK_DIAGNOSTICS_TAB_LABEL = "环境检测"
 ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
 QUICK_SWITCH_TITLE = "快速切换 API"
 CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
@@ -17,7 +18,7 @@ TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", True),
     (ENV_TAB_LABEL, "_env_tab", "ui.tabs.env_tab", "EnvTab", False),
-    ("环境检测", "_network_diagnostics_tab", "ui.tabs.network_diagnostics_tab", "NetworkDiagnosticsTab", False),
+    (NETWORK_DIAGNOSTICS_TAB_LABEL, "_network_diagnostics_tab", "ui.tabs.network_diagnostics_tab", "NetworkDiagnosticsTab", False),
     ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
     ("会话迁移", "_session_migration_tab", "ui.tabs.session_migration_tab", "SessionMigrationTab", False),
     ("SSH 服务器", "_ssh_tab", "ui.tabs.ssh_tab", "SSHTab", False),
@@ -643,6 +644,13 @@ class App(ctk.CTk):
         if tab:
             tab.refresh()
         self._status.configure(text="已打开环境变量管理")
+
+    def _show_network_diagnostics_tab(self):
+        self._tabview.set(NETWORK_DIAGNOSTICS_TAB_LABEL)
+        tab = self._ensure_tab(NETWORK_DIAGNOSTICS_TAB_LABEL)
+        if tab and hasattr(tab, "refresh"):
+            tab.refresh()
+        self._status.configure(text="已打开环境检测")
 
     def refresh_all(self):
         """Refresh all tabs."""

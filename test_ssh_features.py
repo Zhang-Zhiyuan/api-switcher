@@ -9,7 +9,7 @@ from core import persistent_env, profile_manager, remote_auto_continue, remote_c
 from core.ssh_manager import SSHManager, ssh_manager
 from core.ssh_profile_builder import build_ssh_profile_from_data
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile, SSHProfile
-from ui.tabs.ssh_tab import _format_server_batch_item
+from ui.tabs.ssh_tab import SSHTab, _format_server_batch_item
 
 
 @pytest.fixture()
@@ -24,6 +24,34 @@ def isolated_ssh(tmp_path, monkeypatch):
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
 
     return secret_store
+
+
+def test_proxy_latency_stops_when_no_server_is_selected():
+    class FakeTab:
+        _proxy_busy = False
+        _proxy_subscription_nodes = [object()]
+
+        def __init__(self):
+            self.required_selection = False
+
+        def _require_selected_servers(self, _status_setter):
+            self.required_selection = True
+            return []
+
+        def _set_proxy_status(self, *_args, **_kwargs):
+            raise AssertionError("status should be set by _require_selected_servers")
+
+        def _format_server_target(self, *_args, **_kwargs):
+            raise AssertionError("must not format an empty target")
+
+        def _run_proxy_ssh_task(self, *_args, **_kwargs):
+            raise AssertionError("must not start latency task without a server")
+
+    fake = FakeTab()
+
+    SSHTab._measure_proxy_subscription_latencies(fake)
+
+    assert fake.required_selection is True
 
 
 def test_ssh_builder_preserves_password_when_editing_metadata(isolated_ssh):
