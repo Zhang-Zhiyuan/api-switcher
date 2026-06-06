@@ -20,8 +20,13 @@ class SearchBar(ctk.CTkFrame):
 
         self.on_search = on_search
         self._search_history: list[str] = []
+        self._search_after_id = None
 
         self._build_ui(placeholder)
+
+    def destroy(self):
+        self._cancel_pending_search()
+        super().destroy()
 
     def _build_ui(self, placeholder: str):
         """构建 UI"""
@@ -77,18 +82,32 @@ class SearchBar(ctk.CTkFrame):
         # 实时搜索（延迟触发）
         if self.on_search:
             # 取消之前的延迟调用
-            if hasattr(self, '_search_after_id'):
-                self.after_cancel(self._search_after_id)
+            self._cancel_pending_search()
 
             # 延迟 300ms 后触发搜索
-            self._search_after_id = self.after(300, lambda: self.on_search(query))
+            def fire_search():
+                self._search_after_id = None
+                if self.on_search:
+                    self.on_search(query)
+
+            self._search_after_id = self.after(300, fire_search)
 
     def _clear_search(self):
         """清除搜索"""
+        self._cancel_pending_search()
         self.search_entry.delete(0, "end")
         self.clear_button.pack_forget()
         if self.on_search:
             self.on_search("")
+
+    def _cancel_pending_search(self):
+        if not self._search_after_id:
+            return
+        try:
+            self.after_cancel(self._search_after_id)
+        except Exception:
+            pass
+        self._search_after_id = None
 
     def _add_to_history(self, query: str):
         """添加到搜索历史"""

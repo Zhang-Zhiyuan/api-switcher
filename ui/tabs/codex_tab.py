@@ -338,18 +338,26 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         def run_test():
             from core.api_tester import APITester
+            from core.api_tester import TestResult
             from core.providers import ProviderRegistry
             from ui.dialogs.api_test_result_dialog import APITestResultDialog
 
-            provider = ProviderRegistry.get_provider(profile.model_provider)
-            base_url = profile.custom_base_url or (provider.base_url_for_codex() if provider else "")
-            result = APITester.benchmark_openai_wire_apis(
-                api_key,
-                base_url,
-                profile.model,
-                repeat_count=3,
-                wire_apis=("responses",),
-            )
+            try:
+                provider = ProviderRegistry.get_provider(profile.model_provider)
+                base_url = profile.custom_base_url or (provider.base_url_for_codex() if provider else "")
+                result = APITester.benchmark_openai_wire_apis(
+                    api_key,
+                    base_url,
+                    profile.model,
+                    repeat_count=3,
+                    wire_apis=("responses",),
+                )
+            except Exception as exc:
+                result = TestResult(
+                    False,
+                    f"测试失败: {type(exc).__name__}",
+                    error_details=str(exc)[:400],
+                )
 
             def show_result():
                 if self.winfo_exists():

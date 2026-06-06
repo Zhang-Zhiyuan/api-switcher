@@ -633,7 +633,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
     def _safe_after(self, callback) -> None:
         """Schedule UI work from a background thread if the dialog still exists."""
         try:
-            self.after(0, callback)
+            if self.winfo_exists():
+                self.after(0, callback)
         except Exception:
             pass
 

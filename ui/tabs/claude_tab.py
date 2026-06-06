@@ -341,9 +341,17 @@ class ClaudeTab(ctk.CTkScrollableFrame):
 
         def run_test():
             from core.api_tester import APITester
+            from core.api_tester import TestResult
             from ui.dialogs.api_test_result_dialog import APITestResultDialog
 
-            result = APITester.test_claude_api(api_key, profile.base_url, profile.model)
+            try:
+                result = APITester.test_claude_api(api_key, profile.base_url, profile.model)
+            except Exception as exc:
+                result = TestResult(
+                    False,
+                    f"测试失败: {type(exc).__name__}",
+                    error_details=str(exc)[:400],
+                )
 
             def show_result():
                 if self.winfo_exists():

@@ -8,6 +8,7 @@ class Toast(ctk.CTkToplevel):
 
     def __init__(self, master, message: str, duration: int = 2000, is_error: bool = False):
         super().__init__(master)
+        self._dismiss_after_id = None
         self.overrideredirect(True)
         self.attributes("-topmost", True)
 
@@ -55,7 +56,20 @@ class Toast(ctk.CTkToplevel):
         py = min(max(py, screen_y + 8), screen_y + max(screen_height - height - 8, 0))
         self.geometry(f"+{px}+{py}")
 
-        self.after(duration, self.destroy)
+        self._dismiss_after_id = self.after(duration, self._dismiss)
+
+    def _dismiss(self):
+        self._dismiss_after_id = None
+        self.destroy()
+
+    def destroy(self):
+        if self._dismiss_after_id:
+            try:
+                self.after_cancel(self._dismiss_after_id)
+            except Exception:
+                pass
+            self._dismiss_after_id = None
+        super().destroy()
 
 
 def show_toast(master, message: str, is_error: bool = False):

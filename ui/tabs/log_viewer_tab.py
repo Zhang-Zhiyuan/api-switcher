@@ -29,8 +29,13 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self.configure(fg_color="transparent")
         self._auto_scroll = True
         self._filter_level = 'DEBUG'  # 显示所有级别
+        self._poll_after_id = None
         self._build_ui()
         self._start_log_polling()
+
+    def destroy(self):
+        self._cancel_log_polling()
+        super().destroy()
 
     def _build_ui(self):
         """构建 UI"""
@@ -140,8 +145,31 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         """开始轮询日志队列"""
         self._poll_logs()
 
+    def _schedule_log_polling(self):
+        self._cancel_log_polling()
+        try:
+            self._poll_after_id = self.after(100, self._poll_logs)
+        except Exception:
+            self._poll_after_id = None
+
+    def _cancel_log_polling(self):
+        if not self._poll_after_id:
+            return
+        try:
+            self.after_cancel(self._poll_after_id)
+        except Exception:
+            pass
+        self._poll_after_id = None
+
     def _poll_logs(self):
         """从队列中获取日志并显示"""
+        self._poll_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
         try:
             # 批量处理日志（最多100条）
             batch_count = 0
@@ -161,7 +189,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             logging.error(f"Error polling logs: {e}")
 
         # 继续轮询（每100ms）
-        self.after(100, self._poll_logs)
+        self._schedule_log_polling()
 
     def _add_log_entry(self, log_entry: dict):
         """添加日志条目"""

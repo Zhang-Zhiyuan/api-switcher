@@ -16,16 +16,43 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._auto_refresh_after_id = None
         self._build_ui()
         self.refresh()
 
         # Auto-refresh every 30 seconds
-        self.after(30000, self._auto_refresh)
+        self._schedule_auto_refresh()
 
     def _auto_refresh(self):
         """Auto-refresh stats."""
+        self._auto_refresh_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
         self.refresh()
-        self.after(30000, self._auto_refresh)
+        self._schedule_auto_refresh()
+
+    def _schedule_auto_refresh(self):
+        self._cancel_auto_refresh()
+        try:
+            self._auto_refresh_after_id = self.after(30000, self._auto_refresh)
+        except Exception:
+            self._auto_refresh_after_id = None
+
+    def _cancel_auto_refresh(self):
+        if not self._auto_refresh_after_id:
+            return
+        try:
+            self.after_cancel(self._auto_refresh_after_id)
+        except Exception:
+            pass
+        self._auto_refresh_after_id = None
+
+    def destroy(self):
+        self._cancel_auto_refresh()
+        super().destroy()
 
     def _build_ui(self):
         """Build the UI."""
