@@ -367,7 +367,7 @@ proxies:
 
 def test_assess_proxy_node_quality_classifies_proxycheck_residential():
     node = remote_proxy.parse_proxy_node(
-        "{ name: Claude 家宽, type: vless, server: node.example.com, port: 443 }"
+        "{ name: AI代理家宽, type: vless, server: node.example.com, port: 443 }"
     )
 
     def resolver(host, *_args, **_kwargs):
@@ -436,10 +436,10 @@ def test_assess_proxy_node_quality_classifies_proxycheck_residential():
     assert result.quality_label == "家宽高质"
     assert result.quality_score >= 90
     assert result.risk_score == 8
-    assert remote_proxy.proxy_node_quality_for_claude_ok(result) is True
+    assert remote_proxy.proxy_node_quality_for_ai_proxy_ok(result) is True
 
 
-def test_quality_preferred_sorting_selects_claude_residential_over_faster_idc():
+def test_quality_preferred_sorting_selects_ai_proxy_residential_over_faster_idc():
     nodes = remote_proxy.parse_proxy_subscription_content(
         """
 proxies:
@@ -473,7 +473,7 @@ proxies:
     }
 
     sorted_nodes = remote_proxy.sort_proxy_subscription_nodes(nodes, latencies, qualities, prefer_quality=True)
-    best = remote_proxy.best_proxy_subscription_node_for_claude(nodes, qualities, latencies)
+    best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(nodes, qualities, latencies)
 
     assert sorted_nodes[0].node["name"] == "美国 家宽"
     assert best is not None

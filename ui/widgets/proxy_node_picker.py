@@ -152,7 +152,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         ok_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_latency_ok(self._latency_for(item)))
         measured_count = sum(1 for item in self._nodes if self._latency_for(item) is not None)
         quality_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_measured(self._quality_for(item)))
-        claude_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_for_claude_ok(self._quality_for(item)))
+        high_quality_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_for_ai_proxy_ok(self._quality_for(item)))
         visible = matches[: self.MAX_VISIBLE_ROWS]
         selected_item = self.selected_item()
         if selected_item in matches and selected_item not in visible:
@@ -165,7 +165,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._summary_label.configure(
                 text=(
                     f"节点 {total} 个；可连 {ok_count}；延迟已测 {measured_count}；"
-                    f"质量已测 {quality_count}；家宽高质 {claude_count}；匹配 {len(matches)} 个{suffix}"
+                    f"质量已测 {quality_count}；家宽高质 {high_quality_count}；匹配 {len(matches)} 个{suffix}"
                 )
             )
 
@@ -346,7 +346,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             if result and "解析失败" in remote_proxy.proxy_node_quality_label(result):
                 return COLORS["danger"]
             return COLORS["muted_soft"]
-        if remote_proxy.proxy_node_quality_for_claude_ok(result):
+        if remote_proxy.proxy_node_quality_for_ai_proxy_ok(result):
             return COLORS["success"]
         label = remote_proxy.proxy_node_quality_label(result)
         if "代理" in label or "机房" in label:
@@ -367,7 +367,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not measured:
             return False
         if mode == "家宽高质":
-            return remote_proxy.proxy_node_quality_for_claude_ok(result)
+            return remote_proxy.proxy_node_quality_for_ai_proxy_ok(result)
         if mode == "家宽/运营商":
             return any(marker in label or marker in ip_type for marker in ("家宽", "家庭", "住宅", "运营商/宽带"))
         if mode == "低风险":

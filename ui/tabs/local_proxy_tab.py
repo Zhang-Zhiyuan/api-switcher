@@ -1123,7 +1123,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         candidates = self._quality_candidate_nodes()
         if not candidates:
-            message = "当前测速结果里没有可连节点；请先重新测速，再检测 Claude 高质量节点。"
+            message = "当前测速结果里没有可连节点；请先重新测速，再检测 AI 代理高质量节点。"
             self._set_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
@@ -1164,7 +1164,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     save_error = str(exc)
 
                 self._set_subscription_nodes(self._subscription_nodes)
-                best = remote_proxy.best_proxy_subscription_node_for_claude(
+                best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
                     self._subscription_nodes,
                     self._quality_results,
                     self._latency_results,
@@ -1179,7 +1179,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 high_count = sum(
                     1
                     for item in self._subscription_nodes
-                    if remote_proxy.proxy_node_quality_for_claude_ok(
+                    if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
                         self._quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
@@ -1198,7 +1198,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 region = remote_proxy.proxy_node_region(best.node)
                 label = remote_proxy.proxy_node_quality_label(quality)
                 score = remote_proxy.proxy_node_quality_score(quality)
-                severity = "success" if remote_proxy.proxy_node_quality_for_claude_ok(quality) and not save_error else "warning"
+                severity = "success" if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality) and not save_error else "warning"
                 message = (
                     f"质量检测完成: 家宽高质 {high_count}/{tested_count}；"
                     f"已选择【{region}】{label} 评分{score}。"

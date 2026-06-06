@@ -585,7 +585,7 @@ def sort_proxy_subscription_nodes(
         quality_score = proxy_node_quality_score(quality_result)
         quality_measured_sort = 0 if proxy_node_quality_measured(quality_result) else 1
         quality_sort = -quality_score if prefer_quality else 0
-        claude_sort = 0 if proxy_node_quality_for_claude_ok(quality_result) else 1
+        ai_proxy_sort = 0 if proxy_node_quality_for_ai_proxy_ok(quality_result) else 1
         latency_result = latencies.get(node_key)
         latency = proxy_node_latency_ms(latency_result)
         if proxy_node_latency_ok(latency_result):
@@ -596,13 +596,13 @@ def sort_proxy_subscription_nodes(
             status_sort = 2
         latency_sort = latency if latency is not None else 10**9
         if prefer_quality:
-            return (claude_sort, quality_measured_sort, quality_sort, status_sort, latency_sort, region_index, region, item.display_name().lower())
+            return (ai_proxy_sort, quality_measured_sort, quality_sort, status_sort, latency_sort, region_index, region, item.display_name().lower())
         return (region_index, region, status_sort, latency_sort, item.display_name().lower())
 
     return tuple(sorted(items, key=sort_key))
 
 
-def best_proxy_subscription_node_for_claude(
+def best_proxy_subscription_node_for_ai_proxy(
     nodes,
     quality_results: dict[str, ProxyNodeQualityResult | dict],
     latency_results: dict[str, ProxyNodeLatencyResult | dict] | None = None,
@@ -614,7 +614,7 @@ def best_proxy_subscription_node_for_claude(
         prefer_quality=True,
     )
     for item in ranked:
-        if proxy_node_quality_for_claude_ok(quality_results.get(proxy_node_key(item.node))):
+        if proxy_node_quality_for_ai_proxy_ok(quality_results.get(proxy_node_key(item.node))):
             return item
     for item in ranked:
         if proxy_node_quality_measured(quality_results.get(proxy_node_key(item.node))):
@@ -1000,7 +1000,7 @@ def proxy_node_quality_checked_at(result: ProxyNodeQualityResult | dict | None) 
     return ""
 
 
-def proxy_node_quality_for_claude_ok(result: ProxyNodeQualityResult | dict | None) -> bool:
+def proxy_node_quality_for_ai_proxy_ok(result: ProxyNodeQualityResult | dict | None) -> bool:
     if not proxy_node_quality_measured(result):
         return False
     ip_type = proxy_node_quality_ip_type(result)
