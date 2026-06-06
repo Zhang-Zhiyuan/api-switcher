@@ -3,16 +3,27 @@ from pathlib import Path
 
 from config.paths import CODEX_CONFIG
 from core.atomic_io import atomic_write_text
+from core.file_cache import CACHE_MISS, FileValueCache
 
 logger = logging.getLogger(__name__)
+_TOML_FILE_CACHE = FileValueCache()
 
 
 def _atomic_write(path: Path, content: str) -> None:
     atomic_write_text(path, content)
 
 
+def clear_codex_config_cache(path: Path | None = None) -> None:
+    _TOML_FILE_CACHE.clear(path)
+
+
 def read_codex_config() -> dict:
+    cached = _TOML_FILE_CACHE.get(CODEX_CONFIG)
+    if cached is not CACHE_MISS:
+        return cached if isinstance(cached, dict) else {}
+
     if not CODEX_CONFIG.exists():
+        _TOML_FILE_CACHE.set(CODEX_CONFIG, {})
         return {}
     try:
         try:
@@ -20,9 +31,15 @@ def read_codex_config() -> dict:
         except ModuleNotFoundError:
             import tomli as tomllib
         with open(CODEX_CONFIG, "rb") as f:
-            return tomllib.load(f)
+            data = tomllib.load(f)
+        if not isinstance(data, dict):
+            _TOML_FILE_CACHE.set(CODEX_CONFIG, {})
+            return {}
+        _TOML_FILE_CACHE.set(CODEX_CONFIG, data)
+        return data
     except Exception as e:
         logger.error(f"Failed to read {CODEX_CONFIG}: {e}")
+        _TOML_FILE_CACHE.clear(CODEX_CONFIG)
         return {}
 
 
@@ -31,8 +48,10 @@ def write_codex_config(data: dict) -> None:
         import tomli_w
         content = tomli_w.dumps(data)
         _atomic_write(CODEX_CONFIG, content)
+        _TOML_FILE_CACHE.set(CODEX_CONFIG, data)
     except Exception as e:
         logger.error(f"Failed to write {CODEX_CONFIG}: {e}")
+        _TOML_FILE_CACHE.clear(CODEX_CONFIG)
         raise
 
 

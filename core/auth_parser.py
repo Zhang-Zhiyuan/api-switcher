@@ -4,31 +4,46 @@ from pathlib import Path
 
 from config.paths import CODEX_AUTH
 from core.atomic_io import atomic_write_text
+from core.file_cache import CACHE_MISS, FileValueCache
 
 logger = logging.getLogger(__name__)
+_JSON_FILE_CACHE = FileValueCache()
 
 
 def _atomic_write(path: Path, content: str) -> None:
     atomic_write_text(path, content)
 
 
+def clear_codex_auth_cache(path: Path | None = None) -> None:
+    _JSON_FILE_CACHE.clear(path)
+
+
 def read_codex_auth() -> dict:
+    cached = _JSON_FILE_CACHE.get(CODEX_AUTH)
+    if cached is not CACHE_MISS:
+        return cached if isinstance(cached, dict) else {}
+
     if not CODEX_AUTH.exists():
+        _JSON_FILE_CACHE.set(CODEX_AUTH, {})
         return {}
     try:
         data = json.loads(CODEX_AUTH.read_text(encoding="utf-8-sig"))
         if not isinstance(data, dict):
             logger.error(f"Failed to read {CODEX_AUTH}: top-level JSON is not an object")
+            _JSON_FILE_CACHE.set(CODEX_AUTH, {})
             return {}
+        _JSON_FILE_CACHE.set(CODEX_AUTH, data)
         return data
     except Exception as e:
         logger.error(f"Failed to read {CODEX_AUTH}: {e}")
+        _JSON_FILE_CACHE.clear(CODEX_AUTH)
         return {}
 
 
 def write_codex_auth(data: dict) -> None:
     content = json.dumps(data, indent=2, ensure_ascii=False)
     _atomic_write(CODEX_AUTH, content)
+    _JSON_FILE_CACHE.set(CODEX_AUTH, data)
 
 
 def apply_codex_apikey(auth: dict, profile) -> dict:

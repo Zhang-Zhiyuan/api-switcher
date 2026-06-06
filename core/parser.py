@@ -4,70 +4,71 @@ from pathlib import Path
 
 from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG, CLAUDE_CREDENTIALS
 from core.atomic_io import atomic_write_text
+from core.file_cache import CACHE_MISS, FileValueCache
 from core.providers import CLAUDE_CODE_MODEL_ALIASES
 
 logger = logging.getLogger(__name__)
+_JSON_FILE_CACHE = FileValueCache()
 
 
 def _atomic_write(path: Path, content: str) -> None:
     atomic_write_text(path, content)
 
 
-def read_claude_settings() -> dict:
-    if not CLAUDE_SETTINGS.exists():
+def clear_claude_file_cache(path: Path | None = None) -> None:
+    _JSON_FILE_CACHE.clear(path)
+
+
+def _read_json_object(path: Path, encoding: str = "utf-8") -> dict:
+    cached = _JSON_FILE_CACHE.get(path)
+    if cached is not CACHE_MISS:
+        return cached if isinstance(cached, dict) else {}
+
+    if not path.exists():
+        _JSON_FILE_CACHE.set(path, {})
         return {}
     try:
-        data = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding=encoding))
         if not isinstance(data, dict):
-            logger.error(f"Failed to read {CLAUDE_SETTINGS}: top-level JSON is not an object")
+            logger.error(f"Failed to read {path}: top-level JSON is not an object")
+            _JSON_FILE_CACHE.set(path, {})
             return {}
+        _JSON_FILE_CACHE.set(path, data)
         return data
     except Exception as e:
-        logger.error(f"Failed to read {CLAUDE_SETTINGS}: {e}")
+        logger.error(f"Failed to read {path}: {e}")
+        _JSON_FILE_CACHE.clear(path)
         return {}
+
+
+def read_claude_settings() -> dict:
+    return _read_json_object(CLAUDE_SETTINGS)
 
 
 def write_claude_settings(data: dict) -> None:
     content = json.dumps(data, indent=2, ensure_ascii=False)
     _atomic_write(CLAUDE_SETTINGS, content)
+    _JSON_FILE_CACHE.set(CLAUDE_SETTINGS, data)
 
 
 def read_claude_config() -> dict:
-    if not CLAUDE_CONFIG.exists():
-        return {}
-    try:
-        data = json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            logger.error(f"Failed to read {CLAUDE_CONFIG}: top-level JSON is not an object")
-            return {}
-        return data
-    except Exception as e:
-        logger.error(f"Failed to read {CLAUDE_CONFIG}: {e}")
-        return {}
+    return _read_json_object(CLAUDE_CONFIG)
 
 
 def write_claude_config(data: dict) -> None:
     content = json.dumps(data, indent=2, ensure_ascii=False)
     _atomic_write(CLAUDE_CONFIG, content)
+    _JSON_FILE_CACHE.set(CLAUDE_CONFIG, data)
 
 
 def read_claude_credentials() -> dict:
-    if not CLAUDE_CREDENTIALS.exists():
-        return {}
-    try:
-        data = json.loads(CLAUDE_CREDENTIALS.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            logger.error(f"Failed to read {CLAUDE_CREDENTIALS}: top-level JSON is not an object")
-            return {}
-        return data
-    except Exception as e:
-        logger.error(f"Failed to read {CLAUDE_CREDENTIALS}: {e}")
-        return {}
+    return _read_json_object(CLAUDE_CREDENTIALS)
 
 
 def write_claude_credentials(data: dict) -> None:
     content = json.dumps(data, indent=2, ensure_ascii=False)
     _atomic_write(CLAUDE_CREDENTIALS, content)
+    _JSON_FILE_CACHE.set(CLAUDE_CREDENTIALS, data)
 
 
 def clear_claude_api_overrides(settings: dict) -> dict:

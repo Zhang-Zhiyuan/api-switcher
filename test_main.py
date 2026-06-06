@@ -39,6 +39,14 @@ def test_proxy_quality_is_not_a_primary_tab():
     assert not hasattr(app_module.App, "_show_network_diagnostics_tab")
 
 
+def test_only_first_primary_tab_loads_eagerly():
+    specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
+
+    assert specs["Claude Code"] is True
+    assert specs["Codex CLI"] is False
+    assert all(eager is False for label, eager in specs.items() if label not in {"Claude Code"})
+
+
 def test_proxy_quality_dialog_module_is_importable():
     from ui.dialogs.proxy_quality_dialog import ProxyQualityDialog
     from ui.widgets.proxy_quality_panel import ProxyQualityPanel

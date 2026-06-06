@@ -16,7 +16,7 @@ CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
-    ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", True),
+    ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
     (ENV_TAB_LABEL, "_env_tab", "ui.tabs.env_tab", "EnvTab", False),
     ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
     ("会话迁移", "_session_migration_tab", "ui.tabs.session_migration_tab", "SessionMigrationTab", False),
