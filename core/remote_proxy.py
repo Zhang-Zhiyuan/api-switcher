@@ -155,6 +155,10 @@ PROXY_REGION_TLD_MAP = {
 }
 
 PROXY_REGION_ORDER = tuple(region for region, _patterns in PROXY_REGION_RULES) + ("其他",)
+PROXY_REGION_MATCHERS = tuple(
+    (region, tuple(re.compile(pattern, flags=re.I) for pattern in patterns))
+    for region, patterns in PROXY_REGION_RULES
+)
 
 
 @dataclass(frozen=True)
@@ -552,9 +556,9 @@ def format_proxy_node(node: dict) -> str:
 def proxy_node_region(node: dict) -> str:
     normalized = _normalize_proxy_node(node)
     text = f"{normalized.get('name', '')} {normalized.get('server', '')}".lower()
-    for region, patterns in PROXY_REGION_RULES:
+    for region, patterns in PROXY_REGION_MATCHERS:
         for pattern in patterns:
-            if re.search(pattern, text, flags=re.I):
+            if pattern.search(text):
                 return region
 
     server = str(normalized.get("server") or "").strip().lower().rstrip(".")
@@ -598,9 +602,10 @@ def sort_proxy_subscription_nodes(
         else:
             status_sort = 2
         latency_sort = latency if latency is not None else 10**9
+        display_name = str(item.node.get("name") or item.display_name()).lower()
         if prefer_quality:
-            return (ai_proxy_sort, quality_measured_sort, quality_sort, status_sort, latency_sort, region_index, region, item.display_name().lower())
-        return (region_index, region, status_sort, latency_sort, item.display_name().lower())
+            return (ai_proxy_sort, quality_measured_sort, quality_sort, status_sort, latency_sort, region_index, region, display_name)
+        return (region_index, region, status_sort, latency_sort, display_name)
 
     return tuple(sorted(items, key=sort_key))
 

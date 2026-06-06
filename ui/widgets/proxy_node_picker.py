@@ -19,9 +19,18 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._nodes = []
         self._latency_results = {}
         self._quality_results = {}
+        self._node_meta = {}
+        self._summary_counts = {
+            "ok": 0,
+            "measured": 0,
+            "quality": 0,
+            "high_quality": 0,
+        }
         self._selected_key = ""
         self._checked_keys = set()
         self._enabled = True
+        self._render_after_id = None
+        self._last_match_count = 0
         self._search_entry = None
         self._filter_combo = None
         self._region_combo = None
@@ -43,7 +52,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             **input_style(),
         )
         self._search_entry.grid(row=0, column=0, columnspan=4, sticky="ew")
-        self._search_entry.bind("<KeyRelease>", lambda _event: self._render_nodes())
+        self._search_entry.bind("<KeyRelease>", lambda _event: self._request_render_nodes(120))
 
         filter_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
         filter_bar.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -52,7 +61,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             filter_bar,
             values=list(self.FILTER_OPTIONS),
             width=108,
-            command=lambda _value: self._render_nodes(),
+            command=lambda _value: self._request_render_nodes(20),
             **combo_style(),
         )
         self._filter_combo.set("全部")
@@ -62,7 +71,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             filter_bar,
             values=[self.REGION_ALL],
             width=112,
-            command=lambda _value: self._render_nodes(),
+            command=lambda _value: self._request_render_nodes(20),
             **combo_style(),
         )
         self._region_combo.set(self.REGION_ALL)
@@ -72,7 +81,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             filter_bar,
             values=list(self.QUALITY_OPTIONS),
             width=112,
-            command=lambda _value: self._render_nodes(),
+            command=lambda _value: self._request_render_nodes(20),
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
@@ -134,6 +143,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._nodes = list(nodes or [])
         self._latency_results = latency_results if isinstance(latency_results, dict) else {}
         self._quality_results = quality_results if isinstance(quality_results, dict) else {}
+        self._build_node_metadata()
         self._update_region_options()
         available_keys = {self._node_key(item) for item in self._nodes}
         if selected_key and selected_key in available_keys:
@@ -146,6 +156,10 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._selected_key = ""
         self._checked_keys.intersection_update(available_keys)
         self._render_nodes()
+
+    def destroy(self):
+        self._cancel_pending_render()
+        super().destroy()
 
     def set_enabled(self, enabled: bool):
         self._enabled = bool(enabled)
@@ -189,7 +203,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if checked_count:
             return f"已勾选 {checked_count} 个节点"
         if self._has_active_filters():
-            return f"当前筛选 {len(self._filtered_nodes())} 个节点"
+            return f"当前筛选 {self._last_match_count} 个节点"
         return f"全部 {len(self._nodes)} 个节点"
 
     def select_by_key(self, node_key: str) -> bool:
@@ -204,17 +218,25 @@ class ProxyNodePicker(ctk.CTkFrame):
         return False
 
     def _render_nodes(self):
+        pending_render = self._render_after_id
+        self._render_after_id = None
+        if pending_render:
+            try:
+                self.after_cancel(pending_render)
+            except Exception:
+                pass
         if not self._list_frame:
             return
         for child in self._list_frame.winfo_children():
             child.destroy()
 
         matches = self._filtered_nodes()
+        self._last_match_count = len(matches)
         total = len(self._nodes)
-        ok_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_latency_ok(self._latency_for(item)))
-        measured_count = sum(1 for item in self._nodes if self._latency_for(item) is not None)
-        quality_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_measured(self._quality_for(item)))
-        high_quality_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_for_ai_proxy_ok(self._quality_for(item)))
+        ok_count = int(self._summary_counts.get("ok") or 0)
+        measured_count = int(self._summary_counts.get("measured") or 0)
+        quality_count = int(self._summary_counts.get("quality") or 0)
+        high_quality_count = int(self._summary_counts.get("high_quality") or 0)
         checked_count = len(self._checked_keys)
         visible = matches[: self.MAX_VISIBLE_ROWS]
         selected_item = self.selected_item()
@@ -255,7 +277,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         current_region = None
         current_items = []
         for item in items:
-            region = remote_proxy.proxy_node_region(item.node)
+            region = self._node_region(item)
             if current_items and region != current_region:
                 groups.append((current_region, current_items))
                 current_items = []
@@ -266,10 +288,11 @@ class ProxyNodePicker(ctk.CTkFrame):
         return groups
 
     def _render_group_header(self, region: str, items):
-        keys = [self._node_key(item) for item in items]
+        metas = [self._metadata_for(item) for item in items]
+        keys = [str(meta.get("key") or "") for meta in metas]
         checked = sum(1 for key in keys if key in self._checked_keys)
-        ok_count = sum(1 for item in items if remote_proxy.proxy_node_latency_ok(self._latency_for(item)))
-        high_count = sum(1 for item in items if remote_proxy.proxy_node_quality_for_ai_proxy_ok(self._quality_for(item)))
+        ok_count = sum(1 for meta in metas if meta.get("latency_ok"))
+        high_count = sum(1 for meta in metas if meta.get("quality_ai_ok"))
         header = ctk.CTkFrame(self._list_frame, fg_color=COLORS["surface_alt"], corner_radius=6)
         header.pack(fill="x", padx=6, pady=(8, 0))
         header.grid_columnconfigure(0, weight=1)
@@ -309,7 +332,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         quality_label = remote_proxy.proxy_node_quality_label(quality)
         quality_score = remote_proxy.proxy_node_quality_score(quality)
         quality_ip = remote_proxy.proxy_node_quality_ip(quality)
-        region = remote_proxy.proxy_node_region(node)
+        region = self._node_region(item)
         node_type = str(node.get("type") or "").upper()
         server = str(node.get("server") or "")
         port = str(node.get("port") or "")
@@ -429,6 +452,22 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._checked_keys.discard(key)
         self._render_nodes()
 
+    def _request_render_nodes(self, delay_ms: int = 60):
+        self._cancel_pending_render()
+        try:
+            self._render_after_id = self.after(max(1, int(delay_ms)), self._render_nodes)
+        except Exception:
+            self._render_nodes()
+
+    def _cancel_pending_render(self):
+        if not self._render_after_id:
+            return
+        try:
+            self.after_cancel(self._render_after_id)
+        except Exception:
+            pass
+        self._render_after_id = None
+
     def _update_scope_label(self):
         if not self._scope_label:
             return
@@ -456,17 +495,18 @@ class ProxyNodePicker(ctk.CTkFrame):
             quality_filter = "全部质量"
         matches = []
         for item in self._nodes:
-            latency = self._latency_for(item)
-            quality = self._quality_for(item)
-            if region_filter and region_filter != self.REGION_ALL and remote_proxy.proxy_node_region(item.node) != region_filter:
+            meta = self._metadata_for(item)
+            if region_filter and region_filter != self.REGION_ALL and self._node_region(item) != region_filter:
                 continue
-            if mode == "可连" and not remote_proxy.proxy_node_latency_ok(latency):
+            latency_ok = bool(meta.get("latency_ok"))
+            latency_measured = bool(meta.get("latency_measured"))
+            if mode == "可连" and not latency_ok:
                 continue
-            if mode == "不可连" and (latency is None or remote_proxy.proxy_node_latency_ok(latency)):
+            if mode == "不可连" and (not latency_measured or latency_ok):
                 continue
-            if mode == "未测速" and latency is not None:
+            if mode == "未测速" and latency_measured:
                 continue
-            if not self._quality_matches(quality_filter, quality):
+            if not self._quality_matches(quality_filter, meta):
                 continue
             if query and query not in self._search_blob(item):
                 continue
@@ -498,29 +538,103 @@ class ProxyNodePicker(ctk.CTkFrame):
         )
 
     def _search_blob(self, item) -> str:
+        return str(self._metadata_for(item).get("search_blob") or "")
+
+    def _latency_for(self, item):
+        return self._metadata_for(item).get("latency")
+
+    def _quality_for(self, item):
+        return self._metadata_for(item).get("quality")
+
+    def _node_key(self, item) -> str:
+        return str(self._metadata_for(item).get("key") or "")
+
+    def _node_region(self, item) -> str:
+        return str(self._metadata_for(item).get("region") or "其他")
+
+    def _metadata_for(self, item) -> dict:
+        meta = self._node_meta.get(id(item))
+        if meta is not None:
+            return meta
+        return self._build_item_metadata(item)
+
+    def _build_node_metadata(self):
+        self._node_meta = {}
+        counts = {
+            "ok": 0,
+            "measured": 0,
+            "quality": 0,
+            "high_quality": 0,
+        }
+        for item in self._nodes:
+            meta = self._build_item_metadata(item)
+            self._node_meta[id(item)] = meta
+            if meta.get("latency_ok"):
+                counts["ok"] += 1
+            if meta.get("latency_measured"):
+                counts["measured"] += 1
+            if meta.get("quality_measured"):
+                counts["quality"] += 1
+            if meta.get("quality_ai_ok"):
+                counts["high_quality"] += 1
+        self._summary_counts = counts
+
+    def _build_item_metadata(self, item) -> dict:
         node = item.node
-        parts = [
+        try:
+            node_key = remote_proxy.proxy_node_key(node)
+        except Exception:
+            node_key = f"invalid:{item.index}:{id(item)}"
+        try:
+            region = remote_proxy.proxy_node_region(node)
+        except Exception:
+            region = "其他"
+        latency = self._latency_results.get(node_key)
+        quality = self._quality_results.get(node_key)
+        latency_label = remote_proxy.proxy_node_latency_label(latency)
+        latency_detail = remote_proxy.proxy_node_latency_detail(latency)
+        quality_label = remote_proxy.proxy_node_quality_label(quality)
+        quality_detail = remote_proxy.proxy_node_quality_detail(quality)
+        quality_ip_type = remote_proxy.proxy_node_quality_ip_type(quality)
+        quality_ip = remote_proxy.proxy_node_quality_ip(quality)
+        quality_score = remote_proxy.proxy_node_quality_score(quality)
+        quality_risk = remote_proxy.proxy_node_quality_risk_score(quality)
+        quality_measured = remote_proxy.proxy_node_quality_measured(quality)
+        quality_ai_ok = remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality)
+        static_parts = [
             str(item.index),
             str(node.get("name") or ""),
             str(node.get("type") or ""),
             str(node.get("server") or ""),
-            remote_proxy.proxy_node_region(node),
-            remote_proxy.proxy_node_latency_label(self._latency_for(item)),
-            remote_proxy.proxy_node_quality_label(self._quality_for(item)),
-            remote_proxy.proxy_node_quality_ip_type(self._quality_for(item)),
-            remote_proxy.proxy_node_quality_ip(self._quality_for(item)),
-            remote_proxy.proxy_node_quality_detail(self._quality_for(item)),
+            region,
         ]
-        return " ".join(parts).casefold()
-
-    def _latency_for(self, item):
-        return self._latency_results.get(self._node_key(item))
-
-    def _quality_for(self, item):
-        return self._quality_results.get(self._node_key(item))
-
-    def _node_key(self, item) -> str:
-        return remote_proxy.proxy_node_key(item.node)
+        search_parts = [
+            *static_parts,
+            latency_label,
+            latency_detail,
+            quality_label,
+            quality_detail,
+            quality_ip_type,
+            quality_ip,
+        ]
+        meta = {
+            "key": node_key,
+            "region": region,
+            "search_static": " ".join(static_parts).casefold(),
+            "search_blob": " ".join(part for part in search_parts if part).casefold(),
+            "latency": latency,
+            "latency_ok": remote_proxy.proxy_node_latency_ok(latency),
+            "latency_measured": latency is not None,
+            "quality": quality,
+            "quality_measured": quality_measured,
+            "quality_ai_ok": quality_ai_ok,
+            "quality_score": quality_score,
+            "quality_risk": quality_risk,
+            "quality_label_text": quality_label.casefold(),
+            "quality_ip_type_text": quality_ip_type.casefold(),
+        }
+        self._node_meta[id(item)] = meta
+        return meta
 
     def _latency_color(self, result) -> str:
         if remote_proxy.proxy_node_latency_ok(result):
@@ -543,29 +657,28 @@ class ProxyNodePicker(ctk.CTkFrame):
             return COLORS["warning"]
         return COLORS["muted"]
 
-    def _quality_matches(self, mode: str, result) -> bool:
+    def _quality_matches(self, mode: str, meta: dict) -> bool:
         if not mode or mode == "全部质量":
             return True
-        measured = remote_proxy.proxy_node_quality_measured(result)
-        label = remote_proxy.proxy_node_quality_label(result)
-        ip_type = remote_proxy.proxy_node_quality_ip_type(result)
-        risk = remote_proxy.proxy_node_quality_risk_score(result)
+        measured = bool(meta.get("quality_measured"))
         if mode == "未测质量":
             return not measured
         if not measured:
             return False
-        label_text = label.casefold()
-        ip_type_text = ip_type.casefold()
+        label_text = str(meta.get("quality_label_text") or "")
+        ip_type_text = str(meta.get("quality_ip_type_text") or "")
+        quality_score = int(meta.get("quality_score") or 0)
+        risk = meta.get("quality_risk")
         if mode == "家宽高质":
-            return remote_proxy.proxy_node_quality_for_ai_proxy_ok(result)
+            return bool(meta.get("quality_ai_ok"))
         if mode == "家宽/运营商":
             return any(marker in label_text or marker in ip_type_text for marker in ("家宽", "家庭", "住宅", "residential", "home", "broadband", "运营商/宽带"))
         if mode == "低风险":
-            return remote_proxy.proxy_node_quality_score(result) >= 75 and (risk is None or risk <= 35)
+            return quality_score >= 75 and (risk is None or risk <= 35)
         if mode == "机房/商宽":
             return any(marker in label_text or marker in ip_type_text for marker in ("机房", "idc", "hosting", "datacenter", "business", "商宽", "企业"))
         if mode == "代理风险":
-            return remote_proxy.proxy_node_quality_score(result) <= 40 or any(
+            return quality_score <= 40 or any(
                 marker in label_text or marker in ip_type_text for marker in ("代理", "vpn", "tor", "proxy", "匿名")
             )
         return True
@@ -573,7 +686,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     def _update_region_options(self):
         if not self._region_combo:
             return
-        regions = {remote_proxy.proxy_node_region(item.node) for item in self._nodes}
+        regions = {self._node_region(item) for item in self._nodes}
         ordered = [region for region in remote_proxy.PROXY_REGION_ORDER if region in regions]
         ordered.extend(sorted(regions - set(ordered)))
         values = [self.REGION_ALL] + ordered

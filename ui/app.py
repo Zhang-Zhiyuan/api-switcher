@@ -46,6 +46,7 @@ class App(ctk.CTk):
         self._proxy_quality_dialog = None
         self._tab_frames = {}
         self._tab_class_cache = {}
+        self._quick_switch_load_generation = 0
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             setattr(self, attr, None)
@@ -374,41 +375,61 @@ class App(ctk.CTk):
 
     def _load_quick_switch_profiles(self):
         """Load profiles for quick switch menus."""
-        try:
-            from core import profile_manager
+        self._quick_switch_load_generation += 1
+        generation = self._quick_switch_load_generation
 
-            # Load Claude profiles
-            claude_profiles = profile_manager.list_switchable_claude_profiles()
-            claude_names = [p.name for p in claude_profiles]
-            if claude_names:
-                self.claude_switch.configure(values=claude_names, state="normal")
-                # Set current active profile
-                current = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
-                if current in claude_names:
-                    self.claude_switch.set(current)
-                else:
-                    self.claude_switch.set(claude_names[0] if claude_names else "Claude API")
-            else:
-                self.claude_switch.configure(values=["暂无 Claude API 配置"], state="disabled")
-                self.claude_switch.set("暂无 Claude API 配置")
+        def run():
+            try:
+                from core import profile_manager
 
-            # Load Codex profiles
-            codex_profiles = profile_manager.list_switchable_codex_profiles()
-            codex_names = [p.name for p in codex_profiles]
-            if codex_names:
-                self.codex_switch.configure(values=codex_names, state="normal")
-                # Set current active profile
-                current = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
-                if current in codex_names:
-                    self.codex_switch.set(current)
-                else:
-                    self.codex_switch.set(codex_names[0] if codex_names else "Codex API")
-            else:
-                self.codex_switch.configure(values=["暂无 Codex API 配置"], state="disabled")
-                self.codex_switch.set("暂无 Codex API 配置")
+                payload = {
+                    "ok": True,
+                    "error": "",
+                    "claude_names": [p.name for p in profile_manager.list_switchable_claude_profiles()],
+                    "claude_current": profile_manager.get_current_claude_name()
+                    or profile_manager.get_active_claude_name(),
+                    "codex_names": [p.name for p in profile_manager.list_switchable_codex_profiles()],
+                    "codex_current": profile_manager.get_current_codex_name()
+                    or profile_manager.get_active_codex_name(),
+                }
+            except Exception as e:
+                payload = {"ok": False, "error": str(e)}
 
-        except Exception as e:
-            logger.error(f"Failed to load quick switch profiles: {e}", exc_info=True)
+            def finish():
+                if generation != self._quick_switch_load_generation or self._exit_requested:
+                    return
+                if not payload["ok"]:
+                    logger.error("Failed to load quick switch profiles: %s", payload["error"])
+                    self.claude_switch.configure(values=["加载失败"], state="disabled")
+                    self.claude_switch.set("加载失败")
+                    self.codex_switch.configure(values=["加载失败"], state="disabled")
+                    self.codex_switch.set("加载失败")
+                    return
+                self._apply_quick_switch_profiles(
+                    payload["claude_names"],
+                    payload["claude_current"],
+                    payload["codex_names"],
+                    payload["codex_current"],
+                )
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _apply_quick_switch_profiles(self, claude_names, claude_current, codex_names, codex_current):
+        if claude_names:
+            self.claude_switch.configure(values=claude_names, state="normal")
+            self.claude_switch.set(claude_current if claude_current in claude_names else claude_names[0])
+        else:
+            self.claude_switch.configure(values=["暂无 Claude API 配置"], state="disabled")
+            self.claude_switch.set("暂无 Claude API 配置")
+
+        if codex_names:
+            self.codex_switch.configure(values=codex_names, state="normal")
+            self.codex_switch.set(codex_current if codex_current in codex_names else codex_names[0])
+        else:
+            self.codex_switch.configure(values=["暂无 Codex API 配置"], state="disabled")
+            self.codex_switch.set("暂无 Codex API 配置")
 
     def _quick_switch_claude(self, profile_name: str):
         """Quick switch Claude profile."""
