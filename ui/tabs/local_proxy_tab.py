@@ -1,11 +1,10 @@
 import threading
-import webbrowser
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core import local_proxy, remote_proxy, startup_manager
+from core import local_proxy, network_diagnostic_settings, remote_proxy, startup_manager
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, input_style, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
@@ -347,9 +346,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._ping0_button = ctk.CTkButton(
             node_actions,
-            text="选中节点 Ping0",
+            text="检测选中节点",
             width=104,
-            command=self._open_selected_subscription_ping0,
+            command=self._measure_selected_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
         )
@@ -1051,14 +1050,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
-        node_count = len(self._subscription_nodes)
+        scope_nodes = self._subscription_batch_nodes()
+        scope_label = self._subscription_batch_scope_label()
+        node_count = len(scope_nodes)
+        if not scope_nodes:
+            message = "当前节点分组没有可测速的节点"
+            self._set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
         self._set_busy(True)
-        self._set_status(f"正在测试 {node_count} 个订阅节点的 TCP 延迟；完成后会按地区聚类并自动选择最低延迟节点...")
+        self._set_status(f"正在测试 {scope_label} 的 TCP 延迟；完成后会自动选择该范围内最低延迟节点...")
 
         def run():
             try:
                 results = remote_proxy.measure_proxy_node_latencies(
-                    tuple(self._subscription_nodes),
+                    tuple(scope_nodes),
                     timeout=3.0,
                     attempts=2,
                     max_workers=20,
@@ -1077,7 +1083,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
-                self._latency_results = payload["result"] or {}
+                self._latency_results.update(payload["result"] or {})
                 self._prefer_quality_sort = False
                 save_error = ""
                 try:
@@ -1085,10 +1091,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 except Exception as exc:
                     save_error = str(exc)
                 self._set_subscription_nodes(self._subscription_nodes)
-                fastest = self._fastest_subscription_node()
-                ok_count = sum(1 for item in self._latency_results.values() if remote_proxy.proxy_node_latency_ok(item))
+                fastest = self._fastest_subscription_node(scope_nodes)
+                ok_count = sum(
+                    1
+                    for item in scope_nodes
+                    if remote_proxy.proxy_node_latency_ok(
+                        self._latency_results.get(remote_proxy.proxy_node_key(item.node))
+                    )
+                )
                 if not fastest:
-                    message = f"测速完成: {ok_count}/{node_count} 个节点可连；未找到可用节点，已按地区展示。"
+                    message = f"测速完成: {scope_label} 中 {ok_count}/{node_count} 个节点可连；未找到可用节点。"
                     if save_error:
                         message += f" 测速结果缓存失败: {save_error}"
                     self._set_status(message, "warning")
@@ -1100,7 +1112,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._use_selected_subscription_node(show_message=False)
                 latency = remote_proxy.proxy_node_latency_label(self._latency_results.get(fastest_key))
                 region = remote_proxy.proxy_node_region(fastest.node)
-                message = f"测速完成: {ok_count}/{node_count} 个节点可连；已选择最快节点【{region}】{latency}。"
+                message = f"测速完成: 基于 {scope_label}，{ok_count}/{node_count} 个节点可连；已选择最快节点【{region}】{latency}。"
                 severity = "warning" if save_error else "success"
                 if save_error:
                     message += f" 测速结果缓存失败: {save_error}"
@@ -1114,16 +1126,27 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _quality_candidate_nodes(self):
+    def _subscription_batch_nodes(self):
+        if self._subscription_picker:
+            return self._subscription_picker.batch_items()
+        return list(self._subscription_nodes)
+
+    def _subscription_batch_scope_label(self) -> str:
+        if self._subscription_picker:
+            return self._subscription_picker.batch_scope_label()
+        return f"全部 {len(self._subscription_nodes)} 个节点"
+
+    def _quality_candidate_nodes(self, nodes=None):
+        base_nodes = list(nodes if nodes is not None else self._subscription_batch_nodes())
         candidates = []
         measured_any = False
-        for item in self._subscription_nodes:
+        for item in base_nodes:
             result = self._latency_results.get(remote_proxy.proxy_node_key(item.node))
             if result is not None:
                 measured_any = True
             if remote_proxy.proxy_node_latency_ok(result):
                 candidates.append(item)
-        return candidates if measured_any else list(self._subscription_nodes)
+        return candidates if measured_any else base_nodes
 
     def _measure_subscription_qualities(self):
         if self._busy:
@@ -1135,7 +1158,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
-        candidates = self._quality_candidate_nodes()
+        scope_nodes = self._subscription_batch_nodes()
+        scope_label = self._subscription_batch_scope_label()
+        candidates = self._quality_candidate_nodes(scope_nodes)
         if not candidates:
             message = "当前测速结果里没有可连节点；请先重新测速，再检测 AI 代理高质量节点。"
             self._set_status(message, "warning")
@@ -1143,9 +1168,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
 
         node_count = len(candidates)
+        settings = network_diagnostic_settings.load_settings()
+        services = settings.enabled_services()
+        source_label = remote_proxy.quality_source_label_from_settings(settings, services)
+        if not services:
+            message = "请先在“质量检测源”启用至少一个检测源"
+            self._set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
         self._set_busy(True)
         self._set_status(
-            f"正在检测 {node_count} 个可用订阅节点的服务器 IP 质量；完成后会优先选择家宽、低风险节点..."
+            f"正在基于 {source_label} 检测 {scope_label} 中 {node_count} 个候选节点；完成后优先选择家宽、低风险节点..."
         )
 
         def run():
@@ -1154,6 +1187,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     tuple(candidates),
                     timeout=5.0,
                     max_workers=8,
+                    settings=settings,
+                    enabled_services=services,
                 )
                 payload = {"ok": True, "result": results, "error": None}
             except Exception as e:
@@ -1183,16 +1218,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._quality_results,
                     self._latency_results,
                 )
+                if best and best not in candidates:
+                    best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
+                        candidates,
+                        self._quality_results,
+                        self._latency_results,
+                    )
                 tested_count = sum(
                     1
-                    for item in self._subscription_nodes
+                    for item in candidates
                     if remote_proxy.proxy_node_quality_measured(
                         self._quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
                 high_count = sum(
                     1
-                    for item in self._subscription_nodes
+                    for item in candidates
                     if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
                         self._quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
@@ -1212,9 +1253,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 region = remote_proxy.proxy_node_region(best.node)
                 label = remote_proxy.proxy_node_quality_label(quality)
                 score = remote_proxy.proxy_node_quality_score(quality)
+                basis = remote_proxy.proxy_node_quality_source_label(quality)
                 severity = "success" if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality) and not save_error else "warning"
                 message = (
-                    f"质量检测完成: 家宽高质 {high_count}/{tested_count}；"
+                    f"质量检测完成: 基于 {basis}，{scope_label} 家宽高质 {high_count}/{tested_count}；"
                     f"已选择【{region}】{label} 评分{score}。"
                 )
                 if save_error:
@@ -1243,7 +1285,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._set_status("无法打开代理质量检测窗口。", "error")
         show_toast(top, "无法打开代理质量检测窗口", is_error=True)
 
-    def _open_selected_subscription_ping0(self):
+    def _measure_selected_subscription_quality(self):
         if not self._subscription_picker:
             return
         item = self._subscription_picker.selected_item()
@@ -1252,26 +1294,73 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
-        try:
-            url = remote_proxy.ping0_detail_url_for_proxy_node(item.node)
-            opened = webbrowser.open(url)
-        except Exception as exc:
-            message = f"打开当前节点 Ping0 详情失败: {exc}"
-            self._set_status(message, "error")
+        settings = network_diagnostic_settings.load_settings()
+        services = settings.enabled_services()
+        source_label = remote_proxy.quality_source_label_from_settings(settings, services)
+        if not services:
+            message = "请先在“质量检测源”启用至少一个检测源"
+            self._set_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
-        if not opened:
-            message = "打开当前节点 Ping0 详情失败，请检查系统默认浏览器"
-            self._set_status(message, "error")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
-        self._set_status(f"已打开当前节点 Ping0 详情: {remote_proxy.describe_proxy_node(item.node)}", "success")
-        show_toast(self.winfo_toplevel(), "已打开当前选中节点的 Ping0 详情")
+        node_summary = remote_proxy.describe_proxy_node(item.node)
+        self._set_busy(True)
+        self._set_status(f"正在基于 {source_label} 检测选中节点: {node_summary}")
 
-    def _fastest_subscription_node(self):
+        def run():
+            try:
+                result = remote_proxy.assess_proxy_node_quality(
+                    item.node,
+                    timeout=5.0,
+                    settings=settings,
+                    enabled_services=services,
+                )
+                payload = {"ok": True, "result": result, "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_busy(False)
+                if not payload["ok"]:
+                    message = f"选中节点质量检测失败: {payload['error']}"
+                    self._set_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+                result = payload["result"]
+                node_key = remote_proxy.proxy_node_key(item.node)
+                self._quality_results[node_key] = result
+                self._prefer_quality_sort = True
+                save_error = ""
+                try:
+                    remote_proxy.save_proxy_subscription_qualities(self._quality_results)
+                except Exception as exc:
+                    save_error = str(exc)
+                self._set_subscription_nodes(self._subscription_nodes, preserve_key=node_key)
+                label = remote_proxy.proxy_node_quality_label(result)
+                score = remote_proxy.proxy_node_quality_score(result)
+                basis = remote_proxy.proxy_node_quality_source_label(result)
+                detail = remote_proxy.proxy_node_quality_detail(result)
+                message = f"选中节点检测完成: 基于 {basis}，{label} 评分{score}"
+                if detail:
+                    message += f"；{detail}"
+                if save_error:
+                    message += f" 质量结果缓存失败: {save_error}"
+                severity = "success" if result.ok and not save_error else "warning"
+                self._set_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _fastest_subscription_node(self, nodes=None):
         fastest = None
         fastest_latency = None
-        for item in self._subscription_nodes:
+        for item in (nodes if nodes is not None else self._subscription_nodes):
             result = self._latency_results.get(remote_proxy.proxy_node_key(item.node))
             latency = remote_proxy.proxy_node_latency_ms(result)
             if latency is None or not remote_proxy.proxy_node_latency_ok(result):

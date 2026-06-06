@@ -436,6 +436,8 @@ def test_assess_proxy_node_quality_classifies_proxycheck_residential():
     assert result.quality_label == "家宽高质"
     assert result.quality_score >= 90
     assert result.risk_score == 8
+    assert result.sources == (network_diagnostic_settings.SERVICE_PROXYCHECK,)
+    assert remote_proxy.proxy_node_quality_source_label(result) == "ProxyCheck"
     assert remote_proxy.proxy_node_quality_for_ai_proxy_ok(result) is True
 
 
@@ -457,6 +459,7 @@ def test_assess_proxy_node_quality_returns_failure_when_provider_raises():
     assert result.ok is False
     assert result.ip == "198.51.100.88"
     assert result.quality_label == "检测失败"
+    assert result.sources == (network_diagnostic_settings.SERVICE_PROXYCHECK,)
     assert "quota exploded" in result.detail
 
 

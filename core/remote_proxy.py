@@ -224,6 +224,7 @@ class ProxyNodeQualityResult:
     quality_label: str = ""
     detail: str = ""
     checked_at: str = ""
+    sources: tuple[str, ...] = ()
 
     def label(self) -> str:
         if not self.ok:
@@ -469,6 +470,7 @@ def save_proxy_subscription_qualities(qualities: dict[str, ProxyNodeQualityResul
             "quality_label": proxy_node_quality_label(result),
             "detail": proxy_node_quality_detail(result),
             "checked_at": proxy_node_quality_checked_at(result) or _now_iso(),
+            "sources": list(proxy_node_quality_sources(result)),
         }
     return save_proxy_subscription_state(node_qualities=payload, node_qualities_updated_at=_now_iso())
 
@@ -524,6 +526,7 @@ def load_proxy_subscription_qualities() -> dict[str, dict]:
             "quality_label": str(value.get("quality_label") or "")[:60],
             "detail": str(value.get("detail") or "")[:220],
             "checked_at": str(value.get("checked_at") or "")[:40],
+            "sources": list(network_diagnostic_settings.normalize_services(value.get("sources") or [])),
         }
     return results
 
@@ -719,12 +722,23 @@ def assess_proxy_node_quality(
     try:
         settings = settings or network_diagnostic_settings.load_settings()
         if enabled_services is not None:
-            services = enabled_services
+            services = network_diagnostic_settings.normalize_services(enabled_services)
         elif hasattr(settings, "enabled_services"):
             services = settings.enabled_services()
         else:
             services = []
+        service_set = set(services)
         http_get = http_get or network_diagnostics._http_get
+        if network_diagnostic_settings.SERVICE_PING0 in service_set:
+            ping0 = network_diagnostics.lookup_ping0_quality(
+                ip,
+                "默认出口",
+                timeout,
+                http_get,
+                api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_PING0),
+            )
+        else:
+            ping0 = network_diagnostics._disabled_ping0_quality(ip)
         reputation = network_diagnostics.lookup_reputation(
             ip,
             timeout,
@@ -735,19 +749,25 @@ def assess_proxy_node_quality(
             vpnapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_VPNAPI),
         )
         geo = network_diagnostics.lookup_geo(ip, timeout, http_get)
-        classification = network_diagnostics.classify_ip(geo, reputation=reputation)
+        classification = network_diagnostics.classify_ip(geo, ping0=ping0, reputation=reputation)
     except Exception as exc:
         return _proxy_node_quality_error_result(
             normalized,
             "检测失败",
             str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
             ip=ip,
+            sources=services,
         )
     quality_score = _proxy_quality_score(classification)
     quality_label = _proxy_quality_label(classification, quality_score)
     detail_parts = []
     if geo.ok and geo.owner_text() != "-":
         detail_parts.append(geo.owner_text())
+    if network_diagnostic_settings.SERVICE_PING0 in service_set:
+        if ping0.has_paid_quality:
+            detail_parts.append(ping0.quality_text())
+        elif ping0.error:
+            detail_parts.append(f"Ping0: {ping0.error}")
     for item in reputation:
         if item.ok:
             detail_parts.append(item.summary_text())
@@ -766,6 +786,7 @@ def assess_proxy_node_quality(
         quality_label=quality_label,
         detail="；".join(detail_parts[:3])[:220],
         checked_at=_now_iso(),
+        sources=tuple(services),
     )
 
 
@@ -1014,6 +1035,32 @@ def proxy_node_quality_checked_at(result: ProxyNodeQualityResult | dict | None) 
     if isinstance(result, dict):
         return str(result.get("checked_at") or "")
     return ""
+
+
+def proxy_node_quality_sources(result: ProxyNodeQualityResult | dict | None) -> tuple[str, ...]:
+    if isinstance(result, ProxyNodeQualityResult):
+        return tuple(network_diagnostic_settings.normalize_services(list(result.sources or ())))
+    if isinstance(result, dict):
+        return tuple(network_diagnostic_settings.normalize_services(result.get("sources") or []))
+    return ()
+
+
+def proxy_node_quality_source_label(result: ProxyNodeQualityResult | dict | None) -> str:
+    sources = proxy_node_quality_sources(result)
+    if not sources:
+        return "未标明检测源"
+    return " + ".join(network_diagnostic_settings.SERVICE_LABELS.get(source, source) for source in sources)
+
+
+def quality_source_label_from_settings(settings=None, enabled_services=None) -> str:
+    if enabled_services is not None:
+        services = network_diagnostic_settings.normalize_services(enabled_services)
+    else:
+        settings = settings or network_diagnostic_settings.load_settings()
+        services = settings.enabled_services() if hasattr(settings, "enabled_services") else []
+    if not services:
+        return "未启用检测源"
+    return " + ".join(network_diagnostic_settings.SERVICE_LABELS.get(service, service) for service in services)
 
 
 def proxy_node_quality_for_ai_proxy_ok(result: ProxyNodeQualityResult | dict | None) -> bool:
@@ -2128,7 +2175,13 @@ def _diagnostic_settings_keys(settings, service: str) -> list[str]:
     return []
 
 
-def _proxy_node_quality_error_result(node: dict, quality_label: str, detail: str, ip: str = "") -> ProxyNodeQualityResult:
+def _proxy_node_quality_error_result(
+    node: dict,
+    quality_label: str,
+    detail: str,
+    ip: str = "",
+    sources=None,
+) -> ProxyNodeQualityResult:
     normalized = _normalize_proxy_node(node)
     return ProxyNodeQualityResult(
         node_key=proxy_node_key(normalized),
@@ -2139,6 +2192,7 @@ def _proxy_node_quality_error_result(node: dict, quality_label: str, detail: str
         quality_label=str(quality_label or "检测失败")[:60],
         detail=str(detail or "节点服务器 IP 质量检测失败")[:220],
         checked_at=_now_iso(),
+        sources=tuple(network_diagnostic_settings.normalize_services(sources or [])),
     )
 
 

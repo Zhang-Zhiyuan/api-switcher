@@ -1,5 +1,4 @@
 import threading
-import webbrowser
 from pathlib import Path
 from tkinter import filedialog
 
@@ -10,6 +9,7 @@ from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from core import (
     profile_manager,
+    network_diagnostic_settings,
     remote_auto_continue,
     remote_git_login,
     remote_proxy,
@@ -653,9 +653,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._proxy_ping0_button = ctk.CTkButton(
             proxy_node_actions,
-            text="选中节点 Ping0",
+            text="检测选中节点",
             width=98,
-            command=self._open_selected_proxy_subscription_ping0,
+            command=self._measure_selected_proxy_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
         )
@@ -1713,7 +1713,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._set_proxy_status("无法打开代理质量检测窗口。", "error")
         show_toast(top, "无法打开代理质量检测窗口", is_error=True)
 
-    def _open_selected_proxy_subscription_ping0(self):
+    def _measure_selected_proxy_subscription_quality(self):
         if not self._proxy_subscription_picker:
             return
         item = self._proxy_subscription_picker.selected_item()
@@ -1722,21 +1722,68 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
-        try:
-            url = remote_proxy.ping0_detail_url_for_proxy_node(item.node)
-            opened = webbrowser.open(url)
-        except Exception as exc:
-            message = f"打开当前节点 Ping0 详情失败: {exc}"
-            self._set_proxy_status(message, "error")
+        settings = network_diagnostic_settings.load_settings()
+        services = settings.enabled_services()
+        source_label = remote_proxy.quality_source_label_from_settings(settings, services)
+        if not services:
+            message = "请先在“质量检测源”启用至少一个检测源"
+            self._set_proxy_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
-        if not opened:
-            message = "打开当前节点 Ping0 详情失败，请检查系统默认浏览器"
-            self._set_proxy_status(message, "error")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
-        self._set_proxy_status(f"已打开当前节点 Ping0 详情: {remote_proxy.describe_proxy_node(item.node)}", "success")
-        show_toast(self.winfo_toplevel(), "已打开当前选中节点的 Ping0 详情")
+        node_summary = remote_proxy.describe_proxy_node(item.node)
+        self._set_proxy_busy(True)
+        self._set_proxy_status(f"正在基于 {source_label} 检测选中节点: {node_summary}")
+
+        def run():
+            try:
+                result = remote_proxy.assess_proxy_node_quality(
+                    item.node,
+                    timeout=5.0,
+                    settings=settings,
+                    enabled_services=services,
+                )
+                payload = {"ok": True, "result": result, "error": None}
+            except Exception as e:
+                payload = {"ok": False, "result": None, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists():
+                    return
+                self._set_proxy_busy(False)
+                if not payload["ok"]:
+                    message = f"选中节点质量检测失败: {payload['error']}"
+                    self._set_proxy_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+                result = payload["result"]
+                node_key = remote_proxy.proxy_node_key(item.node)
+                self._proxy_quality_results[node_key] = result
+                self._proxy_prefer_quality_sort = True
+                save_error = ""
+                try:
+                    remote_proxy.save_proxy_subscription_qualities(self._proxy_quality_results)
+                except Exception as exc:
+                    save_error = str(exc)
+                self._set_proxy_subscription_nodes(self._proxy_subscription_nodes, preserve_key=node_key)
+                label = remote_proxy.proxy_node_quality_label(result)
+                score = remote_proxy.proxy_node_quality_score(result)
+                basis = remote_proxy.proxy_node_quality_source_label(result)
+                detail = remote_proxy.proxy_node_quality_detail(result)
+                message = f"选中节点检测完成: 基于 {basis}，{label} 评分{score}"
+                if detail:
+                    message += f"；{detail}"
+                if save_error:
+                    message += f" 质量结果缓存失败: {save_error}"
+                severity = "success" if result.ok and not save_error else "warning"
+                self._set_proxy_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _measure_proxy_subscription_latencies(self):
         if self._proxy_busy:
@@ -1752,7 +1799,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         target_label = self._format_server_target(server_names)
-        node_count = len(self._proxy_subscription_nodes)
+        scope_nodes = self._proxy_subscription_batch_nodes()
+        scope_label = self._proxy_subscription_batch_scope_label()
+        node_count = len(scope_nodes)
+        if not scope_nodes:
+            message = "当前节点分组没有可测速的节点"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
 
         def done(payload):
             if not payload["ok"]:
@@ -1765,13 +1819,21 @@ class SSHTab(ctk.CTkScrollableFrame):
             failures = result.get("failures", [])
             server_results = result.get("results", {})
             self._proxy_latency_server_count = len(server_names)
-            self._proxy_latency_results = self._aggregate_proxy_latency_results(server_results, len(server_names))
+            self._proxy_latency_results.update(
+                self._aggregate_proxy_latency_results(server_results, len(server_names), scope_nodes)
+            )
             self._proxy_prefer_quality_sort = False
             self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
-            fastest = self._fastest_proxy_subscription_node()
-            ok_nodes = sum(1 for item in self._proxy_latency_results.values() if remote_proxy.proxy_node_latency_ok(item))
+            fastest = self._fastest_proxy_subscription_node(scope_nodes)
+            ok_nodes = sum(
+                1
+                for item in scope_nodes
+                if remote_proxy.proxy_node_latency_ok(
+                    self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
+                )
+            )
             if not fastest:
-                message = f"{target_label}: 测速完成，但没有发现可连节点。"
+                message = f"{target_label}: 基于 {scope_label} 测速完成，但没有发现可连节点。"
                 if failures:
                     message += " 失败: " + "；".join(failures)
                 self._set_proxy_status(message, "warning")
@@ -1786,7 +1848,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             detail = remote_proxy.proxy_node_latency_detail(self._proxy_latency_results.get(fastest_key))
             target_detail = f"{detail}，" if detail and len(server_names) > 1 else ""
             message = (
-                f"{target_label}: 已完成 {node_count} 个节点远端测速，"
+                f"{target_label}: 已基于 {scope_label} 完成 {node_count} 个节点远端测速，"
                 f"{ok_nodes} 个可连；已选择最快节点【{region}】{target_detail}{latency}。"
             )
             if failures:
@@ -1798,21 +1860,32 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
 
         self._run_proxy_ssh_task(
-            f"正在从 {target_label} 测试 {node_count} 个订阅节点延迟，完成后自动选择最低延迟节点...",
-            lambda: self._measure_proxy_nodes_for_servers(server_names),
+            f"正在从 {target_label} 测试 {scope_label} 的远端延迟，完成后自动选择该范围内最低延迟节点...",
+            lambda: self._measure_proxy_nodes_for_servers(server_names, scope_nodes),
             on_done=done,
         )
 
-    def _proxy_quality_candidate_nodes(self):
+    def _proxy_subscription_batch_nodes(self):
+        if self._proxy_subscription_picker:
+            return self._proxy_subscription_picker.batch_items()
+        return list(self._proxy_subscription_nodes)
+
+    def _proxy_subscription_batch_scope_label(self) -> str:
+        if self._proxy_subscription_picker:
+            return self._proxy_subscription_picker.batch_scope_label()
+        return f"全部 {len(self._proxy_subscription_nodes)} 个节点"
+
+    def _proxy_quality_candidate_nodes(self, nodes=None):
+        base_nodes = list(nodes if nodes is not None else self._proxy_subscription_batch_nodes())
         candidates = []
         measured_any = False
-        for item in self._proxy_subscription_nodes:
+        for item in base_nodes:
             result = self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
             if result is not None:
                 measured_any = True
             if remote_proxy.proxy_node_latency_ok(result):
                 candidates.append(item)
-        return candidates if measured_any else list(self._proxy_subscription_nodes)
+        return candidates if measured_any else base_nodes
 
     def _measure_proxy_subscription_qualities(self):
         if self._proxy_busy:
@@ -1824,7 +1897,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
-        candidates = self._proxy_quality_candidate_nodes()
+        scope_nodes = self._proxy_subscription_batch_nodes()
+        scope_label = self._proxy_subscription_batch_scope_label()
+        candidates = self._proxy_quality_candidate_nodes(scope_nodes)
         if not candidates:
             message = "当前远端测速结果里没有可连节点；请先重新测速，再检测 AI 代理高质量节点。"
             self._set_proxy_status(message, "warning")
@@ -1832,9 +1907,17 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         node_count = len(candidates)
+        settings = network_diagnostic_settings.load_settings()
+        services = settings.enabled_services()
+        source_label = remote_proxy.quality_source_label_from_settings(settings, services)
+        if not services:
+            message = "请先在“质量检测源”启用至少一个检测源"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
         self._set_proxy_busy(True)
         self._set_proxy_status(
-            f"正在检测 {node_count} 个候选订阅节点的服务器 IP 质量；完成后会优先选择家宽、低风险节点..."
+            f"正在基于 {source_label} 检测 {scope_label} 中 {node_count} 个候选节点；完成后优先选择家宽、低风险节点..."
         )
 
         def run():
@@ -1843,6 +1926,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                     tuple(candidates),
                     timeout=5.0,
                     max_workers=8,
+                    settings=settings,
+                    enabled_services=services,
                 )
                 payload = {"ok": True, "result": results, "error": None}
             except Exception as e:
@@ -1868,20 +1953,20 @@ class SSHTab(ctk.CTkScrollableFrame):
 
                 self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
                 best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
-                    self._proxy_subscription_nodes,
+                    candidates,
                     self._proxy_quality_results,
                     self._proxy_latency_results,
                 )
                 tested_count = sum(
                     1
-                    for item in self._proxy_subscription_nodes
+                    for item in candidates
                     if remote_proxy.proxy_node_quality_measured(
                         self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
                 high_count = sum(
                     1
-                    for item in self._proxy_subscription_nodes
+                    for item in candidates
                     if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
                         self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
@@ -1901,9 +1986,10 @@ class SSHTab(ctk.CTkScrollableFrame):
                 region = remote_proxy.proxy_node_region(best.node)
                 label = remote_proxy.proxy_node_quality_label(quality)
                 score = remote_proxy.proxy_node_quality_score(quality)
+                basis = remote_proxy.proxy_node_quality_source_label(quality)
                 severity = "success" if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality) and not save_error else "warning"
                 message = (
-                    f"质量检测完成: 家宽高质 {high_count}/{tested_count}；"
+                    f"质量检测完成: 基于 {basis}，{scope_label} 家宽高质 {high_count}/{tested_count}；"
                     f"已选择【{region}】{label} 评分{score}。"
                 )
                 if save_error:
@@ -1918,14 +2004,15 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _measure_proxy_nodes_for_servers(self, server_names: list[str]) -> dict:
+    def _measure_proxy_nodes_for_servers(self, server_names: list[str], nodes=None) -> dict:
+        measure_nodes = tuple(nodes if nodes is not None else self._proxy_subscription_nodes)
         results = {}
         failures = []
         for server_name in server_names:
             try:
                 results[server_name] = remote_proxy.measure_proxy_node_latencies_on_server(
                     server_name,
-                    tuple(self._proxy_subscription_nodes),
+                    measure_nodes,
                     timeout=3.0,
                     attempts=2,
                     max_workers=20,
@@ -1934,9 +2021,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 failures.append(f"{server_name}: {e}")
         return {"results": results, "failures": failures, "server_names": server_names}
 
-    def _aggregate_proxy_latency_results(self, server_results: dict, server_count: int) -> dict:
+    def _aggregate_proxy_latency_results(self, server_results: dict, server_count: int, nodes=None) -> dict:
         aggregate = {}
-        for item in self._proxy_subscription_nodes:
+        for item in (nodes if nodes is not None else self._proxy_subscription_nodes):
             key = remote_proxy.proxy_node_key(item.node)
             latencies = []
             details = []
@@ -1970,10 +2057,10 @@ class SSHTab(ctk.CTkScrollableFrame):
                 )
         return aggregate
 
-    def _fastest_proxy_subscription_node(self):
+    def _fastest_proxy_subscription_node(self, nodes=None):
         fastest = None
         fastest_latency = None
-        for item in self._proxy_subscription_nodes:
+        for item in (nodes if nodes is not None else self._proxy_subscription_nodes):
             result = self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
             latency = remote_proxy.proxy_node_latency_ms(result)
             if latency is None or not remote_proxy.proxy_node_latency_ok(result):

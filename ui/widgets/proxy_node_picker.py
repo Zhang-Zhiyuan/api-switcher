@@ -19,11 +19,13 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._latency_results = {}
         self._quality_results = {}
         self._selected_key = ""
+        self._checked_keys = set()
         self._enabled = True
         self._search_entry = None
         self._filter_combo = None
         self._region_combo = None
         self._quality_combo = None
+        self._batch_buttons = []
         self._summary_label = None
         self._list_frame = None
         self._build_ui()
@@ -72,7 +74,25 @@ class ProxyNodePicker(ctk.CTkFrame):
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
-        self._quality_combo.pack(side="left")
+        self._quality_combo.pack(side="left", padx=(0, 8))
+
+        match_button = ctk.CTkButton(
+            filter_bar,
+            text="勾选匹配",
+            width=74,
+            command=lambda: self._set_matching_checked(True),
+            **button_style("secondary", compact=True),
+        )
+        match_button.pack(side="left", padx=(0, 6))
+        clear_button = ctk.CTkButton(
+            filter_bar,
+            text="清空勾选",
+            width=74,
+            command=lambda: self._set_matching_checked(False),
+            **button_style("secondary", compact=True),
+        )
+        clear_button.pack(side="left")
+        self._batch_buttons = [match_button, clear_button]
 
         self._summary_label = ctk.CTkLabel(
             self,
@@ -109,12 +129,13 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._selected_key = self._node_key(self._nodes[0])
         if not self._nodes:
             self._selected_key = ""
+        self._checked_keys.intersection_update(available_keys)
         self._render_nodes()
 
     def set_enabled(self, enabled: bool):
         self._enabled = bool(enabled)
         state = "normal" if self._enabled else "disabled"
-        for widget in (self._search_entry, self._filter_combo, self._region_combo, self._quality_combo):
+        for widget in (self._search_entry, self._filter_combo, self._region_combo, self._quality_combo, *self._batch_buttons):
             if widget:
                 try:
                     widget.configure(state=state)
@@ -130,6 +151,31 @@ class ProxyNodePicker(ctk.CTkFrame):
             if self._node_key(item) == self._selected_key:
                 return item
         return None
+
+    def checked_items(self) -> list:
+        if not self._checked_keys:
+            return []
+        return [item for item in self._nodes if self._node_key(item) in self._checked_keys]
+
+    def filtered_items(self) -> list:
+        return list(self._filtered_nodes())
+
+    def batch_items(self) -> list:
+        checked = self.checked_items()
+        if checked:
+            return checked
+        filtered = self.filtered_items()
+        if self._has_active_filters():
+            return filtered
+        return list(self._nodes)
+
+    def batch_scope_label(self) -> str:
+        checked_count = len(self._checked_keys)
+        if checked_count:
+            return f"已勾选 {checked_count} 个节点"
+        if self._has_active_filters():
+            return f"当前筛选 {len(self._filtered_nodes())} 个节点"
+        return f"全部 {len(self._nodes)} 个节点"
 
     def select_by_key(self, node_key: str) -> bool:
         key = str(node_key or "")
@@ -154,6 +200,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         measured_count = sum(1 for item in self._nodes if self._latency_for(item) is not None)
         quality_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_measured(self._quality_for(item)))
         high_quality_count = sum(1 for item in self._nodes if remote_proxy.proxy_node_quality_for_ai_proxy_ok(self._quality_for(item)))
+        checked_count = len(self._checked_keys)
         visible = matches[: self.MAX_VISIBLE_ROWS]
         selected_item = self.selected_item()
         if selected_item in matches and selected_item not in visible:
@@ -166,7 +213,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._summary_label.configure(
                 text=(
                     f"节点 {total} 个；可连 {ok_count}；延迟已测 {measured_count}；"
-                    f"质量已测 {quality_count}；家宽高质 {high_quality_count}；匹配 {len(matches)} 个{suffix}"
+                    f"质量已测 {quality_count}；家宽高质 {high_quality_count}；"
+                    f"批量勾选 {checked_count}；匹配 {len(matches)} 个{suffix}"
                 )
             )
 
@@ -179,8 +227,57 @@ class ProxyNodePicker(ctk.CTkFrame):
             ).pack(fill="x", padx=12, pady=16)
             return
 
-        for item in visible:
-            self._render_row(item)
+        for region, group_items in self._group_visible_nodes(visible):
+            self._render_group_header(region, group_items)
+            for item in group_items:
+                self._render_row(item)
+
+    def _group_visible_nodes(self, items):
+        groups = []
+        current_region = None
+        current_items = []
+        for item in items:
+            region = remote_proxy.proxy_node_region(item.node)
+            if current_items and region != current_region:
+                groups.append((current_region, current_items))
+                current_items = []
+            current_region = region
+            current_items.append(item)
+        if current_items:
+            groups.append((current_region, current_items))
+        return groups
+
+    def _render_group_header(self, region: str, items):
+        keys = [self._node_key(item) for item in items]
+        checked = sum(1 for key in keys if key in self._checked_keys)
+        ok_count = sum(1 for item in items if remote_proxy.proxy_node_latency_ok(self._latency_for(item)))
+        high_count = sum(1 for item in items if remote_proxy.proxy_node_quality_for_ai_proxy_ok(self._quality_for(item)))
+        header = ctk.CTkFrame(self._list_frame, fg_color=COLORS["surface_alt"], corner_radius=6)
+        header.pack(fill="x", padx=6, pady=(8, 0))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text=f"{region or '其他'}  {len(items)} 个 · 可连 {ok_count} · 家宽高质 {high_count} · 已勾选 {checked}",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=6)
+        ctk.CTkButton(
+            header,
+            text="全选",
+            width=48,
+            state="normal" if self._enabled else "disabled",
+            command=lambda group_keys=tuple(keys): self._set_group_checked(group_keys, True),
+            **button_style("secondary", compact=True),
+        ).grid(row=0, column=1, sticky="e", padx=(0, 6), pady=5)
+        ctk.CTkButton(
+            header,
+            text="清空",
+            width=48,
+            state="normal" if self._enabled else "disabled",
+            command=lambda group_keys=tuple(keys): self._set_group_checked(group_keys, False),
+            **button_style("secondary", compact=True),
+        ).grid(row=0, column=2, sticky="e", padx=(0, 8), pady=5)
 
     def _render_row(self, item):
         node_key = self._node_key(item)
@@ -204,16 +301,30 @@ class ProxyNodePicker(ctk.CTkFrame):
             **card_frame_kwargs(COLORS["primary"] if selected else COLORS["border_soft"]),
         )
         row.pack(fill="x", padx=6, pady=(6, 0))
-        row.grid_columnconfigure(1, weight=1)
+        row.grid_columnconfigure(2, weight=1)
+
+        checked_var = ctk.BooleanVar(value=node_key in self._checked_keys)
+        ctk.CTkCheckBox(
+            row,
+            text="",
+            width=24,
+            checkbox_width=16,
+            checkbox_height=16,
+            variable=checked_var,
+            state="normal" if self._enabled else "disabled",
+            command=lambda key=node_key, var=checked_var: self._toggle_checked(key, var.get()),
+            text_color=COLORS["muted"],
+            font=font(11),
+        ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(8, 4), pady=8)
 
         ctk.CTkButton(
             row,
             text="已选" if selected else "选择",
-            width=56,
+            width=50,
             state="normal" if self._enabled else "disabled",
             command=lambda key=node_key: self._select(key),
             **button_style("primary" if selected else "secondary", compact=True),
-        ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(8, 8), pady=8)
+        ).grid(row=0, column=1, rowspan=2, sticky="w", padx=(4, 8), pady=8)
 
         title = str(node.get("name") or item.display_name())
         title_label = ctk.CTkLabel(
@@ -224,14 +335,17 @@ class ProxyNodePicker(ctk.CTkFrame):
             anchor="w",
             justify="left",
         )
-        title_label.grid(row=0, column=1, sticky="ew", pady=(8, 0))
-        bind_wraplength(row, title_label, padding=250, min_width=180, max_width=760)
+        title_label.grid(row=0, column=2, sticky="ew", pady=(8, 0))
+        bind_wraplength(row, title_label, padding=280, min_width=180, max_width=760)
 
         meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
         if remote_proxy.proxy_node_quality_measured(quality):
             quality_part = f"{quality_label} {quality_score}"
             if quality_ip:
                 quality_part += f" {quality_ip}"
+            source_label = remote_proxy.proxy_node_quality_source_label(quality)
+            if source_label and source_label != "未标明检测源":
+                quality_part += f" 基于{source_label}"
             meta_parts.append(quality_part)
         elif quality:
             meta_parts.append(quality_label)
@@ -245,8 +359,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             anchor="w",
             justify="left",
         )
-        meta_label.grid(row=1, column=1, sticky="ew", pady=(1, 8))
-        bind_wraplength(row, meta_label, padding=250, min_width=180, max_width=760)
+        meta_label.grid(row=1, column=2, sticky="ew", pady=(1, 8))
+        bind_wraplength(row, meta_label, padding=280, min_width=180, max_width=760)
 
         ctk.CTkLabel(
             row,
@@ -255,7 +369,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             font=font(12, "bold"),
             width=64,
             anchor="e",
-        ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 10))
+        ).grid(row=0, column=3, rowspan=2, sticky="e", padx=(8, 10))
 
         ctk.CTkLabel(
             row,
@@ -264,7 +378,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             font=font(11, "bold"),
             width=82,
             anchor="e",
-        ).grid(row=0, column=3, rowspan=2, sticky="e", padx=(0, 10))
+        ).grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 10))
 
     def _select(self, node_key: str):
         self._selected_key = node_key
@@ -272,6 +386,30 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_nodes()
         if item and self._on_select:
             self._on_select(item)
+
+    def _toggle_checked(self, node_key: str, checked: bool):
+        if checked:
+            self._checked_keys.add(node_key)
+        else:
+            self._checked_keys.discard(node_key)
+        self._render_nodes()
+
+    def _set_group_checked(self, keys, checked: bool):
+        if checked:
+            self._checked_keys.update(keys)
+        else:
+            for key in keys:
+                self._checked_keys.discard(key)
+        self._render_nodes()
+
+    def _set_matching_checked(self, checked: bool):
+        keys = [self._node_key(item) for item in self._filtered_nodes()]
+        if checked:
+            self._checked_keys.update(keys)
+        else:
+            for key in keys:
+                self._checked_keys.discard(key)
+        self._render_nodes()
 
     def _filtered_nodes(self):
         query = self._search_text()
@@ -315,6 +453,17 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not self._search_entry:
             return ""
         return self._search_entry.get().strip().casefold()
+
+    def _has_active_filters(self) -> bool:
+        mode = self._filter_combo.get() if self._filter_combo else "全部"
+        region_filter = self._region_combo.get() if self._region_combo else self.REGION_ALL
+        quality_filter = self._quality_combo.get() if self._quality_combo else "全部质量"
+        return bool(
+            self._search_text()
+            or mode != "全部"
+            or (region_filter and region_filter != self.REGION_ALL)
+            or quality_filter != "全部质量"
+        )
 
     def _search_blob(self, item) -> str:
         node = item.node
