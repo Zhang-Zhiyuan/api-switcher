@@ -2289,7 +2289,9 @@ def _proxy_quality_score(classification: network_diagnostics.IpClassification) -
     risk = max(0, min(100, int(classification.risk_score)))
     score = 100 - risk
     ip_type = str(classification.ip_type or "")
-    if any(marker in ip_type for marker in ("家庭宽带", "住宅", "家庭/非IDC", "运营商/宽带")):
+    if "高风险" in ip_type:
+        score -= 35
+    elif any(marker in ip_type for marker in ("家庭宽带", "住宅", "家庭/非IDC", "运营商/宽带")):
         score += 18
     elif "蜂窝" in ip_type or "移动网络" in ip_type:
         score -= 8
@@ -2299,8 +2301,6 @@ def _proxy_quality_score(classification: network_diagnostics.IpClassification) -
         score -= 38
     elif "代理" in ip_type or "VPN" in ip_type or "Tor" in ip_type or "匿名" in ip_type:
         score -= 65
-    elif "高风险" in ip_type:
-        score -= 35
     return max(0, min(100, score))
 
 
@@ -2309,6 +2309,8 @@ def _proxy_quality_label(classification: network_diagnostics.IpClassification, s
     risk = int(classification.risk_score)
     if "冲突" in ip_type:
         return "来源冲突"
+    if "高风险" in ip_type:
+        return "高风险"
     if any(marker in ip_type for marker in ("家庭宽带", "住宅", "家庭/非IDC", "运营商/宽带")):
         if score >= 80 and risk <= 35:
             return "家宽高质"
@@ -2321,8 +2323,6 @@ def _proxy_quality_label(classification: network_diagnostics.IpClassification, s
         return "机房风险"
     if "代理" in ip_type or "VPN" in ip_type or "Tor" in ip_type or "匿名" in ip_type:
         return "代理风险"
-    if "高风险" in ip_type:
-        return "高风险"
     if score >= 75 and risk <= 35:
         return "低风险"
     return "质量未知"

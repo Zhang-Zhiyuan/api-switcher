@@ -651,7 +651,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if remote_proxy.proxy_node_quality_for_ai_proxy_ok(result):
             return COLORS["success"]
         label = remote_proxy.proxy_node_quality_label(result)
-        if "代理" in label or "机房" in label:
+        if any(marker in label for marker in ("代理", "机房", "高风险", "冲突")):
             return COLORS["danger"]
         if remote_proxy.proxy_node_quality_score(result) >= 65:
             return COLORS["warning"]
@@ -679,7 +679,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             return any(marker in label_text or marker in ip_type_text for marker in ("机房", "idc", "hosting", "datacenter", "business", "商宽", "企业"))
         if mode == "代理风险":
             return quality_score <= 40 or any(
-                marker in label_text or marker in ip_type_text for marker in ("代理", "vpn", "tor", "proxy", "匿名")
+                marker in label_text or marker in ip_type_text
+                for marker in ("代理", "vpn", "tor", "proxy", "匿名", "高风险", "冲突")
             )
         return True
 
