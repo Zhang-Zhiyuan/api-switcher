@@ -1,3 +1,5 @@
+import webbrowser
+
 import customtkinter as ctk
 
 from core import remote_proxy
@@ -205,6 +207,14 @@ class ProxyNodePicker(ctk.CTkFrame):
             anchor="e",
         ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 10))
 
+        ctk.CTkButton(
+            row,
+            text="Ping0",
+            width=58,
+            command=lambda current=node: self._open_ping0(current),
+            **button_style("accent", compact=True),
+        ).grid(row=0, column=3, rowspan=2, sticky="e", padx=(0, 8), pady=8)
+
     def _select(self, node_key: str):
         self._selected_key = node_key
         item = self.selected_item()
@@ -258,3 +268,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         if result is None:
             return COLORS["muted_soft"]
         return COLORS["danger"]
+
+    def _open_ping0(self, node: dict):
+        try:
+            webbrowser.open(remote_proxy.ping0_detail_url_for_proxy_node(node))
+        except Exception:
+            return

@@ -477,6 +477,14 @@ def proxy_node_region(node: dict) -> str:
     return PROXY_REGION_TLD_MAP.get(tld, "其他")
 
 
+def ping0_detail_url_for_proxy_node(node: dict) -> str:
+    normalized = _normalize_proxy_node(node)
+    target = str(normalized.get("server") or "").strip().strip("[]")
+    if not target:
+        raise ValueError("代理节点缺少服务器地址，无法打开 Ping0")
+    return "https://ping0.cc/ip/" + urlparse.quote(target, safe=":.")
+
+
 def sort_proxy_subscription_nodes(
     nodes,
     latency_results: dict[str, ProxyNodeLatencyResult | dict] | None = None,

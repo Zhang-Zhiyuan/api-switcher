@@ -24,6 +24,27 @@ def test_parse_proxy_node_accepts_clash_inline_map():
     assert node["tls"] is False
 
 
+def test_ping0_detail_url_for_proxy_node_supports_ip_domain_and_ipv6():
+    assert remote_proxy.ping0_detail_url_for_proxy_node({
+        "name": "ipv4",
+        "type": "vless",
+        "server": "8.8.8.8",
+        "port": 443,
+    }) == "https://ping0.cc/ip/8.8.8.8"
+    assert remote_proxy.ping0_detail_url_for_proxy_node({
+        "name": "domain",
+        "type": "vless",
+        "server": "node.example.com",
+        "port": 443,
+    }) == "https://ping0.cc/ip/node.example.com"
+    assert remote_proxy.ping0_detail_url_for_proxy_node({
+        "name": "ipv6",
+        "type": "vless",
+        "server": "[2001:4860:4860::8888]",
+        "port": 443,
+    }) == "https://ping0.cc/ip/2001:4860:4860::8888"
+
+
 def test_build_mihomo_config_routes_only_ai_domains_to_proxy():
     config = remote_proxy.build_mihomo_config(
         {
