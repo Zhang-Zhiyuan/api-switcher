@@ -70,6 +70,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_button = None
         self._proxy_quality_settings_button = None
         self._proxy_ping0_button = None
+        self._proxy_subscription_action_hint_label = None
         self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
         self._proxy_auto_refresh_check = None
         self._proxy_periodic_update_var = ctk.BooleanVar(value=False)
@@ -611,6 +612,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_picker = ProxyNodePicker(
             proxy_controls,
             on_select=lambda _item: self._use_selected_proxy_subscription_node(show_message=False),
+            on_scope_change=self._refresh_proxy_subscription_action_hint,
         )
         self._proxy_subscription_picker.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._proxy_subscription_picker.set_enabled(False)
@@ -618,7 +620,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         proxy_node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
         self._proxy_latency_button = ctk.CTkButton(
             proxy_node_actions,
-            text="测速选最快",
+            text="范围测速",
             width=98,
             command=self._measure_proxy_subscription_latencies,
             state="disabled",
@@ -627,7 +629,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
         self._proxy_quality_button = ctk.CTkButton(
             proxy_node_actions,
-            text="测质选家宽",
+            text="范围测质",
             width=98,
             command=self._measure_proxy_subscription_qualities,
             state="disabled",
@@ -636,7 +638,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_button.pack(anchor="e", pady=(0, 6))
         self._proxy_use_node_button = ctk.CTkButton(
             proxy_node_actions,
-            text="填入待部署",
+            text="使用当前",
             width=98,
             command=self._use_selected_proxy_subscription_node,
             state="disabled",
@@ -645,7 +647,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_use_node_button.pack(anchor="e")
         self._proxy_quality_settings_button = ctk.CTkButton(
             proxy_node_actions,
-            text="质量检测源",
+            text="检测源",
             width=98,
             command=self._open_proxy_quality_dialog,
             **button_style("primary", compact=True),
@@ -653,13 +655,24 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._proxy_ping0_button = ctk.CTkButton(
             proxy_node_actions,
-            text="检测选中节点",
+            text="测当前质",
             width=98,
             command=self._measure_selected_proxy_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._proxy_ping0_button.pack(anchor="e", pady=(6, 0))
+        self._proxy_subscription_action_hint_label = ctk.CTkLabel(
+            proxy_node_actions,
+            text="范围: -\n源: -",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            width=106,
+            anchor="e",
+            justify="right",
+            wraplength=106,
+        )
+        self._proxy_subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
         self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
             text="待部署节点: 未选择",
@@ -1630,6 +1643,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_quality_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_ping0_button:
             self._proxy_ping0_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+        self._refresh_proxy_subscription_action_hint()
+
+    def _refresh_proxy_subscription_action_hint(self):
+        if not self._proxy_subscription_action_hint_label:
+            return
+        scope = self._proxy_subscription_picker.batch_scope_label() if self._proxy_subscription_picker else "-"
+        source = remote_proxy.quality_source_label_from_settings()
+        self._proxy_subscription_action_hint_label.configure(text=f"范围: {scope}\n源: {source}")
 
     def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
@@ -1704,6 +1725,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if hasattr(top, "_show_proxy_quality_dialog"):
             dialog = top._show_proxy_quality_dialog()
             if dialog is not None:
+                self._refresh_proxy_subscription_action_hint()
                 self._set_proxy_status("已打开代理质量检测；可配置检测源和 API Key 池。")
                 show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
             else:

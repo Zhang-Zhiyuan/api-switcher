@@ -12,9 +12,10 @@ class ProxyNodePicker(ctk.CTkFrame):
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     MAX_VISIBLE_ROWS = 120
 
-    def __init__(self, master, on_select=None, **kwargs):
+    def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._on_select = on_select
+        self._on_scope_change = on_scope_change
         self._nodes = []
         self._latency_results = {}
         self._quality_results = {}
@@ -26,6 +27,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._region_combo = None
         self._quality_combo = None
         self._batch_buttons = []
+        self._scope_label = None
         self._summary_label = None
         self._list_frame = None
         self._build_ui()
@@ -74,24 +76,37 @@ class ProxyNodePicker(ctk.CTkFrame):
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
-        self._quality_combo.pack(side="left", padx=(0, 8))
+        self._quality_combo.pack(side="left")
+
+        scope_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
+        scope_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        scope_bar.grid_columnconfigure(0, weight=1)
+
+        self._scope_label = ctk.CTkLabel(
+            scope_bar,
+            text="批量范围: 全部 0 个节点",
+            text_color=COLORS["muted_soft"],
+            font=font(11, "bold"),
+            anchor="w",
+        )
+        self._scope_label.grid(row=0, column=0, sticky="ew")
 
         match_button = ctk.CTkButton(
-            filter_bar,
-            text="勾选匹配",
-            width=74,
+            scope_bar,
+            text="勾选当前匹配",
+            width=104,
             command=lambda: self._set_matching_checked(True),
             **button_style("secondary", compact=True),
         )
-        match_button.pack(side="left", padx=(0, 6))
+        match_button.grid(row=0, column=1, sticky="e", padx=(8, 6))
         clear_button = ctk.CTkButton(
-            filter_bar,
-            text="清空勾选",
-            width=74,
+            scope_bar,
+            text="清空当前匹配",
+            width=104,
             command=lambda: self._set_matching_checked(False),
             **button_style("secondary", compact=True),
         )
-        clear_button.pack(side="left")
+        clear_button.grid(row=0, column=2, sticky="e")
         self._batch_buttons = [match_button, clear_button]
 
         self._summary_label = ctk.CTkLabel(
@@ -212,11 +227,12 @@ class ProxyNodePicker(ctk.CTkFrame):
         if self._summary_label:
             self._summary_label.configure(
                 text=(
-                    f"节点 {total} 个；可连 {ok_count}；延迟已测 {measured_count}；"
-                    f"质量已测 {quality_count}；家宽高质 {high_quality_count}；"
-                    f"批量勾选 {checked_count}；匹配 {len(matches)} 个{suffix}"
+                    f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"
+                    f"质量 {quality_count}；家宽高质 {high_quality_count}；"
+                    f"勾选 {checked_count}；匹配 {len(matches)} 个{suffix}"
                 )
             )
+        self._update_scope_label()
 
         if not visible:
             ctk.CTkLabel(
@@ -225,12 +241,14 @@ class ProxyNodePicker(ctk.CTkFrame):
                 text_color=COLORS["muted"],
                 font=font(12),
             ).pack(fill="x", padx=12, pady=16)
+            self._emit_scope_change()
             return
 
         for region, group_items in self._group_visible_nodes(visible):
             self._render_group_header(region, group_items)
             for item in group_items:
                 self._render_row(item)
+        self._emit_scope_change()
 
     def _group_visible_nodes(self, items):
         groups = []
@@ -257,23 +275,23 @@ class ProxyNodePicker(ctk.CTkFrame):
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             header,
-            text=f"{region or '其他'}  {len(items)} 个 · 可连 {ok_count} · 家宽高质 {high_count} · 已勾选 {checked}",
+            text=f"{region or '其他'} · {len(items)} 个 · 可连 {ok_count} · 家宽 {high_count} · 勾选 {checked}",
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=6)
         ctk.CTkButton(
             header,
-            text="全选",
-            width=48,
+            text="勾选本组",
+            width=72,
             state="normal" if self._enabled else "disabled",
             command=lambda group_keys=tuple(keys): self._set_group_checked(group_keys, True),
             **button_style("secondary", compact=True),
         ).grid(row=0, column=1, sticky="e", padx=(0, 6), pady=5)
         ctk.CTkButton(
             header,
-            text="清空",
-            width=48,
+            text="清空本组",
+            width=72,
             state="normal" if self._enabled else "disabled",
             command=lambda group_keys=tuple(keys): self._set_group_checked(group_keys, False),
             **button_style("secondary", compact=True),
@@ -319,7 +337,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         ctk.CTkButton(
             row,
-            text="已选" if selected else "选择",
+            text="当前" if selected else "使用",
             width=50,
             state="normal" if self._enabled else "disabled",
             command=lambda key=node_key: self._select(key),
@@ -410,6 +428,20 @@ class ProxyNodePicker(ctk.CTkFrame):
             for key in keys:
                 self._checked_keys.discard(key)
         self._render_nodes()
+
+    def _update_scope_label(self):
+        if not self._scope_label:
+            return
+        color = COLORS["accent"] if self._checked_keys else COLORS["warning"] if self._has_active_filters() else COLORS["muted_soft"]
+        self._scope_label.configure(text=f"批量范围: {self.batch_scope_label()}", text_color=color)
+
+    def _emit_scope_change(self):
+        if not self._on_scope_change:
+            return
+        try:
+            self._on_scope_change()
+        except Exception:
+            pass
 
     def _filtered_nodes(self):
         query = self._search_text()

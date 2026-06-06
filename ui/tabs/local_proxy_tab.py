@@ -25,6 +25,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_button = None
         self._quality_settings_button = None
         self._ping0_button = None
+        self._subscription_action_hint_label = None
         self._auto_refresh_var = ctk.BooleanVar(value=False)
         self._auto_refresh_check = None
         self._periodic_update_var = ctk.BooleanVar(value=False)
@@ -304,6 +305,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_picker = ProxyNodePicker(
             controls,
             on_select=lambda _item: self._use_selected_subscription_node(show_message=False),
+            on_scope_change=self._refresh_subscription_action_hint,
         )
         self._subscription_picker.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._subscription_picker.set_enabled(False)
@@ -311,7 +313,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
         self._latency_button = ctk.CTkButton(
             node_actions,
-            text="测速选最快",
+            text="范围测速",
             width=104,
             command=self._measure_subscription_latencies,
             state="disabled",
@@ -320,7 +322,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button.pack(anchor="e", pady=(0, 6))
         self._quality_button = ctk.CTkButton(
             node_actions,
-            text="测质选家宽",
+            text="范围测质",
             width=104,
             command=self._measure_subscription_qualities,
             state="disabled",
@@ -329,7 +331,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_button.pack(anchor="e", pady=(0, 6))
         self._use_node_button = ctk.CTkButton(
             node_actions,
-            text="填入待启动",
+            text="使用当前",
             width=104,
             command=self._use_selected_subscription_node,
             state="disabled",
@@ -338,7 +340,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._use_node_button.pack(anchor="e")
         self._quality_settings_button = ctk.CTkButton(
             node_actions,
-            text="质量检测源",
+            text="检测源",
             width=104,
             command=self._open_proxy_quality_dialog,
             **button_style("primary", compact=True),
@@ -346,13 +348,24 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._ping0_button = ctk.CTkButton(
             node_actions,
-            text="检测选中节点",
+            text="测当前质",
             width=104,
             command=self._measure_selected_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._ping0_button.pack(anchor="e", pady=(6, 0))
+        self._subscription_action_hint_label = ctk.CTkLabel(
+            node_actions,
+            text="范围: -\n源: -",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            width=112,
+            anchor="e",
+            justify="right",
+            wraplength=112,
+        )
+        self._subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
         self._selected_label = ctk.CTkLabel(
             controls,
             text="待启动节点: 未选择",
@@ -972,6 +985,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._quality_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._ping0_button:
             self._ping0_button.configure(state="normal" if options and not self._busy else "disabled")
+        self._refresh_subscription_action_hint()
+
+    def _refresh_subscription_action_hint(self):
+        if not self._subscription_action_hint_label:
+            return
+        scope = self._subscription_picker.batch_scope_label() if self._subscription_picker else "-"
+        source = remote_proxy.quality_source_label_from_settings()
+        self._subscription_action_hint_label.configure(text=f"范围: {scope}\n源: {source}")
 
     def _fetch_subscription(self, auto: bool = False, show_message: bool = True):
         if self._busy:
@@ -1276,6 +1297,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if hasattr(top, "_show_proxy_quality_dialog"):
             dialog = top._show_proxy_quality_dialog()
             if dialog is not None:
+                self._refresh_subscription_action_hint()
                 self._set_status("已打开代理质量检测；可配置检测源和 API Key 池。")
                 show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / IPQS / VPNAPI")
             else:
