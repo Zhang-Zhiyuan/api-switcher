@@ -5,6 +5,14 @@ import subprocess
 import build_exe
 
 
+def test_tab_hidden_imports_cover_app_tab_specs():
+    from ui import app
+
+    tab_modules = {module_name for _label, _attr, module_name, _class_name, _eager in app.TAB_SPECS}
+
+    assert tab_modules <= set(build_exe.UI_TAB_HIDDEN_IMPORTS)
+
+
 def test_build_exe_reports_pyinstaller_failure(monkeypatch):
     def fail_build(*args, **kwargs):
         raise subprocess.CalledProcessError(1, ["PyInstaller"])

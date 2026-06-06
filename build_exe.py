@@ -20,6 +20,7 @@ UI_TAB_HIDDEN_IMPORTS = [
     "ui.tabs.claude_tab",
     "ui.tabs.codex_tab",
     "ui.tabs.env_tab",
+    "ui.tabs.network_diagnostics_tab",
     "ui.tabs.browser_tab",
     "ui.tabs.session_migration_tab",
     "ui.tabs.ssh_tab",
