@@ -183,6 +183,23 @@ def test_local_config_zip_includes_network_diagnostic_key_pool(isolated_local_co
     assert loaded.keys_for(network_diagnostic_settings.SERVICE_VPNAPI) == ["vpn-a"]
 
 
+def test_local_config_zip_without_network_settings_keeps_existing_diagnostics(isolated_local_config, tmp_path):
+    package = tmp_path / "local-config-without-network.zip"
+    local_config_bundle.export_local_config_zip(package, "strong-password")
+
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_IPQS},
+        {network_diagnostic_settings.SERVICE_IPQS: "current-ipqs-key"},
+    )
+    network_diagnostic_settings.save_settings(settings)
+
+    local_config_bundle.import_local_config_zip(package, "strong-password")
+    loaded = network_diagnostic_settings.load_settings()
+
+    assert loaded.enabled_services() == [network_diagnostic_settings.SERVICE_IPQS]
+    assert loaded.keys_for(network_diagnostic_settings.SERVICE_IPQS) == ["current-ipqs-key"]
+
+
 def test_local_config_zip_disconnects_imported_ssh_profiles(isolated_local_config, tmp_path, monkeypatch):
     disconnected: list[str] = []
     monkeypatch.setattr(ssh_manager, "disconnect", lambda name: disconnected.append(name))

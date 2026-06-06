@@ -24,13 +24,17 @@ SERVICE_SET = set(SERVICE_ORDER)
 SERVICE_ALIASES = {
     "ping0": SERVICE_PING0,
     "ping0.cc": SERVICE_PING0,
+    "ping0cc": SERVICE_PING0,
     "proxycheck": SERVICE_PROXYCHECK,
     "proxycheck.io": SERVICE_PROXYCHECK,
+    "proxycheckio": SERVICE_PROXYCHECK,
     "ipqs": SERVICE_IPQS,
     "ipqualityscore": SERVICE_IPQS,
     "ipqualityscore.com": SERVICE_IPQS,
+    "ipqualityscorecom": SERVICE_IPQS,
     "vpnapi": SERVICE_VPNAPI,
     "vpnapi.io": SERVICE_VPNAPI,
+    "vpnapiio": SERVICE_VPNAPI,
 }
 
 SERVICE_LABELS = {
@@ -82,7 +86,6 @@ def load_settings() -> NetworkDiagnosticSettings:
 
     data = _read_settings_file()
     raw_services = data.get("services") if isinstance(data.get("services"), dict) else {}
-    has_saved_settings = bool(raw_services)
     settings = NetworkDiagnosticSettings()
 
     for service in SERVICE_ORDER:
@@ -92,7 +95,7 @@ def load_settings() -> NetworkDiagnosticSettings:
         default_enabled = DEFAULT_ENABLED.get(service, False)
         if not has_raw_service and env_keys and service in {SERVICE_IPQS, SERVICE_VPNAPI}:
             default_enabled = True
-        enabled = bool(raw.get("enabled", default_enabled))
+        enabled = _coerce_bool(raw.get("enabled"), default_enabled)
         key_refs = [str(item) for item in raw.get("key_refs", []) if str(item).strip()]
         keys = [value for ref in key_refs if (value := security.get_secret(ref))]
         if not keys and not has_raw_service:
@@ -226,6 +229,20 @@ def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return bool(default)
 
 
 def _clean_key_token(value: str) -> str:

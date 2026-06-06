@@ -142,6 +142,30 @@ def test_probe_public_ip_accepts_text_response_with_extra_label():
     assert result.ip == "198.51.100.44"
 
 
+def test_probe_public_ip_accepts_key_value_text_response():
+    result = network_diagnostics.probe_public_ip(
+        "IPv4",
+        "https://example.test/ip",
+        1.0,
+        _fake_http_get({"https://example.test/ip": "ip=198.51.100.46, source=edge"}),
+    )
+
+    assert result.ok is True
+    assert result.ip == "198.51.100.46"
+
+
+def test_probe_public_ip_accepts_ipv6_label_without_space():
+    result = network_diagnostics.probe_public_ip(
+        "IPv6",
+        "https://example.test/ip",
+        1.0,
+        _fake_http_get({"https://example.test/ip": "ip:2001:db8::1"}),
+    )
+
+    assert result.ok is True
+    assert result.ip == "2001:db8::1"
+
+
 def test_ping0_paid_api_parses_nested_payload_and_string_values():
     ip = "198.51.100.45"
     mapping = {
@@ -281,6 +305,37 @@ def test_proxycheck_hosting_classifies_data_center():
     assert diagnostic.classification.ip_type == "IDC/云机房"
     assert diagnostic.classification.risk_score >= 52
     assert "IDC" in diagnostic.reputation[0].summary_text()
+
+
+def test_proxycheck_hosting_flag_without_type_classifies_data_center():
+    ip = "203.0.113.39"
+    mapping = {
+        f"https://proxycheck.io/v3/{ip}?p=0&tag=0": {
+            "status": "ok",
+            ip: {
+                "detections": {
+                    "anonymous": False,
+                    "proxy": False,
+                    "vpn": False,
+                    "tor": False,
+                    "hosting": "true",
+                    "risk": "44",
+                },
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_proxycheck_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.network_type == ""
+    assert info.flags["hosting"] is True
+    assert classification.ip_type == "IDC/云机房"
+    assert classification.risk_score >= 52
 
 
 def test_proxycheck_legacy_vpn_type_is_parsed_as_anonymous_flag():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -42,6 +43,7 @@ PING0_API_URL = "https://ping0.cc/apiloc/apikey({api_key})/ip({ip})"
 PROXYCHECK_API_URL = "https://proxycheck.io/v3/{ip}"
 IPQS_API_URL = "https://ipqualityscore.com/api/json/ip/{api_key}/{ip}"
 VPNAPI_URL = "https://vpnapi.io/api/{ip}"
+IPV4_CANDIDATE_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 
 
 IDC_KEYWORDS = (
@@ -1066,10 +1068,17 @@ def _classify_from_reputation(reputation: list[ReputationInfo]) -> Optional[IpCl
         )
 
     explicit_types = [item for item in ok_results if item.network_type]
+    hosting_flag_results = [item for item in ok_results if item.flags.get("hosting")]
+    if hosting_flag_results and not any(_network_type_category(item.network_type) == "hosting" for item in explicit_types):
+        explicit_types.extend(hosting_flag_results)
     if not explicit_types:
         return None
 
-    hosting = [item for item in explicit_types if _network_type_category(item.network_type) == "hosting"]
+    hosting = [
+        item
+        for item in explicit_types
+        if _network_type_category(item.network_type) == "hosting" or item.flags.get("hosting")
+    ]
     business = [item for item in explicit_types if _network_type_category(item.network_type) == "business"]
     mobile = [item for item in explicit_types if _network_type_category(item.network_type) == "mobile"]
     residential = [item for item in explicit_types if _network_type_category(item.network_type) == "residential"]
@@ -1220,15 +1229,41 @@ def _extract_ip_value(value: Any) -> str:
     text = str(value or "").strip().strip('"\'`[](){}')
     if _valid_ip(text):
         return text
-    for token in re_split_ip_candidates(text):
+    for token in _split_ip_candidates(text):
         cleaned = token.strip().strip('"\'`[](){}<>,;')
         if _valid_ip(cleaned):
             return cleaned
     return ""
 
 
+def _split_ip_candidates(text: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        candidate = value.strip().strip('"\'`[](){}<>,;')
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            values.append(candidate)
+
+    for match in IPV4_CANDIDATE_RE.finditer(text or ""):
+        add(match.group(0))
+
+    for token in re.split(r"[\s,;，；、|]+", text.replace("\r", "\n")):
+        cleaned = token.strip()
+        if not cleaned:
+            continue
+        add(cleaned)
+        if "=" in cleaned:
+            add(cleaned.rsplit("=", 1)[-1])
+        label_match = re.match(r"^[^\d:=：]{1,32}[:：](.+)$", cleaned)
+        if label_match and not _valid_ip(cleaned):
+            add(label_match.group(1))
+    return values
+
+
 def re_split_ip_candidates(text: str) -> list[str]:
-    return [part for part in text.replace("\r", "\n").split() if part]
+    return _split_ip_candidates(text)
 
 
 def _payload_dict(data: dict[str, Any], *nested_keys: str) -> dict[str, Any]:
@@ -1379,13 +1414,41 @@ def _network_type_label(value: str) -> str:
 
 def _network_type_category(value: str) -> str:
     normalized = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
-    if normalized in {"residential", "consumer", "home broadband", "isp", "fixed line"}:
+    if normalized in {
+        "residential",
+        "consumer",
+        "home",
+        "home broadband",
+        "fixed broadband",
+        "consumer broadband",
+        "broadband",
+        "cable",
+        "dsl",
+        "dialup",
+        "isp",
+        "fixed line",
+        "fixed line isp",
+    }:
         return "residential"
-    if normalized in {"business", "corporate", "commercial", "education", "enterprise", "organization"}:
+    if normalized in {"business", "corporate", "commercial", "commercial isp", "education", "enterprise", "organization", "school", "government"}:
         return "business"
     if normalized in {"wireless", "cellular", "mobile", "mobile isp", "carrier grade nat", "cg nat", "cgnat"}:
         return "mobile"
-    if normalized in {"hosting", "data center", "datacenter", "data centre", "cloud", "server", "hosting provider"}:
+    if normalized in {
+        "hosting",
+        "data center",
+        "datacenter",
+        "data centre",
+        "cloud",
+        "cloud provider",
+        "cdn",
+        "server",
+        "vps",
+        "dedicated",
+        "colo",
+        "colocation",
+        "hosting provider",
+    }:
         return "hosting"
     return ""
 

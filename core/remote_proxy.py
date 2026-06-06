@@ -223,6 +223,11 @@ def parse_proxy_node(text: str) -> dict:
     if not raw:
         raise ValueError("请先粘贴 Clash 代理节点")
 
+    if not re.search(r"(?m)^[ \t]*proxies\s*:", raw):
+        uri_nodes = _parse_proxy_uri_lines(raw)
+        if uri_nodes:
+            return uri_nodes[0]
+
     candidate = _extract_first_proxy_entry(raw) or raw
     if candidate.startswith("-"):
         candidate = candidate[1:].strip()
@@ -495,10 +500,16 @@ def sort_proxy_subscription_nodes(
     def sort_key(item: ProxySubscriptionNode):
         region = proxy_node_region(item.node)
         region_index = PROXY_REGION_ORDER.index(region) if region in PROXY_REGION_ORDER else len(PROXY_REGION_ORDER)
-        latency = proxy_node_latency_ms(latencies.get(proxy_node_key(item.node)))
+        latency_result = latencies.get(proxy_node_key(item.node))
+        latency = proxy_node_latency_ms(latency_result)
+        if proxy_node_latency_ok(latency_result):
+            status_sort = 0
+        elif latency_result is None:
+            status_sort = 1
+        else:
+            status_sort = 2
         latency_sort = latency if latency is not None else 10**9
-        ok_sort = 0 if latency is not None else 1
-        return (region_index, region, ok_sort, latency_sort, item.display_name().lower())
+        return (region_index, region, status_sort, latency_sort, item.display_name().lower())
 
     return tuple(sorted(items, key=sort_key))
 

@@ -220,6 +220,13 @@ def _collect_network_diagnostic_secret_refs(settings_payload: dict[str, Any]) ->
     return refs
 
 
+def _has_network_diagnostic_settings(settings_payload: Any) -> bool:
+    if not isinstance(settings_payload, dict):
+        return False
+    services = settings_payload.get("services")
+    return isinstance(services, dict) and bool(services)
+
+
 def _normalized_store_for_import(store: dict[str, Any]) -> dict[str, Any]:
     normalized = profile_manager._get_default_store()
     if isinstance(store, dict):
@@ -428,7 +435,7 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
         "profile_counts": _profile_counts_by_type(store),
         "secret_count": len(secrets),
         "missing_secret_count": len(missing),
-        "network_diagnostics": bool(network_diagnostics),
+        "network_diagnostics": _has_network_diagnostic_settings(network_diagnostics),
         "payload": PAYLOAD_NAME,
     }
 
@@ -532,7 +539,7 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     profile_manager._normalize_store(new_store)
     profile_manager._save_store(new_store)
-    if isinstance(imported_network_diagnostics, dict):
+    if _has_network_diagnostic_settings(imported_network_diagnostics):
         atomic_write_text(
             network_diagnostic_settings.SETTINGS_FILE,
             json.dumps(imported_network_diagnostics, ensure_ascii=False, indent=2),

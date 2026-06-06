@@ -3,7 +3,7 @@ import webbrowser
 import customtkinter as ctk
 
 from core import remote_proxy
-from ui.theme import COLORS, button_style, card_frame_kwargs, combo_style, font, input_style
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style
 
 
 class ProxyNodePicker(ctk.CTkFrame):
@@ -179,24 +179,30 @@ class ProxyNodePicker(ctk.CTkFrame):
         ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(8, 8), pady=8)
 
         title = str(node.get("name") or item.display_name())
-        ctk.CTkLabel(
+        title_label = ctk.CTkLabel(
             row,
             text=title,
             text_color=COLORS["text"],
             font=font(12, "bold"),
             anchor="w",
-        ).grid(row=0, column=1, sticky="ew", pady=(8, 0))
+            justify="left",
+        )
+        title_label.grid(row=0, column=1, sticky="ew", pady=(8, 0))
+        bind_wraplength(row, title_label, padding=230, min_width=180, max_width=740)
 
         meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
         if latency_detail:
             meta_parts.append(latency_detail)
-        ctk.CTkLabel(
+        meta_label = ctk.CTkLabel(
             row,
             text=" · ".join(part for part in meta_parts if part),
             text_color=COLORS["muted"],
             font=font(11),
             anchor="w",
-        ).grid(row=1, column=1, sticky="ew", pady=(1, 8))
+            justify="left",
+        )
+        meta_label.grid(row=1, column=1, sticky="ew", pady=(1, 8))
+        bind_wraplength(row, meta_label, padding=230, min_width=180, max_width=740)
 
         ctk.CTkLabel(
             row,

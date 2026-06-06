@@ -24,6 +24,17 @@ def test_parse_proxy_node_accepts_clash_inline_map():
     assert node["tls"] is False
 
 
+def test_parse_proxy_node_accepts_single_proxy_uri():
+    node = remote_proxy.parse_proxy_node(
+        "vless://token@example.com:443?encryption=none&security=tls&type=ws&path=%2Fchat#URI%20Node"
+    )
+
+    assert node["name"] == "URI Node"
+    assert node["type"] == "vless"
+    assert node["server"] == "example.com"
+    assert node["ws-opts"]["path"] == "/chat"
+
+
 def test_ping0_detail_url_for_proxy_node_supports_ip_domain_and_ipv6():
     assert remote_proxy.ping0_detail_url_for_proxy_node({
         "name": "ipv4",
@@ -320,6 +331,37 @@ proxies:
     assert [item.node["name"] for item in sorted_nodes if remote_proxy.proxy_node_region(item.node) == "台湾"] == [
         "台湾 1",
         "台湾 2",
+    ]
+
+
+def test_proxy_node_sorting_keeps_failed_nodes_after_unmeasured_within_region():
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        """
+proxies:
+  - { name: 香港 failed, type: vless, server: hk-failed.example.com, port: 443 }
+  - { name: 香港 ok, type: vless, server: hk-ok.example.com, port: 443 }
+  - { name: 香港 unmeasured, type: vless, server: hk-new.example.com, port: 443 }
+"""
+    )
+    latencies = {
+        remote_proxy.proxy_node_key(nodes[0].node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(nodes[0].node),
+            False,
+            detail="timed out",
+        ),
+        remote_proxy.proxy_node_key(nodes[1].node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(nodes[1].node),
+            True,
+            latency_ms=20,
+        ),
+    }
+
+    sorted_nodes = remote_proxy.sort_proxy_subscription_nodes(nodes, latencies)
+
+    assert [item.node["name"] for item in sorted_nodes] == [
+        "香港 ok",
+        "香港 unmeasured",
+        "香港 failed",
     ]
 
 

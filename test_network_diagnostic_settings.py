@@ -1,3 +1,5 @@
+import json
+
 from core import network_diagnostic_settings
 
 
@@ -90,3 +92,22 @@ def test_saved_empty_key_pool_does_not_reload_environment_key(tmp_path, monkeypa
 
     assert loaded.service(network_diagnostic_settings.SERVICE_VPNAPI).enabled is True
     assert loaded.keys_for(network_diagnostic_settings.SERVICE_VPNAPI) == []
+
+
+def test_load_settings_accepts_string_boolean_values(tmp_path, monkeypatch):
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", tmp_path / "network_diagnostics.json")
+    monkeypatch.setattr(network_diagnostic_settings.security, "get_secret", lambda ref: None)
+    network_diagnostic_settings.SETTINGS_FILE.write_text(
+        json.dumps({
+            "services": {
+                network_diagnostic_settings.SERVICE_IPQS: {"enabled": "false", "key_refs": []},
+                network_diagnostic_settings.SERVICE_VPNAPI: {"enabled": "yes", "key_refs": []},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    loaded = network_diagnostic_settings.load_settings()
+
+    assert loaded.service(network_diagnostic_settings.SERVICE_IPQS).enabled is False
+    assert loaded.service(network_diagnostic_settings.SERVICE_VPNAPI).enabled is True
