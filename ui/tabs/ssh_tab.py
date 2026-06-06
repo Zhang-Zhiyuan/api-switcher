@@ -1,4 +1,5 @@
 import threading
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog
 
@@ -68,6 +69,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_button = None
         self._proxy_quality_button = None
         self._proxy_quality_settings_button = None
+        self._proxy_ping0_button = None
         self._proxy_auto_refresh_var = ctk.BooleanVar(value=False)
         self._proxy_auto_refresh_check = None
         self._proxy_periodic_update_var = ctk.BooleanVar(value=False)
@@ -649,6 +651,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("primary", compact=True),
         )
         self._proxy_quality_settings_button.pack(anchor="e", pady=(6, 0))
+        self._proxy_ping0_button = ctk.CTkButton(
+            proxy_node_actions,
+            text="选中节点 Ping0",
+            width=98,
+            command=self._open_selected_proxy_subscription_ping0,
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_ping0_button.pack(anchor="e", pady=(6, 0))
         self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
             text="待部署节点: 未选择",
@@ -1336,6 +1347,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_quality_button,
             self._proxy_use_node_button,
             self._proxy_quality_settings_button,
+            self._proxy_ping0_button,
             self._proxy_load_file_button,
             self._proxy_deploy_button,
             self._proxy_inspect_button,
@@ -1345,7 +1357,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             if not button:
                 continue
             try:
-                if button in (self._proxy_use_node_button, self._proxy_latency_button, self._proxy_quality_button) and not self._proxy_subscription_options:
+                if button in (self._proxy_use_node_button, self._proxy_latency_button, self._proxy_quality_button, self._proxy_ping0_button) and not self._proxy_subscription_options:
                     button.configure(state="disabled")
                 else:
                     button.configure(state=state)
@@ -1609,6 +1621,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_latency_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_quality_button:
             self._proxy_quality_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+        if self._proxy_ping0_button:
+            self._proxy_ping0_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
 
     def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
@@ -1691,6 +1705,31 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         self._set_proxy_status("无法打开代理质量检测窗口。", "error")
         show_toast(top, "无法打开代理质量检测窗口", is_error=True)
+
+    def _open_selected_proxy_subscription_ping0(self):
+        if not self._proxy_subscription_picker:
+            return
+        item = self._proxy_subscription_picker.selected_item()
+        if not item:
+            message = "请先拉取订阅并选择一个节点"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        try:
+            url = remote_proxy.ping0_detail_url_for_proxy_node(item.node)
+            opened = webbrowser.open(url)
+        except Exception as exc:
+            message = f"打开当前节点 Ping0 详情失败: {exc}"
+            self._set_proxy_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        if not opened:
+            message = "打开当前节点 Ping0 详情失败，请检查系统默认浏览器"
+            self._set_proxy_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        self._set_proxy_status(f"已打开当前节点 Ping0 详情: {remote_proxy.describe_proxy_node(item.node)}", "success")
+        show_toast(self.winfo_toplevel(), "已打开当前选中节点的 Ping0 详情")
 
     def _measure_proxy_subscription_latencies(self):
         if self._proxy_busy:

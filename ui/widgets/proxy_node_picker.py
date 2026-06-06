@@ -1,5 +1,3 @@
-import webbrowser
-
 import customtkinter as ctk
 
 from core import remote_proxy
@@ -227,7 +225,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             justify="left",
         )
         title_label.grid(row=0, column=1, sticky="ew", pady=(8, 0))
-        bind_wraplength(row, title_label, padding=330, min_width=180, max_width=700)
+        bind_wraplength(row, title_label, padding=250, min_width=180, max_width=760)
 
         meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
         if remote_proxy.proxy_node_quality_measured(quality):
@@ -248,7 +246,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             justify="left",
         )
         meta_label.grid(row=1, column=1, sticky="ew", pady=(1, 8))
-        bind_wraplength(row, meta_label, padding=330, min_width=180, max_width=700)
+        bind_wraplength(row, meta_label, padding=250, min_width=180, max_width=760)
 
         ctk.CTkLabel(
             row,
@@ -267,14 +265,6 @@ class ProxyNodePicker(ctk.CTkFrame):
             width=82,
             anchor="e",
         ).grid(row=0, column=3, rowspan=2, sticky="e", padx=(0, 10))
-
-        ctk.CTkButton(
-            row,
-            text="Ping0",
-            width=64,
-            command=lambda current=node: self._open_ping0(current),
-            **button_style("accent", compact=True),
-        ).grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 8), pady=8)
 
     def _select(self, node_key: str):
         self._selected_key = node_key
@@ -410,9 +400,3 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._region_combo.configure(values=values)
         if current not in values:
             self._region_combo.set(self.REGION_ALL)
-
-    def _open_ping0(self, node: dict):
-        try:
-            webbrowser.open(remote_proxy.ping0_detail_url_for_proxy_node(node))
-        except Exception:
-            return
