@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import ipaddress
@@ -89,6 +90,8 @@ VSCODE_SERVER_ENV_SETUP_PATHS = (
 VSCODE_ENV_BLOCK_START = "# >>> API切换器 AI proxy VS Code >>>"
 VSCODE_ENV_BLOCK_END = "# <<< API切换器 AI proxy VS Code <<<"
 _PROXY_SUBSCRIPTION_STATE_LOCK = threading.RLock()
+_PROXY_SUBSCRIPTION_STATE_CACHE: dict | None = None
+_PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -385,13 +388,23 @@ def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
 def load_proxy_subscription_state() -> dict:
     path = _proxy_subscription_state_path()
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        signature = _proxy_subscription_state_signature(path)
+        if (
+            _PROXY_SUBSCRIPTION_STATE_CACHE is not None
+            and _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE == signature
+        ):
+            return copy.deepcopy(_PROXY_SUBSCRIPTION_STATE_CACHE)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            _cache_proxy_subscription_state({}, signature)
             return {}
         except Exception:
+            clear_proxy_subscription_state_cache()
             return {}
-        return data if isinstance(data, dict) else {}
+        state = data if isinstance(data, dict) else {}
+        _cache_proxy_subscription_state(state, signature)
+        return copy.deepcopy(state)
 
 
 def save_proxy_subscription_state(**updates) -> dict:
@@ -409,9 +422,38 @@ def save_proxy_subscription_state(**updates) -> dict:
         try:
             temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             temp_path.replace(path)
+            _cache_proxy_subscription_state(state)
         finally:
             temp_path.unlink(missing_ok=True)
         return state
+
+
+def clear_proxy_subscription_state_cache() -> None:
+    global _PROXY_SUBSCRIPTION_STATE_CACHE, _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        _PROXY_SUBSCRIPTION_STATE_CACHE = None
+        _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE = None
+
+
+def _proxy_subscription_state_signature(path: Path | None = None) -> tuple[str, int | None, int | None]:
+    state_path = path or _proxy_subscription_state_path()
+    path_key = str(state_path.resolve(strict=False))
+    try:
+        stat = state_path.stat()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+    except FileNotFoundError:
+        return (path_key, None, None)
+    except OSError:
+        return (path_key, None, None)
+
+
+def _cache_proxy_subscription_state(
+    state: dict,
+    signature: tuple[str, int | None, int | None] | None = None,
+) -> None:
+    global _PROXY_SUBSCRIPTION_STATE_CACHE, _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE
+    _PROXY_SUBSCRIPTION_STATE_CACHE = copy.deepcopy(state)
+    _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE = signature or _proxy_subscription_state_signature()
 
 
 def proxy_subscription_auto_refresh_enabled(scope: str = "") -> bool:

@@ -4,6 +4,8 @@ import logging
 import re
 import shutil
 import base64
+import copy
+import threading
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -20,6 +22,9 @@ from models.profile import (
 from core import security
 
 logger = logging.getLogger(__name__)
+_STORE_CACHE_LOCK = threading.RLock()
+_STORE_CACHE: dict | None = None
+_STORE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 
 PROFILE_LIST_KEYS = (
     "claude_profiles",
@@ -56,6 +61,36 @@ def _get_default_store() -> dict:
         "active_ssh_profile": None,
         "active_browser_profile": None,
     }
+
+
+def clear_profile_store_cache() -> None:
+    """Clear the in-process profile store cache."""
+    global _STORE_CACHE, _STORE_CACHE_SIGNATURE
+    with _STORE_CACHE_LOCK:
+        _STORE_CACHE = None
+        _STORE_CACHE_SIGNATURE = None
+
+
+def _profile_store_signature() -> tuple[str, int | None, int | None]:
+    path = PROFILES_FILE
+    path_key = str(path.resolve(strict=False))
+    try:
+        stat = path.stat()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+    except FileNotFoundError:
+        return (path_key, None, None)
+    except OSError:
+        return (path_key, None, None)
+
+
+def _clone_store(store: dict) -> dict:
+    return copy.deepcopy(store)
+
+
+def _cache_store(store: dict, signature: tuple[str, int | None, int | None] | None = None) -> None:
+    global _STORE_CACHE, _STORE_CACHE_SIGNATURE
+    _STORE_CACHE = _clone_store(store)
+    _STORE_CACHE_SIGNATURE = signature or _profile_store_signature()
 
 
 def _normalize_store(store: dict) -> bool:
@@ -176,149 +211,165 @@ def _restore_store_from_backup(backup_file) -> dict | None:
 
 def _load_store() -> dict:
     """Load profiles store with backup and recovery mechanism."""
-    if not PROFILES_FILE.exists():
-        logger.info("Profiles file does not exist, returning default store")
-        return _get_default_store()
+    with _STORE_CACHE_LOCK:
+        signature = _profile_store_signature()
+        if _STORE_CACHE is not None and _STORE_CACHE_SIGNATURE == signature:
+            return _clone_store(_STORE_CACHE)
 
-    backup_file = PROFILES_FILE.with_suffix(".backup")
+        if not PROFILES_FILE.exists():
+            logger.info("Profiles file does not exist, returning default store")
+            store = _get_default_store()
+            _cache_store(store, signature)
+            return _clone_store(store)
 
-    try:
-        content = PROFILES_FILE.read_text(encoding="utf-8")
-        store = json.loads(content)
+        backup_file = PROFILES_FILE.with_suffix(".backup")
 
-        # Validate basic structure
-        if not isinstance(store, dict):
-            raise ValueError("Store is not a dictionary")
+        try:
+            content = PROFILES_FILE.read_text(encoding="utf-8")
+            store = json.loads(content)
 
-        changed = _normalize_store(store)
+            # Validate basic structure
+            if not isinstance(store, dict):
+                raise ValueError("Store is not a dictionary")
 
-        # Migrate old versions
-        version = store.get("version", 1)
-        if version == 1:
-            logger.info("Migrating store from version 1 to 4")
-            store["version"] = 4
-            changed = True
-            store["ssh_profiles"] = []
-            store["active_ssh_profile"] = None
-            store["browser_profiles"] = []
-            store["active_browser_profile"] = None
-            # 为所有 Claude profiles 添加默认 provider
-            for profile in store.get("claude_profiles", []):
-                if not isinstance(profile, dict):
-                    continue
-                if "provider" not in profile:
-                    profile["provider"] = "anthropic"
-                    changed = True
-                if "custom_provider_name" not in profile:
-                    profile["custom_provider_name"] = None
-                    changed = True
-        elif version == 2:
-            logger.info("Migrating store from version 2 to 4")
-            store["version"] = 4
-            changed = True
-            if "browser_profiles" not in store:
-                store["browser_profiles"] = []
-            if "active_browser_profile" not in store:
-                store["active_browser_profile"] = None
-            # 为所有 Claude profiles 添加默认 provider
-            for profile in store.get("claude_profiles", []):
-                if not isinstance(profile, dict):
-                    continue
-                if "provider" not in profile:
-                    profile["provider"] = "anthropic"
-                    changed = True
-                if "custom_provider_name" not in profile:
-                    profile["custom_provider_name"] = None
-                    changed = True
-        elif version == 3:
-            logger.info("Migrating store from version 3 to 4")
-            store["version"] = 4
-            changed = True
-            # 为所有 Claude profiles 添加默认 provider
-            for profile in store.get("claude_profiles", []):
-                if not isinstance(profile, dict):
-                    continue
-                if "provider" not in profile:
-                    profile["provider"] = "anthropic"
-                    changed = True
-                if "custom_provider_name" not in profile:
-                    profile["custom_provider_name"] = None
-                    changed = True
-        else:
-            # Ensure all required fields exist
-            if "browser_profiles" not in store:
-                store["browser_profiles"] = []
+            changed = _normalize_store(store)
+
+            # Migrate old versions
+            version = store.get("version", 1)
+            if version == 1:
+                logger.info("Migrating store from version 1 to 4")
+                store["version"] = 4
                 changed = True
-            if "active_browser_profile" not in store:
+                store["ssh_profiles"] = []
+                store["active_ssh_profile"] = None
+                store["browser_profiles"] = []
                 store["active_browser_profile"] = None
+                # 为所有 Claude profiles 添加默认 provider
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+            elif version == 2:
+                logger.info("Migrating store from version 2 to 4")
+                store["version"] = 4
                 changed = True
-            # 确保所有 Claude profiles 都有 provider 字段
-            for profile in store.get("claude_profiles", []):
-                if not isinstance(profile, dict):
-                    continue
-                if "provider" not in profile:
-                    profile["provider"] = "anthropic"
+                if "browser_profiles" not in store:
+                    store["browser_profiles"] = []
+                if "active_browser_profile" not in store:
+                    store["active_browser_profile"] = None
+                # 为所有 Claude profiles 添加默认 provider
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+            elif version == 3:
+                logger.info("Migrating store from version 3 to 4")
+                store["version"] = 4
+                changed = True
+                # 为所有 Claude profiles 添加默认 provider
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+            else:
+                # Ensure all required fields exist
+                if "browser_profiles" not in store:
+                    store["browser_profiles"] = []
                     changed = True
-                if "custom_provider_name" not in profile:
-                    profile["custom_provider_name"] = None
+                if "active_browser_profile" not in store:
+                    store["active_browser_profile"] = None
                     changed = True
+                # 确保所有 Claude profiles 都有 provider 字段
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
 
-        changed = _normalize_store(store) or changed
+            changed = _normalize_store(store) or changed
 
-        if changed:
-            _save_store(store)
+            if changed:
+                _save_store(store)
+            else:
+                _cache_store(store, signature)
 
-        return store
+            return _clone_store(store)
 
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error in profiles file: {e}")
-        restored = _restore_store_from_backup(backup_file)
-        if restored is not None:
-            return restored
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in profiles file: {e}")
+            restored = _restore_store_from_backup(backup_file)
+            if restored is not None:
+                return restored
 
-        logger.warning("Returning default store due to corrupted profiles file")
-        return _get_default_store()
+            logger.warning("Returning default store due to corrupted profiles file")
+            store = _get_default_store()
+            _cache_store(store, signature)
+            return _clone_store(store)
 
-    except Exception as e:
-        logger.error(f"Failed to load profiles: {e}")
-        restored = _restore_store_from_backup(backup_file)
-        if restored is not None:
-            return restored
+        except Exception as e:
+            logger.error(f"Failed to load profiles: {e}")
+            restored = _restore_store_from_backup(backup_file)
+            if restored is not None:
+                return restored
 
-        return _get_default_store()
+            store = _get_default_store()
+            _cache_store(store, signature)
+            return _clone_store(store)
 
 
 def _save_store(store: dict, create_backup: bool = True) -> None:
     """Save profiles store with atomic write and backup."""
-    try:
-        # Ensure parent directory exists
-        PROFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-        # Validate store structure before saving
-        if not isinstance(store, dict):
-            raise ValueError("Store must be a dictionary")
-
-        # Serialize to JSON
-        content = json.dumps(store, indent=2, ensure_ascii=False)
-
-        # Create backup of existing file
-        backup_file = PROFILES_FILE.with_suffix(".backup")
-        if create_backup and PROFILES_FILE.exists():
-            try:
-                shutil.copy2(PROFILES_FILE, backup_file)
-                logger.debug(f"Created backup: {backup_file}")
-            except Exception as e:
-                logger.warning(f"Failed to create backup: {e}")
-
+    with _STORE_CACHE_LOCK:
         try:
-            atomic_write_text(PROFILES_FILE, content)
-            logger.debug(f"Successfully saved profiles to {PROFILES_FILE}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to save profiles: {e}") from e
+            # Ensure parent directory exists
+            PROFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    except Exception as e:
-        logger.error(f"Error saving profiles store: {e}")
-        raise
+            # Validate store structure before saving
+            if not isinstance(store, dict):
+                raise ValueError("Store must be a dictionary")
+
+            # Serialize to JSON
+            content = json.dumps(store, indent=2, ensure_ascii=False)
+
+            # Create backup of existing file
+            backup_file = PROFILES_FILE.with_suffix(".backup")
+            if create_backup and PROFILES_FILE.exists():
+                try:
+                    shutil.copy2(PROFILES_FILE, backup_file)
+                    logger.debug(f"Created backup: {backup_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to create backup: {e}")
+
+            try:
+                atomic_write_text(PROFILES_FILE, content)
+                _cache_store(store)
+                logger.debug(f"Successfully saved profiles to {PROFILES_FILE}")
+            except Exception as e:
+                clear_profile_store_cache()
+                raise RuntimeError(f"Failed to save profiles: {e}") from e
+
+        except Exception as e:
+            logger.error(f"Error saving profiles store: {e}")
+            raise
 
 
 # --- Claude Profile CRUD ---

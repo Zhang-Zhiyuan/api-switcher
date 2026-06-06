@@ -806,6 +806,37 @@ def test_proxy_subscription_auto_refresh_scopes_are_independent(monkeypatch, tmp
     assert remote_proxy.proxy_subscription_auto_refresh_enabled("ssh") is True
 
 
+def test_proxy_subscription_state_cache_reuses_reads_and_detects_external_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    state_dir = tmp_path / "proxy_subscriptions"
+    state_dir.mkdir()
+    state_path = state_dir / "subscription_state.json"
+    state_path.write_text(json.dumps({"url": "https://example.com/one"}), encoding="utf-8")
+    remote_proxy.clear_proxy_subscription_state_cache()
+
+    original_read_text = type(state_path).read_text
+    read_count = {"value": 0}
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == state_path:
+            read_count["value"] += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(state_path), "read_text", counting_read_text)
+
+    assert remote_proxy.load_proxy_subscription_state()["url"] == "https://example.com/one"
+    assert remote_proxy.load_proxy_subscription_state()["url"] == "https://example.com/one"
+    assert read_count["value"] == 1
+
+    state_path.write_text(
+        json.dumps({"url": "https://example.com/two", "node_count": 2}),
+        encoding="utf-8",
+    )
+
+    assert remote_proxy.load_proxy_subscription_state()["url"] == "https://example.com/two"
+    assert read_count["value"] == 2
+
+
 def test_describe_proxy_node_uses_normalized_endpoint():
     node = remote_proxy.parse_proxy_node("{ name: node, type: vless, server: example.com, port: '443' }")
 

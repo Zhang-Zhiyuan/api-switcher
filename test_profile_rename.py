@@ -53,6 +53,50 @@ def test_profile_store_replace_retries_transient_permission_error(tmp_path, monk
     assert target.read_text(encoding="utf-8") == "new"
 
 
+def test_profile_store_cache_reuses_reads_and_detects_external_write(tmp_path, monkeypatch):
+    target = tmp_path / "profiles.json"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", target)
+    store = profile_manager._get_default_store()
+    store["claude_profiles"] = [
+        ClaudeProfile(
+            name="Cached Claude",
+            auth_token_ref="claude:cached:auth",
+            base_url="https://cached.example",
+        ).to_dict()
+    ]
+    target.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    profile_manager.clear_profile_store_cache()
+
+    original_read_text = type(target).read_text
+    read_count = {"value": 0}
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == target:
+            read_count["value"] += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(target), "read_text", counting_read_text)
+
+    assert [p.name for p in profile_manager.list_claude_profiles()] == ["Cached Claude"]
+    assert [p.name for p in profile_manager.list_codex_profiles()] == []
+    assert read_count["value"] == 1
+
+    store["claude_profiles"].append(
+        ClaudeProfile(
+            name="External Claude",
+            auth_token_ref="claude:external:auth",
+            base_url="https://external.example",
+        ).to_dict()
+    )
+    target.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert [p.name for p in profile_manager.list_claude_profiles()] == [
+        "Cached Claude",
+        "External Claude",
+    ]
+    assert read_count["value"] == 2
+
+
 def test_renaming_claude_profile_replaces_old_entry_and_keeps_shared_secret(isolated_profile_store):
     _secret_store, deleted_refs = isolated_profile_store
     old = ClaudeProfile(name="Old Claude", auth_token_ref="claude:old:auth_token", base_url="https://old.example")
