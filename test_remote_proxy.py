@@ -1638,6 +1638,7 @@ def test_local_proxy_preferences_build_custom_routing_rules(monkeypatch, tmp_pat
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_EXTENDED_ROUTING_ENABLED", True)
 
     local_proxy.set_builtin_proxy_site_enabled("github", True)
     local_proxy.set_local_proxy_non_cn_mode(True)
@@ -1662,6 +1663,32 @@ def test_local_proxy_preferences_build_custom_routing_rules(monkeypatch, tmp_pat
         17897,
     )
     assert "IP-CIDR,8.8.8.8/32,AI-PROXY,no-resolve" not in updated
+
+
+def test_local_proxy_default_config_ignores_extended_routing_preferences(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path / "mihomo")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_EXTENDED_ROUTING_ENABLED", False)
+
+    local_proxy.set_builtin_proxy_site_enabled("youtube", True)
+    local_proxy.set_builtin_proxy_site_enabled("github", True)
+    local_proxy.set_local_proxy_non_cn_mode(True)
+    local_proxy.add_custom_proxy_target("https://www.youtube.com/watch?v=1")
+    local_proxy.add_custom_proxy_target("8.8.8.8")
+    config = local_proxy._build_local_mihomo_config(
+        {"name": "node", "type": "vless", "server": "example.com", "port": 443},
+        17897,
+    )
+
+    assert "DOMAIN-SUFFIX,chatgpt.com,AI-PROXY" in config
+    assert "DOMAIN-SUFFIX,claude.ai,AI-PROXY" in config
+    assert "DOMAIN-SUFFIX,youtube.com,AI-PROXY" not in config
+    assert "DOMAIN-SUFFIX,www.youtube.com,AI-PROXY" not in config
+    assert "DOMAIN-SUFFIX,github.com,AI-PROXY" not in config
+    assert "IP-CIDR,8.8.8.8/32,AI-PROXY,no-resolve" not in config
+    assert "GEOIP,CN,DIRECT" not in config
+    assert "MATCH,DIRECT" in config
 
 
 def test_local_proxy_keep_running_on_exit_defaults_to_enabled(monkeypatch, tmp_path):

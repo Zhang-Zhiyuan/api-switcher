@@ -36,6 +36,7 @@ LOCAL_PROXY_PREFS_PATH = LOCAL_PROXY_DIR / "preferences.json"
 LOCAL_PROXY_LOG_PATH = LOCAL_PROXY_DIR / "mihomo.log"
 LOCAL_PROXY_PID_PATH = LOCAL_PROXY_DIR / "mihomo.pid"
 MIHOMO_DOWNLOAD_RETRIES = 3
+LOCAL_PROXY_EXTENDED_ROUTING_ENABLED = False
 WINDOWS_SYSTEM_PROXY_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 WINDOWS_SYSTEM_PROXY_KEYS = ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL", "AutoDetect")
 WINDOWS_SYSTEM_PROXY_OVERRIDE = "<local>;127.0.0.1;localhost;::1"
@@ -720,6 +721,12 @@ def _normalize_domain_target(host: str) -> str:
 
 def _routing_options_from_preferences(preferences: dict | None = None) -> dict:
     preferences = preferences or load_local_proxy_preferences()
+    if not LOCAL_PROXY_EXTENDED_ROUTING_ENABLED:
+        return {
+            "extra_proxy_domains": (),
+            "extra_proxy_ip_cidrs": (),
+            "proxy_non_cn": False,
+        }
     domains = []
     ip_cidrs = []
     builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
