@@ -92,6 +92,8 @@ VSCODE_ENV_BLOCK_END = "# <<< API切换器 AI proxy VS Code <<<"
 _PROXY_SUBSCRIPTION_STATE_LOCK = threading.RLock()
 _PROXY_SUBSCRIPTION_STATE_CACHE: dict | None = None
 _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
+_PROXY_SUBSCRIPTION_NODES_CACHE: tuple[ProxySubscriptionNode, ...] | None = None
+_PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE: tuple[str, int | None, int | None, str] | None = None
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -372,9 +374,10 @@ def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
     path = Path(saved_path)
     if not path.exists() or not path.is_file():
         return None
+    charset = str(state.get("charset") or "utf-8-sig")
+    signature = _proxy_subscription_nodes_signature(path, charset)
     try:
-        text = _decode_subscription_bytes(path.read_bytes(), str(state.get("charset") or "utf-8-sig"))
-        nodes = parse_proxy_subscription_content(text)
+        nodes = _load_cached_proxy_subscription_nodes(path, charset, signature)
     except Exception:
         return None
     return ProxySubscriptionResult(
@@ -430,9 +433,12 @@ def save_proxy_subscription_state(**updates) -> dict:
 
 def clear_proxy_subscription_state_cache() -> None:
     global _PROXY_SUBSCRIPTION_STATE_CACHE, _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE
+    global _PROXY_SUBSCRIPTION_NODES_CACHE, _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
         _PROXY_SUBSCRIPTION_STATE_CACHE = None
         _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE = None
+        _PROXY_SUBSCRIPTION_NODES_CACHE = None
+        _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE = None
 
 
 def _proxy_subscription_state_signature(path: Path | None = None) -> tuple[str, int | None, int | None]:
@@ -454,6 +460,36 @@ def _cache_proxy_subscription_state(
     global _PROXY_SUBSCRIPTION_STATE_CACHE, _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE
     _PROXY_SUBSCRIPTION_STATE_CACHE = copy.deepcopy(state)
     _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE = signature or _proxy_subscription_state_signature()
+
+
+def _proxy_subscription_nodes_signature(path: Path, charset: str) -> tuple[str, int | None, int | None, str]:
+    path_key = str(path.resolve(strict=False))
+    charset_key = str(charset or "utf-8-sig")
+    try:
+        stat = path.stat()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size), charset_key)
+    except OSError:
+        return (path_key, None, None, charset_key)
+
+
+def _load_cached_proxy_subscription_nodes(
+    path: Path,
+    charset: str,
+    signature: tuple[str, int | None, int | None, str],
+) -> tuple[ProxySubscriptionNode, ...]:
+    global _PROXY_SUBSCRIPTION_NODES_CACHE, _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        if (
+            _PROXY_SUBSCRIPTION_NODES_CACHE is not None
+            and _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE == signature
+        ):
+            return _PROXY_SUBSCRIPTION_NODES_CACHE
+    text = _decode_subscription_bytes(path.read_bytes(), charset)
+    nodes = parse_proxy_subscription_content(text)
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        _PROXY_SUBSCRIPTION_NODES_CACHE = nodes
+        _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE = signature
+    return nodes
 
 
 def proxy_subscription_auto_refresh_enabled(scope: str = "") -> bool:

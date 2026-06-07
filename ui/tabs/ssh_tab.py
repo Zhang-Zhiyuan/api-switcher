@@ -87,6 +87,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_prefer_quality_sort = False
         self._proxy_busy = False
         self._proxy_saved_subscription_loaded = False
+        self._proxy_saved_subscription_load_generation = 0
         self._proxy_node_text = None
         self._proxy_target_label = None
         self._proxy_cache_label = None
@@ -1403,6 +1404,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_saved_subscription_loaded:
             return
         self._proxy_saved_subscription_loaded = True
+        self._proxy_saved_subscription_load_generation += 1
+        generation = self._proxy_saved_subscription_load_generation
         state = remote_proxy.load_proxy_subscription_state()
         url = str(state.get("url") or "").strip()
         auto_refresh = remote_proxy.proxy_subscription_auto_refresh_enabled("ssh")
@@ -1418,29 +1421,53 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_periodic_update_entry.delete(0, "end")
             self._proxy_periodic_update_entry.insert(0, interval_minutes)
 
-        cached = remote_proxy.load_cached_proxy_subscription()
-        if cached and cached.nodes:
-            self._proxy_latency_results = {}
-            self._proxy_latency_server_count = 0
-            self._proxy_quality_results = remote_proxy.load_proxy_subscription_qualities()
-            self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
-            self._set_proxy_subscription_nodes(cached.nodes)
-            self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
-            self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
-            self._set_proxy_cache_status(
-                f"本机缓存: {len(cached.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}",
-                "success",
-            )
-            self._set_proxy_status(
-                f"已加载本机缓存订阅: {len(cached.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}"
-            )
-        elif url:
-            self._set_proxy_cache_status("本机缓存: 未找到可用节点", "warning")
-            self._set_proxy_status("已恢复订阅链接；尚未找到可用本机缓存，可手动拉取订阅。", "warning")
+        if not url:
+            self._schedule_proxy_periodic_update(initial=True)
+            return
 
-        if url and auto_refresh:
-            self._schedule_proxy_startup_refresh()
-        self._schedule_proxy_periodic_update(initial=True)
+        self._set_proxy_cache_status("本机缓存: 正在后台恢复订阅...", "info")
+        self._set_proxy_status("正在后台恢复本机缓存订阅；页面可先操作。")
+
+        def run():
+            cached = remote_proxy.load_cached_proxy_subscription()
+            payload = {
+                "cached": cached,
+                "qualities": remote_proxy.load_proxy_subscription_qualities() if cached and cached.nodes else {},
+            }
+
+            def finish():
+                if not self.winfo_exists() or generation != self._proxy_saved_subscription_load_generation:
+                    return
+                cached_result = payload["cached"]
+                if cached_result and cached_result.nodes:
+                    self._proxy_latency_results = {}
+                    self._proxy_latency_server_count = 0
+                    self._proxy_quality_results = payload["qualities"]
+                    self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
+                    self._set_proxy_subscription_nodes(cached_result.nodes)
+                    self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
+                    self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+                    self._set_proxy_cache_status(
+                        f"本机缓存: {len(cached_result.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}",
+                        "success",
+                    )
+                    self._set_proxy_status(
+                        f"已加载本机缓存订阅: {len(cached_result.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}"
+                    )
+                else:
+                    self._set_proxy_cache_status("本机缓存: 未找到可用节点", "warning")
+                    self._set_proxy_status("已恢复订阅链接；尚未找到可用本机缓存，可手动拉取订阅。", "warning")
+
+                if url and auto_refresh:
+                    self._schedule_proxy_startup_refresh()
+                self._schedule_proxy_periodic_update(initial=True)
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, name="ssh-proxy-cache-load", daemon=True).start()
 
     def _select_proxy_subscription_node_by_key(self, node_key: str) -> bool:
         if not node_key or not self._proxy_subscription_picker:
@@ -1665,6 +1692,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
+        self._proxy_saved_subscription_load_generation += 1
         self._set_proxy_busy(True)
         self._set_proxy_cache_status("本机缓存: 正在刷新订阅..." if auto else "本机缓存: 正在拉取订阅...")
         self._set_proxy_status("正在自动刷新订阅..." if auto else "正在拉取订阅并解析节点...")

@@ -911,6 +911,41 @@ def test_load_cached_proxy_subscription_respects_saved_charset(monkeypatch, tmp_
     assert cached.nodes[0].node["name"] == "缓存节点"
 
 
+def test_load_cached_proxy_subscription_reuses_parsed_nodes(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    cache_dir = tmp_path / "proxy_subscriptions"
+    cache_dir.mkdir()
+    content_path = cache_dir / "subscription-cache.yaml"
+    content_path.write_text(
+        "proxies:\n  - { name: cached, type: vless, server: example.com, port: 443 }\n",
+        encoding="utf-8",
+    )
+    remote_proxy.save_proxy_subscription_state(
+        url="https://example.com/sub",
+        saved_path=str(content_path),
+        last_fetched_at="2026-05-26T00:00:00+00:00",
+        node_count=1,
+    )
+    calls = {"count": 0}
+    original_parse = remote_proxy.parse_proxy_subscription_content
+
+    def counting_parse(text):
+        calls["count"] += 1
+        return original_parse(text)
+
+    monkeypatch.setattr(remote_proxy, "parse_proxy_subscription_content", counting_parse)
+
+    first = remote_proxy.load_cached_proxy_subscription()
+    second = remote_proxy.load_cached_proxy_subscription()
+
+    assert first is not None
+    assert second is not None
+    assert first.nodes[0].node["name"] == "cached"
+    assert second.nodes[0].node["name"] == "cached"
+    assert calls["count"] == 1
+
+
 def test_proxy_subscription_state_persists_auto_refresh_and_selection(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     node = remote_proxy.parse_proxy_node("{ name: picked, type: vless, server: example.com, port: 443 }")
