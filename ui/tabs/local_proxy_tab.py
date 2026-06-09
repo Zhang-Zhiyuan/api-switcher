@@ -90,7 +90,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             policy,
-            text="运行策略",
+            text="运行策略与代理范围",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -100,6 +100,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         startup_box.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         startup_box.grid_columnconfigure(0, weight=1)
         startup_box.grid_columnconfigure(1, weight=1)
+        startup_box.grid_columnconfigure(2, weight=1)
         ctk.CTkCheckBox(
             startup_box,
             text="开机自动启动本机代理",
@@ -120,16 +121,87 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             text_color=COLORS["text"],
             font=font(12),
         ).grid(row=0, column=1, sticky="w", padx=(0, 16))
+        ctk.CTkCheckBox(
+            startup_box,
+            text="代理大陆境外 IP",
+            variable=self._proxy_non_cn_var,
+            command=self._on_proxy_non_cn_toggle,
+            checkbox_width=18,
+            checkbox_height=18,
+            text_color=COLORS["text"],
+            font=font(12),
+        ).grid(row=0, column=2, sticky="w")
+        self._apply_routing_button = ctk.CTkButton(
+            startup_box,
+            text="应用规则",
+            width=92,
+            command=self._apply_saved_routing,
+            **button_style("secondary", compact=True),
+        )
+        self._apply_routing_button.grid(row=0, column=3, sticky="e")
+
+        ctk.CTkLabel(
+            policy,
+            text="内置站点",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="nw", pady=(12, 0))
+        builtin_box = ctk.CTkFrame(policy, fg_color="transparent")
+        builtin_box.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        builtin_box.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self._builtin_site_vars = {}
+        for index, site in enumerate(local_proxy.LOCAL_PROXY_BUILTIN_SITES):
+            site_id = str(site["id"])
+            var = ctk.BooleanVar(value=False)
+            self._builtin_site_vars[site_id] = var
+            ctk.CTkCheckBox(
+                builtin_box,
+                text=str(site["label"]),
+                variable=var,
+                command=lambda value=site_id: self._on_builtin_site_toggle(value),
+                checkbox_width=16,
+                checkbox_height=16,
+                text_color=COLORS["text"],
+                font=font(12),
+            ).grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 14), pady=(0, 8))
+
+        ctk.CTkLabel(
+            policy,
+            text="自定义",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        custom_box = ctk.CTkFrame(policy, fg_color="transparent")
+        custom_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        custom_box.grid_columnconfigure(0, weight=1)
+        self._custom_target_entry = ctk.CTkEntry(
+            custom_box,
+            placeholder_text="输入网址或 IP，例如 youtube.com、https://example.com、8.8.8.8、1.1.1.0/24",
+            **input_style(),
+        )
+        self._custom_target_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            custom_box,
+            text="新增",
+            width=72,
+            command=self._add_custom_target,
+            **button_style("accent", compact=True),
+        ).grid(row=0, column=1, sticky="e")
+
+        self._custom_target_frame = ctk.CTkFrame(policy, fg_color="transparent")
+        self._custom_target_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
 
         self._routing_status_label = ctk.CTkLabel(
             policy,
-            text="默认仅代理 AI 相关域名；YouTube、内置站点、自定义目标和境外 IP 扩展路由暂时关闭。",
+            text="默认只代理 AI 相关域名；勾选内置站点或新增自定义目标后，会写入本机 mihomo 规则。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._routing_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._routing_status_label.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         bind_wraplength(policy, self._routing_status_label, padding=20)
 
         node_frame = ctk.CTkFrame(self, **card_frame_kwargs())
@@ -477,12 +549,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         preferences = local_proxy.load_local_proxy_preferences()
         self._start_on_login_var.set(bool(preferences.get("start_on_login")))
         self._keep_running_on_exit_var.set(bool(preferences.get("keep_running_on_exit", True)))
-        self._proxy_non_cn_var.set(False)
+        self._proxy_non_cn_var.set(bool(preferences.get("proxy_non_cn")))
         builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
         for site_id, var in self._builtin_site_vars.items():
             var.set(bool(builtin_sites.get(site_id)))
+        self._render_custom_targets(preferences.get("custom_targets") or [])
+        enabled_sites = sum(1 for enabled in builtin_sites.values() if enabled)
+        enabled_custom = sum(1 for item in preferences.get("custom_targets") or [] if item.get("enabled", True))
+        mode = "大陆境外 IP 走代理" if preferences.get("proxy_non_cn") else "仅规则命中的站点走代理"
         self._set_routing_status(
-            "当前规则: 默认 AI 域名走代理；YouTube、境外 IP、内置站点和自定义目标扩展路由暂时关闭。"
+            f"当前规则: {mode}；内置站点 {enabled_sites} 个，自定义目标 {enabled_custom} 个。"
         )
 
     def _render_custom_targets(self, entries):
@@ -1461,7 +1537,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 "将使用当前节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
                 "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY、VS Code 本机代理设置，以及 Win11 当前用户系统代理。\n"
                 f"识别到节点: {node_summary}\n"
-                "mihomo 当前仅转发默认 AI 相关域名；YouTube、内置站点、自定义目标和境外 IP 扩展路由暂时关闭。"
+                "mihomo 会按上方“代理范围”规则转发：AI 站点始终走代理，内置站点/自定义目标和境外 IP 模式按开关生效。"
             ),
             on_confirm=do_start,
         )
