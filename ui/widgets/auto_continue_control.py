@@ -18,6 +18,11 @@ class AutoContinueControl(ctk.CTkFrame):
         self._refreshing = False
         self._refresh_generation = 0
         self._refresh_finish_after_id = None
+        self._info_text = None
+        self._info_text_host = None
+        self._info_text_after_id = None
+        self._info_placeholder_label = None
+        self._pending_info_text = "正在后台读取自动续跑状态..."
         self._destroyed = False
         self._build_ui()
         self.after(20, self.refresh)
@@ -25,6 +30,12 @@ class AutoContinueControl(ctk.CTkFrame):
     def destroy(self):
         self._destroyed = True
         self._refresh_generation += 1
+        if self._info_text_after_id:
+            try:
+                self.after_cancel(self._info_text_after_id)
+            except Exception:
+                pass
+            self._info_text_after_id = None
         if self._refresh_finish_after_id:
             try:
                 self.after_cancel(self._refresh_finish_after_id)
@@ -258,8 +269,52 @@ class AutoContinueControl(ctk.CTkFrame):
         self._git_auto_push_switch.grid(row=0, column=2, sticky="w", padx=(0, 14), pady=(0, 4))
 
         # Info display
-        self._info_text = ctk.CTkTextbox(self, height=118, **textbox_style(monospace=True))
-        self._info_text.pack(fill="x", padx=10, pady=(5, 8))
+        self._info_text_host = ctk.CTkFrame(
+            self,
+            height=118,
+            fg_color=COLORS["field_bg"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"],
+        )
+        self._info_text_host.pack(fill="x", padx=10, pady=(5, 8))
+        self._info_text_host.pack_propagate(False)
+        self._info_placeholder_label = ctk.CTkLabel(
+            self._info_text_host,
+            text="正在后台读取自动续跑状态...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._info_placeholder_label.pack(expand=True)
+        self._info_text_after_id = self.after(60, self._build_info_text)
+
+    def _build_info_text(self):
+        self._info_text_after_id = None
+        if self._destroyed or self._info_text or not self._info_text_host:
+            return
+        try:
+            for child in self._info_text_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._info_text = ctk.CTkTextbox(self._info_text_host, height=118, **textbox_style(monospace=True))
+        self._info_text.pack(fill="both", expand=True)
+        self._set_info_text(self._pending_info_text)
+
+    def _set_info_text(self, text: str):
+        self._pending_info_text = str(text or "")
+        if not self._info_text:
+            if self._info_placeholder_label:
+                try:
+                    preview = self._pending_info_text.splitlines()[0] if self._pending_info_text else ""
+                    self._info_placeholder_label.configure(text=preview[:120])
+                except Exception:
+                    pass
+            return
+        self._info_text.configure(state="normal")
+        self._info_text.delete("1.0", "end")
+        self._info_text.insert("1.0", self._pending_info_text)
+        self._info_text.configure(state="disabled")
 
     def _create_state_chip(self, parent, key: str, label: str, width: int = 88):
         chip = ctk.CTkLabel(
@@ -293,10 +348,7 @@ class AutoContinueControl(ctk.CTkFrame):
         generation = self._refresh_generation
         try:
             self._status_label.configure(text="读取中...", text_color=COLORS["muted_soft"])
-            self._info_text.configure(state="normal")
-            self._info_text.delete("1.0", "end")
-            self._info_text.insert("1.0", "正在后台读取自动续跑状态...")
-            self._info_text.configure(state="disabled")
+            self._set_info_text("正在后台读取自动续跑状态...")
         except Exception:
             pass
 
@@ -339,10 +391,7 @@ class AutoContinueControl(ctk.CTkFrame):
     def _apply_refresh_error(self, message: str):
         try:
             self._status_label.configure(text="错误", text_color="#e74c3c")
-            self._info_text.configure(state="normal")
-            self._info_text.delete("1.0", "end")
-            self._info_text.insert("1.0", f"错误: {message}")
-            self._info_text.configure(state="disabled")
+            self._set_info_text(f"错误: {message}")
         except Exception:
             pass
 
@@ -452,10 +501,7 @@ class AutoContinueControl(ctk.CTkFrame):
                         f" / {auto_approve_limit} 次 / {', '.join(auto_approve_tools[:5])}"
                     )
 
-            self._info_text.configure(state="normal")
-            self._info_text.delete("1.0", "end")
-            self._info_text.insert("1.0", "\n".join(info_lines))
-            self._info_text.configure(state="disabled")
+            self._set_info_text("\n".join(info_lines))
 
         except Exception as e:
             self._apply_refresh_error(str(e))
