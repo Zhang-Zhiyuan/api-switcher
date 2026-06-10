@@ -40,6 +40,7 @@ def test_detect_network_classifies_cloud_exit_without_private_data():
     }
 
     report = network_diagnostics.detect_network(
+        enabled_services=[],
         http_get=_fake_http_get(mapping),
         reverse_resolver=lambda _ip: "ec2-203-0-113-10.compute-1.amazonaws.com",
     )
@@ -94,6 +95,7 @@ def test_detect_network_uses_ping0_paid_api_only_for_reachable_ips():
 
     report = network_diagnostics.detect_network(
         ping0_api_key="test-key",
+        enabled_services=[network_diagnostics.SERVICE_PING0],
         http_get=fake,
         reverse_resolver=lambda _ip: "",
     )
@@ -389,6 +391,86 @@ def test_proxycheck_hosting_flag_without_type_classifies_data_center():
     assert classification.risk_score >= 52
 
 
+def test_ipapi_hosting_vpn_abuser_classifies_suspicious_exit():
+    ip = "8.8.8.8"
+    mapping = {
+        f"https://api.ipapi.is?q={ip}": {
+            "ip": ip,
+            "is_datacenter": True,
+            "is_vpn": True,
+            "is_proxy": False,
+            "is_tor": False,
+            "is_abuser": True,
+            "company": {
+                "name": "Google LLC",
+                "type": "hosting",
+                "abuser_score": "0.0039 (Low)",
+            },
+            "asn": {
+                "asn": 15169,
+                "org": "Google LLC",
+                "type": "hosting",
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_ipapi_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.source == network_diagnostics.SERVICE_IPAPI
+    assert info.network_type == "hosting"
+    assert info.flags["hosting"] is True
+    assert info.flags["vpn"] is True
+    assert info.flags["abuser"] is True
+    assert info.risk_score >= 82
+    assert info.asn == "AS15169"
+    assert classification.ip_type == "代理/VPN/Tor 可疑"
+    assert classification.risk_score >= 82
+    assert any("ipapi.is flags" in signal for signal in classification.signals)
+
+
+def test_ipapi_isp_type_classifies_home_broadband():
+    ip = "198.51.100.50"
+    mapping = {
+        f"https://api.ipapi.is?q={ip}": {
+            "ip": ip,
+            "is_datacenter": "false",
+            "is_vpn": "false",
+            "is_proxy": "false",
+            "is_tor": "false",
+            "is_abuser": "false",
+            "company": {
+                "name": "Example Fiber",
+                "type": "isp",
+                "abuser_score": "0.002 (Low)",
+            },
+            "asn": {
+                "asn": "64510",
+                "org": "Example Fiber",
+                "type": "isp",
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_ipapi_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.network_type == "isp"
+    assert info.flags["hosting"] is False
+    assert info.flags["vpn"] is False
+    assert info.risk_score is None
+    assert classification.ip_type == "家庭宽带/住宅 IP"
+    assert classification.risk_score <= 30
+
+
 def test_proxycheck_v3_device_estimate_is_parsed_and_affects_risk():
     ip = "203.0.113.41"
     mapping = {
@@ -530,6 +612,10 @@ def test_vpnapi_flags_anonymous_network_when_key_is_present():
 
     report = network_diagnostics.detect_network(
         vpnapi_api_key="vpn-key",
+        enabled_services=[
+            network_diagnostics.SERVICE_PROXYCHECK,
+            network_diagnostics.SERVICE_VPNAPI,
+        ],
         http_get=_fake_http_get(mapping),
         reverse_resolver=lambda _ip: "",
     )
@@ -639,6 +725,10 @@ def test_ipqs_fraud_score_and_connection_type_are_used_with_key():
 
     report = network_diagnostics.detect_network(
         ipqs_api_key="ipqs-key",
+        enabled_services=[
+            network_diagnostics.SERVICE_PROXYCHECK,
+            network_diagnostics.SERVICE_IPQS,
+        ],
         http_get=_fake_http_get(mapping),
         reverse_resolver=lambda _ip: "",
     )
@@ -766,7 +856,7 @@ def test_user_can_disable_quality_services():
     assert diagnostic.ping0.source == "disabled"
     assert diagnostic.reputation == []
     assert diagnostic.classification.ip_type == "运营商/宽带"
-    assert not any("ping0.cc" in url or "proxycheck.io" in url or "ipqualityscore.com" in url or "vpnapi.io" in url for url in seen_urls)
+    assert not any("ping0.cc" in url or "proxycheck.io" in url or "api.ipapi.is" in url or "ipqualityscore.com" in url or "vpnapi.io" in url for url in seen_urls)
 
 
 def test_ipqs_key_pool_rotates_after_limited_key():

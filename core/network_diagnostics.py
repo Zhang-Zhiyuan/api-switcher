@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from core.network_diagnostic_settings import (
     HIDDEN_SERVICES,
+    SERVICE_IPAPI,
     SERVICE_IPQS,
     SERVICE_PING0,
     SERVICE_PROXYCHECK,
@@ -43,6 +44,7 @@ PING0_DETAIL_URL = "https://ping0.cc/ip/{ip}"
 PING0_PING_URL = "https://ping0.cc/ping/{ip}"
 PING0_API_URL = "https://ping0.cc/apiloc/apikey({api_key})/ip({ip})"
 PROXYCHECK_API_URL = "https://proxycheck.io/v3/{ip}"
+IPAPI_IS_URL = "https://api.ipapi.is"
 IPQS_API_URL = "https://ipqualityscore.com/api/json/ip/{api_key}/{ip}"
 VPNAPI_URL = "https://vpnapi.io/api/{ip}"
 IPV4_CANDIDATE_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
@@ -271,6 +273,7 @@ class ReputationInfo:
     def source_label(self) -> str:
         return {
             "proxycheck": "ProxyCheck",
+            "ipapi": "ipapi.is",
             "ipqs": "IPQualityScore",
             "vpnapi": "VPNAPI.io",
         }.get(self.source, self.source)
@@ -355,11 +358,13 @@ def detect_network(
     timeout: float = DEFAULT_TIMEOUT,
     ping0_api_key: str = "",
     proxycheck_api_key: str = "",
+    ipapi_api_key: str = "",
     ipqs_api_key: str = "",
     vpnapi_api_key: str = "",
     enabled_services: Optional[list[str] | set[str] | tuple[str, ...]] = None,
     ping0_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     proxycheck_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    ipapi_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     ipqs_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     vpnapi_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     http_get: Optional[HttpGetter] = None,
@@ -371,12 +376,14 @@ def detect_network(
     reverse_resolver = reverse_resolver or _reverse_dns
     ping0_keys = _key_pool(ping0_api_keys, ping0_api_key)
     proxycheck_keys = _key_pool(proxycheck_api_keys, proxycheck_api_key)
+    ipapi_keys = _key_pool(ipapi_api_keys, ipapi_api_key)
     ipqs_keys = _key_pool(ipqs_api_keys, ipqs_api_key)
     vpnapi_keys = _key_pool(vpnapi_api_keys, vpnapi_api_key)
     services = _enabled_services(
         enabled_services,
         ping0_keys=ping0_keys,
         proxycheck_keys=proxycheck_keys,
+        ipapi_keys=ipapi_keys,
         ipqs_keys=ipqs_keys,
         vpnapi_keys=vpnapi_keys,
     )
@@ -399,6 +406,7 @@ def detect_network(
             http_get,
             enabled_services=services,
             proxycheck_api_keys=proxycheck_keys,
+            ipapi_api_keys=ipapi_keys,
             ipqs_api_keys=ipqs_keys,
             vpnapi_api_keys=vpnapi_keys,
         )
@@ -425,6 +433,8 @@ def detect_network(
     ]
     if SERVICE_PROXYCHECK in services:
         notices.append("ProxyCheck 可无 Key 调用；配置多个 Key 后会优先使用 Key 池。")
+    if SERVICE_IPAPI in services:
+        notices.append("ipapi.is 可无 Key 调用；用于补充机房、ASN、VPN/Proxy/Tor 和 Abuser 信号。")
     if SERVICE_PING0 not in services:
         notices.append("Ping0 已由用户关闭。")
     elif not ping0_keys:
@@ -648,22 +658,26 @@ def lookup_reputation(
     timeout: float,
     http_get: HttpGetter,
     proxycheck_api_key: str = "",
+    ipapi_api_key: str = "",
     ipqs_api_key: str = "",
     vpnapi_api_key: str = "",
     enabled_services: Optional[list[str] | set[str] | tuple[str, ...]] = None,
     proxycheck_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+    ipapi_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     ipqs_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
     vpnapi_api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
 ) -> list[ReputationInfo]:
     """Look up reputation sources that can classify residential/hosting/proxy usage."""
 
     proxycheck_keys = _key_pool(proxycheck_api_keys, proxycheck_api_key)
+    ipapi_keys = _key_pool(ipapi_api_keys, ipapi_api_key)
     ipqs_keys = _key_pool(ipqs_api_keys, ipqs_api_key)
     vpnapi_keys = _key_pool(vpnapi_api_keys, vpnapi_api_key)
     services = _enabled_services(
         enabled_services,
         ping0_keys=[],
         proxycheck_keys=proxycheck_keys,
+        ipapi_keys=ipapi_keys,
         ipqs_keys=ipqs_keys,
         vpnapi_keys=vpnapi_keys,
     )
@@ -674,6 +688,12 @@ def lookup_reputation(
             SERVICE_PROXYCHECK,
             lookup_proxycheck_reputation,
             {"api_keys": proxycheck_keys},
+        ))
+    if SERVICE_IPAPI in services:
+        tasks.append((
+            SERVICE_IPAPI,
+            lookup_ipapi_reputation,
+            {"api_keys": ipapi_keys},
         ))
     if SERVICE_IPQS in services:
         tasks.append((
@@ -817,6 +837,95 @@ def _lookup_proxycheck_reputation_once(
         if info.subnet_shared_count is not None:
             signal_parts.append(f"subnet={info.subnet_shared_count}")
         info.signals.append("ProxyCheck device_estimate." + " ".join(signal_parts))
+    return info
+
+
+def lookup_ipapi_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str = "",
+    api_keys: Optional[list[str] | tuple[str, ...] | str] = None,
+) -> ReputationInfo:
+    keys = _key_pool(api_keys, api_key)
+    keys_to_try = keys + [""] if keys else [""]
+    attempts: list[str] = []
+    for index, key in enumerate(keys_to_try):
+        info = _lookup_ipapi_reputation_once(ip, timeout, http_get, key)
+        info.api_key_label = _key_label(index) if key else "无 Key"
+        if info.ok:
+            info.attempts = attempts + [f"{info.api_key_label} 成功"]
+            return info
+        attempts.append(f"{info.api_key_label} 失败: {info.error or '请求失败'}")
+    info.attempts = attempts
+    return info
+
+
+def _lookup_ipapi_reputation_once(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+    api_key: str = "",
+) -> ReputationInfo:
+    params = {"q": ip}
+    api_key = (api_key or "").strip()
+    if api_key:
+        params["key"] = api_key
+    url = f"{IPAPI_IS_URL}?{urllib.parse.urlencode(params)}"
+    result = http_get(url, timeout)
+    info = ReputationInfo(ip=ip, source="ipapi", response_time=result.response_time)
+    if not result.ok:
+        info.error = _http_result_error_text(result, "ipapi.is 请求失败")
+        return info
+
+    try:
+        data = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        info.error = f"ipapi.is JSON 解析失败: {exc}"
+        return info
+
+    if not isinstance(data, dict):
+        info.error = "ipapi.is 返回结构异常"
+        return info
+    payload = _payload_dict(data, "data", "result")
+    if _payload_is_error(data) or (payload is not data and _payload_is_error(payload)):
+        info.error = _payload_error_text(payload, _payload_error_text(data, "ipapi.is 查询失败"))
+        return info
+    returned_ip = _first_text(payload, "ip", "query", "address")
+    if returned_ip and _valid_ip(returned_ip) and returned_ip != ip:
+        info.error = f"ipapi.is 返回 IP 不匹配: {returned_ip}"
+        return info
+
+    company = payload.get("company") if isinstance(payload.get("company"), dict) else {}
+    asn_data = payload.get("asn") if isinstance(payload.get("asn"), dict) else {}
+    info.ok = True
+    info.raw = payload
+    info.network_type = _ipapi_network_type(payload, company, asn_data)
+    info.provider = (
+        _first_text(company, "name", "org", "organization")
+        or _first_text(asn_data, "org", "name", "descr", "description")
+    )
+    info.organization = info.provider
+    info.asn = _normalize_asn(_first_value(asn_data, "asn", "as") or _first_value(company, "asn", "as"))
+    info.flags = _ipapi_flags(payload)
+    info.risk_score = _ipapi_risk_score(info, payload, company, asn_data)
+
+    company_type = _first_text(company, "type", "connection_type", "network_type")
+    asn_type = _first_text(asn_data, "type", "connection_type", "network_type")
+    if info.network_type:
+        type_parts = [f"network.type={info.network_type}"]
+        if company_type:
+            type_parts.append(f"company.type={company_type}")
+        if asn_type and asn_type != company_type:
+            type_parts.append(f"asn.type={asn_type}")
+        info.signals.append("ipapi.is " + " ".join(type_parts))
+    active = _active_flag_names(info.flags)
+    if active:
+        info.signals.append("ipapi.is flags: " + ", ".join(active))
+    if info.risk_score is not None:
+        info.signals.append(f"ipapi.is risk={info.risk_score}")
+    if info.asn or info.provider:
+        info.signals.append(f"ipapi.is ASN={info.asn or '-'} {info.provider or ''}".strip())
     return info
 
 
@@ -1383,13 +1492,14 @@ def _enabled_services(
     *,
     ping0_keys: list[str],
     proxycheck_keys: list[str],
+    ipapi_keys: list[str],
     ipqs_keys: list[str],
     vpnapi_keys: list[str],
 ) -> set[str]:
     if enabled_services is not None:
         return set(normalize_services(enabled_services))
 
-    services = {SERVICE_PING0, SERVICE_PROXYCHECK}
+    services = {SERVICE_PING0, SERVICE_PROXYCHECK, SERVICE_IPAPI}
     if ipqs_keys:
         services.add(SERVICE_IPQS)
     if vpnapi_keys:
@@ -1575,6 +1685,86 @@ def _proxycheck_device_estimates(record: dict[str, Any]) -> tuple[Optional[int],
     return address_count, subnet_count
 
 
+def _ipapi_network_type(payload: dict[str, Any], company: dict[str, Any], asn_data: dict[str, Any]) -> str:
+    for data in (company, asn_data, payload):
+        network_type = _first_text(data, "type", "connection_type", "network_type", "asn_type")
+        if network_type and _network_type_category(network_type):
+            return network_type
+    if _optional_boolish(payload.get("is_datacenter")) is True:
+        return "hosting"
+    if _optional_boolish(payload.get("is_mobile")) is True:
+        return "mobile"
+    return ""
+
+
+def _ipapi_flags(payload: dict[str, Any]) -> dict[str, bool]:
+    flags: dict[str, bool] = {}
+    mappings = {
+        "vpn": ("is_vpn", "vpn"),
+        "proxy": ("is_proxy", "proxy"),
+        "tor": ("is_tor", "tor"),
+        "hosting": ("is_datacenter", "is_hosting", "datacenter"),
+        "mobile": ("is_mobile", "mobile"),
+        "abuser": ("is_abuser", "abuser"),
+        "scraper": ("is_crawler", "crawler"),
+    }
+    for flag, keys in mappings.items():
+        parsed = _optional_boolish(_first_value(payload, *keys))
+        if parsed is not None:
+            flags[flag] = parsed
+            continue
+        if any(isinstance(payload.get(key), dict) for key in keys):
+            flags[flag] = True
+    if _network_type_category(_ipapi_network_type(
+        payload,
+        payload.get("company") if isinstance(payload.get("company"), dict) else {},
+        payload.get("asn") if isinstance(payload.get("asn"), dict) else {},
+    )) == "hosting":
+        flags.setdefault("hosting", True)
+    return flags
+
+
+def _ipapi_risk_score(
+    info: ReputationInfo,
+    payload: dict[str, Any],
+    company: dict[str, Any],
+    asn_data: dict[str, Any],
+) -> Optional[int]:
+    scores = [
+        _abuser_score_to_percent(_first_value(company, "abuser_score", "risk_score", "risk")),
+        _abuser_score_to_percent(_first_value(asn_data, "abuser_score", "risk_score", "risk")),
+        _abuser_score_to_percent(_first_value(payload, "abuser_score", "risk_score", "risk")),
+    ]
+    scores = [score for score in scores if score is not None and score >= 20]
+    risk = max(scores) if scores else None
+    if any(info.flags.get(key) for key in ("vpn", "proxy", "tor")):
+        risk = max(risk or 0, 82)
+    if info.flags.get("abuser"):
+        risk = max(risk or 0, 78)
+    if info.flags.get("scraper"):
+        risk = max(risk or 0, 70)
+    if _network_type_category(info.network_type) == "hosting" or info.flags.get("hosting"):
+        risk = max(risk or 0, 55)
+    if risk is None:
+        return None
+    return max(0, min(100, int(risk)))
+
+
+def _abuser_score_to_percent(value: Any) -> Optional[int]:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    if not match:
+        return None
+    try:
+        score = float(match.group(0))
+    except ValueError:
+        return None
+    if score <= 1:
+        score *= 100
+    return max(0, min(100, int(round(score))))
+
+
 def summarize_report(report: NetworkDiagnosticReport) -> str:
     if not report.diagnostics:
         failed = sum(1 for probe in report.probes if not probe.ok)
@@ -1724,6 +1914,7 @@ def _has_anonymity_flag(flags: dict[str, bool]) -> bool:
             "scraper",
             "compromised",
             "residential_proxy",
+            "abuser",
             "recent_abuse",
             "frequent_abuser",
             "high_risk_attacks",
@@ -1743,6 +1934,7 @@ def _active_flag_names(flags: dict[str, bool]) -> list[str]:
         "scraper": "Scraper",
         "compromised": "Compromised",
         "residential_proxy": "Residential Proxy",
+        "abuser": "Abuser",
         "active_vpn": "Active VPN",
         "active_tor": "Active Tor",
         "recent_abuse": "Recent Abuse",

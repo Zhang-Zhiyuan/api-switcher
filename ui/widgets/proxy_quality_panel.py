@@ -22,6 +22,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._open_ping0_button = None
         self._ping0_key_entry = None
         self._proxycheck_key_entry = None
+        self._ipapi_key_entry = None
         self._ipqs_key_entry = None
         self._vpnapi_key_entry = None
         self._service_vars = {}
@@ -52,7 +53,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Ping0、ProxyCheck、VPNAPI 评估 IP 质量",
+            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Ping0、ProxyCheck、ipapi.is、VPNAPI 评估 IP 质量",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -134,6 +135,11 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 network_diagnostic_settings.SERVICE_PROXYCHECK,
                 "ProxyCheck",
                 "可无 Key；Key 池用于更稳定额度",
+            ),
+            (
+                network_diagnostic_settings.SERVICE_IPAPI,
+                "ipapi.is",
+                "可无 Key；补充机房、ASN、Abuser、VPN/Proxy 信号",
             ),
             (
                 network_diagnostic_settings.SERVICE_VPNAPI,
@@ -241,6 +247,8 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             self._ping0_key_entry = self._service_key_entries[service][0]
         elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
             self._proxycheck_key_entry = self._service_key_entries[service][0]
+        elif service == network_diagnostic_settings.SERVICE_IPAPI:
+            self._ipapi_key_entry = self._service_key_entries[service][0]
         elif service == network_diagnostic_settings.SERVICE_IPQS:
             self._ipqs_key_entry = self._service_key_entries[service][0]
         elif service == network_diagnostic_settings.SERVICE_VPNAPI:
@@ -328,7 +336,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 count = len(service_settings.api_keys)
                 if count:
                     count_label.configure(text=f"{count} 个 Key", text_color=COLORS["success"])
-                elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
+                elif service in {network_diagnostic_settings.SERVICE_PROXYCHECK, network_diagnostic_settings.SERVICE_IPAPI}:
                     count_label.configure(text="可无 Key", text_color=COLORS["muted_soft"])
                 elif service == network_diagnostic_settings.SERVICE_PING0:
                     count_label.configure(text="免费 Geo", text_color=COLORS["muted_soft"])
@@ -413,6 +421,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                     enabled_services=enabled_services,
                     ping0_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_PING0),
                     proxycheck_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_PROXYCHECK),
+                    ipapi_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_IPAPI),
                     ipqs_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_IPQS),
                     vpnapi_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_VPNAPI),
                 )

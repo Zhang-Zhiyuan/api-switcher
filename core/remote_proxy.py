@@ -828,6 +828,7 @@ def assess_proxy_node_quality(
             http_get,
             enabled_services=services,
             proxycheck_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_PROXYCHECK),
+            ipapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_IPAPI),
             ipqs_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_IPQS),
             vpnapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_VPNAPI),
         )

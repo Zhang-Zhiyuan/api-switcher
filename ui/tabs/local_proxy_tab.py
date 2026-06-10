@@ -1328,7 +1328,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if dialog is not None:
                 self._refresh_subscription_action_hint()
                 self._set_status("已打开代理质量检测；可配置检测源和 API Key 池。")
-                show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / VPNAPI")
+                show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / ipapi.is / VPNAPI")
             else:
                 self._set_status("代理质量检测窗口打开失败。", "error")
                 show_toast(top, "代理质量检测窗口打开失败", is_error=True)
