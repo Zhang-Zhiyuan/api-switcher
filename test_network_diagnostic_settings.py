@@ -72,6 +72,9 @@ def test_save_and_load_settings_store_api_keys_as_secret_refs(tmp_path, monkeypa
 
     assert loaded.enabled_services() == [
         network_diagnostic_settings.SERVICE_PROXYCHECK,
+    ]
+    assert loaded.enabled_services(include_hidden=True) == [
+        network_diagnostic_settings.SERVICE_PROXYCHECK,
         network_diagnostic_settings.SERVICE_IPQS,
     ]
     assert loaded.keys_for(network_diagnostic_settings.SERVICE_PROXYCHECK) == ["proxy-a", "proxy-b"]
@@ -141,3 +144,24 @@ def test_load_settings_accepts_string_boolean_values(tmp_path, monkeypatch):
 
     assert loaded.service(network_diagnostic_settings.SERVICE_IPQS).enabled is False
     assert loaded.service(network_diagnostic_settings.SERVICE_VPNAPI).enabled is True
+
+
+def test_hidden_ipqs_is_preserved_but_not_user_selectable(tmp_path, monkeypatch):
+    secrets = {}
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", tmp_path / "network_diagnostics.json")
+    monkeypatch.setattr(network_diagnostic_settings.security, "set_secret", lambda ref, value: secrets.__setitem__(ref, value))
+    monkeypatch.setattr(network_diagnostic_settings.security, "get_secret", lambda ref: secrets.get(ref))
+    monkeypatch.setattr(network_diagnostic_settings.security, "delete_secret", lambda ref: None)
+
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_IPQS},
+        {network_diagnostic_settings.SERVICE_IPQS: "hidden-ipqs-key"},
+    )
+
+    network_diagnostic_settings.save_settings(settings)
+    loaded = network_diagnostic_settings.load_settings()
+
+    assert network_diagnostic_settings.SERVICE_IPQS not in network_diagnostic_settings.VISIBLE_SERVICE_ORDER
+    assert loaded.enabled_services() == []
+    assert loaded.enabled_services(include_hidden=True) == [network_diagnostic_settings.SERVICE_IPQS]
+    assert loaded.keys_for(network_diagnostic_settings.SERVICE_IPQS) == ["hidden-ipqs-key"]

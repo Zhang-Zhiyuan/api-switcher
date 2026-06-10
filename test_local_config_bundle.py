@@ -196,7 +196,8 @@ def test_local_config_zip_without_network_settings_keeps_existing_diagnostics(is
     local_config_bundle.import_local_config_zip(package, "strong-password")
     loaded = network_diagnostic_settings.load_settings()
 
-    assert loaded.enabled_services() == [network_diagnostic_settings.SERVICE_IPQS]
+    assert loaded.enabled_services() == []
+    assert loaded.enabled_services(include_hidden=True) == [network_diagnostic_settings.SERVICE_IPQS]
     assert loaded.keys_for(network_diagnostic_settings.SERVICE_IPQS) == ["current-ipqs-key"]
 
 

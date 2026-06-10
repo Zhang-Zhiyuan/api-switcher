@@ -504,6 +504,7 @@ def test_assess_proxy_node_quality_rejects_residential_business_conflict_for_ai_
         http_get=http_get,
         resolver=resolver,
         settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_PROXYCHECK, network_diagnostic_settings.SERVICE_IPQS],
     )
 
     assert result.ok is True

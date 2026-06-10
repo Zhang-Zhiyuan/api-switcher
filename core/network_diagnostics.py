@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from core.network_diagnostic_settings import (
+    HIDDEN_SERVICES,
     SERVICE_IPQS,
     SERVICE_PING0,
     SERVICE_PROXYCHECK,
@@ -428,10 +429,11 @@ def detect_network(
         notices.append("Ping0 已由用户关闭。")
     elif not ping0_keys:
         notices.append("未填写 Ping0 API Key 时，只使用 Ping0 免费 Geo 和详情页链接；指定 IP 风控值需要 Ping0 官方 API。")
-    if SERVICE_IPQS not in services:
-        notices.append("IPQualityScore 已由用户关闭。")
-    elif not ipqs_keys:
-        notices.append("IPQualityScore 已启用但未配置 Key，本次不会发起 IPQS 请求。")
+    if SERVICE_IPQS not in HIDDEN_SERVICES:
+        if SERVICE_IPQS not in services:
+            notices.append("IPQualityScore 已由用户关闭。")
+        elif not ipqs_keys:
+            notices.append("IPQualityScore 已启用但未配置 Key，本次不会发起 IPQS 请求。")
     if SERVICE_VPNAPI not in services:
         notices.append("VPNAPI.io 已由用户关闭。")
     elif not vpnapi_keys:

@@ -20,6 +20,8 @@ SERVICE_IPQS = "ipqs"
 SERVICE_VPNAPI = "vpnapi"
 SERVICE_ORDER = (SERVICE_PING0, SERVICE_PROXYCHECK, SERVICE_IPQS, SERVICE_VPNAPI)
 SERVICE_SET = set(SERVICE_ORDER)
+HIDDEN_SERVICES = {SERVICE_IPQS}
+VISIBLE_SERVICE_ORDER = tuple(service for service in SERVICE_ORDER if service not in HIDDEN_SERVICES)
 
 SERVICE_ALIASES = {
     "ping0": SERVICE_PING0,
@@ -74,8 +76,9 @@ class DiagnosticServiceSettings:
 class NetworkDiagnosticSettings:
     services: dict[str, DiagnosticServiceSettings] = field(default_factory=dict)
 
-    def enabled_services(self) -> list[str]:
-        return [service for service in SERVICE_ORDER if self.service(service).enabled]
+    def enabled_services(self, include_hidden: bool = False) -> list[str]:
+        order = SERVICE_ORDER if include_hidden else VISIBLE_SERVICE_ORDER
+        return [service for service in order if self.service(service).enabled]
 
     def keys_for(self, service: str) -> list[str]:
         return list(self.service(service).api_keys)

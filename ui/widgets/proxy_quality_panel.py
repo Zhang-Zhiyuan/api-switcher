@@ -30,6 +30,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._service_count_labels = {}
         self._service_cards = {}
         self._settings_controls = []
+        self._hidden_service_settings = {}
         self._settings_status_label = None
         self._save_settings_button = None
         self._status_label = None
@@ -51,7 +52,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Ping0、ProxyCheck、IPQS、VPNAPI 评估 IP 质量",
+            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Ping0、ProxyCheck、VPNAPI 评估 IP 质量",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -119,6 +120,10 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._save_settings_button.pack(side="right", padx=(10, 0), pady=(2, 0))
         self._settings_controls.append(self._save_settings_button)
         saved_settings = network_diagnostic_settings.load_settings()
+        self._hidden_service_settings = {
+            service: saved_settings.service(service)
+            for service in network_diagnostic_settings.HIDDEN_SERVICES
+        }
         service_rows = [
             (
                 network_diagnostic_settings.SERVICE_PING0,
@@ -129,11 +134,6 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 network_diagnostic_settings.SERVICE_PROXYCHECK,
                 "ProxyCheck",
                 "可无 Key；Key 池用于更稳定额度",
-            ),
-            (
-                network_diagnostic_settings.SERVICE_IPQS,
-                "IPQS",
-                "欺诈分、连接类型、Proxy/VPN/Tor",
             ),
             (
                 network_diagnostic_settings.SERVICE_VPNAPI,
@@ -307,6 +307,13 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             service: [entry.get() for entry in entries]
             for service, entries in self._service_key_entries.items()
         }
+        for service in network_diagnostic_settings.HIDDEN_SERVICES:
+            service_settings = self._hidden_service_settings.get(service)
+            if service_settings is None:
+                continue
+            if service_settings.enabled:
+                enabled.append(service)
+            api_keys[service] = service_settings.api_keys
         return network_diagnostic_settings.settings_from_values(enabled, api_keys)
 
     def _update_settings_preview(self):
@@ -314,7 +321,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             settings = self._collect_detection_settings()
         except Exception:
             return
-        for service in network_diagnostic_settings.SERVICE_ORDER:
+        for service in network_diagnostic_settings.VISIBLE_SERVICE_ORDER:
             service_settings = settings.service(service)
             count_label = self._service_count_labels.get(service)
             if count_label:
@@ -354,7 +361,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
     def _settings_status_text(self, settings) -> str:
         enabled_labels = []
         key_counts = []
-        for service in network_diagnostic_settings.SERVICE_ORDER:
+        for service in network_diagnostic_settings.VISIBLE_SERVICE_ORDER:
             service_settings = settings.service(service)
             label = network_diagnostic_settings.SERVICE_LABELS.get(service, service)
             if service_settings.enabled:
