@@ -58,6 +58,11 @@ ENV_KEYS = {
     SERVICE_VPNAPI: ("VPNAPI_KEY", "VPNAPI_API_KEY"),
 }
 
+KNOWN_API_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]{6}-){3}[A-Za-z0-9]{6}(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])[A-Za-z0-9]{24,96}(?![A-Za-z0-9])"
+)
+
 
 @dataclass
 class DiagnosticServiceSettings:
@@ -158,6 +163,9 @@ def parse_api_keys(value: list[str] | tuple[str, ...] | str | None) -> list[str]
             if isinstance(parsed, list):
                 return parse_api_keys(parsed)
         stripped = "\n".join(_clean_key_line(line) for line in stripped.splitlines())
+        known_tokens = _extract_known_api_key_tokens(stripped)
+        if known_tokens:
+            return _dedupe(known_tokens)
         parts = re.split(r"[\s,;，；、|]+", stripped)
     else:
         parts: list[str] = []
@@ -256,6 +264,10 @@ def _clean_key_token(value: str) -> str:
 
 def _clean_key_line(value: str) -> str:
     return re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", str(value or "").strip())
+
+
+def _extract_known_api_key_tokens(value: str) -> list[str]:
+    return [match.group(0) for match in KNOWN_API_KEY_RE.finditer(value or "")]
 
 
 def _mask_key(value: str) -> str:

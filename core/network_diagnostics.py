@@ -254,6 +254,8 @@ class ReputationInfo:
     risk_score: Optional[int] = None
     fraud_score: Optional[int] = None
     confidence_score: Optional[int] = None
+    shared_count: Optional[int] = None
+    subnet_shared_count: Optional[int] = None
     flags: dict[str, bool] = field(default_factory=dict)
     signals: list[str] = field(default_factory=list)
     api_key_label: str = ""
@@ -283,6 +285,11 @@ class ReputationInfo:
             parts.append(f"风险 {self.risk_score}%")
         if self.fraud_score is not None:
             parts.append(f"欺诈分 {self.fraud_score}")
+        if self.shared_count is not None:
+            shared = f"共享设备约 {self.shared_count}"
+            if self.subnet_shared_count is not None:
+                shared += f"/网段约 {self.subnet_shared_count}"
+            parts.append(shared)
         if self.api_key_label:
             parts.append(self.api_key_label)
         active_flags = _active_flag_names(self.flags)
@@ -525,7 +532,7 @@ def _lookup_ping0_paid_quality(
     quality.response_time = result.response_time
     quality.source = "ping0-api"
     if not result.ok:
-        quality.error = result.error or "Ping0 API 请求失败"
+        quality.error = _http_result_error_text(result, "Ping0 API 请求失败")
         return quality
 
     try:
@@ -671,7 +678,7 @@ def _lookup_proxycheck_reputation_once(
     result = http_get(url, timeout)
     info = ReputationInfo(ip=ip, source="proxycheck", response_time=result.response_time)
     if not result.ok:
-        info.error = result.error or "ProxyCheck 请求失败"
+        info.error = _http_result_error_text(result, "ProxyCheck 请求失败")
         return info
 
     try:
@@ -703,6 +710,7 @@ def _lookup_proxycheck_reputation_once(
     info.asn = _normalize_asn(_first_value(network, "asn", "as") or _first_value(record, "asn", "as"))
     info.risk_score = _optional_int(_first_value(detections, "risk", "risk_score", "score") or _first_value(record, "risk", "risk_score", "score") or data.get("risk"))
     info.confidence_score = _optional_int(_first_value(detections, "confidence", "confidence_score") or _first_value(record, "confidence", "confidence_score"))
+    info.shared_count, info.subnet_shared_count = _proxycheck_device_estimates(record)
     info.flags = _extract_bool_flags(
         detections,
         (
@@ -728,6 +736,11 @@ def _lookup_proxycheck_reputation_once(
         info.signals.append("ProxyCheck detections: " + ", ".join(active))
     if info.risk_score is not None:
         info.signals.append(f"ProxyCheck risk={info.risk_score}")
+    if info.shared_count is not None:
+        shared_signal = f"ProxyCheck device_estimate.address={info.shared_count}"
+        if info.subnet_shared_count is not None:
+            shared_signal += f" subnet={info.subnet_shared_count}"
+        info.signals.append(shared_signal)
     return info
 
 
@@ -770,7 +783,7 @@ def _lookup_ipqs_reputation_once(
     result = http_get(url, timeout)
     info = ReputationInfo(ip=ip, source="ipqs", response_time=result.response_time)
     if not result.ok:
-        info.error = result.error or "IPQualityScore 请求失败"
+        info.error = _http_result_error_text(result, "IPQualityScore 请求失败")
         return info
 
     try:
@@ -854,7 +867,7 @@ def _lookup_vpnapi_reputation_once(
     result = http_get(url, timeout)
     info = ReputationInfo(ip=ip, source="vpnapi", response_time=result.response_time)
     if not result.ok:
-        info.error = result.error or "VPNAPI.io 请求失败"
+        info.error = _http_result_error_text(result, "VPNAPI.io 请求失败")
         return info
 
     try:
@@ -1198,7 +1211,25 @@ def _category_vote_risk(result: ReputationInfo | str, default: int) -> int:
         risk = _reputation_score(result, default)
         if result.flags.get("shared_connection"):
             risk = max(risk, 42)
-        if result.flags.get("dynamic_connection") and _network_type_category(result.network_type) == "residential":
+        shared_values = [
+            value
+            for value in (result.shared_count, result.subnet_shared_count)
+            if isinstance(value, int)
+        ]
+        shared_peak = max(shared_values) if shared_values else None
+        if shared_peak is not None:
+            if shared_peak >= 50:
+                risk = max(risk, 65)
+            elif shared_peak >= 20:
+                risk = max(risk, 48)
+            elif shared_peak >= 10:
+                risk = max(risk, 38)
+        if (
+            result.flags.get("dynamic_connection")
+            and not result.flags.get("shared_connection")
+            and shared_peak is None
+            and _network_type_category(result.network_type) == "residential"
+        ):
             risk = min(risk, 24)
         return risk
     return default
@@ -1391,6 +1422,18 @@ def _payload_error_text(data: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def _http_result_error_text(result: HttpResult, fallback: str) -> str:
+    if result.text:
+        try:
+            data = json.loads(result.text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            payload = _payload_dict(data, "data", "result")
+            return _payload_error_text(payload, _payload_error_text(data, result.error or fallback))
+    return result.error or fallback
+
+
 def _first_value(data: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in data and data[key] not in (None, ""):
@@ -1419,6 +1462,41 @@ def _proxycheck_network_type(record_type: str, network: dict[str, Any]) -> str:
 
 def _proxycheck_anonymous_type(value: str) -> bool:
     return str(value or "").strip().lower() in {"anonymous", "proxy", "vpn", "tor", "relay", "socks"}
+
+
+def _proxycheck_device_estimates(record: dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    device_estimate = record.get("device_estimate")
+    if not isinstance(device_estimate, dict):
+        device_estimate = record.get("deviceEstimate")
+    if not isinstance(device_estimate, dict):
+        device_estimate = record.get("device estimate")
+    if not isinstance(device_estimate, dict):
+        device_estimate = {}
+    address_count = _optional_int(
+        _first_value(
+            device_estimate,
+            "address",
+            "address_count",
+            "addressCount",
+            "device_address_count",
+            "deviceAddressCount",
+            "ip_count",
+            "ipCount",
+        )
+        or _first_value(record, "device_address_count", "address_count", "shared_count", "shared_users")
+    )
+    subnet_count = _optional_int(
+        _first_value(
+            device_estimate,
+            "subnet",
+            "subnet_count",
+            "subnetCount",
+            "device_subnet_count",
+            "deviceSubnetCount",
+        )
+        or _first_value(record, "device_subnet_count", "subnet_count")
+    )
+    return address_count, subnet_count
 
 
 def summarize_report(report: NetworkDiagnosticReport) -> str:
@@ -1457,9 +1535,15 @@ def _http_get(url: str, timeout: float) -> HttpResult:
                 error="" if 200 <= int(status_code or 0) < 300 else f"HTTP {status_code}",
             )
     except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read()
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            text = ""
         return HttpResult(
             url=url,
             ok=False,
+            text=text,
             status_code=exc.code,
             response_time=time.perf_counter() - start,
             error=f"HTTP {exc.code}",

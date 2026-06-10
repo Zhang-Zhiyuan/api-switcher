@@ -9,6 +9,36 @@ def test_parse_api_keys_splits_and_deduplicates():
     assert network_diagnostic_settings.parse_api_keys(["- c", "1. d"]) == ["c", "d"]
 
 
+def test_parse_api_keys_extracts_dashboard_and_email_snippets():
+    proxycheck_key = "a92709-80366h-34707l-12pmwq"
+    ipqs_key = "zXppKcJBZKEfcBrW7S7KPIQjDMCgq9vi"
+    vpnapi_key = "6e31466319a94a94b43153b58b24acc3"
+    pasted = f"""
+dashboard / proxycheck.io
+Account Information
+API Key
+{proxycheck_key}
+Plan Tier Free Queries Today 0 / 1K
+
+Welcome to IPQualityScore.com!
+Account Details
+Email: user@example.com
+API KEY: {ipqs_key}
+Credit Balance: 1,000
+
+Dashboard
+Manage your API, plan, and account settings.
+API Key
+{vpnapi_key}
+"""
+
+    assert network_diagnostic_settings.parse_api_keys(pasted) == [
+        proxycheck_key,
+        ipqs_key,
+        vpnapi_key,
+    ]
+
+
 def test_normalize_services_accepts_common_aliases():
     assert network_diagnostic_settings.normalize_services(["proxycheck.io", "IPQualityScore", "VPN API", "unknown"]) == [
         network_diagnostic_settings.SERVICE_PROXYCHECK,

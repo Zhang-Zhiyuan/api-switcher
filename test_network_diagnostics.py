@@ -338,6 +338,49 @@ def test_proxycheck_hosting_flag_without_type_classifies_data_center():
     assert classification.risk_score >= 52
 
 
+def test_proxycheck_v3_device_estimate_is_parsed_and_affects_risk():
+    ip = "203.0.113.41"
+    mapping = {
+        f"https://proxycheck.io/v3/{ip}?p=0&tag=0": {
+            "status": "ok",
+            ip: {
+                "network": {
+                    "asn": "AS7922",
+                    "provider": "Example Fiber",
+                    "organisation": "Example Fiber",
+                    "type": "Residential",
+                },
+                "detections": {
+                    "anonymous": False,
+                    "proxy": False,
+                    "vpn": False,
+                    "tor": False,
+                    "risk": 7,
+                    "confidence": 96,
+                },
+                "device_estimate": {
+                    "address": 12,
+                    "subnet": 60,
+                },
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_proxycheck_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.shared_count == 12
+    assert info.subnet_shared_count == 60
+    assert "共享设备约 12/网段约 60" in info.summary_text()
+    assert any("device_estimate.address=12 subnet=60" in signal for signal in info.signals)
+    assert classification.ip_type == "家庭宽带/住宅 IP"
+    assert classification.risk_score >= 65
+
+
 def test_proxycheck_legacy_vpn_type_is_parsed_as_anonymous_flag():
     ip = "203.0.113.36"
     mapping = {
@@ -360,6 +403,26 @@ def test_proxycheck_legacy_vpn_type_is_parsed_as_anonymous_flag():
     assert info.flags["proxy"] is True
     assert info.flags["vpn"] is True
     assert info.risk_score == 86
+
+
+def test_ipqs_dynamic_connection_does_not_hide_shared_connection_risk():
+    ip = "203.0.113.42"
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="ipqs",
+                ok=True,
+                network_type="Residential",
+                fraud_score=12,
+                flags={"shared_connection": True, "dynamic_connection": True},
+            ),
+        ],
+    )
+
+    assert classification.ip_type == "家庭宽带/住宅 IP"
+    assert classification.risk_score >= 42
 
 
 def test_vpnapi_flags_anonymous_network_when_key_is_present():
@@ -605,7 +668,13 @@ def test_ipqs_key_pool_rotates_after_limited_key():
             error="network unreachable",
         ),
         "https://api64.ipify.org?format=json": {"ip": ip},
-        first_url: network_diagnostics.HttpResult(url=first_url, ok=False, status_code=429, error="HTTP 429"),
+        first_url: network_diagnostics.HttpResult(
+            url=first_url,
+            ok=False,
+            status_code=429,
+            error="HTTP 429",
+            text=json.dumps({"success": False, "message": "quota exhausted"}),
+        ),
         second_url: {
             "success": True,
             "proxy": False,
@@ -642,7 +711,7 @@ def test_ipqs_key_pool_rotates_after_limited_key():
     assert len(diagnostic.reputation) == 1
     assert diagnostic.reputation[0].ok is True
     assert diagnostic.reputation[0].api_key_label == "Key #2"
-    assert diagnostic.reputation[0].attempts == ["Key #1 失败: HTTP 429", "Key #2 成功"]
+    assert diagnostic.reputation[0].attempts == ["Key #1 失败: quota exhausted", "Key #2 成功"]
     assert diagnostic.classification.ip_type == "家庭宽带/住宅 IP"
 
 
