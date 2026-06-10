@@ -233,27 +233,13 @@ class ProxyNodePicker(ctk.CTkFrame):
         matches = self._filtered_nodes()
         self._last_match_count = len(matches)
         total = len(self._nodes)
-        ok_count = int(self._summary_counts.get("ok") or 0)
-        measured_count = int(self._summary_counts.get("measured") or 0)
         quality_count = int(self._summary_counts.get("quality") or 0)
-        high_quality_count = int(self._summary_counts.get("high_quality") or 0)
-        checked_count = len(self._checked_keys)
         visible = matches[: self.MAX_VISIBLE_ROWS]
         selected_item = self.selected_item()
         if selected_item in matches and selected_item not in visible:
             visible = [selected_item] + visible[: max(0, self.MAX_VISIBLE_ROWS - 1)]
 
-        suffix = ""
-        if len(matches) > len(visible):
-            suffix = f"；显示前 {len(visible)} 个，请继续搜索缩小范围"
-        if self._summary_label:
-            self._summary_label.configure(
-                text=(
-                    f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"
-                    f"质量 {quality_count}；高质 {high_quality_count}；"
-                    f"勾选 {checked_count}；匹配 {len(matches)} 个{suffix}"
-                )
-            )
+        self._update_summary_label(match_count=len(matches), visible_count=len(visible))
         self._update_scope_label()
 
         if not visible:
@@ -433,7 +419,9 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._checked_keys.add(node_key)
         else:
             self._checked_keys.discard(node_key)
-        self._render_nodes()
+        self._update_scope_label()
+        self._update_summary_label()
+        self._emit_scope_change()
 
     def _set_group_checked(self, keys, checked: bool):
         if checked:
@@ -473,6 +461,28 @@ class ProxyNodePicker(ctk.CTkFrame):
             return
         color = COLORS["accent"] if self._checked_keys else COLORS["warning"] if self._has_active_filters() else COLORS["muted_soft"]
         self._scope_label.configure(text=f"批量范围: {self.batch_scope_label()}", text_color=color)
+
+    def _update_summary_label(self, match_count: int | None = None, visible_count: int | None = None):
+        if not self._summary_label:
+            return
+        if match_count is None:
+            match_count = self._last_match_count
+        total = len(self._nodes)
+        ok_count = int(self._summary_counts.get("ok") or 0)
+        measured_count = int(self._summary_counts.get("measured") or 0)
+        quality_count = int(self._summary_counts.get("quality") or 0)
+        high_quality_count = int(self._summary_counts.get("high_quality") or 0)
+        checked_count = len(self._checked_keys)
+        suffix = ""
+        if visible_count is not None and match_count > visible_count:
+            suffix = f"；显示前 {visible_count} 个，请继续搜索缩小范围"
+        self._summary_label.configure(
+            text=(
+                f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"
+                f"质量 {quality_count}；高质 {high_quality_count}；"
+                f"勾选 {checked_count}；匹配 {match_count} 个{suffix}"
+            )
+        )
 
     def _emit_scope_change(self):
         if not self._on_scope_change:

@@ -264,20 +264,90 @@ class App(ctk.CTk):
             **button_style("secondary"),
         ).pack()
 
+    def _set_app_status(self, message: str):
+        status = getattr(self, "_status", None)
+        if status is None:
+            return
+        try:
+            status.configure(text=message)
+        except Exception as exc:
+            logger.debug("Failed to update status bar: %s", exc)
+
+    def _show_tab_loading(self, label: str):
+        frame = self._tab_frames.get(label)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        panel = ctk.CTkFrame(frame, fg_color="transparent")
+        panel.pack(fill="both", expand=True, padx=24, pady=24)
+        ctk.CTkLabel(
+            panel,
+            text=f"正在加载 {label}",
+            text_color=COLORS["text"],
+            font=font(16, "bold"),
+        ).pack(pady=(90, 6))
+        ctk.CTkLabel(
+            panel,
+            text="首次打开会初始化相关模块，请稍候。",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack()
+        self._set_app_status(f"正在加载 {label}...")
+        try:
+            self.update_idletasks()
+        except Exception as exc:
+            logger.debug("Failed to render tab loading state: %s", exc)
+
     def _show_tab_error(self, label: str, error: Exception):
         frame = self._tab_frames.get(label)
         if frame is None:
             return
         for child in frame.winfo_children():
             child.destroy()
-        message = f"{label} 加载失败: {error}"
-        ctk.CTkLabel(
+        detail = str(error).strip().splitlines()[0] if str(error).strip() else error.__class__.__name__
+        if len(detail) > 260:
+            detail = detail[:257] + "..."
+        panel = ctk.CTkFrame(
             frame,
-            text=message,
+            fg_color=COLORS["surface_alt"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border_soft"],
+        )
+        panel.pack(fill="x", padx=28, pady=70)
+        ctk.CTkLabel(
+            panel,
+            text=f"{label} 加载失败",
             text_color=COLORS["danger"],
-            font=font(13),
-            wraplength=760,
-        ).pack(padx=24, pady=80)
+            font=font(16, "bold"),
+        ).pack(anchor="w", padx=18, pady=(16, 4))
+        ctk.CTkLabel(
+            panel,
+            text=detail,
+            text_color=COLORS["muted"],
+            font=font(12),
+            justify="left",
+            anchor="w",
+            wraplength=780,
+        ).pack(fill="x", padx=18, pady=(0, 14))
+        actions = ctk.CTkFrame(panel, fg_color="transparent")
+        actions.pack(fill="x", padx=18, pady=(0, 16))
+        ctk.CTkButton(
+            actions,
+            text="重试加载",
+            width=104,
+            command=lambda name=label: self._ensure_tab(name),
+            **button_style("primary"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            actions,
+            text="回到首页",
+            width=96,
+            command=lambda: self._tabview.set("Claude Code"),
+            **button_style("secondary"),
+        ).pack(side="left", padx=(8, 0))
+        self._set_app_status(f"{label} 加载失败，可点击重试加载")
 
     def _ensure_tab(self, label: str):
         spec = self._tab_specs.get(label)
@@ -293,13 +363,15 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-        for child in frame.winfo_children():
-            child.destroy()
+        self._show_tab_loading(label)
         try:
             tab_class = self._resolve_tab_class(label, module_name, class_name)
+            for child in frame.winfo_children():
+                child.destroy()
             tab = tab_class(frame)
             tab.pack(fill="both", expand=True)
             setattr(self, attr, tab)
+            self._set_app_status(f"已加载 {label}")
             logger.debug("Loaded tab: %s", label)
             return tab
         except Exception as e:
