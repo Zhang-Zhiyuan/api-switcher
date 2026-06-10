@@ -10,7 +10,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速")
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
-    MAX_VISIBLE_ROWS = 120
+    MAX_VISIBLE_ROWS = 60
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -30,6 +30,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._checked_keys = set()
         self._enabled = True
         self._render_after_id = None
+        self._render_batch_after_id = None
+        self._render_generation = 0
         self._last_match_count = 0
         self._search_entry = None
         self._filter_combo = None
@@ -187,6 +189,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
     def destroy(self):
         self._cancel_pending_render()
+        self._cancel_incremental_render()
         super().destroy()
 
     def set_enabled(self, enabled: bool):
@@ -274,6 +277,9 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self.after_cancel(pending_render)
             except Exception:
                 pass
+        self._cancel_incremental_render()
+        self._render_generation += 1
+        generation = self._render_generation
         if not self._list_frame:
             return
         self._visible_group_headers = []
@@ -302,11 +308,34 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._emit_scope_change()
             return
 
+        render_plan = []
         for region, group_items in self._group_visible_nodes(visible):
-            self._render_group_header(region, group_items)
+            render_plan.append(("header", region, group_items))
             for item in group_items:
-                self._render_row(item)
+                render_plan.append(("row", item, None))
         self._emit_scope_change()
+        self._render_plan_batch(generation, render_plan, 0)
+
+    def _render_plan_batch(self, generation: int, render_plan: list, start_index: int):
+        if generation != self._render_generation or not self._list_frame:
+            return
+        batch_size = 4
+        end_index = min(len(render_plan), start_index + batch_size)
+        for kind, payload, extra in render_plan[start_index:end_index]:
+            if kind == "header":
+                self._render_group_header(payload, extra)
+            else:
+                self._render_row(payload)
+        if end_index >= len(render_plan):
+            self._render_batch_after_id = None
+            return
+        try:
+            self._render_batch_after_id = self.after(
+                1,
+                lambda: self._render_plan_batch(generation, render_plan, end_index),
+            )
+        except Exception:
+            self._render_batch_after_id = None
 
     def _group_visible_nodes(self, items):
         groups = []
@@ -504,6 +533,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
     def _request_render_nodes(self, delay_ms: int = 60):
         self._cancel_pending_render()
+        self._cancel_incremental_render()
         try:
             self._render_after_id = self.after(max(1, int(delay_ms)), self._render_nodes)
         except Exception:
@@ -517,6 +547,15 @@ class ProxyNodePicker(ctk.CTkFrame):
         except Exception:
             pass
         self._render_after_id = None
+
+    def _cancel_incremental_render(self):
+        if not self._render_batch_after_id:
+            return
+        try:
+            self.after_cancel(self._render_batch_after_id)
+        except Exception:
+            pass
+        self._render_batch_after_id = None
 
     def _update_scope_label(self):
         if not self._scope_label:
