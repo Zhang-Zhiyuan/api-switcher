@@ -36,6 +36,7 @@ def test_proxy_quality_is_not_a_primary_tab():
     assert "环境监测" not in labels
     assert app_module.PROXY_QUALITY_DIALOG_LABEL not in labels
     assert hasattr(app_module.App, "_show_proxy_quality_dialog")
+    assert hasattr(app_module.App, "_on_proxy_quality_settings_saved")
     assert not hasattr(app_module.App, "_show_network_diagnostics_tab")
 
 

@@ -7,7 +7,7 @@ from ui.theme import COLORS, center_window
 class ProxyQualityDialog(ctk.CTkToplevel):
     """Proxy quality diagnostics window launched from proxy pages."""
 
-    def __init__(self, master, on_close=None):
+    def __init__(self, master, on_close=None, on_settings_saved=None):
         super().__init__(master)
         self._on_close = on_close
         self._closed = False
@@ -18,7 +18,7 @@ class ProxyQualityDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Destroy>", self._on_destroy, add="+")
 
-        self.panel = ProxyQualityPanel(self)
+        self.panel = ProxyQualityPanel(self, on_settings_saved=on_settings_saved)
         self.panel.pack(fill="both", expand=True)
 
         center_window(self, master)

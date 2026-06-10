@@ -19,11 +19,12 @@ OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {network_diagnostic_settings.SERVICE_
 class ProxyQualityPanel(ctk.CTkScrollableFrame):
     """Panel for public network and proxy exit quality diagnostics."""
 
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, on_settings_saved=None, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._busy = False
         self._last_report = None
+        self._on_settings_saved = on_settings_saved
         self._run_button = None
         self._copy_button = None
         self._open_ping0_button = None
@@ -445,9 +446,18 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         network_diagnostic_settings.save_settings(settings)
         if self._settings_status_label:
             self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["success"])
+        self._notify_settings_saved(settings)
         if show_message:
             show_toast(self.winfo_toplevel(), "代理质量检测设置已保存")
         return settings
+
+    def _notify_settings_saved(self, settings):
+        if not self._on_settings_saved:
+            return
+        try:
+            self._on_settings_saved(settings)
+        except Exception:
+            pass
 
     def _settings_status_text(self, settings) -> str:
         enabled_labels = []

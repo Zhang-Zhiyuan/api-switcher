@@ -787,7 +787,11 @@ class App(ctk.CTk):
         try:
             from ui.dialogs.proxy_quality_dialog import ProxyQualityDialog
 
-            dialog = ProxyQualityDialog(self, on_close=lambda: setattr(self, "_proxy_quality_dialog", None))
+            dialog = ProxyQualityDialog(
+                self,
+                on_close=lambda: setattr(self, "_proxy_quality_dialog", None),
+                on_settings_saved=self._on_proxy_quality_settings_saved,
+            )
             self._proxy_quality_dialog = dialog
             self._status.configure(text="已打开代理质量检测")
             return dialog
@@ -801,6 +805,23 @@ class App(ctk.CTk):
             except Exception:
                 pass
             return None
+
+    def _on_proxy_quality_settings_saved(self, _settings=None):
+        refresh_targets = (
+            ("_local_proxy_tab", "_refresh_subscription_action_hint"),
+            ("_ssh_tab", "_refresh_proxy_subscription_action_hint"),
+        )
+        for attr, method_name in refresh_targets:
+            tab = self._loaded_tab(attr)
+            if not tab:
+                continue
+            callback = getattr(tab, method_name, None)
+            if callable(callback):
+                try:
+                    callback()
+                except Exception as exc:
+                    logger.debug("Failed to refresh proxy quality hint for %s: %s", attr, exc)
+        self._set_app_status("代理质量检测设置已保存，相关页面提示已同步")
 
     def refresh_all(self):
         """Refresh all tabs."""
