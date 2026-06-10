@@ -45,6 +45,10 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._status_label = None
         self._content_frame = None
         self._report_box = None
+        self._report_box_host = None
+        self._report_box_after_id = None
+        self._report_placeholder_label = None
+        self._pending_report_text = "等待检测结果..."
         self._build_ui()
 
     def _build_ui(self):
@@ -212,9 +216,46 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._content_frame.pack(fill="x", padx=14, pady=(0, 10))
         self._render_empty()
 
-        self._report_box = ctk.CTkTextbox(self, height=190, **textbox_style(monospace=True))
-        self._report_box.pack(fill="x", padx=14, pady=(0, 14))
-        self._set_report_text("等待检测结果...")
+        self._report_box_host = ctk.CTkFrame(
+            self,
+            height=190,
+            fg_color=COLORS["field_bg"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"],
+        )
+        self._report_box_host.pack(fill="x", padx=14, pady=(0, 14))
+        self._report_box_host.pack_propagate(False)
+        self._report_placeholder_label = ctk.CTkLabel(
+            self._report_box_host,
+            text="报告文本框正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._report_placeholder_label.pack(expand=True)
+        self._report_box_after_id = self.after(60, self._build_report_box)
+
+    def destroy(self):
+        if self._report_box_after_id:
+            try:
+                self.after_cancel(self._report_box_after_id)
+            except Exception:
+                pass
+            self._report_box_after_id = None
+        super().destroy()
+
+    def _build_report_box(self):
+        self._report_box_after_id = None
+        if self._report_box or not self._report_box_host:
+            return
+        try:
+            for child in self._report_box_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._report_box = ctk.CTkTextbox(self._report_box_host, height=190, **textbox_style(monospace=True))
+        self._report_box.pack(fill="both", expand=True)
+        self._set_report_text(self._pending_report_text)
 
     def _add_service_setting_row(self, parent, service: str, label: str, description: str, saved_settings):
         service_settings = saved_settings.service(service)
@@ -700,12 +741,19 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._status_label.configure(text=message, text_color=color)
 
     def _set_report_text(self, text: str):
+        self._pending_report_text = str(text or "")
         if not self._report_box:
+            if self._report_placeholder_label:
+                try:
+                    preview = self._pending_report_text.splitlines()[0] if self._pending_report_text else "等待检测结果..."
+                    self._report_placeholder_label.configure(text=preview[:120])
+                except Exception:
+                    pass
             return
         try:
             self._report_box.configure(state="normal")
             self._report_box.delete("1.0", "end")
-            self._report_box.insert("1.0", str(text or ""))
+            self._report_box.insert("1.0", self._pending_report_text)
             self._report_box.configure(state="disabled")
         except Exception:
             pass

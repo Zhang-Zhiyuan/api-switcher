@@ -19,6 +19,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self.configure(fg_color="transparent")
         self._subscription_entry = None
         self._subscription_picker = None
+        self._subscription_picker_host = None
+        self._subscription_picker_after_id = None
         self._fetch_button = None
         self._use_node_button = None
         self._latency_button = None
@@ -47,6 +49,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._cache_label = None
         self._selected_label = None
         self._node_text = None
+        self._node_text_host = None
+        self._node_text_after_id = None
         self._load_file_button = None
         self._start_button = None
         self._inspect_button = None
@@ -305,13 +309,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         ).grid(row=4, column=0, sticky="w", pady=(8, 0))
-        self._subscription_picker = ProxyNodePicker(
+        self._subscription_picker_host = ctk.CTkFrame(
             controls,
-            on_select=lambda _item: self._use_selected_subscription_node(show_message=False),
-            on_scope_change=self._refresh_subscription_action_hint,
+            height=360,
+            fg_color=COLORS["field_bg"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border_soft"],
         )
-        self._subscription_picker.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-        self._subscription_picker.set_enabled(False)
+        self._subscription_picker_host.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_picker_host.grid_propagate(False)
+        ctk.CTkLabel(
+            self._subscription_picker_host,
+            text="节点选择器正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(expand=True)
         node_actions = ctk.CTkFrame(controls, fg_color="transparent")
         node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
@@ -415,12 +428,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         ).grid(row=7, column=0, sticky="nw", pady=(8, 0))
-        self._node_text = ctk.CTkTextbox(
+        self._node_text_host = ctk.CTkFrame(
             controls,
             height=96,
-            **textbox_style(monospace=True),
+            fg_color=COLORS["field_bg"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"],
         )
-        self._node_text.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._node_text_host.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._node_text_host.grid_propagate(False)
+        ctk.CTkLabel(
+            self._node_text_host,
+            text="节点输入框正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(expand=True)
 
         actions = ctk.CTkFrame(controls, fg_color="transparent")
         actions.grid(row=7, column=3, sticky="ne", pady=(8, 0))
@@ -489,14 +512,63 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
-        self._initial_refresh_after_id = self.after(20, self.refresh)
+        self._subscription_picker_after_id = self.after(20, self._build_subscription_picker)
+        self._node_text_after_id = self.after(45, self._build_node_text)
+        self._initial_refresh_after_id = self.after(90, self.refresh)
+
+    def _build_subscription_picker(self):
+        self._subscription_picker_after_id = None
+        if self._subscription_picker or not self._subscription_picker_host:
+            return
+        try:
+            for child in self._subscription_picker_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._subscription_picker = ProxyNodePicker(
+            self._subscription_picker_host,
+            on_select=lambda _item: self._use_selected_subscription_node(show_message=False),
+            on_scope_change=self._refresh_subscription_action_hint,
+        )
+        self._subscription_picker.pack(fill="x")
+        self._subscription_picker.set_enabled(False)
+        if self._subscription_nodes:
+            self._set_subscription_nodes(self._subscription_nodes, preserve_key=self._selected_subscription_node_key())
+
+    def _build_node_text(self):
+        self._node_text_after_id = None
+        if self._node_text or not self._node_text_host:
+            return
+        try:
+            for child in self._node_text_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._node_text = ctk.CTkTextbox(
+            self._node_text_host,
+            height=96,
+            **textbox_style(monospace=True),
+        )
+        self._node_text.pack(fill="both", expand=True)
 
     def destroy(self):
+        self._cancel_deferred_widget_builds()
         self._cancel_initial_refresh()
         self._cancel_saved_subscription_refresh()
         self._cancel_startup_refresh()
         self._cancel_periodic_update()
         super().destroy()
+
+    def _cancel_deferred_widget_builds(self):
+        for attr in ("_subscription_picker_after_id", "_node_text_after_id"):
+            after_id = getattr(self, attr, None)
+            if not after_id:
+                continue
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+            setattr(self, attr, None)
 
     def _cancel_initial_refresh(self):
         if not self._initial_refresh_after_id:
