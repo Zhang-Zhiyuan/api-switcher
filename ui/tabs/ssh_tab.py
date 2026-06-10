@@ -42,6 +42,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._initial_refresh_after_id = None
         self._proxy_saved_subscription_after_id = None
         self._destroyed = False
+        self._deployment_sections_frame = None
+        self._deployment_sections_after_id = None
+        self._deployment_sections_built = False
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
@@ -493,7 +496,35 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
-        proxy_header = ctk.CTkFrame(self, fg_color="transparent")
+        self._install_deployment_sections_placeholder()
+        self._initial_refresh_after_id = self.after(20, self.refresh)
+        self._deployment_sections_after_id = self.after(180, self._build_deployment_sections)
+
+    def _install_deployment_sections_placeholder(self):
+        self._deployment_sections_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._deployment_sections_frame.pack(fill="x")
+        placeholder = ctk.CTkFrame(self._deployment_sections_frame, **card_frame_kwargs())
+        placeholder.pack(fill="x", padx=14, pady=(4, 12))
+        ctk.CTkLabel(
+            placeholder,
+            text="远端代理与自动续跑正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=12)
+
+    def _build_deployment_sections(self):
+        self._deployment_sections_after_id = None
+        if self._destroyed or self._deployment_sections_built:
+            return
+        deployment_parent = self._deployment_sections_frame or self
+        try:
+            for child in deployment_parent.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._deployment_sections_built = True
+        proxy_header = ctk.CTkFrame(deployment_parent, fg_color="transparent")
         proxy_header.pack(fill="x", padx=14, pady=(4, 5))
         ctk.CTkLabel(
             proxy_header,
@@ -516,7 +547,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_target_label.pack(side="right")
 
-        proxy_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        proxy_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
         proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
         proxy_controls.pack(fill="x", padx=14, pady=14)
@@ -802,7 +833,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
         self._update_proxy_target_label()
 
-        auto_header = ctk.CTkFrame(self, fg_color="transparent")
+        auto_header = ctk.CTkFrame(deployment_parent, fg_color="transparent")
         auto_header.pack(fill="x", padx=14, pady=(4, 5))
         ctk.CTkLabel(
             auto_header,
@@ -817,7 +848,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
         ).pack(side="left", padx=(10, 0))
 
-        auto_frame = ctk.CTkFrame(self, **card_frame_kwargs())
+        auto_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
         auto_frame.pack(fill="x", padx=14, pady=(0, 12))
         auto_controls = ctk.CTkFrame(auto_frame, fg_color="transparent")
         auto_controls.pack(fill="x", padx=14, pady=14)
@@ -985,7 +1016,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_status_label.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
-        self._initial_refresh_after_id = self.after(20, self.refresh)
+        self._update_proxy_target_label()
+        self._update_remote_auto_feature_label()
+        self._refresh_remote_auto_switch_availability()
         self._proxy_saved_subscription_after_id = self.after(50, self._load_saved_proxy_subscription_ui)
 
     def destroy(self):
@@ -999,7 +1032,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         super().destroy()
 
     def _cancel_initial_after_callbacks(self):
-        for attr in ("_initial_refresh_after_id", "_proxy_saved_subscription_after_id"):
+        for attr in ("_initial_refresh_after_id", "_proxy_saved_subscription_after_id", "_deployment_sections_after_id"):
             after_id = getattr(self, attr, None)
             if not after_id:
                 continue
