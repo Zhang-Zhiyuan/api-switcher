@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+from pathlib import Path
 
 import release_check
 
@@ -12,6 +13,16 @@ def test_release_check_uses_project_local_pytest_tempdir():
     assert "no:cacheprovider" in pytest_command
     assert "--basetemp" in pytest_command
     assert release_check.PYTEST_BASETEMP.as_posix() in pytest_command
+
+
+def test_runtime_dependencies_do_not_require_pywin32_for_free_threaded_python():
+    assert "win32api" not in release_check.RUNTIME_DEPENDENCY_IMPORTS
+
+
+def test_requirements_do_not_pin_pywin32():
+    requirements = Path("requirements.txt").read_text(encoding="utf-8").lower()
+
+    assert "pywin32" not in requirements
 
 
 def test_release_check_pytest_env_stops_git_parent_discovery(monkeypatch, tmp_path):

@@ -17,7 +17,6 @@ RUNTIME_DEPENDENCY_IMPORTS = (
     "keyring",
     "tomli_w",
     "PIL",
-    "win32api",
     "paramiko",
     "pystray",
     "cryptography",
