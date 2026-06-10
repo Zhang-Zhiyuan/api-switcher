@@ -238,7 +238,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if checked_count:
             return f"已勾选 {checked_count} 个节点"
         if self._has_active_filters():
-            return f"当前筛选 {self._last_match_count} 个节点"
+            return f"当前筛选 {self._current_filtered_count()} 个节点"
         return f"全部 {len(self._nodes)} 个节点"
 
     def select_by_key(self, node_key: str) -> bool:
@@ -623,6 +623,12 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not self._search_entry:
             return ""
         return self._search_entry.get().strip().casefold()
+
+    def _current_filtered_count(self) -> int:
+        try:
+            return len(self._filtered_nodes())
+        except Exception:
+            return int(self._last_match_count or 0)
 
     def _has_active_filters(self) -> bool:
         mode = self._filter_combo.get() if self._filter_combo else "全部"
