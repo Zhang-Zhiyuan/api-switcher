@@ -258,7 +258,7 @@ def main():
 
     print("\n" + "=" * 80)
     print(f"{Colors.BLUE}更多信息：{Colors.RESET}")
-    print("- 待办记录: PENDING_WORK.md")
+    print("- 发布检查: python release_check.py")
     print("=" * 80 + "\n")
 
     return 0 if not all_issues else 1

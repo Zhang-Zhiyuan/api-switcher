@@ -106,7 +106,6 @@ def create_spec_file(bundle_mode: str = DEFAULT_BUNDLE_MODE) -> None:
         ("assets", "assets"),
         ("icon.ico", "."),
         ("icon.png", "."),
-        ("PENDING_WORK.md", "."),
     ]:
         if Path(source).exists():
             datas.append((source, target))

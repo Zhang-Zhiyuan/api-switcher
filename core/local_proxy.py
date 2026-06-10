@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 
 
 DEFAULT_LOCAL_MIXED_PORT = 17897
@@ -906,12 +906,10 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     _ensure_local_dirs()
-    temp_path = LOCAL_PROXY_STATE_PATH.with_name(f"{LOCAL_PROXY_STATE_PATH.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(LOCAL_PROXY_STATE_PATH)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    atomic_write_text(
+        LOCAL_PROXY_STATE_PATH,
+        json.dumps(state, ensure_ascii=False, indent=2),
+    )
 
 
 def _proxy_url(mixed_port: int) -> str:
@@ -1448,27 +1446,22 @@ def _elapsed_ms(started: float) -> int:
 
 
 def _write_mihomo_payload(target: Path, url: str, payload: bytes) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        lower_url = url.lower()
-        if lower_url.endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                exe_names = [
-                    name
-                    for name in archive.namelist()
-                    if name.lower().endswith(".exe") and ("mihomo" in name.lower() or "clash" in name.lower())
-                ]
-                if not exe_names:
-                    raise RuntimeError("mihomo zip 里没有找到可执行文件")
-                temp_path.write_bytes(archive.read(exe_names[0]))
-        elif lower_url.endswith(".gz"):
-            temp_path.write_bytes(gzip.decompress(payload))
-        else:
-            temp_path.write_bytes(payload)
-        temp_path.replace(target)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    lower_url = url.lower()
+    if lower_url.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            exe_names = [
+                name
+                for name in archive.namelist()
+                if name.lower().endswith(".exe") and ("mihomo" in name.lower() or "clash" in name.lower())
+            ]
+            if not exe_names:
+                raise RuntimeError("mihomo zip 里没有找到可执行文件")
+            content = archive.read(exe_names[0])
+    elif lower_url.endswith(".gz"):
+        content = gzip.decompress(payload)
+    else:
+        content = payload
+    atomic_write_bytes(target, content)
 
 
 def _read_pid() -> int | None:
