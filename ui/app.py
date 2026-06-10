@@ -46,6 +46,8 @@ class App(ctk.CTk):
         self._proxy_quality_dialog = None
         self._tab_frames = {}
         self._tab_class_cache = {}
+        self._tab_class_cache_lock = threading.RLock()
+        self._lazy_tab_preload_started = False
         self._quick_switch_load_generation = 0
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
@@ -234,6 +236,7 @@ class App(ctk.CTk):
         self.after(20, self._load_quick_switch_profiles)
         self.after(50, self._start_tray_icon)
         self.after(900, self._auto_start_local_proxy)
+        self.after(1200, self._preload_lazy_tab_classes)
 
     def _install_tab_placeholder(self, label: str):
         frame = self._tab_frames.get(label)
@@ -306,14 +309,47 @@ class App(ctk.CTk):
             return None
 
     def _resolve_tab_class(self, label: str, module_name: str, class_name: str):
-        tab_class = self._tab_class_cache.get(label)
-        if tab_class is not None:
-            return tab_class
+        with self._tab_class_cache_lock:
+            tab_class = self._tab_class_cache.get(label)
+            if tab_class is not None:
+                return tab_class
 
         module = importlib.import_module(module_name)
         tab_class = getattr(module, class_name)
-        self._tab_class_cache[label] = tab_class
-        return tab_class
+        with self._tab_class_cache_lock:
+            return self._tab_class_cache.setdefault(label, tab_class)
+
+    def _preload_lazy_tab_classes(self):
+        if self._exit_requested or self._lazy_tab_preload_started:
+            return
+        self._lazy_tab_preload_started = True
+        priority = {
+            "Win11 代理": 0,
+            "SSH 服务器": 1,
+            "Codex CLI": 2,
+            ENV_TAB_LABEL: 3,
+        }
+        specs = [
+            (priority.get(label, 50), label, module_name, class_name)
+            for label, _attr, module_name, class_name, eager in TAB_SPECS
+            if not eager
+        ]
+        specs.sort(key=lambda item: (item[0], item[1]))
+
+        def run():
+            for _order, label, module_name, class_name in specs:
+                if self._exit_requested:
+                    return
+                with self._tab_class_cache_lock:
+                    if label in self._tab_class_cache:
+                        continue
+                try:
+                    self._resolve_tab_class(label, module_name, class_name)
+                    logger.debug("Preloaded lazy tab class: %s", label)
+                except Exception as exc:
+                    logger.debug("Lazy tab preload skipped for %s: %s", label, exc)
+
+        threading.Thread(target=run, name="lazy-tab-preload", daemon=True).start()
 
     def _on_tab_changed(self):
         self._ensure_tab(self._tabview.get())
