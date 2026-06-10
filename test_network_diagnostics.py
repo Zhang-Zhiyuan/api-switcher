@@ -130,6 +130,57 @@ def test_ping0_free_geo_is_used_without_api_key():
     assert "完整风控" in quality.quality_text()
 
 
+def test_ping0_free_geo_mismatch_keeps_link_only_status():
+    ip = "198.51.100.20"
+    returned_ip = "203.0.113.20"
+    mapping = {
+        "https://ipv4.ping0.cc/geo": f"{returned_ip}\n美国 加利福尼亚州 洛杉矶\nAS7922\nComcast Cable Communications\n",
+    }
+
+    quality = network_diagnostics.lookup_ping0_quality(
+        ip,
+        "IPv4",
+        1.0,
+        _fake_http_get(mapping),
+        api_key="",
+    )
+
+    assert quality.ok is False
+    assert quality.source == "ping0-link-only"
+    assert quality.raw["returned_ip"] == returned_ip
+    assert "链接已生成" in quality.quality_text()
+    assert ip in quality.detail_url
+
+
+def test_detect_network_keeps_probe_order_when_endpoint_raises():
+    ip = "198.51.100.21"
+    mapping = {
+        "https://api.ipify.org?format=json": {"ip": ip},
+        "https://api64.ipify.org?format=json": {"ip": ip},
+        f"https://ipwho.is/{ip}": {
+            "success": True,
+            "country": "United States",
+            "connection": {"asn": 7922, "org": "Example ISP", "isp": "Example ISP"},
+        },
+    }
+
+    def fake(url, timeout):
+        if "api6.ipify.org" in url:
+            raise RuntimeError("ipv6 endpoint exploded")
+        return _fake_http_get(mapping)(url, timeout)
+
+    report = network_diagnostics.detect_network(
+        enabled_services=[],
+        http_get=fake,
+        reverse_resolver=lambda _ip: "",
+    )
+
+    assert [probe.label for probe in report.probes] == ["IPv4", "IPv6", "默认出口"]
+    assert report.probes[1].ok is False
+    assert "ipv6 endpoint exploded" in report.probes[1].error
+    assert len(report.diagnostics) == 1
+
+
 def test_probe_public_ip_accepts_text_response_with_extra_label():
     result = network_diagnostics.probe_public_ip(
         "IPv4",
@@ -513,6 +564,43 @@ def test_vpnapi_parses_nested_payload_and_string_booleans():
     assert info.flags["proxy"] is False
     assert info.asn == "AS64502"
     assert info.provider == "Example Relay Network"
+
+
+def test_lookup_reputation_isolates_single_provider_exception():
+    ip = "203.0.113.44"
+
+    def fake(url, timeout):
+        if "proxycheck.io" in url:
+            raise RuntimeError("proxycheck transport failed")
+        if "vpnapi.io" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps({
+                    "ip": ip,
+                    "security": {"vpn": False, "proxy": False, "tor": False, "relay": False},
+                }),
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    results = network_diagnostics.lookup_reputation(
+        ip,
+        1.0,
+        fake,
+        enabled_services=[
+            network_diagnostics.SERVICE_PROXYCHECK,
+            network_diagnostics.SERVICE_VPNAPI,
+        ],
+        vpnapi_api_keys=["vpn-key"],
+    )
+
+    assert [item.source for item in results] == [
+        network_diagnostics.SERVICE_PROXYCHECK,
+        network_diagnostics.SERVICE_VPNAPI,
+    ]
+    assert results[0].ok is False
+    assert "proxycheck transport failed" in results[0].error
+    assert results[1].ok is True
 
 
 def test_ipqs_fraud_score_and_connection_type_are_used_with_key():

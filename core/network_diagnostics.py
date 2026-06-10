@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -228,6 +229,8 @@ class Ping0Quality:
     def quality_text(self) -> str:
         if self.source == "disabled":
             return "Ping0 未启用"
+        if self.source == "ping0-link-only":
+            return f"Ping0 链接已生成；免费 Geo 与测速出口不一致 ({self.error or '未获取到同一出口'})"
         if not self.ok:
             return f"Ping0 未完成: {self.error or '未获取到结果'}"
         if self.has_paid_quality:
@@ -376,13 +379,11 @@ def detect_network(
         ipqs_keys=ipqs_keys,
         vpnapi_keys=vpnapi_keys,
     )
-    probes: list[EndpointProbe] = []
+    probes = _probe_public_ip_endpoints(timeout, http_get)
     diagnostics: list[IpDiagnostic] = []
     seen_ips: set[str] = set()
 
-    for label, url in PUBLIC_IP_ENDPOINTS:
-        probe = probe_public_ip(label, url, timeout, http_get)
-        probes.append(probe)
+    for probe in probes:
         if not probe.ok or not probe.ip or probe.ip in seen_ips:
             continue
 
@@ -405,7 +406,7 @@ def detect_network(
         classification = classify_ip(geo, rdns, ping0, reputation)
         diagnostics.append(
             IpDiagnostic(
-                label=label,
+                label=probe.label,
                 ip=probe.ip,
                 probe=probe,
                 geo=geo,
@@ -482,6 +483,27 @@ def probe_public_ip(label: str, url: str, timeout: float, http_get: HttpGetter) 
         response_time=result.response_time,
         status_code=result.status_code,
     )
+
+
+def _probe_public_ip_endpoints(timeout: float, http_get: HttpGetter) -> list[EndpointProbe]:
+    results: list[EndpointProbe | None] = [None] * len(PUBLIC_IP_ENDPOINTS)
+    with ThreadPoolExecutor(max_workers=len(PUBLIC_IP_ENDPOINTS)) as executor:
+        futures = {
+            executor.submit(probe_public_ip, label, url, timeout, http_get): (index, label, url)
+            for index, (label, url) in enumerate(PUBLIC_IP_ENDPOINTS)
+        }
+        for future in as_completed(futures):
+            index, label, url = futures[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = EndpointProbe(
+                    label=label,
+                    url=url,
+                    ok=False,
+                    error=str(exc).splitlines()[0][:180] or "公开端点请求异常",
+                )
+    return [result for result in results if result is not None]
 
 
 def lookup_ping0_quality(
@@ -593,7 +615,15 @@ def _lookup_ping0_free_geo(
         return quality
     returned_ip = lines[0]
     if _valid_ip(returned_ip) and returned_ip != quality.ip:
+        quality.source = "ping0-link-only"
         quality.error = f"Ping0 免费 Geo 返回 IP 不匹配: {returned_ip}"
+        quality.raw = {
+            "ip": quality.ip,
+            "returned_ip": returned_ip,
+            "location": lines[1] if len(lines) > 1 else "",
+            "asn": _normalize_asn(lines[2] if len(lines) > 2 else ""),
+            "org": lines[3] if len(lines) > 3 else "",
+        }
         return quality
 
     quality.ok = True
@@ -636,12 +666,51 @@ def lookup_reputation(
         vpnapi_keys=vpnapi_keys,
     )
     results: list[ReputationInfo] = []
+    tasks = []
     if SERVICE_PROXYCHECK in services:
-        results.append(lookup_proxycheck_reputation(ip, timeout, http_get, api_keys=proxycheck_keys))
+        tasks.append((
+            SERVICE_PROXYCHECK,
+            lookup_proxycheck_reputation,
+            {"api_keys": proxycheck_keys},
+        ))
     if SERVICE_IPQS in services:
-        results.append(lookup_ipqs_reputation(ip, timeout, http_get, api_keys=ipqs_keys))
+        tasks.append((
+            SERVICE_IPQS,
+            lookup_ipqs_reputation,
+            {"api_keys": ipqs_keys},
+        ))
     if SERVICE_VPNAPI in services:
-        results.append(lookup_vpnapi_reputation(ip, timeout, http_get, api_keys=vpnapi_keys))
+        tasks.append((
+            SERVICE_VPNAPI,
+            lookup_vpnapi_reputation,
+            {"api_keys": vpnapi_keys},
+        ))
+    if not tasks:
+        return results
+    if len(tasks) == 1:
+        service, func, kwargs = tasks[0]
+        try:
+            return [func(ip, timeout, http_get, **kwargs)]
+        except Exception as exc:
+            return [ReputationInfo(ip=ip, source=service, error=str(exc).splitlines()[0][:180] or "信誉检测异常")]
+
+    by_service: dict[str, ReputationInfo] = {}
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {
+            executor.submit(func, ip, timeout, http_get, **kwargs): service
+            for service, func, kwargs in tasks
+        }
+        for future in as_completed(futures):
+            service = futures[future]
+            try:
+                by_service[service] = future.result()
+            except Exception as exc:
+                by_service[service] = ReputationInfo(
+                    ip=ip,
+                    source=service,
+                    error=str(exc).splitlines()[0][:180] or "信誉检测异常",
+                )
+    results.extend(by_service[service] for service, _func, _kwargs in tasks if service in by_service)
     return results
 
 
