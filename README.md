@@ -185,6 +185,11 @@
 - 普通启动会先显示轻量启动窗，给双击操作即时反馈；排查启动问题时可传入 `--no-splash` 跳过。
 - 默认构建产物是单文件 `dist/API切换器.exe`，运行时不需要旁边放 `_internal` 或其他依赖目录。
 
+### 5. 性能诊断
+- 源码环境可运行 `python performance_probe.py` 查看解释器、核心模块导入耗时和线程池基准。
+- 如安装了 Python 3.14 free-threaded 构建，可用同一命令对比，例如 `py -3.14t performance_probe.py --json`。
+- 在 Win11 桌面环境可加 `--ui` 测各标签页构建耗时，例如 `python performance_probe.py --ui`。
+
 ## 📊 错误统计功能
 
 点击"错误统计"按钮可以查看：
