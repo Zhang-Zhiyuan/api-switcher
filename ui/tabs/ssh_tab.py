@@ -619,9 +619,16 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_picker.set_enabled(False)
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        ctk.CTkLabel(
+            proxy_node_actions,
+            text="批量",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
         self._proxy_latency_button = ctk.CTkButton(
             proxy_node_actions,
-            text="范围测速",
+            text="测速范围",
             width=98,
             command=self._measure_proxy_subscription_latencies,
             state="disabled",
@@ -630,13 +637,20 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
         self._proxy_quality_button = ctk.CTkButton(
             proxy_node_actions,
-            text="范围测质",
+            text="质量选优",
             width=98,
             command=self._measure_proxy_subscription_qualities,
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._proxy_quality_button.pack(anchor="e", pady=(0, 6))
+        ctk.CTkLabel(
+            proxy_node_actions,
+            text="当前节点",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(2, 4))
         self._proxy_use_node_button = ctk.CTkButton(
             proxy_node_actions,
             text="使用当前",
@@ -646,23 +660,30 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("accent", compact=True),
         )
         self._proxy_use_node_button.pack(anchor="e")
-        self._proxy_quality_settings_button = ctk.CTkButton(
-            proxy_node_actions,
-            text="检测源",
-            width=98,
-            command=self._open_proxy_quality_dialog,
-            **button_style("primary", compact=True),
-        )
-        self._proxy_quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._proxy_ping0_button = ctk.CTkButton(
             proxy_node_actions,
-            text="测当前质",
+            text="测当前",
             width=98,
             command=self._measure_selected_proxy_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._proxy_ping0_button.pack(anchor="e", pady=(6, 0))
+        ctk.CTkLabel(
+            proxy_node_actions,
+            text="设置",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(8, 4))
+        self._proxy_quality_settings_button = ctk.CTkButton(
+            proxy_node_actions,
+            text="质量源",
+            width=98,
+            command=self._open_proxy_quality_dialog,
+            **button_style("primary", compact=True),
+        )
+        self._proxy_quality_settings_button.pack(anchor="e")
         self._proxy_subscription_action_hint_label = ctk.CTkLabel(
             proxy_node_actions,
             text="范围: -\n源: -",

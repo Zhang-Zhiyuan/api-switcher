@@ -312,9 +312,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_picker.set_enabled(False)
         node_actions = ctk.CTkFrame(controls, fg_color="transparent")
         node_actions.grid(row=4, column=3, sticky="e", pady=(8, 0))
+        ctk.CTkLabel(
+            node_actions,
+            text="批量",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
         self._latency_button = ctk.CTkButton(
             node_actions,
-            text="范围测速",
+            text="测速范围",
             width=104,
             command=self._measure_subscription_latencies,
             state="disabled",
@@ -323,13 +330,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button.pack(anchor="e", pady=(0, 6))
         self._quality_button = ctk.CTkButton(
             node_actions,
-            text="范围测质",
+            text="质量选优",
             width=104,
             command=self._measure_subscription_qualities,
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._quality_button.pack(anchor="e", pady=(0, 6))
+        ctk.CTkLabel(
+            node_actions,
+            text="当前节点",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(2, 4))
         self._use_node_button = ctk.CTkButton(
             node_actions,
             text="使用当前",
@@ -339,23 +353,30 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("accent", compact=True),
         )
         self._use_node_button.pack(anchor="e")
-        self._quality_settings_button = ctk.CTkButton(
-            node_actions,
-            text="检测源",
-            width=104,
-            command=self._open_proxy_quality_dialog,
-            **button_style("primary", compact=True),
-        )
-        self._quality_settings_button.pack(anchor="e", pady=(6, 0))
         self._ping0_button = ctk.CTkButton(
             node_actions,
-            text="测当前质",
+            text="测当前",
             width=104,
             command=self._measure_selected_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._ping0_button.pack(anchor="e", pady=(6, 0))
+        ctk.CTkLabel(
+            node_actions,
+            text="设置",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(8, 4))
+        self._quality_settings_button = ctk.CTkButton(
+            node_actions,
+            text="质量源",
+            width=104,
+            command=self._open_proxy_quality_dialog,
+            **button_style("primary", compact=True),
+        )
+        self._quality_settings_button.pack(anchor="e")
         self._subscription_action_hint_label = ctk.CTkLabel(
             node_actions,
             text="范围: -\n源: -",
@@ -394,13 +415,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).grid(row=7, column=0, sticky="nw", pady=(8, 0))
         self._node_text = ctk.CTkTextbox(
             controls,
-            height=112,
+            height=96,
             **textbox_style(monospace=True),
         )
         self._node_text.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
 
         actions = ctk.CTkFrame(controls, fg_color="transparent")
         actions.grid(row=7, column=3, sticky="ne", pady=(8, 0))
+        ctk.CTkLabel(
+            actions,
+            text="节点来源",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
         self._load_file_button = ctk.CTkButton(
             actions,
             text="导入文件",
@@ -409,6 +437,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._load_file_button.pack(anchor="e", pady=(0, 10))
+        ctk.CTkLabel(
+            actions,
+            text="本机运行",
+            text_color=COLORS["muted"],
+            font=font(11, "bold"),
+            anchor="e",
+        ).pack(anchor="e", pady=(0, 4))
         self._start_button = ctk.CTkButton(
             actions,
             text="启动本机",
