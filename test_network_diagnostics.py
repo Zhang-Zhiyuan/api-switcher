@@ -381,6 +381,31 @@ def test_proxycheck_v3_device_estimate_is_parsed_and_affects_risk():
     assert classification.risk_score >= 65
 
 
+def test_proxycheck_v3_subnet_only_device_estimate_is_displayed():
+    ip = "203.0.113.43"
+    mapping = {
+        f"https://proxycheck.io/v3/{ip}?p=0&tag=0": {
+            "status": "ok",
+            ip: {
+                "network": {"type": "Business"},
+                "detections": {"anonymous": False, "confidence": 100},
+                "device_estimate": {
+                    "address": None,
+                    "subnet": 3,
+                },
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_proxycheck_reputation(ip, 1.0, _fake_http_get(mapping))
+
+    assert info.ok is True
+    assert info.shared_count is None
+    assert info.subnet_shared_count == 3
+    assert "共享设备未知/网段约 3" in info.summary_text()
+    assert "ProxyCheck device_estimate.subnet=3" in info.signals
+
+
 def test_proxycheck_legacy_vpn_type_is_parsed_as_anonymous_flag():
     ip = "203.0.113.36"
     mapping = {

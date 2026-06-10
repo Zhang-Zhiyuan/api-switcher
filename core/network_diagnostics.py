@@ -285,8 +285,11 @@ class ReputationInfo:
             parts.append(f"风险 {self.risk_score}%")
         if self.fraud_score is not None:
             parts.append(f"欺诈分 {self.fraud_score}")
-        if self.shared_count is not None:
-            shared = f"共享设备约 {self.shared_count}"
+        if self.shared_count is not None or self.subnet_shared_count is not None:
+            if self.shared_count is not None:
+                shared = f"共享设备约 {self.shared_count}"
+            else:
+                shared = "共享设备未知"
             if self.subnet_shared_count is not None:
                 shared += f"/网段约 {self.subnet_shared_count}"
             parts.append(shared)
@@ -736,11 +739,13 @@ def _lookup_proxycheck_reputation_once(
         info.signals.append("ProxyCheck detections: " + ", ".join(active))
     if info.risk_score is not None:
         info.signals.append(f"ProxyCheck risk={info.risk_score}")
-    if info.shared_count is not None:
-        shared_signal = f"ProxyCheck device_estimate.address={info.shared_count}"
+    if info.shared_count is not None or info.subnet_shared_count is not None:
+        signal_parts = []
+        if info.shared_count is not None:
+            signal_parts.append(f"address={info.shared_count}")
         if info.subnet_shared_count is not None:
-            shared_signal += f" subnet={info.subnet_shared_count}"
-        info.signals.append(shared_signal)
+            signal_parts.append(f"subnet={info.subnet_shared_count}")
+        info.signals.append("ProxyCheck device_estimate." + " ".join(signal_parts))
     return info
 
 
