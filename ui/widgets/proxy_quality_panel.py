@@ -9,6 +9,13 @@ from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
 
 
+KEYLESS_SERVICES = {
+    network_diagnostic_settings.SERVICE_PROXYCHECK,
+    network_diagnostic_settings.SERVICE_IPAPI,
+}
+OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {network_diagnostic_settings.SERVICE_PING0}
+
+
 class ProxyQualityPanel(ctk.CTkScrollableFrame):
     """Panel for public network and proxy exit quality diagnostics."""
 
@@ -125,16 +132,40 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             service: saved_settings.service(service)
             for service in network_diagnostic_settings.HIDDEN_SERVICES
         }
+        preset_bar = ctk.CTkFrame(settings_section, fg_color="transparent")
+        preset_bar.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(
+            preset_bar,
+            text="快速方案",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            width=62,
+            anchor="w",
+        ).pack(side="left", padx=(0, 6))
+        for text, mode in (
+            ("AI 推荐", "recommended"),
+            ("基础源", "keyless"),
+            ("全量", "all"),
+        ):
+            button = ctk.CTkButton(
+                preset_bar,
+                text=text,
+                width=74,
+                command=lambda mode=mode: self._apply_service_preset(mode),
+                **button_style("secondary", compact=True),
+            )
+            button.pack(side="left", padx=(0, 6))
+            self._settings_controls.append(button)
         service_rows = [
             (
                 network_diagnostic_settings.SERVICE_PING0,
                 "Ping0",
-                "免费 Geo；Key 返回 isidc、iprisk、isnative",
+                "免费 Geo；Key 增强 isidc、iprisk、isnative",
             ),
             (
                 network_diagnostic_settings.SERVICE_PROXYCHECK,
                 "ProxyCheck",
-                "可无 Key；Key 池用于更稳定额度",
+                "家宽/商宽/共享人数；可无 Key",
             ),
             (
                 network_diagnostic_settings.SERVICE_IPAPI,
@@ -240,19 +271,10 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         key_frame.pack(fill="x", padx=12, pady=(0, 10))
         self._service_key_frames[service] = key_frame
         self._service_key_entries[service] = []
-        keys = service_settings.api_keys or [""]
-        for key in keys:
+        for key in service_settings.api_keys:
             self._add_key_row(service, key)
-        if service == network_diagnostic_settings.SERVICE_PING0:
-            self._ping0_key_entry = self._service_key_entries[service][0]
-        elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
-            self._proxycheck_key_entry = self._service_key_entries[service][0]
-        elif service == network_diagnostic_settings.SERVICE_IPAPI:
-            self._ipapi_key_entry = self._service_key_entries[service][0]
-        elif service == network_diagnostic_settings.SERVICE_IPQS:
-            self._ipqs_key_entry = self._service_key_entries[service][0]
-        elif service == network_diagnostic_settings.SERVICE_VPNAPI:
-            self._vpnapi_key_entry = self._service_key_entries[service][0]
+        self._assign_first_key_entry(service)
+        self._update_key_frame_spacing(service)
         bind_wraplength(top, desc, padding=320, min_width=180, max_width=620)
 
     def _add_key_row(self, service: str, value: str = "", focus: bool = False):
@@ -280,6 +302,8 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         delete_button.grid(row=0, column=1, padx=(6, 0), sticky="e")
         self._service_key_entries.setdefault(service, []).append(entry)
         self._settings_controls.extend([entry.entry, entry.toggle_btn, delete_button])
+        self._assign_first_key_entry(service)
+        self._update_key_frame_spacing(service)
         self._update_settings_preview()
         if focus:
             try:
@@ -289,14 +313,36 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
 
     def _remove_key_row(self, service: str, entry: MaskedEntry, row):
         entries = self._service_key_entries.get(service, [])
-        if len(entries) <= 1:
-            entry.set("")
-            self._update_settings_preview()
-            return
         self._service_key_entries[service] = [item for item in entries if item is not entry]
         row.destroy()
         self._renumber_key_placeholders(service)
+        self._assign_first_key_entry(service)
+        self._update_key_frame_spacing(service)
         self._update_settings_preview()
+
+    def _assign_first_key_entry(self, service: str):
+        entries = self._service_key_entries.get(service, [])
+        first = entries[0] if entries else None
+        if service == network_diagnostic_settings.SERVICE_PING0:
+            self._ping0_key_entry = first
+        elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
+            self._proxycheck_key_entry = first
+        elif service == network_diagnostic_settings.SERVICE_IPAPI:
+            self._ipapi_key_entry = first
+        elif service == network_diagnostic_settings.SERVICE_IPQS:
+            self._ipqs_key_entry = first
+        elif service == network_diagnostic_settings.SERVICE_VPNAPI:
+            self._vpnapi_key_entry = first
+
+    def _update_key_frame_spacing(self, service: str):
+        key_frame = self._service_key_frames.get(service)
+        if key_frame is None:
+            return
+        pady = (0, 10) if self._service_key_entries.get(service) else (0, 0)
+        try:
+            key_frame.pack_configure(pady=pady)
+        except Exception:
+            pass
 
     def _renumber_key_placeholders(self, service: str):
         for index, entry in enumerate(self._service_key_entries.get(service, []), start=1):
@@ -304,6 +350,23 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 entry.entry.configure(placeholder_text=f"Key #{index}")
             except Exception:
                 pass
+
+    def _apply_service_preset(self, mode: str):
+        settings = self._collect_detection_settings()
+        if mode == "all":
+            enabled = set(network_diagnostic_settings.VISIBLE_SERVICE_ORDER)
+        else:
+            enabled = {
+                network_diagnostic_settings.SERVICE_PING0,
+                network_diagnostic_settings.SERVICE_PROXYCHECK,
+                network_diagnostic_settings.SERVICE_IPAPI,
+            }
+            if mode == "recommended" and settings.keys_for(network_diagnostic_settings.SERVICE_VPNAPI):
+                enabled.add(network_diagnostic_settings.SERVICE_VPNAPI)
+
+        for service, var in self._service_vars.items():
+            var.set(service in enabled)
+        self._update_settings_preview()
 
     def _collect_detection_settings(self):
         enabled = [
@@ -334,17 +397,25 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             count_label = self._service_count_labels.get(service)
             if count_label:
                 count = len(service_settings.api_keys)
-                if count:
-                    count_label.configure(text=f"{count} 个 Key", text_color=COLORS["success"])
-                elif service in {network_diagnostic_settings.SERVICE_PROXYCHECK, network_diagnostic_settings.SERVICE_IPAPI}:
+                if not service_settings.enabled:
+                    count_label.configure(text="关闭", text_color=COLORS["muted_soft"])
+                elif count:
+                    count_label.configure(text=f"Key x{count}", text_color=COLORS["success"])
+                elif service in KEYLESS_SERVICES:
                     count_label.configure(text="可无 Key", text_color=COLORS["muted_soft"])
                 elif service == network_diagnostic_settings.SERVICE_PING0:
                     count_label.configure(text="免费 Geo", text_color=COLORS["muted_soft"])
                 else:
-                    count_label.configure(text="需 Key", text_color=COLORS["warning"])
+                    count_label.configure(text="缺 Key", text_color=COLORS["warning"])
             card = self._service_cards.get(service)
             if card:
-                card.configure(border_color=COLORS["success"] if service_settings.enabled else COLORS["border_soft"])
+                if not service_settings.enabled:
+                    border = COLORS["border_soft"]
+                elif service not in OPTIONAL_KEY_SERVICES and not service_settings.api_keys:
+                    border = COLORS["warning"]
+                else:
+                    border = COLORS["success"]
+                card.configure(border_color=border)
         if self._settings_status_label:
             self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["muted_soft"])
 
@@ -369,16 +440,31 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
     def _settings_status_text(self, settings) -> str:
         enabled_labels = []
         key_counts = []
+        direct_labels = []
+        missing_key_labels = []
         for service in network_diagnostic_settings.VISIBLE_SERVICE_ORDER:
             service_settings = settings.service(service)
             label = network_diagnostic_settings.SERVICE_LABELS.get(service, service)
             if service_settings.enabled:
                 enabled_labels.append(label)
+                if not service_settings.api_keys:
+                    if service in KEYLESS_SERVICES:
+                        direct_labels.append(label)
+                    elif service == network_diagnostic_settings.SERVICE_PING0:
+                        direct_labels.append("Ping0 免费 Geo")
+                    else:
+                        missing_key_labels.append(label)
             if service_settings.api_keys:
                 key_counts.append(f"{label} {len(service_settings.api_keys)} 个 Key")
         enabled_text = "、".join(enabled_labels) if enabled_labels else "未启用检测源"
-        keys_text = "；".join(key_counts) if key_counts else "未保存 API Key"
-        return f"已启用: {enabled_text}  |  {keys_text}"
+        parts = [f"已启用: {enabled_text}"]
+        if key_counts:
+            parts.append("Key 池: " + "；".join(key_counts))
+        if direct_labels:
+            parts.append("可直接用: " + "、".join(direct_labels))
+        if missing_key_labels:
+            parts.append("缺 Key: " + "、".join(missing_key_labels))
+        return "  |  ".join(parts)
 
     def refresh(self):
         if self._last_report:
