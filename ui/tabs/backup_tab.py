@@ -78,7 +78,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         self._list_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
 
-        self.refresh()
+        self.after(20, self.refresh)
 
     def refresh(self):
         if not self._list_frame:

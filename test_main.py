@@ -40,12 +40,12 @@ def test_proxy_quality_is_not_a_primary_tab():
     assert not hasattr(app_module.App, "_show_network_diagnostics_tab")
 
 
-def test_only_first_primary_tab_loads_eagerly():
+def test_primary_tabs_are_lazy_loaded_until_mainloop_is_responsive():
     specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
 
-    assert specs["Claude Code"] is True
+    assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
-    assert all(eager is False for label, eager in specs.items() if label not in {"Claude Code"})
+    assert all(eager is False for eager in specs.values())
 
 
 def test_proxy_quality_dialog_module_is_importable():

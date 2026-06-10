@@ -1,3 +1,5 @@
+import threading
+
 import customtkinter as ctk
 
 from core import profile_manager
@@ -29,6 +31,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._cards_frame = None
         self._filter_mode = "all"
         self._selected_names: set[str] = set()
+        self._refresh_generation = 0
         self._build_ui()
 
     def _toast(self, message: str, is_error: bool = False):
@@ -101,20 +104,70 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 12))
 
-        self.refresh()
+        self.after(20, self.refresh)
 
     def refresh(self):
+        if not self._cards_frame:
+            return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        for w in self._cards_frame.winfo_children():
+            w.destroy()
+        if self._stats_label:
+            self._stats_label.configure(text="正在诊断浏览器 Profile...")
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="正在诊断浏览器 Profile...",
+            text_color=COLORS["muted"],
+            font=font(13),
+        ).pack(fill="x", pady=(22, 6))
+
+        def worker():
+            try:
+                profiles = profile_manager.list_browser_profiles()
+                active = profile_manager.get_active_browser_name()
+                diagnoses = {p.name: browser_profile_manager.diagnose_profile(p) for p in profiles}
+                payload = {"ok": True, "profiles": profiles, "active": active, "diagnoses": diagnoses, "error": ""}
+            except Exception as exc:
+                payload = {"ok": False, "profiles": [], "active": "", "diagnoses": {}, "error": str(exc)}
+
+            def finish():
+                try:
+                    if not self.winfo_exists() or generation != self._refresh_generation:
+                        return
+                    if not payload["ok"]:
+                        for w in self._cards_frame.winfo_children():
+                            w.destroy()
+                        if self._stats_label:
+                            self._stats_label.configure(text="浏览器 Profile 诊断失败")
+                        EmptyState(
+                            self._cards_frame,
+                            "浏览器 Profile 诊断失败",
+                            payload["error"] or "请稍后重试。",
+                            "重新诊断",
+                            self.refresh,
+                        ).pack(fill="x", pady=(12, 4))
+                        return
+                    self._render_profiles(payload["profiles"], payload["active"], payload["diagnoses"])
+                except Exception:
+                    return
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="browser-profile-diagnostics", daemon=True).start()
+
+    def _render_profiles(self, profiles, active, diagnoses):
         if not self._cards_frame:
             return
         for w in self._cards_frame.winfo_children():
             w.destroy()
 
-        profiles = profile_manager.list_browser_profiles()
-        active = profile_manager.get_active_browser_name()
         existing_names = {p.name for p in profiles}
         self._selected_names.intersection_update(existing_names)
 
-        diagnoses = {p.name: browser_profile_manager.diagnose_profile(p) for p in profiles}
         total_count = len(profiles)
         issues_count = sum(1 for d in diagnoses.values() if (not d["valid"]) or (not d["executable_found"]) or (not d["profile_path_exists"]) or d["browser_running"])
         launchable_count = sum(1 for d in diagnoses.values() if d["valid"] and d["executable_found"] and d["profile_path_exists"])

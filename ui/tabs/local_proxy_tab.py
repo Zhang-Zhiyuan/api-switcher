@@ -487,7 +487,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
-        self.refresh()
+        self.after(20, self.refresh)
 
     def destroy(self):
         self._cancel_startup_refresh()
@@ -496,7 +496,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def refresh(self):
         self._load_proxy_preferences_ui()
-        self._load_saved_subscription_ui()
+        self.after(30, self._load_saved_subscription_ui)
 
     def _set_status(self, message: str, severity: str = "info"):
         if not self._status_label:

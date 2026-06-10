@@ -175,7 +175,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
-        self.refresh()
+        self.after(20, self.refresh)
 
     def refresh(self):
         if not self._cards_frame:

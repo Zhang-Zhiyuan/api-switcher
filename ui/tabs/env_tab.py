@@ -96,7 +96,7 @@ class EnvTab(ctk.CTkScrollableFrame):
         )
         self._remote_env_control.pack(fill="x", padx=14, pady=(0, 12))
 
-        self.refresh()
+        self.after(20, self.refresh)
 
     def refresh(self):
         self._refresh_import_sources()

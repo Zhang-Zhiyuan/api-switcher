@@ -979,8 +979,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_status_label.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
-        self.refresh()
-        self._load_saved_proxy_subscription_ui()
+        self.after(20, self.refresh)
+        self.after(50, self._load_saved_proxy_subscription_ui)
 
     def destroy(self):
         self._cancel_proxy_startup_refresh()

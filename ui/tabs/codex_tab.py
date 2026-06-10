@@ -160,7 +160,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         self._auto_continue_control = AutoContinueControl(self, provider="codex")
         self._auto_continue_control.pack(fill="x", padx=14, pady=(0, 10))
 
-        self.refresh()
+        self.after(20, self.refresh)
 
     def _refresh_shell_state(self):
         top = self.winfo_toplevel()

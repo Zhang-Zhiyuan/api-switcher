@@ -18,7 +18,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self.configure(fg_color="transparent")
         self._auto_refresh_after_id = None
         self._build_ui()
-        self.refresh()
+        self.after(20, self.refresh)
 
         # Auto-refresh every 30 seconds
         self._schedule_auto_refresh()

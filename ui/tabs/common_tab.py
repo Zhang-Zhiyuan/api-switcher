@@ -54,13 +54,6 @@ class CommonTab(ctk.CTkScrollableFrame):
         )
         bypass_switch.pack(anchor="w", padx=14, pady=5)
 
-        # Load current state
-        settings = parser.read_claude_settings()
-        if settings.get("permissions", {}).get("defaultMode") == "bypassPermissions":
-            bypass_switch.select()
-        else:
-            bypass_switch.deselect()
-
         ctk.CTkLabel(
             perm_frame,
             text="开启后会同步更新 Claude Code 与 VS Code 的权限模式",
@@ -219,9 +212,7 @@ class CommonTab(ctk.CTkScrollableFrame):
         )
         self._overview_text.pack(fill="x", padx=14, pady=(0, 14))
 
-        self._refresh_startup_info()
-        self._refresh_overview()
-        self._refresh_storage_info()
+        self.after(20, self.refresh)
 
     def refresh(self):
         """Refresh current permission state and overview text."""

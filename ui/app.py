@@ -14,8 +14,9 @@ ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
 QUICK_SWITCH_TITLE = "快速切换 API"
 CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
+DEFAULT_TAB_LABEL = "Claude Code"
 TAB_SPECS = [
-    ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", True),
+    ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
     (ENV_TAB_LABEL, "_env_tab", "ui.tabs.env_tab", "EnvTab", False),
     ("浏览器 Profile", "_browser_tab", "ui.tabs.browser_tab", "BrowserTab", False),
@@ -48,6 +49,8 @@ class App(ctk.CTk):
         self._tab_class_cache = {}
         self._tab_class_cache_lock = threading.RLock()
         self._lazy_tab_preload_started = False
+        self._initial_tab_load_started = False
+        self._pending_tab_load_after_ids = {}
         self._quick_switch_load_generation = 0
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
@@ -210,10 +213,6 @@ class App(ctk.CTk):
             if not eager:
                 self._install_tab_placeholder(label)
 
-        for label, _attr, _module_name, _class_name, eager in TAB_SPECS:
-            if eager:
-                self._ensure_tab(label)
-
         # Status bar
         footer = ctk.CTkFrame(
             shell,
@@ -235,8 +234,11 @@ class App(ctk.CTk):
         self.codex_switch.configure(values=["正在加载..."], state="disabled")
         self.after(20, self._load_quick_switch_profiles)
         self.after(50, self._start_tray_icon)
+        if not self._start_minimized_to_tray:
+            self.after(90, self._schedule_initial_tab_load)
         self.after(900, self._auto_start_local_proxy)
-        self.after(1200, self._preload_lazy_tab_classes)
+        if os.environ.get("API_SWITCHER_PRELOAD_TABS") == "1":
+            self.after(2500, self._preload_lazy_tab_classes)
 
     def _install_tab_placeholder(self, label: str):
         frame = self._tab_frames.get(label)
@@ -260,7 +262,7 @@ class App(ctk.CTk):
             placeholder,
             text="加载",
             width=96,
-            command=lambda name=label: self._ensure_tab(name),
+            command=lambda name=label: self._schedule_tab_load(name),
             **button_style("secondary"),
         ).pack()
 
@@ -294,10 +296,6 @@ class App(ctk.CTk):
             font=font(12),
         ).pack()
         self._set_app_status(f"正在加载 {label}...")
-        try:
-            self.update_idletasks()
-        except Exception as exc:
-            logger.debug("Failed to render tab loading state: %s", exc)
 
     def _show_tab_error(self, label: str, error: Exception):
         frame = self._tab_frames.get(label)
@@ -337,7 +335,7 @@ class App(ctk.CTk):
             actions,
             text="重试加载",
             width=104,
-            command=lambda name=label: self._ensure_tab(name),
+            command=lambda name=label: self._schedule_tab_load(name),
             **button_style("primary"),
         ).pack(side="left")
         ctk.CTkButton(
@@ -423,8 +421,43 @@ class App(ctk.CTk):
 
         threading.Thread(target=run, name="lazy-tab-preload", daemon=True).start()
 
+    def _schedule_initial_tab_load(self):
+        if self._exit_requested or self._initial_tab_load_started:
+            return
+        self._initial_tab_load_started = True
+        current = self._tabview.get() or DEFAULT_TAB_LABEL
+        self._schedule_tab_load(current, delay_ms=10)
+
+    def _schedule_tab_load(self, label: str, delay_ms: int = 25):
+        if self._exit_requested:
+            return
+        spec = self._tab_specs.get(label)
+        if not spec:
+            return
+        attr, _module_name, _class_name, _eager = spec
+        existing = getattr(self, attr, None)
+        try:
+            if existing is not None and existing.winfo_exists():
+                return
+        except Exception:
+            pass
+        if label in self._pending_tab_load_after_ids:
+            return
+        self._show_tab_loading(label)
+
+        def load_now():
+            self._pending_tab_load_after_ids.pop(label, None)
+            if not self._exit_requested:
+                self._ensure_tab(label)
+
+        try:
+            self._pending_tab_load_after_ids[label] = self.after(max(1, int(delay_ms)), load_now)
+        except Exception:
+            self._pending_tab_load_after_ids.pop(label, None)
+            self._ensure_tab(label)
+
     def _on_tab_changed(self):
-        self._ensure_tab(self._tabview.get())
+        self._schedule_tab_load(self._tabview.get())
 
     def _loaded_tab(self, attr: str):
         tab = getattr(self, attr, None)
@@ -676,6 +709,7 @@ class App(ctk.CTk):
             pass
         self.lift()
         self.focus_force()
+        self.after(50, self._schedule_initial_tab_load)
         logger.info("Window restored from tray")
 
     def _exit_app(self):
@@ -720,6 +754,13 @@ class App(ctk.CTk):
         except Exception as e:
             logger.debug("Failed to close exit dialog: %s", e)
         self._close_dialog = None
+
+        for after_id in list(self._pending_tab_load_after_ids.values()):
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._pending_tab_load_after_ids.clear()
 
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             tab = getattr(self, attr, None)
@@ -771,7 +812,7 @@ class App(ctk.CTk):
         self._tabview.set(ENV_TAB_LABEL)
         tab = self._ensure_tab(ENV_TAB_LABEL)
         if tab:
-            tab.refresh()
+            self.after(30, tab.refresh)
         self._status.configure(text="已打开环境变量管理")
 
     def _show_proxy_quality_dialog(self):
@@ -825,20 +866,37 @@ class App(ctk.CTk):
 
     def refresh_all(self):
         """Refresh all tabs."""
-        self._status.configure(text="正在刷新全部 API 配置和账号状态...")
-        self.update_idletasks()
-        for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
+        tabs = []
+        for label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             tab = self._loaded_tab(attr)
             if tab and hasattr(tab, "refresh"):
-                tab.refresh()
-        self._status.configure(text="已刷新已加载页面和快捷菜单")
+                tabs.append((label, tab))
+        if not tabs:
+            self._status.configure(text="暂无已加载页面需要刷新")
+            self._load_quick_switch_profiles()
+            return
 
-        # Update tray menu to reflect changes
-        if self.tray_manager.is_running():
-            self.tray_manager.update_menu()
+        self._status.configure(text=f"正在刷新已加载页面 0/{len(tabs)}...")
 
-        # Reload quick switch profiles
-        self._load_quick_switch_profiles()
+        def refresh_next(index: int = 0):
+            if self._exit_requested:
+                return
+            if index >= len(tabs):
+                self._status.configure(text="已刷新已加载页面和快捷菜单")
+                if self.tray_manager.is_running():
+                    self.tray_manager.update_menu()
+                self._load_quick_switch_profiles()
+                return
+            label, tab = tabs[index]
+            self._status.configure(text=f"正在刷新 {label} ({index + 1}/{len(tabs)})...")
+            try:
+                if tab.winfo_exists():
+                    tab.refresh()
+            except Exception as exc:
+                logger.debug("Failed to refresh tab %s: %s", label, exc)
+            self.after(45, lambda: refresh_next(index + 1))
+
+        self.after(0, refresh_next)
 
     def _restore_latest_backup(self):
         """Restore the newest config backup after confirmation."""
