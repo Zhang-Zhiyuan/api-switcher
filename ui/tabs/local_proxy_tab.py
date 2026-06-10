@@ -330,7 +330,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button.pack(anchor="e", pady=(0, 6))
         self._quality_button = ctk.CTkButton(
             node_actions,
-            text="质量选优",
+            text="质量+复核",
             width=104,
             command=self._measure_subscription_qualities,
             state="disabled",
@@ -1264,19 +1264,62 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
         self._set_busy(True)
         self._set_status(
-            f"正在基于 {source_label} 检测 {scope_label} 中 {node_count} 个候选节点；完成后优先选择家宽、低风险节点..."
+            f"正在基于 {source_label} 检测 {scope_label} 中 {node_count} 个候选节点；"
+            "运行中的本机代理会继续热更新候选并复核 OpenAI/Claude/Gemini..."
         )
+        candidate_nodes = tuple(candidates)
+        existing_quality_results = dict(self._quality_results)
+        existing_latency_results = dict(self._latency_results)
 
         def run():
             try:
                 results = remote_proxy.assess_proxy_node_qualities(
-                    tuple(candidates),
+                    candidate_nodes,
                     timeout=5.0,
                     max_workers=8,
                     settings=settings,
                     enabled_services=services,
                 )
-                payload = {"ok": True, "result": results, "error": None}
+                merged_results = dict(existing_quality_results)
+                merged_results.update(results or {})
+                best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
+                    candidate_nodes,
+                    merged_results,
+                    existing_latency_results,
+                )
+                verify_message = ""
+                verified_key = ""
+                verify_error = ""
+                try:
+                    running = local_proxy.inspect_local_ai_proxy().running
+                except Exception as exc:
+                    running = False
+                    verify_error = f"本机代理状态读取失败: {exc}"
+                if best and running:
+                    try:
+                        verify_message = local_proxy.reload_local_ai_proxy_verified(
+                            remote_proxy.format_proxy_node(best.node),
+                            remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(
+                                candidate_nodes,
+                                merged_results,
+                                existing_latency_results,
+                            ),
+                            quality_results=merged_results,
+                        )
+                        verified_key = local_proxy.current_local_ai_proxy_node_key()
+                    except Exception as exc:
+                        verify_error = str(exc)
+                payload = {
+                    "ok": True,
+                    "result": results,
+                    "merged_result": merged_results,
+                    "best_key": remote_proxy.proxy_node_key(best.node) if best else "",
+                    "verified_key": verified_key,
+                    "verify_message": verify_message,
+                    "verify_error": verify_error,
+                    "verify_running": bool(best and running),
+                    "error": None,
+                }
             except Exception as e:
                 payload = {"ok": False, "result": None, "error": str(e)}
 
@@ -1299,32 +1342,24 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     save_error = str(exc)
 
                 self._set_subscription_nodes(self._subscription_nodes)
-                best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
-                    self._subscription_nodes,
-                    self._quality_results,
-                    self._latency_results,
-                )
-                if best and best not in candidates:
-                    best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
-                        candidates,
-                        self._quality_results,
-                        self._latency_results,
-                    )
                 tested_count = sum(
                     1
-                    for item in candidates
+                    for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_measured(
                         self._quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
                 high_count = sum(
                     1
-                    for item in candidates
+                    for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
                         self._quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
-                if not best:
+                best_key = str(payload.get("verified_key") or payload.get("best_key") or "")
+                if best_key and not self._select_subscription_node_by_key(best_key):
+                    best_key = str(payload.get("best_key") or "")
+                if not best_key or not self._select_subscription_node_by_key(best_key):
                     message = f"质量检测完成: 本次 {len(payload['result'] or {})} 个；暂无可用质量结果。"
                     if save_error:
                         message += f" 质量结果缓存失败: {save_error}"
@@ -1332,23 +1367,41 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
-                best_key = remote_proxy.proxy_node_key(best.node)
-                self._select_subscription_node_by_key(best_key)
                 self._use_selected_subscription_node(show_message=False)
+                selected = self._subscription_picker.selected_item() if self._subscription_picker else None
+                selected_node = selected.node if selected else {}
                 quality = self._quality_results.get(best_key)
-                region = remote_proxy.proxy_node_region(best.node)
+                region = remote_proxy.proxy_node_region(selected_node)
                 label = remote_proxy.proxy_node_quality_label(quality)
                 score = remote_proxy.proxy_node_quality_score(quality)
                 basis = remote_proxy.proxy_node_quality_source_label(quality)
-                severity = "success" if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality) and not save_error else "warning"
+                verify_message = str(payload.get("verify_message") or "")
+                verify_error = str(payload.get("verify_error") or "")
+                verify_running = bool(payload.get("verify_running"))
+                verify_ok = remote_proxy._probe_summary_all_ok(verify_message)
+                severity = (
+                    "success"
+                    if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality)
+                    and not save_error
+                    and verify_running
+                    and verify_ok
+                    and not verify_error
+                    else "warning"
+                )
                 message = (
                     f"质量检测完成: 基于 {basis}，{scope_label} 家宽高质 {high_count}/{tested_count}；"
                     f"已选择【{region}】{label} 评分{score}。"
                 )
+                if verify_message:
+                    message += f" AI 复核: {remote_proxy._compact_probe_summary(verify_message)}"
+                elif verify_error:
+                    message += f" AI 复核跳过: {verify_error}"
+                else:
+                    message += " 本机代理未运行，启动或热更新时会继续做 AI 连通性验证。"
                 if save_error:
                     message += f" 质量结果缓存失败: {save_error}"
                 self._set_status(message, severity)
-                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
+                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error or verify_error))
 
             try:
                 self.after(0, finish)
@@ -1561,8 +1614,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         def do_start():
             self._run_local_task(
-                "正在启动 Windows 本机 AI 代理，首次运行可能需要下载 mihomo...",
-                lambda: local_proxy.install_local_ai_proxy(proxy_text),
+                "正在启动 Windows 本机 AI 代理，并验证 OpenAI/Claude/Gemini 连通性...",
+                lambda: local_proxy.install_local_ai_proxy_verified(
+                    proxy_text,
+                    tuple(self._subscription_nodes),
+                    quality_results=self._quality_results,
+                ),
                 "启动本机 AI 代理",
             )
 

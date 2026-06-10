@@ -1475,6 +1475,98 @@ def test_install_ai_proxy_verified_falls_back_to_working_candidate(monkeypatch):
     assert "验证通过" in message
 
 
+def test_install_ai_proxy_verified_prefers_quality_ranked_candidate(monkeypatch):
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: bad, type: vless, server: bad.example.com, port: 443 }"),
+    )
+    fast_hosting = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node("{ name: fast-hosting, type: vless, server: fast.example.com, port: 443 }"),
+    )
+    slow_residential = remote_proxy.ProxySubscriptionNode(
+        3,
+        remote_proxy.parse_proxy_node("{ name: slow-residential, type: vless, server: slow.example.com, port: 443 }"),
+    )
+    installs = []
+    probes = iter([
+        "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 0/3 可达",
+        "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 3/3 可达",
+    ])
+
+    def fake_install(_server, text, _port=7890):
+        installs.append(remote_proxy.parse_proxy_node(text)["name"])
+        return "installed"
+
+    latencies = {
+        remote_proxy.proxy_node_key(fast_hosting.node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(fast_hosting.node),
+            True,
+            latency_ms=15,
+        ),
+        remote_proxy.proxy_node_key(slow_residential.node): remote_proxy.ProxyNodeLatencyResult(
+            remote_proxy.proxy_node_key(slow_residential.node),
+            True,
+            latency_ms=120,
+        ),
+    }
+    qualities = {
+        remote_proxy.proxy_node_key(fast_hosting.node): remote_proxy.ProxyNodeQualityResult(
+            remote_proxy.proxy_node_key(fast_hosting.node),
+            True,
+            ip_type="IDC机房 IP",
+            risk_score=72,
+            quality_score=43,
+            quality_label="机房风险",
+        ),
+        remote_proxy.proxy_node_key(slow_residential.node): remote_proxy.ProxyNodeQualityResult(
+            remote_proxy.proxy_node_key(slow_residential.node),
+            True,
+            ip_type="住宅宽带",
+            risk_score=12,
+            quality_score=96,
+            quality_label="家宽高质",
+        ),
+    }
+
+    monkeypatch.setattr(remote_proxy, "install_ai_proxy", fake_install)
+    monkeypatch.setattr(remote_proxy, "probe_ai_proxy", lambda *_args, **_kwargs: next(probes))
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies_on_server", lambda *_args, **_kwargs: latencies)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = remote_proxy.install_ai_proxy_verified(
+        "server",
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, fast_hosting, slow_residential],
+        quality_results=qualities,
+    )
+
+    assert installs == ["bad", "slow-residential"]
+    assert "自动切换到 slow-residential" in message
+    assert "验证通过" in message
+
+
+def test_reload_ai_proxy_verified_still_probes_when_node_is_unchanged(monkeypatch):
+    probes = []
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(remote_proxy, "reload_ai_proxy", lambda *_args, **_kwargs: "server: 运行节点已是最新配置，无需热更新")
+    monkeypatch.setattr(
+        remote_proxy,
+        "probe_ai_proxy",
+        lambda *_args, **_kwargs: probes.append(1)
+        or "server: AI 代理已配置，运行中: http://127.0.0.1:7890；AI 连通性 3/3 可达",
+    )
+
+    message = remote_proxy.reload_ai_proxy_verified(
+        "server",
+        "{ name: same, type: vless, server: same.example.com, port: 443 }",
+    )
+
+    assert probes == [1]
+    assert "无需热更新" in message
+    assert "验证通过" in message
+
+
 def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     env_file = remote_proxy._build_env_file(7890)
     shell_paths = remote_proxy._shell_proxy_profile_paths("/home/me")

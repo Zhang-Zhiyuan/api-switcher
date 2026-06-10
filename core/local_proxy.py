@@ -393,6 +393,76 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     )
 
 
+def install_local_ai_proxy_verified(
+    proxy_text: str,
+    candidate_nodes=None,
+    max_candidates: int = 10,
+    quality_results: dict[str, remote_proxy.ProxyNodeQualityResult | dict] | None = None,
+) -> str:
+    requested_node = remote_proxy.parse_proxy_node(proxy_text)
+    requested_key = remote_proxy.proxy_node_key(requested_node)
+    install_message = install_local_ai_proxy(proxy_text)
+    probe_message = probe_local_ai_proxy()
+    if remote_proxy._probe_summary_all_ok(probe_message):
+        return f"{install_message}；验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
+
+    candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, remote_proxy.ProxySubscriptionNode))
+    if not candidates:
+        return f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}"
+
+    try:
+        latencies = remote_proxy.measure_proxy_node_latencies(
+            candidates,
+            timeout=3.0,
+            attempts=2,
+            max_workers=20,
+        )
+    except Exception as exc:
+        return f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}"
+
+    ranked = []
+    for item in remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
+        key = remote_proxy.proxy_node_key(item.node)
+        if key == requested_key:
+            continue
+        result = latencies.get(key)
+        latency = remote_proxy.proxy_node_latency_ms(result)
+        if latency is None or not remote_proxy.proxy_node_latency_ok(result):
+            continue
+        ranked.append((latency, item, result))
+
+    attempts = max(1, min(remote_proxy._int_or_default(max_candidates, 10), len(ranked)))
+    tried = []
+    for _latency, item, result in ranked[:attempts]:
+        node_summary = remote_proxy.describe_proxy_node(item.node)
+        latency_label = remote_proxy.proxy_node_latency_label(result)
+        try:
+            install_local_ai_proxy(remote_proxy.format_proxy_node(item.node))
+            candidate_probe = probe_local_ai_proxy()
+        except Exception as exc:
+            tried.append(f"{node_summary} {latency_label}: {exc}")
+            continue
+        if remote_proxy._probe_summary_all_ok(candidate_probe):
+            _remember_selected_subscription_node(item.node)
+            return (
+                f"本机 AI 代理原启动节点验证失败，已自动切换到 {node_summary}"
+                f"（本机 TCP {latency_label}）；"
+                f"验证通过: {remote_proxy._compact_probe_summary(candidate_probe)}"
+            )
+        tried.append(f"{node_summary} {latency_label}: {remote_proxy._probe_summary_counts(candidate_probe)}")
+
+    try:
+        install_local_ai_proxy(remote_proxy.format_proxy_node(requested_node))
+    except Exception:
+        pass
+    tried_summary = "；".join(tried[:3])
+    suffix = f"；尝试摘要: {tried_summary}" if tried_summary else ""
+    return (
+        f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
+        f"自动尝试 {attempts} 个高质量候选仍未 3/3 可达，已恢复原节点{suffix}"
+    )
+
+
 def reload_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
@@ -444,6 +514,7 @@ def reload_local_ai_proxy_verified(
     proxy_text: str,
     candidate_nodes=None,
     max_candidates: int = 10,
+    quality_results: dict[str, remote_proxy.ProxyNodeQualityResult | dict] | None = None,
 ) -> str:
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
     requested_key = remote_proxy.proxy_node_key(requested_node)
@@ -452,7 +523,7 @@ def reload_local_ai_proxy_verified(
         reload_message = reload_local_ai_proxy(proxy_text)
     except Exception as exc:
         return f"本机 AI 代理自动更新跳过，{exc}"
-    if "跳过" in reload_message or "无需热更新" in reload_message:
+    if "跳过" in reload_message:
         return reload_message
 
     probe_message = probe_local_ai_proxy()
@@ -479,7 +550,7 @@ def reload_local_ai_proxy_verified(
         )
 
     ranked = []
-    for item in remote_proxy.sort_proxy_subscription_nodes(candidates, latencies):
+    for item in remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
         key = remote_proxy.proxy_node_key(item.node)
         if key == requested_key:
             continue
@@ -543,6 +614,11 @@ def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
             return "订阅已刷新，但没有测到可连节点，已保留当前运行节点"
         chosen = ranked[0]
     return reload_local_ai_proxy_verified(remote_proxy.format_proxy_node(chosen.node), candidates)
+
+
+def current_local_ai_proxy_node_key() -> str:
+    state = _load_state()
+    return str(state.get("node_key") or "")
 
 
 def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalAIProxyStatus:

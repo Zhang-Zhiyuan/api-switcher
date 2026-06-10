@@ -637,7 +637,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
         self._proxy_quality_button = ctk.CTkButton(
             proxy_node_actions,
-            text="质量选优",
+            text="质量+复核",
             width=98,
             command=self._measure_proxy_subscription_qualities,
             state="disabled",
@@ -1987,21 +1987,61 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
+        server_names = self._selected_sync_server_names()
+        target_label = self._format_server_target(server_names) if server_names else ""
         self._set_proxy_busy(True)
+        verify_hint = f"；{target_label} 运行中的远端代理会继续热更新并复核 AI 连通" if server_names else "；未勾选 SSH 目标时仅做质量选优"
         self._set_proxy_status(
-            f"正在基于 {source_label} 检测 {scope_label} 中 {node_count} 个候选节点；完成后优先选择家宽、低风险节点..."
+            f"正在基于 {source_label} 检测 {scope_label} 中 {node_count} 个候选节点{verify_hint}..."
         )
+        candidate_nodes = tuple(candidates)
+        existing_quality_results = dict(self._proxy_quality_results)
+        existing_latency_results = dict(self._proxy_latency_results)
 
         def run():
             try:
                 results = remote_proxy.assess_proxy_node_qualities(
-                    tuple(candidates),
+                    candidate_nodes,
                     timeout=5.0,
                     max_workers=8,
                     settings=settings,
                     enabled_services=services,
                 )
-                payload = {"ok": True, "result": results, "error": None}
+                merged_results = dict(existing_quality_results)
+                merged_results.update(results or {})
+                best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
+                    candidate_nodes,
+                    merged_results,
+                    existing_latency_results,
+                )
+                verify_result = None
+                if best and server_names:
+                    ranked_candidates = remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(
+                        candidate_nodes,
+                        merged_results,
+                        existing_latency_results,
+                    )
+
+                    def verify_on_server(server_name: str):
+                        status = remote_proxy.inspect_ai_proxy(server_name)
+                        if not status.running:
+                            return "AI 代理未运行，已跳过 AI 连通复核；部署远端时会继续验证"
+                        return remote_proxy.reload_ai_proxy_verified(
+                            server_name,
+                            remote_proxy.format_proxy_node(best.node),
+                            ranked_candidates,
+                            quality_results=merged_results,
+                        )
+
+                    verify_result = self._run_server_batch(server_names, verify_on_server)
+                payload = {
+                    "ok": True,
+                    "result": results,
+                    "merged_result": merged_results,
+                    "best_key": remote_proxy.proxy_node_key(best.node) if best else "",
+                    "verify_result": verify_result,
+                    "error": None,
+                }
             except Exception as e:
                 payload = {"ok": False, "result": None, "error": str(e)}
 
@@ -2024,26 +2064,22 @@ class SSHTab(ctk.CTkScrollableFrame):
                     save_error = str(exc)
 
                 self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
-                best = remote_proxy.best_proxy_subscription_node_for_ai_proxy(
-                    candidates,
-                    self._proxy_quality_results,
-                    self._proxy_latency_results,
-                )
                 tested_count = sum(
                     1
-                    for item in candidates
+                    for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_measured(
                         self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
                 high_count = sum(
                     1
-                    for item in candidates
+                    for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
                         self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
                     )
                 )
-                if not best:
+                best_key = str(payload.get("best_key") or "")
+                if not best_key or not self._select_proxy_subscription_node_by_key(best_key):
                     message = f"质量检测完成: 本次 {len(payload['result'] or {})} 个；暂无可用质量结果。"
                     if save_error:
                         message += f" 质量结果缓存失败: {save_error}"
@@ -2051,23 +2087,47 @@ class SSHTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
-                best_key = remote_proxy.proxy_node_key(best.node)
-                self._select_proxy_subscription_node_by_key(best_key)
                 self._use_selected_proxy_subscription_node(show_message=False)
+                selected = self._proxy_subscription_picker.selected_item() if self._proxy_subscription_picker else None
+                selected_node = selected.node if selected else {}
                 quality = self._proxy_quality_results.get(best_key)
-                region = remote_proxy.proxy_node_region(best.node)
+                region = remote_proxy.proxy_node_region(selected_node)
                 label = remote_proxy.proxy_node_quality_label(quality)
                 score = remote_proxy.proxy_node_quality_score(quality)
                 basis = remote_proxy.proxy_node_quality_source_label(quality)
-                severity = "success" if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality) and not save_error else "warning"
+                verify_result = payload.get("verify_result") or {}
+                verify_failures = list(verify_result.get("failures", []) or []) if isinstance(verify_result, dict) else []
+                verify_results = list(verify_result.get("results", []) or []) if isinstance(verify_result, dict) else []
+                verify_skipped = any("跳过" in item or "未运行" in item for item in verify_results)
+                verify_passed = bool(verify_results) and all("验证通过" in item for item in verify_results)
+                severity = (
+                    "success"
+                    if remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality)
+                    and not save_error
+                    and bool(server_names)
+                    and verify_passed
+                    and not verify_failures
+                    and not verify_skipped
+                    else "warning"
+                )
                 message = (
                     f"质量检测完成: 基于 {basis}，{scope_label} 家宽高质 {high_count}/{tested_count}；"
                     f"已选择【{region}】{label} 评分{score}。"
                 )
+                if verify_results:
+                    message += " AI 复核: " + " | ".join(verify_results[:2])
+                    if len(verify_results) > 2:
+                        message += f" 等 {len(verify_results)} 台"
+                elif verify_failures:
+                    message += " AI 复核失败: " + "；".join(verify_failures[:2])
+                elif server_names:
+                    message += " 远端代理未运行，部署远端时会继续做 AI 连通性验证。"
+                else:
+                    message += " 未勾选 SSH 目标，已仅按 IP 质量选优。"
                 if save_error:
                     message += f" 质量结果缓存失败: {save_error}"
                 self._set_proxy_status(message, severity)
-                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
+                show_toast(self.winfo_toplevel(), message, is_error=bool(save_error or verify_failures))
 
             try:
                 self.after(0, finish)
@@ -2233,6 +2293,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                         server_name,
                         proxy_text,
                         tuple(self._proxy_subscription_nodes),
+                        quality_results=self._proxy_quality_results,
                     ),
                 ),
                 on_done=done,

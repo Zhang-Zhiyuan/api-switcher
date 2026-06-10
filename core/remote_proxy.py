@@ -708,6 +708,20 @@ def best_proxy_subscription_node_for_ai_proxy(
     return None
 
 
+def ranked_proxy_subscription_nodes_for_ai_probe(
+    nodes,
+    quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
+    latency_results: dict[str, ProxyNodeLatencyResult | dict] | None = None,
+) -> tuple[ProxySubscriptionNode, ...]:
+    """Rank candidates for AI proxy validation, preferring high-quality IPs first."""
+    return sort_proxy_subscription_nodes(
+        nodes,
+        latency_results=latency_results,
+        quality_results=quality_results or {},
+        prefer_quality=bool(quality_results),
+    )
+
+
 def measure_proxy_node_latency(node: dict, timeout: float = 3.0, attempts: int = 2) -> ProxyNodeLatencyResult:
     normalized = _normalize_proxy_node(node)
     node_key = proxy_node_key(normalized)
@@ -1314,6 +1328,7 @@ def install_ai_proxy_verified(
     candidate_nodes=None,
     mixed_port: int = 7890,
     max_candidates: int = 10,
+    quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
 ) -> str:
     requested_node = parse_proxy_node(proxy_text)
     requested_key = proxy_node_key(requested_node)
@@ -1338,7 +1353,7 @@ def install_ai_proxy_verified(
         return f"{install_message}；验证失败: {_compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}"
 
     ranked = []
-    for item in sort_proxy_subscription_nodes(candidates, latencies):
+    for item in ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
         key = proxy_node_key(item.node)
         if key == requested_key:
             continue
@@ -1419,6 +1434,7 @@ def reload_ai_proxy_verified(
     candidate_nodes=None,
     mixed_port: int = 7890,
     max_candidates: int = 10,
+    quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
 ) -> str:
     requested_node = parse_proxy_node(proxy_text)
     requested_key = proxy_node_key(requested_node)
@@ -1430,7 +1446,7 @@ def reload_ai_proxy_verified(
         reload_message = reload_ai_proxy(ssh_name, proxy_text, mixed_port)
     except Exception as exc:
         return f"{ssh_name}: 自动更新跳过，{exc}"
-    if "跳过" in reload_message or "无需热更新" in reload_message:
+    if "跳过" in reload_message:
         return reload_message
 
     probe_message = probe_ai_proxy(ssh_name, mixed_port)
@@ -1465,7 +1481,7 @@ def reload_ai_proxy_verified(
         return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动换节点测速失败: {exc}{restore_suffix}"
 
     ranked = []
-    for item in sort_proxy_subscription_nodes(candidates, latencies):
+    for item in ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
         key = proxy_node_key(item.node)
         if key == requested_key:
             continue
@@ -1530,7 +1546,12 @@ def refresh_running_ai_proxy_from_subscription(
         if not ranked:
             return f"{ssh_name}: 订阅已刷新，但没有测到可连节点，已保留当前运行节点"
         chosen = ranked[0]
-    return reload_ai_proxy_verified(ssh_name, format_proxy_node(chosen.node), candidates, mixed_port)
+    return reload_ai_proxy_verified(
+        ssh_name,
+        format_proxy_node(chosen.node),
+        candidates,
+        mixed_port=mixed_port,
+    )
 
 
 def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStatus:
