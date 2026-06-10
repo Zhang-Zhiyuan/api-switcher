@@ -283,10 +283,18 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             return
         row = ctk.CTkFrame(key_frame, fg_color="transparent")
         row.pack(fill="x", pady=(0, 5))
-        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=1)
         key_index = len(self._service_key_entries.get(service, [])) + 1
-        entry = MaskedEntry(row, placeholder=f"Key #{key_index}", width=420)
-        entry.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(
+            row,
+            text=network_diagnostic_settings.SERVICE_LABELS.get(service, service),
+            text_color=COLORS["muted_soft"],
+            font=font(11, "bold"),
+            width=86,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        entry = MaskedEntry(row, placeholder=self._key_placeholder(service, key_index), width=360)
+        entry.grid(row=0, column=1, sticky="ew")
         entry.set(value)
         try:
             entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview(), add="+")
@@ -299,7 +307,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             command=lambda service=service, entry=entry, row=row: self._remove_key_row(service, entry, row),
             **button_style("secondary", compact=True),
         )
-        delete_button.grid(row=0, column=1, padx=(6, 0), sticky="e")
+        delete_button.grid(row=0, column=2, padx=(6, 0), sticky="e")
         self._service_key_entries.setdefault(service, []).append(entry)
         self._settings_controls.extend([entry.entry, entry.toggle_btn, delete_button])
         self._assign_first_key_entry(service)
@@ -347,9 +355,13 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
     def _renumber_key_placeholders(self, service: str):
         for index, entry in enumerate(self._service_key_entries.get(service, []), start=1):
             try:
-                entry.entry.configure(placeholder_text=f"Key #{index}")
+                entry.entry.configure(placeholder_text=self._key_placeholder(service, index))
             except Exception:
                 pass
+
+    def _key_placeholder(self, service: str, index: int) -> str:
+        label = network_diagnostic_settings.SERVICE_LABELS.get(service, service)
+        return f"{label} Key #{index}"
 
     def _apply_service_preset(self, mode: str):
         settings = self._collect_detection_settings()
