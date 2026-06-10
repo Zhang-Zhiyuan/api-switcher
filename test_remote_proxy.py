@@ -1704,6 +1704,35 @@ def test_local_proxy_preferences_parse_string_booleans(monkeypatch, tmp_path):
     assert preferences["custom_targets"][1]["enabled"] is True
 
 
+def test_local_proxy_preferences_cache_reuses_unchanged_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    payload = {
+        "start_on_login": True,
+        "keep_running_on_exit": True,
+        "proxy_non_cn": True,
+        "builtin_sites": {"youtube": True},
+    }
+    local_proxy.LOCAL_PROXY_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    local_proxy.LOCAL_PROXY_PREFS_PATH.write_text(json.dumps(payload), encoding="utf-8")
+    local_proxy.clear_local_proxy_preferences_cache()
+    original_loads = local_proxy.json.loads
+    calls = {"count": 0}
+
+    def counting_loads(text, *args, **kwargs):
+        calls["count"] += 1
+        return original_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(local_proxy.json, "loads", counting_loads)
+
+    first = local_proxy.load_local_proxy_preferences()
+    first["proxy_non_cn"] = False
+    second = local_proxy.load_local_proxy_preferences()
+
+    assert calls["count"] == 1
+    assert second["proxy_non_cn"] is True
+    assert second["builtin_sites"]["youtube"] is True
+
+
 def test_local_proxy_preference_setters_parse_string_booleans(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
 

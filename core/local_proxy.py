@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import gzip
 import ipaddress
 import io
@@ -92,6 +93,8 @@ LOCAL_PROXY_DOMAIN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LOCAL_PROXY_PREFS_LOCK = threading.RLock()
+_LOCAL_PROXY_PREFS_CACHE: dict | None = None
+_LOCAL_PROXY_PREFS_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -127,11 +130,16 @@ class LocalAIProxyProbeResult:
 
 def load_local_proxy_preferences() -> dict:
     with _LOCAL_PROXY_PREFS_LOCK:
+        signature = _local_proxy_preferences_signature()
+        if _LOCAL_PROXY_PREFS_CACHE is not None and _LOCAL_PROXY_PREFS_CACHE_SIGNATURE == signature:
+            return copy.deepcopy(_LOCAL_PROXY_PREFS_CACHE)
         try:
             data = json.loads(LOCAL_PROXY_PREFS_PATH.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-        return _normalize_local_proxy_preferences(data)
+        preferences = _normalize_local_proxy_preferences(data)
+        _cache_local_proxy_preferences(preferences, signature)
+        return copy.deepcopy(preferences)
 
 
 def save_local_proxy_preferences(**updates) -> dict:
@@ -145,7 +153,15 @@ def save_local_proxy_preferences(**updates) -> dict:
             LOCAL_PROXY_PREFS_PATH,
             json.dumps(preferences, ensure_ascii=False, indent=2),
         )
-        return preferences
+        _cache_local_proxy_preferences(preferences)
+        return copy.deepcopy(preferences)
+
+
+def clear_local_proxy_preferences_cache() -> None:
+    global _LOCAL_PROXY_PREFS_CACHE, _LOCAL_PROXY_PREFS_CACHE_SIGNATURE
+    with _LOCAL_PROXY_PREFS_LOCK:
+        _LOCAL_PROXY_PREFS_CACHE = None
+        _LOCAL_PROXY_PREFS_CACHE_SIGNATURE = None
 
 
 def local_proxy_start_on_login_enabled() -> bool:
@@ -620,6 +636,24 @@ def probe_local_ai_proxy(timeout: int = 8) -> str:
 def _ensure_local_dirs() -> None:
     LOCAL_PROXY_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     LOCAL_PROXY_BIN_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _local_proxy_preferences_signature() -> tuple[str, int | None, int | None]:
+    path_key = str(LOCAL_PROXY_PREFS_PATH.resolve(strict=False))
+    try:
+        stat = LOCAL_PROXY_PREFS_PATH.stat()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return (path_key, None, None)
+
+
+def _cache_local_proxy_preferences(
+    preferences: dict,
+    signature: tuple[str, int | None, int | None] | None = None,
+) -> None:
+    global _LOCAL_PROXY_PREFS_CACHE, _LOCAL_PROXY_PREFS_CACHE_SIGNATURE
+    _LOCAL_PROXY_PREFS_CACHE = copy.deepcopy(preferences)
+    _LOCAL_PROXY_PREFS_CACHE_SIGNATURE = signature or _local_proxy_preferences_signature()
 
 
 def _normalize_local_proxy_preferences(data: dict | None) -> dict:
