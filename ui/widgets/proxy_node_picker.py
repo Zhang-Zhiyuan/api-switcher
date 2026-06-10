@@ -35,6 +35,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._filter_combo = None
         self._region_combo = None
         self._quality_combo = None
+        self._filter_reset_button = None
         self._batch_buttons = []
         self._scope_label = None
         self._summary_label = None
@@ -58,16 +59,28 @@ class ProxyNodePicker(ctk.CTkFrame):
         filter_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
         filter_bar.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
+        ctk.CTkLabel(
+            filter_bar,
+            text="连通",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+        ).pack(side="left", padx=(0, 4))
         self._filter_combo = ctk.CTkComboBox(
             filter_bar,
             values=list(self.FILTER_OPTIONS),
-            width=96,
+            width=88,
             command=lambda _value: self._request_render_nodes(20),
             **combo_style(),
         )
         self._filter_combo.set("全部")
         self._filter_combo.pack(side="left", padx=(0, 8))
 
+        ctk.CTkLabel(
+            filter_bar,
+            text="地区",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+        ).pack(side="left", padx=(0, 4))
         self._region_combo = ctk.CTkComboBox(
             filter_bar,
             values=[self.REGION_ALL],
@@ -78,6 +91,12 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._region_combo.set(self.REGION_ALL)
         self._region_combo.pack(side="left", padx=(0, 8))
 
+        ctk.CTkLabel(
+            filter_bar,
+            text="质量",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+        ).pack(side="left", padx=(0, 4))
         self._quality_combo = ctk.CTkComboBox(
             filter_bar,
             values=list(self.QUALITY_OPTIONS),
@@ -86,7 +105,15 @@ class ProxyNodePicker(ctk.CTkFrame):
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
-        self._quality_combo.pack(side="left")
+        self._quality_combo.pack(side="left", padx=(0, 8))
+        self._filter_reset_button = ctk.CTkButton(
+            filter_bar,
+            text="重置",
+            width=58,
+            command=self._reset_filters,
+            **button_style("secondary", compact=True),
+        )
+        self._filter_reset_button.pack(side="left")
 
         scope_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
         scope_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
@@ -165,7 +192,14 @@ class ProxyNodePicker(ctk.CTkFrame):
     def set_enabled(self, enabled: bool):
         self._enabled = bool(enabled)
         state = "normal" if self._enabled else "disabled"
-        for widget in (self._search_entry, self._filter_combo, self._region_combo, self._quality_combo, *self._batch_buttons):
+        for widget in (
+            self._search_entry,
+            self._filter_combo,
+            self._region_combo,
+            self._quality_combo,
+            self._filter_reset_button,
+            *self._batch_buttons,
+        ):
             if widget:
                 try:
                     widget.configure(state=state)
@@ -217,6 +251,20 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._render_nodes()
                 return True
         return False
+
+    def _reset_filters(self):
+        try:
+            if self._search_entry:
+                self._search_entry.delete(0, "end")
+            if self._filter_combo:
+                self._filter_combo.set("全部")
+            if self._region_combo:
+                self._region_combo.set(self.REGION_ALL)
+            if self._quality_combo:
+                self._quality_combo.set("全部质量")
+        except Exception:
+            pass
+        self._render_nodes()
 
     def _render_nodes(self):
         pending_render = self._render_after_id
