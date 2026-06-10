@@ -33,6 +33,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._periodic_update_entry = None
         self._periodic_update_after_id = None
         self._periodic_update_running = False
+        self._initial_refresh_after_id = None
+        self._saved_subscription_after_id = None
         self._startup_refresh_after_id = None
         self._start_on_login_var = ctk.BooleanVar(value=False)
         self._keep_running_on_exit_var = ctk.BooleanVar(value=True)
@@ -487,16 +489,38 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
-        self.after(20, self.refresh)
+        self._initial_refresh_after_id = self.after(20, self.refresh)
 
     def destroy(self):
+        self._cancel_initial_refresh()
+        self._cancel_saved_subscription_refresh()
         self._cancel_startup_refresh()
         self._cancel_periodic_update()
         super().destroy()
 
+    def _cancel_initial_refresh(self):
+        if not self._initial_refresh_after_id:
+            return
+        try:
+            self.after_cancel(self._initial_refresh_after_id)
+        except Exception:
+            pass
+        self._initial_refresh_after_id = None
+
+    def _cancel_saved_subscription_refresh(self):
+        if not self._saved_subscription_after_id:
+            return
+        try:
+            self.after_cancel(self._saved_subscription_after_id)
+        except Exception:
+            pass
+        self._saved_subscription_after_id = None
+
     def refresh(self):
+        self._initial_refresh_after_id = None
         self._load_proxy_preferences_ui()
-        self.after(30, self._load_saved_subscription_ui)
+        self._cancel_saved_subscription_refresh()
+        self._saved_subscription_after_id = self.after(30, self._load_saved_subscription_ui)
 
     def _set_status(self, message: str, severity: str = "info"):
         if not self._status_label:
@@ -802,6 +826,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
 
     def _load_saved_subscription_ui(self):
+        self._saved_subscription_after_id = None
         if self._saved_subscription_loaded:
             return
         self._saved_subscription_loaded = True

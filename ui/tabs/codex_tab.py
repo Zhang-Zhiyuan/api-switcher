@@ -1,3 +1,5 @@
+import threading
+
 import customtkinter as ctk
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
@@ -20,6 +22,11 @@ class CodexTab(ctk.CTkScrollableFrame):
         self._account_cards_frame = None
         self._runtime_label = None
         self._account_runtime_label = None
+        self._refresh_generation = 0
+        self._profile_render_after_id = None
+        self._profile_render_after_ids = set()
+        self._refresh_finish_after_id = None
+        self._destroyed = False
         self._build_ui()
 
     def _build_ui(self):
@@ -162,6 +169,34 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         self.after(20, self.refresh)
 
+    def destroy(self):
+        self._destroyed = True
+        self._refresh_generation += 1
+        self._cancel_profile_render()
+        self._cancel_refresh_finish()
+        super().destroy()
+
+    def _cancel_profile_render(self):
+        after_ids = set(self._profile_render_after_ids)
+        if self._profile_render_after_id:
+            after_ids.add(self._profile_render_after_id)
+        for after_id in after_ids:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._profile_render_after_id = None
+        self._profile_render_after_ids.clear()
+
+    def _cancel_refresh_finish(self):
+        if not self._refresh_finish_after_id:
+            return
+        try:
+            self.after_cancel(self._refresh_finish_after_id)
+        except Exception:
+            pass
+        self._refresh_finish_after_id = None
+
     def _refresh_shell_state(self):
         top = self.winfo_toplevel()
         if hasattr(top, "_load_quick_switch_profiles"):
@@ -183,15 +218,116 @@ class CodexTab(ctk.CTkScrollableFrame):
     def refresh(self):
         if not self._cards_frame or not self._account_cards_frame:
             return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        self._cancel_profile_render()
+        self._show_refresh_loading()
+
+        def worker():
+            try:
+                profiles = profile_manager.list_switchable_codex_profiles()
+                account_profiles = profile_manager.list_codex_account_profiles()
+                runtime = profile_manager.get_codex_runtime_summary()
+                account_runtime = profile_manager.get_codex_account_runtime_summary()
+                active = runtime.get("profile_name")
+                active_account = account_runtime.get("profile_name")
+                payload = {
+                    "ok": True,
+                    "profiles": [
+                        {
+                            "profile": profile,
+                            "is_active": profile.name == active,
+                            "auth_identity": profile_manager.describe_codex_profile_identity(profile),
+                        }
+                        for profile in profiles
+                    ],
+                    "accounts": [
+                        {
+                            "profile": account,
+                            "is_active": account.name == active_account,
+                            "snapshot": profile_manager.validate_codex_account_snapshot(account),
+                        }
+                        for account in account_profiles
+                    ],
+                    "runtime": runtime,
+                    "account_runtime": account_runtime,
+                    "error": "",
+                }
+            except Exception as exc:
+                payload = {"ok": False, "error": str(exc)}
+
+            def finish():
+                self._refresh_finish_after_id = None
+                if generation != self._refresh_generation or not self._is_alive():
+                    return
+                if not payload["ok"]:
+                    self._show_refresh_error(payload["error"])
+                    return
+                self._render_refresh_payload(payload, generation)
+
+            try:
+                if not self._destroyed:
+                    self._refresh_finish_after_id = self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="codex-tab-refresh", daemon=True).start()
+
+    def _is_alive(self) -> bool:
+        if self._destroyed:
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _clear_frame(self, frame):
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+    def _show_refresh_loading(self):
+        self._clear_frame(self._cards_frame)
+        self._clear_frame(self._account_cards_frame)
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="正在后台读取 Codex API 配置...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", pady=(12, 4))
+        ctk.CTkLabel(
+            self._account_cards_frame,
+            text="正在后台读取 Codex 官方账号快照...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 4))
+
+    def _show_refresh_error(self, message: str):
+        self._clear_frame(self._cards_frame)
+        self._clear_frame(self._account_cards_frame)
+        text = f"读取 Codex 配置失败: {message}"
+        ctk.CTkLabel(
+            self._cards_frame,
+            text=text,
+            text_color=COLORS["danger"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", pady=(12, 4))
+        if self._runtime_label:
+            self._runtime_label.configure(text=text, text_color=COLORS["danger"])
+
+    def _render_refresh_payload(self, payload: dict, generation: int):
         for w in self._cards_frame.winfo_children():
             w.destroy()
         for w in self._account_cards_frame.winfo_children():
             w.destroy()
 
-        profiles = profile_manager.list_switchable_codex_profiles()
-        account_profiles = profile_manager.list_codex_account_profiles()
-        runtime = profile_manager.get_codex_runtime_summary()
-        account_runtime = profile_manager.get_codex_account_runtime_summary()
+        profiles = payload["profiles"]
+        account_profiles = payload["accounts"]
+        runtime = payload["runtime"]
+        account_runtime = payload["account_runtime"]
         active = runtime.get("profile_name")
         stored_active = runtime.get("stored_active")
         active_account = account_runtime.get("profile_name")
@@ -248,27 +384,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 self._create_profile,
             ).pack(fill="x", pady=(12, 4))
         else:
-            for p in profiles:
-                is_active = p.name == active
-                auth_identity = profile_manager.describe_codex_profile_identity(p)
-                auth_desc = f"API Key ({auth_identity})"
-                info = [
-                    f"认证: {auth_desc}  |  模型: {p.model}  |  Provider: {p.model_provider}",
-                    f"端点: {p.custom_base_url or '(默认)'}  |  审批: {p.approval_policy}  |  沙盒: {p.sandbox_mode}",
-                ]
-
-                card = ProfileCard(
-                    self._cards_frame, p.name, info, is_active=is_active,
-                    active_label="当前 API",
-                    switch_label="切换 API",
-                    on_switch=self._switch_profile,
-                    on_test=self._test_profile,
-                    on_edit=self._edit_profile,
-                    on_clone=self._clone_profile,
-                    on_delete=self._delete_profile,
-                    border_color=COLORS["primary"] if is_active else COLORS["border_soft"],
-                )
-                card.pack(fill="x", pady=5)
+            self._render_profile_cards_batch(profiles, generation)
 
         if not account_profiles:
             EmptyState(
@@ -280,9 +396,52 @@ class CodexTab(ctk.CTkScrollableFrame):
             ).pack(fill="x", pady=(4, 4))
             return
 
-        for account in account_profiles:
-            is_active = account.name == active_account
-            snapshot_ok, snapshot_status = profile_manager.validate_codex_account_snapshot(account)
+        self._render_account_cards_batch(account_profiles, generation)
+
+    def _render_profile_cards_batch(self, profiles: list[dict], generation: int, start: int = 0):
+        if generation != self._refresh_generation or not self._is_alive():
+            return
+        batch_size = 4
+        end = min(len(profiles), start + batch_size)
+        for item in profiles[start:end]:
+            profile = item["profile"]
+            is_active = bool(item["is_active"])
+            auth_desc = f"API Key ({item.get('auth_identity') or 'no-auth'})"
+            info = [
+                f"认证: {auth_desc}  |  模型: {profile.model}  |  Provider: {profile.model_provider}",
+                f"端点: {profile.custom_base_url or '(默认)'}  |  审批: {profile.approval_policy}  |  沙盒: {profile.sandbox_mode}",
+            ]
+            card = ProfileCard(
+                self._cards_frame, profile.name, info, is_active=is_active,
+                active_label="当前 API",
+                switch_label="切换 API",
+                on_switch=self._switch_profile,
+                on_test=self._test_profile,
+                on_edit=self._edit_profile,
+                on_clone=self._clone_profile,
+                on_delete=self._delete_profile,
+                border_color=COLORS["primary"] if is_active else COLORS["border_soft"],
+            )
+            card.pack(fill="x", pady=5)
+        if end >= len(profiles):
+            self._profile_render_after_id = None
+            return
+        after_id = self.after(
+            1,
+            lambda: self._render_profile_cards_batch(profiles, generation, end),
+        )
+        self._profile_render_after_id = after_id
+        self._profile_render_after_ids.add(after_id)
+
+    def _render_account_cards_batch(self, accounts: list[dict], generation: int, start: int = 0):
+        if generation != self._refresh_generation or not self._is_alive():
+            return
+        batch_size = 4
+        end = min(len(accounts), start + batch_size)
+        for item in accounts[start:end]:
+            account = item["profile"]
+            is_active = bool(item["is_active"])
+            snapshot_ok, snapshot_status = item["snapshot"]
             info = [
                 f"身份: {account.identity}",
                 f"状态: {snapshot_status}  |  凭据: 本机加密保存  |  保存时间: {account.created_at or '-'}",
@@ -297,6 +456,15 @@ class CodexTab(ctk.CTkScrollableFrame):
                 border_color=COLORS["accent"] if is_active else (COLORS["danger"] if not snapshot_ok else COLORS["border_soft"]),
             )
             card.pack(fill="x", pady=5)
+        if end >= len(accounts):
+            self._profile_render_after_id = None
+            return
+        after_id = self.after(
+            1,
+            lambda: self._render_account_cards_batch(accounts, generation, end),
+        )
+        self._profile_render_after_id = after_id
+        self._profile_render_after_ids.add(after_id)
 
     def _switch_profile(self, name):
         def perform_switch():

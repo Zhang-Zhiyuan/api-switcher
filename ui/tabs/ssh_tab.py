@@ -36,6 +36,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._cards_frame = None
+        self._server_refresh_generation = 0
+        self._server_render_after_id = None
+        self._server_refresh_finish_after_id = None
+        self._initial_refresh_after_id = None
+        self._proxy_saved_subscription_after_id = None
+        self._destroyed = False
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
@@ -979,24 +985,125 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_status_label.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
-        self.after(20, self.refresh)
-        self.after(50, self._load_saved_proxy_subscription_ui)
+        self._initial_refresh_after_id = self.after(20, self.refresh)
+        self._proxy_saved_subscription_after_id = self.after(50, self._load_saved_proxy_subscription_ui)
 
     def destroy(self):
+        self._destroyed = True
+        self._server_refresh_generation += 1
+        self._cancel_initial_after_callbacks()
+        self._cancel_server_render()
+        self._cancel_server_refresh_finish()
         self._cancel_proxy_startup_refresh()
         self._cancel_proxy_periodic_update()
         super().destroy()
 
+    def _cancel_initial_after_callbacks(self):
+        for attr in ("_initial_refresh_after_id", "_proxy_saved_subscription_after_id"):
+            after_id = getattr(self, attr, None)
+            if not after_id:
+                continue
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+    def _cancel_server_render(self):
+        if not self._server_render_after_id:
+            return
+        try:
+            self.after_cancel(self._server_render_after_id)
+        except Exception:
+            pass
+        self._server_render_after_id = None
+
+    def _cancel_server_refresh_finish(self):
+        if not self._server_refresh_finish_after_id:
+            return
+        try:
+            self.after_cancel(self._server_refresh_finish_after_id)
+        except Exception:
+            pass
+        self._server_refresh_finish_after_id = None
+
     def refresh(self):
+        self._initial_refresh_after_id = None
         if not self._cards_frame:
             return
+        self._server_refresh_generation += 1
+        generation = self._server_refresh_generation
+        self._cancel_server_render()
 
-        # Clear cards
         for w in self._cards_frame.winfo_children():
             w.destroy()
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="正在后台读取 SSH 服务器...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", pady=(12, 4))
 
-        profiles = profile_manager.list_ssh_profiles()
-        active = profile_manager.get_active_ssh_name()
+        def worker():
+            try:
+                profiles = profile_manager.list_ssh_profiles()
+                active = profile_manager.get_active_ssh_name()
+                payload = {
+                    "ok": True,
+                    "profiles": [
+                        {
+                            "profile": profile,
+                            "is_active": profile.name == active,
+                            "is_connected": ssh_manager.ssh_manager.is_connected(profile.name),
+                        }
+                        for profile in profiles
+                    ],
+                    "error": "",
+                }
+            except Exception as exc:
+                payload = {"ok": False, "profiles": [], "error": str(exc)}
+
+            def finish():
+                self._server_refresh_finish_after_id = None
+                if generation != self._server_refresh_generation or not self._is_alive():
+                    return
+                self._render_server_refresh_payload(payload, generation)
+
+            try:
+                if not self._destroyed:
+                    self._server_refresh_finish_after_id = self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="ssh-tab-refresh", daemon=True).start()
+
+    def _is_alive(self) -> bool:
+        if self._destroyed:
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _render_server_refresh_payload(self, payload: dict, generation: int):
+        if not self._cards_frame:
+            return
+        for w in self._cards_frame.winfo_children():
+            w.destroy()
+        if not payload.get("ok"):
+            ctk.CTkLabel(
+                self._cards_frame,
+                text=f"读取 SSH 服务器失败: {payload.get('error') or '-'}",
+                text_color=COLORS["danger"],
+                font=font(12),
+                anchor="w",
+                justify="left",
+            ).pack(fill="x", pady=(12, 4))
+            return
+
+        profile_items = list(payload.get("profiles") or [])
+        profiles = [item["profile"] for item in profile_items]
 
         if not profiles:
             EmptyState(
@@ -1007,128 +1114,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._create_server,
             ).pack(fill="x", pady=(12, 4))
         else:
-            for p in profiles:
-                is_active = p.name == active
-                is_connected = ssh_manager.ssh_manager.is_connected(p.name)
-                status = "已连接" if is_connected else "未连接"
-                info = [
-                    f"{p.host}:{p.port}  ·  {p.username}  ·  {p.auth_type}",
-                ]
-                remote_dirs = []
-                if getattr(p, "remote_claude_dir", None):
-                    remote_dirs.append(f"Claude: {p.remote_claude_dir}")
-                if getattr(p, "remote_codex_dir", None):
-                    remote_dirs.append(f"Codex: {p.remote_codex_dir}")
-                if remote_dirs:
-                    info.append("目录 " + "  ·  ".join(remote_dirs))
-
-                card_frame = ctk.CTkFrame(
-                    self._cards_frame,
-                    **card_frame_kwargs(COLORS["success"] if is_connected else COLORS["border_soft"]),
-                )
-                card_frame.pack(fill="x", pady=3)
-
-                row = ctk.CTkFrame(card_frame, fg_color="transparent")
-                row.pack(fill="x", padx=10, pady=8)
-                row.grid_columnconfigure(2, weight=1)
-
-                selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
-                ctk.CTkCheckBox(
-                    row,
-                    text="目标",
-                    width=52,
-                    checkbox_width=16,
-                    checkbox_height=16,
-                    text_color=COLORS["muted"],
-                    font=font(11),
-                    variable=selected_var,
-                    command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
-                ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 8))
-
-                status_pill = ctk.CTkLabel(
-                    row,
-                    text=status,
-                    fg_color=COLORS["success"] if is_connected else COLORS["surface_alt"],
-                    corner_radius=999,
-                    text_color=COLORS["text"] if is_connected else COLORS["muted"],
-                    font=font(11, "bold"),
-                    padx=7,
-                    pady=1,
-                )
-                status_pill.grid(row=0, column=1, rowspan=2, sticky="w", padx=(0, 8))
-
-                text_area = ctk.CTkFrame(row, fg_color="transparent")
-                text_area.grid(row=0, column=2, rowspan=2, sticky="ew")
-                title_line = ctk.CTkFrame(text_area, fg_color="transparent")
-                title_line.pack(fill="x")
-
-                name_label = ctk.CTkLabel(
-                    title_line,
-                    text=p.name,
-                    text_color=COLORS["text"],
-                    font=font(14, "bold"),
-                    anchor="w",
-                )
-                name_label.pack(side="left")
-
-                if is_active:
-                    ctk.CTkLabel(
-                        title_line,
-                        text="当前",
-                        fg_color=COLORS["primary"],
-                        corner_radius=999,
-                        text_color=COLORS["text"],
-                        font=font(11, "bold"),
-                        padx=7,
-                        pady=1,
-                    ).pack(side="left", padx=(8, 0))
-
-                info_label = ctk.CTkLabel(
-                    text_area,
-                    text="  |  ".join(info),
-                    text_color=COLORS["muted"],
-                    font=font(11),
-                    anchor="w",
-                    justify="left",
-                )
-                info_label.pack(fill="x", pady=(1, 0))
-                bind_wraplength(text_area, info_label, padding=24, min_width=260, max_width=860)
-
-                btn_frame = ctk.CTkFrame(row, fg_color="transparent")
-                btn_frame.grid(row=0, column=3, rowspan=2, sticky="e", padx=(10, 0))
-
-                if is_connected:
-                    ctk.CTkButton(
-                        btn_frame,
-                        text="断开",
-                        width=54,
-                        command=lambda n=p.name: self._disconnect(n),
-                        **button_style("danger", compact=True),
-                    ).pack(side="left", padx=(0, 5))
-                else:
-                    ctk.CTkButton(
-                        btn_frame,
-                        text="连接",
-                        width=54,
-                        command=lambda n=p.name: self._connect(n),
-                        **button_style("primary", compact=True),
-                    ).pack(side="left", padx=(0, 5))
-
-                ctk.CTkButton(
-                    btn_frame,
-                    text="编辑",
-                    width=50,
-                    command=lambda n=p.name: self._edit_server(n),
-                    **button_style("secondary", compact=True),
-                ).pack(side="left", padx=(0, 5))
-
-                ctk.CTkButton(
-                    btn_frame,
-                    text="删除",
-                    width=50,
-                    command=lambda n=p.name: self._delete_server(n),
-                    **button_style("danger", compact=True),
-                ).pack(side="left")
+            self._render_server_cards_batch(profile_items, generation)
 
         server_names = [p.name for p in profiles]
         previous_selection = set(self._selected_server_names)
@@ -1141,6 +1127,145 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._refresh_remote_auto_switch_availability()
         if not server_names:
             self._set_remote_auto_status("\u8bf7\u5148\u6dfb\u52a0\u5e76\u52fe\u9009 1 \u53f0 SSH \u670d\u52a1\u5668", severity="warning")
+
+    def _render_server_cards_batch(self, profile_items: list[dict], generation: int, start: int = 0):
+        if generation != self._server_refresh_generation or not self._is_alive():
+            return
+        batch_size = 4
+        end = min(len(profile_items), start + batch_size)
+        for item in profile_items[start:end]:
+            self._render_server_card(item)
+        if end >= len(profile_items):
+            self._server_render_after_id = None
+            return
+        self._server_render_after_id = self.after(
+            1,
+            lambda: self._render_server_cards_batch(profile_items, generation, end),
+        )
+
+    def _render_server_card(self, item: dict):
+        p = item["profile"]
+        is_active = bool(item.get("is_active"))
+        is_connected = bool(item.get("is_connected"))
+        status = "已连接" if is_connected else "未连接"
+        info = [
+            f"{p.host}:{p.port}  ·  {p.username}  ·  {p.auth_type}",
+        ]
+        remote_dirs = []
+        if getattr(p, "remote_claude_dir", None):
+            remote_dirs.append(f"Claude: {p.remote_claude_dir}")
+        if getattr(p, "remote_codex_dir", None):
+            remote_dirs.append(f"Codex: {p.remote_codex_dir}")
+        if remote_dirs:
+            info.append("目录 " + "  ·  ".join(remote_dirs))
+
+        card_frame = ctk.CTkFrame(
+            self._cards_frame,
+            **card_frame_kwargs(COLORS["success"] if is_connected else COLORS["border_soft"]),
+        )
+        card_frame.pack(fill="x", pady=3)
+
+        row = ctk.CTkFrame(card_frame, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=8)
+        row.grid_columnconfigure(2, weight=1)
+
+        selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
+        ctk.CTkCheckBox(
+            row,
+            text="目标",
+            width=52,
+            checkbox_width=16,
+            checkbox_height=16,
+            text_color=COLORS["muted"],
+            font=font(11),
+            variable=selected_var,
+            command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
+        ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 8))
+
+        status_pill = ctk.CTkLabel(
+            row,
+            text=status,
+            fg_color=COLORS["success"] if is_connected else COLORS["surface_alt"],
+            corner_radius=999,
+            text_color=COLORS["text"] if is_connected else COLORS["muted"],
+            font=font(11, "bold"),
+            padx=7,
+            pady=1,
+        )
+        status_pill.grid(row=0, column=1, rowspan=2, sticky="w", padx=(0, 8))
+
+        text_area = ctk.CTkFrame(row, fg_color="transparent")
+        text_area.grid(row=0, column=2, rowspan=2, sticky="ew")
+        title_line = ctk.CTkFrame(text_area, fg_color="transparent")
+        title_line.pack(fill="x")
+
+        name_label = ctk.CTkLabel(
+            title_line,
+            text=p.name,
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+            anchor="w",
+        )
+        name_label.pack(side="left")
+
+        if is_active:
+            ctk.CTkLabel(
+                title_line,
+                text="当前",
+                fg_color=COLORS["primary"],
+                corner_radius=999,
+                text_color=COLORS["text"],
+                font=font(11, "bold"),
+                padx=7,
+                pady=1,
+            ).pack(side="left", padx=(8, 0))
+
+        info_label = ctk.CTkLabel(
+            text_area,
+            text="  |  ".join(info),
+            text_color=COLORS["muted"],
+            font=font(11),
+            anchor="w",
+            justify="left",
+        )
+        info_label.pack(fill="x", pady=(1, 0))
+        bind_wraplength(text_area, info_label, padding=24, min_width=260, max_width=860)
+
+        btn_frame = ctk.CTkFrame(row, fg_color="transparent")
+        btn_frame.grid(row=0, column=3, rowspan=2, sticky="e", padx=(10, 0))
+
+        if is_connected:
+            ctk.CTkButton(
+                btn_frame,
+                text="断开",
+                width=54,
+                command=lambda n=p.name: self._disconnect(n),
+                **button_style("danger", compact=True),
+            ).pack(side="left", padx=(0, 5))
+        else:
+            ctk.CTkButton(
+                btn_frame,
+                text="连接",
+                width=54,
+                command=lambda n=p.name: self._connect(n),
+                **button_style("primary", compact=True),
+            ).pack(side="left", padx=(0, 5))
+
+        ctk.CTkButton(
+            btn_frame,
+            text="编辑",
+            width=50,
+            command=lambda n=p.name: self._edit_server(n),
+            **button_style("secondary", compact=True),
+        ).pack(side="left", padx=(0, 5))
+
+        ctk.CTkButton(
+            btn_frame,
+            text="删除",
+            width=50,
+            command=lambda n=p.name: self._delete_server(n),
+            **button_style("danger", compact=True),
+        ).pack(side="left")
 
     def _create_server(self):
         def on_save(profile, _):
@@ -1422,6 +1547,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 pass
 
     def _load_saved_proxy_subscription_ui(self):
+        self._proxy_saved_subscription_after_id = None
         if self._proxy_saved_subscription_loaded:
             return
         self._proxy_saved_subscription_loaded = True

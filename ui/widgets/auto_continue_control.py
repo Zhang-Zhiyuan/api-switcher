@@ -1,3 +1,5 @@
+import threading
+
 import customtkinter as ctk
 from models.auto_continue import AutoContinueSettings, training_prompt_template_by_key
 from core.auto_continue.manager import auto_continue_manager
@@ -14,8 +16,22 @@ class AutoContinueControl(ctk.CTkFrame):
         super().__init__(master, **frame_kwargs)
         self.provider = provider
         self._refreshing = False
+        self._refresh_generation = 0
+        self._refresh_finish_after_id = None
+        self._destroyed = False
         self._build_ui()
-        self.refresh()
+        self.after(20, self.refresh)
+
+    def destroy(self):
+        self._destroyed = True
+        self._refresh_generation += 1
+        if self._refresh_finish_after_id:
+            try:
+                self.after_cancel(self._refresh_finish_after_id)
+            except Exception:
+                pass
+            self._refresh_finish_after_id = None
+        super().destroy()
 
     def _build_ui(self):
         # Header
@@ -273,10 +289,65 @@ class AutoContinueControl(ctk.CTkFrame):
 
     def refresh(self):
         """Refresh status display."""
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         try:
-            status = auto_continue_manager.get_status(self.provider)
-            settings = auto_continue_manager.get_settings(self.provider)
+            self._status_label.configure(text="读取中...", text_color=COLORS["muted_soft"])
+            self._info_text.configure(state="normal")
+            self._info_text.delete("1.0", "end")
+            self._info_text.insert("1.0", "正在后台读取自动续跑状态...")
+            self._info_text.configure(state="disabled")
+        except Exception:
+            pass
 
+        def worker():
+            try:
+                payload = {
+                    "ok": True,
+                    "status": auto_continue_manager.get_status(self.provider),
+                    "settings": auto_continue_manager.get_settings(self.provider),
+                    "error": "",
+                }
+            except Exception as e:
+                payload = {"ok": False, "status": None, "settings": None, "error": str(e)}
+
+            def finish():
+                self._refresh_finish_after_id = None
+                if generation != self._refresh_generation or not self._is_alive():
+                    return
+                if not payload["ok"]:
+                    self._apply_refresh_error(payload["error"])
+                    return
+                self._apply_refresh_payload(payload["status"], payload["settings"])
+
+            try:
+                if not self._destroyed:
+                    self._refresh_finish_after_id = self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name=f"auto-continue-refresh-{self.provider}", daemon=True).start()
+
+    def _is_alive(self) -> bool:
+        if self._destroyed:
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _apply_refresh_error(self, message: str):
+        try:
+            self._status_label.configure(text="错误", text_color="#e74c3c")
+            self._info_text.configure(state="normal")
+            self._info_text.delete("1.0", "end")
+            self._info_text.insert("1.0", f"错误: {message}")
+            self._info_text.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _apply_refresh_payload(self, status, settings):
+        try:
             display_settings = settings or AutoContinueSettings()
 
             # Update status label. This describes the hook installation state;
@@ -387,11 +458,7 @@ class AutoContinueControl(ctk.CTkFrame):
             self._info_text.configure(state="disabled")
 
         except Exception as e:
-            self._status_label.configure(text="错误", text_color="#e74c3c")
-            self._info_text.configure(state="normal")
-            self._info_text.delete("1.0", "end")
-            self._info_text.insert("1.0", f"错误: {e}")
-            self._info_text.configure(state="disabled")
+            self._apply_refresh_error(str(e))
 
     def _save_settings(self, settings: AutoContinueSettings) -> None:
         auto_continue_manager.update_settings(self.provider, settings)

@@ -6,6 +6,7 @@ from typing import Optional
 
 DEFAULT_FONT_FAMILY = "Microsoft YaHei UI"
 MONO_FONT_FAMILY = "Consolas"
+_FONT_CACHE: dict[tuple[int, int, str, str], ctk.CTkFont] = {}
 
 COLORS = {
     "app_bg": "#101216",
@@ -109,10 +110,20 @@ _patch_nested_scrollable_frame_mousewheel()
 
 
 def font(size: int, weight: Optional[str] = None, family: Optional[str] = None) -> ctk.CTkFont:
-    kwargs = {"size": size, "family": family or DEFAULT_FONT_FAMILY}
+    resolved_family = family or DEFAULT_FONT_FAMILY
+    resolved_weight = weight or ""
+    root = tkinter._default_root
+    key = (id(root), int(size), resolved_weight, resolved_family)
+    cached = _FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    kwargs = {"size": size, "family": resolved_family}
     if weight:
         kwargs["weight"] = weight
-    return ctk.CTkFont(**kwargs)
+    created = ctk.CTkFont(**kwargs)
+    _FONT_CACHE[key] = created
+    return created
 
 
 def card_frame_kwargs(border_color: Optional[str] = None) -> dict:
