@@ -39,6 +39,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._scope_label = None
         self._summary_label = None
         self._list_frame = None
+        self._visible_group_headers = []
         self._build_ui()
 
     def _build_ui(self):
@@ -227,6 +228,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                 pass
         if not self._list_frame:
             return
+        self._visible_group_headers = []
         for child in self._list_frame.winfo_children():
             child.destroy()
 
@@ -282,13 +284,24 @@ class ProxyNodePicker(ctk.CTkFrame):
         header = ctk.CTkFrame(self._list_frame, fg_color=COLORS["surface_alt"], corner_radius=6)
         header.pack(fill="x", padx=5, pady=(6, 0))
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
+        label = ctk.CTkLabel(
             header,
-            text=f"{region or '其他'} · {len(items)} 个 · 可连 {ok_count} · 高质 {high_count} · 已选 {checked}",
+            text=self._group_header_text(region, len(items), ok_count, high_count, checked),
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=(9, 8), pady=4)
+        )
+        label.grid(row=0, column=0, sticky="ew", padx=(9, 8), pady=4)
+        self._visible_group_headers.append(
+            {
+                "label": label,
+                "keys": tuple(keys),
+                "region": region,
+                "total": len(items),
+                "ok": ok_count,
+                "high": high_count,
+            }
+        )
         ctk.CTkButton(
             header,
             text="全选",
@@ -421,6 +434,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._checked_keys.discard(node_key)
         self._update_scope_label()
         self._update_summary_label()
+        self._update_group_headers()
         self._emit_scope_change()
 
     def _set_group_checked(self, keys, checked: bool):
@@ -483,6 +497,32 @@ class ProxyNodePicker(ctk.CTkFrame):
                 f"勾选 {checked_count}；匹配 {match_count} 个{suffix}"
             )
         )
+
+    def _group_header_text(self, region: str, total: int, ok_count: int, high_count: int, checked: int) -> str:
+        return f"{region or '其他'} · {total} 个 · 可连 {ok_count} · 高质 {high_count} · 已选 {checked}"
+
+    def _update_group_headers(self):
+        alive_headers = []
+        for header in self._visible_group_headers:
+            label = header.get("label")
+            try:
+                if not label or not label.winfo_exists():
+                    continue
+                keys = tuple(header.get("keys") or ())
+                checked = sum(1 for key in keys if key in self._checked_keys)
+                label.configure(
+                    text=self._group_header_text(
+                        str(header.get("region") or ""),
+                        int(header.get("total") or 0),
+                        int(header.get("ok") or 0),
+                        int(header.get("high") or 0),
+                        checked,
+                    )
+                )
+                alive_headers.append(header)
+            except Exception:
+                continue
+        self._visible_group_headers = alive_headers
 
     def _emit_scope_change(self):
         if not self._on_scope_change:
