@@ -3945,6 +3945,19 @@ def _read_remote_managed_proxy_node(ssh_name: str, mixed_port: int = 7890) -> di
         return None
 
 
+def current_remote_ai_proxy_node_key(ssh_name: str, mixed_port: int = 7890) -> str:
+    try:
+        node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+    except Exception:
+        return ""
+    if not node:
+        return ""
+    try:
+        return proxy_node_key(node)
+    except Exception:
+        return ""
+
+
 def _read_remote_ai_proxy_error_tail(client, home: str) -> str:
     log_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.log")
     command = f"""

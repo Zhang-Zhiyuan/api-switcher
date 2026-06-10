@@ -618,7 +618,16 @@ def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
 
 def current_local_ai_proxy_node_key() -> str:
     state = _load_state()
-    return str(state.get("node_key") or "")
+    key = str(state.get("node_key") or "")
+    if key:
+        return key
+    node = _read_local_managed_proxy_node()
+    if not node:
+        return ""
+    try:
+        return remote_proxy.proxy_node_key(node)
+    except Exception:
+        return ""
 
 
 def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalAIProxyStatus:

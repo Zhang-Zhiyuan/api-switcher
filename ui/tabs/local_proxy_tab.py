@@ -1567,7 +1567,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_selected_summary("待启动节点: 文件内容暂未识别", "warning")
             self._set_status(f"已载入代理文件: {Path(path).name}；暂未识别到可用节点: {e}", "warning")
 
-    def _run_local_task(self, busy_message: str, worker, success_prefix: str):
+    def _run_local_task(self, busy_message: str, worker, success_prefix: str, on_success=None, severity_from_result=None):
         if self._busy:
             show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
             return
@@ -1589,9 +1589,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._set_status(message, "error")
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
+                if on_success:
+                    try:
+                        on_success(payload["result"])
+                    except Exception:
+                        pass
                 message = str(payload["result"])
-                self._set_status(message, "success")
-                show_toast(self.winfo_toplevel(), message)
+                severity = severity_from_result(message) if severity_from_result else "success"
+                self._set_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=severity == "warning")
 
             try:
                 self.after(0, finish)
@@ -1613,6 +1619,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
 
         def do_start():
+            def sync_started_node(_result):
+                key = local_proxy.current_local_ai_proxy_node_key()
+                if key and self._select_subscription_node_by_key(key):
+                    self._use_selected_subscription_node(show_message=False)
+
             self._run_local_task(
                 "正在启动 Windows 本机 AI 代理，并验证 OpenAI/Claude/Gemini 连通性...",
                 lambda: local_proxy.install_local_ai_proxy_verified(
@@ -1621,6 +1632,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     quality_results=self._quality_results,
                 ),
                 "启动本机 AI 代理",
+                on_success=sync_started_node,
+                severity_from_result=lambda message: "warning"
+                if "验证未完全通过" in message or "自动尝试" in message
+                else "success",
             )
 
         ConfirmDialog(

@@ -1567,6 +1567,21 @@ def test_reload_ai_proxy_verified_still_probes_when_node_is_unchanged(monkeypatc
     assert "验证通过" in message
 
 
+def test_current_remote_ai_proxy_node_key_reads_managed_node(monkeypatch):
+    node = remote_proxy.parse_proxy_node("{ name: current, type: vless, server: current.example.com, port: 443 }")
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", lambda *_args, **_kwargs: node)
+
+    assert remote_proxy.current_remote_ai_proxy_node_key("server") == remote_proxy.proxy_node_key(node)
+
+
+def test_current_local_ai_proxy_node_key_falls_back_to_managed_config(monkeypatch):
+    node = remote_proxy.parse_proxy_node("{ name: current, type: vless, server: current.example.com, port: 443 }")
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
+    monkeypatch.setattr(local_proxy, "_read_local_managed_proxy_node", lambda: node)
+
+    assert local_proxy.current_local_ai_proxy_node_key() == remote_proxy.proxy_node_key(node)
+
+
 def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     env_file = remote_proxy._build_env_file(7890)
     shell_paths = remote_proxy._shell_proxy_profile_paths("/home/me")
