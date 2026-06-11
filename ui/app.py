@@ -2,6 +2,7 @@ import importlib
 import logging
 import os
 import threading
+import time
 
 import customtkinter as ctk
 from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
@@ -237,8 +238,9 @@ class App(ctk.CTk):
         if not self._start_minimized_to_tray:
             self.after(90, self._schedule_initial_tab_load)
         self.after(900, self._auto_start_local_proxy)
-        if os.environ.get("API_SWITCHER_PRELOAD_TABS") == "1":
-            self.after(2500, self._preload_lazy_tab_classes)
+        preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", "priority").strip().lower()
+        if preload_mode != "0":
+            self.after(1400, lambda mode=preload_mode: self._preload_lazy_tab_classes(priority_only=mode != "1"))
 
     def _install_tab_placeholder(self, label: str):
         frame = self._tab_frames.get(label)
@@ -389,7 +391,7 @@ class App(ctk.CTk):
         with self._tab_class_cache_lock:
             return self._tab_class_cache.setdefault(label, tab_class)
 
-    def _preload_lazy_tab_classes(self):
+    def _preload_lazy_tab_classes(self, priority_only: bool = False):
         if self._exit_requested or self._lazy_tab_preload_started:
             return
         self._lazy_tab_preload_started = True
@@ -399,10 +401,11 @@ class App(ctk.CTk):
             "Codex CLI": 2,
             ENV_TAB_LABEL: 3,
         }
+        priority_labels = set(priority)
         specs = [
             (priority.get(label, 50), label, module_name, class_name)
             for label, _attr, module_name, class_name, eager in TAB_SPECS
-            if not eager
+            if not eager and (not priority_only or label in priority_labels)
         ]
         specs.sort(key=lambda item: (item[0], item[1]))
 
@@ -416,6 +419,7 @@ class App(ctk.CTk):
                 try:
                     self._resolve_tab_class(label, module_name, class_name)
                     logger.debug("Preloaded lazy tab class: %s", label)
+                    time.sleep(0.03)
                 except Exception as exc:
                     logger.debug("Lazy tab preload skipped for %s: %s", label, exc)
 
@@ -523,16 +527,7 @@ class App(ctk.CTk):
             try:
                 from core import profile_manager
 
-                payload = {
-                    "ok": True,
-                    "error": "",
-                    "claude_names": [p.name for p in profile_manager.list_switchable_claude_profiles()],
-                    "claude_current": profile_manager.get_current_claude_name()
-                    or profile_manager.get_active_claude_name(),
-                    "codex_names": [p.name for p in profile_manager.list_switchable_codex_profiles()],
-                    "codex_current": profile_manager.get_current_codex_name()
-                    or profile_manager.get_active_codex_name(),
-                }
+                payload = {"ok": True, "error": "", **profile_manager.get_quick_switch_summary()}
             except Exception as e:
                 payload = {"ok": False, "error": str(e)}
 

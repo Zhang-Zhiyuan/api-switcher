@@ -40,6 +40,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_render_after_id = None
         self._server_refresh_finish_after_id = None
         self._initial_refresh_after_id = None
+        self._server_profiles_loaded = False
+        self._server_profiles = []
+        self._server_profile_map = {}
         self._proxy_saved_subscription_after_id = None
         self._destroyed = False
         self._deployment_sections_frame = None
@@ -1181,6 +1184,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         profile_items = list(payload.get("profiles") or [])
         profiles = [item["profile"] for item in profile_items]
+        self._set_server_profile_cache(profiles)
 
         if not profiles:
             EmptyState(
@@ -1204,6 +1208,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._refresh_remote_auto_switch_availability()
         if not server_names:
             self._set_remote_auto_status("\u8bf7\u5148\u6dfb\u52a0\u5e76\u52fe\u9009 1 \u53f0 SSH \u670d\u52a1\u5668", severity="warning")
+
+    def _set_server_profile_cache(self, profiles):
+        self._server_profiles_loaded = True
+        self._server_profiles = list(profiles or [])
+        self._server_profile_map = {profile.name: profile for profile in self._server_profiles}
 
     def _render_server_cards_batch(self, profile_items: list[dict], generation: int, start: int = 0):
         if generation != self._server_refresh_generation or not self._is_alive():
@@ -1354,8 +1363,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         SSHEditorDialog(self.winfo_toplevel(), title="新建 SSH 服务器", on_save=on_save)
 
     def _edit_server(self, name):
-        profiles = profile_manager.list_ssh_profiles()
-        profile = next((p for p in profiles if p.name == name), None)
+        profile = self._server_profile_by_name(name)
 
         def on_save(new_profile, old_profile):
             previous_name = old_profile.name if old_profile else None
@@ -1391,7 +1399,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_status_label.configure(text=message, text_color=color)
 
     def _profile_server_names(self) -> list[str]:
-        return [p.name for p in profile_manager.list_ssh_profiles()]
+        if not self._server_profiles_loaded:
+            self._set_server_profile_cache(profile_manager.list_ssh_profiles())
+        return [p.name for p in self._server_profiles]
+
+    def _server_profile_by_name(self, name: str):
+        if not self._server_profiles_loaded:
+            self._set_server_profile_cache(profile_manager.list_ssh_profiles())
+        return self._server_profile_map.get(name)
 
     def _ordered_server_names(self, selected_names: set[str] | list[str] | tuple[str, ...]) -> list[str]:
         selected = set(selected_names)
@@ -2996,8 +3011,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         threading.Thread(target=run, daemon=True).start()
 
     def _connect(self, name):
-        profiles = profile_manager.list_ssh_profiles()
-        profile = next((p for p in profiles if p.name == name), None)
+        profile = self._server_profile_by_name(name)
         if not profile:
             show_toast(self.winfo_toplevel(), f"未找到服务器: {name}", is_error=True)
             return

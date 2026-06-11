@@ -85,6 +85,42 @@ def test_save_and_load_settings_store_api_keys_as_secret_refs(tmp_path, monkeypa
     assert deleted == []
 
 
+def test_load_settings_reuses_cache_and_returns_copy(tmp_path, monkeypatch):
+    secrets = {"network-diagnostics:proxycheck:0": "proxy-a"}
+    target = tmp_path / "network_diagnostics.json"
+    target.write_text(
+        json.dumps({
+            "services": {
+                network_diagnostic_settings.SERVICE_PROXYCHECK: {
+                    "enabled": True,
+                    "key_refs": ["network-diagnostics:proxycheck:0"],
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", target)
+    monkeypatch.setattr(network_diagnostic_settings.security, "get_secret", lambda ref: secrets.get(ref))
+    network_diagnostic_settings.clear_settings_cache()
+
+    original_read_text = type(target).read_text
+    read_count = {"value": 0}
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == target:
+            read_count["value"] += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(target), "read_text", counting_read_text)
+
+    first = network_diagnostic_settings.load_settings()
+    first.service(network_diagnostic_settings.SERVICE_PROXYCHECK).api_keys.append("mutated")
+    second = network_diagnostic_settings.load_settings()
+
+    assert second.keys_for(network_diagnostic_settings.SERVICE_PROXYCHECK) == ["proxy-a"]
+    assert read_count["value"] == 1
+
+
 def test_save_settings_deletes_removed_secret_refs(tmp_path, monkeypatch):
     secrets = {}
     deleted = []

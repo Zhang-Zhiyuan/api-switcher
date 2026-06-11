@@ -97,6 +97,59 @@ def test_profile_store_cache_reuses_reads_and_detects_external_write(tmp_path, m
     assert read_count["value"] == 2
 
 
+def test_quick_switch_summary_reads_profile_store_once(isolated_profile_store, monkeypatch):
+    import core.auth_parser as auth_parser
+    import core.parser as claude_parser
+    import core.toml_parser as toml_parser
+
+    store = profile_manager._get_default_store()
+    store["claude_profiles"] = [
+        ClaudeProfile(
+            name="Anthropic Official",
+            auth_token_ref="claude:official:auth",
+            base_url="https://api.anthropic.com",
+            provider="anthropic",
+        ).to_dict(),
+        ClaudeProfile(
+            name="Claude Router",
+            auth_token_ref="claude:router:auth",
+            base_url="https://router.example",
+            provider="custom",
+        ).to_dict(),
+    ]
+    store["codex_profiles"] = [
+        CodexProfile(name="OpenAI Official", model_provider="openai").to_dict(),
+        CodexProfile(name="Codex Router", model_provider="custom").to_dict(),
+    ]
+    store["active_claude_profile"] = "Claude Router"
+    store["active_codex_profile"] = "Codex Router"
+    profile_manager._save_store(store)
+    profile_manager.clear_profile_store_cache()
+
+    read_count = {"value": 0}
+    original_load_store = profile_manager._load_store
+
+    def counting_load_store():
+        read_count["value"] += 1
+        return original_load_store()
+
+    monkeypatch.setattr(profile_manager, "_load_store", counting_load_store)
+    monkeypatch.setattr(claude_parser, "read_claude_settings", lambda: {})
+    monkeypatch.setattr(claude_parser, "read_claude_config", lambda: {})
+    monkeypatch.setattr(toml_parser, "read_codex_config", lambda: {})
+    monkeypatch.setattr(auth_parser, "read_codex_auth", lambda: {})
+
+    summary = profile_manager.get_quick_switch_summary()
+
+    assert summary == {
+        "claude_names": ["Claude Router"],
+        "claude_current": "Claude Router",
+        "codex_names": ["Codex Router"],
+        "codex_current": "Codex Router",
+    }
+    assert read_count["value"] == 1
+
+
 def test_renaming_claude_profile_replaces_old_entry_and_keeps_shared_secret(isolated_profile_store):
     _secret_store, deleted_refs = isolated_profile_store
     old = ClaudeProfile(name="Old Claude", auth_token_ref="claude:old:auth_token", base_url="https://old.example")

@@ -428,6 +428,56 @@ def list_switchable_claude_profiles() -> list[ClaudeProfile]:
     return [p for p in list_claude_profiles() if is_third_party_claude_profile(p)]
 
 
+def get_quick_switch_summary() -> dict:
+    store = _load_store()
+    claude_profiles = [
+        profile
+        for profile in _load_profile_list(store.get("claude_profiles", []), ClaudeProfile, "Claude")
+        if is_third_party_claude_profile(profile)
+    ]
+    codex_profiles = [
+        profile
+        for profile in _load_profile_list(store.get("codex_profiles", []), CodexProfile, "Codex")
+        if is_third_party_codex_profile(profile)
+    ]
+
+    claude_current = None
+    try:
+        from core.parser import read_claude_config, read_claude_settings
+
+        settings = read_claude_settings()
+        config = read_claude_config()
+        if settings or config:
+            for profile in claude_profiles:
+                if _claude_profile_matches(profile, settings, config):
+                    claude_current = profile.name
+                    break
+    except Exception as exc:
+        logger.debug("Failed to detect current Claude quick-switch profile: %s", exc)
+
+    codex_current = None
+    try:
+        from core.auth_parser import read_codex_auth
+        from core.toml_parser import read_codex_config
+
+        config = read_codex_config()
+        auth = read_codex_auth()
+        if config or auth:
+            for profile in codex_profiles:
+                if _codex_profile_matches(profile, config, auth):
+                    codex_current = profile.name
+                    break
+    except Exception as exc:
+        logger.debug("Failed to detect current Codex quick-switch profile: %s", exc)
+
+    return {
+        "claude_names": [profile.name for profile in claude_profiles],
+        "claude_current": claude_current or store.get("active_claude_profile"),
+        "codex_names": [profile.name for profile in codex_profiles],
+        "codex_current": codex_current or store.get("active_codex_profile"),
+    }
+
+
 def get_active_claude_name() -> str | None:
     return _load_store().get("active_claude_profile")
 

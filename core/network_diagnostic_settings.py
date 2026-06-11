@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import copy
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,6 +15,9 @@ from core.atomic_io import atomic_write_text
 
 
 SETTINGS_FILE = STORAGE_DIR / "network_diagnostics.json"
+_SETTINGS_CACHE_LOCK = threading.RLock()
+_SETTINGS_CACHE: NetworkDiagnosticSettings | None = None
+_SETTINGS_CACHE_SIGNATURE: tuple | None = None
 
 SERVICE_PING0 = "ping0"
 SERVICE_PROXYCHECK = "proxycheck"
@@ -99,6 +104,11 @@ class NetworkDiagnosticSettings:
 def load_settings() -> NetworkDiagnosticSettings:
     """Load settings and decrypt saved API key pools."""
 
+    signature = _settings_signature()
+    with _SETTINGS_CACHE_LOCK:
+        if _SETTINGS_CACHE is not None and _SETTINGS_CACHE_SIGNATURE == signature:
+            return _clone_settings(_SETTINGS_CACHE)
+
     data = _read_settings_file()
     raw_services = data.get("services") if isinstance(data.get("services"), dict) else {}
     settings = NetworkDiagnosticSettings()
@@ -120,7 +130,9 @@ def load_settings() -> NetworkDiagnosticSettings:
             api_keys=_dedupe(keys),
         )
 
-    return settings
+    with _SETTINGS_CACHE_LOCK:
+        _cache_settings(settings, signature)
+    return _clone_settings(settings)
 
 
 def save_settings(settings: NetworkDiagnosticSettings) -> None:
@@ -147,6 +159,8 @@ def save_settings(settings: NetworkDiagnosticSettings) -> None:
         security.delete_secret(ref)
 
     atomic_write_text(SETTINGS_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
+    with _SETTINGS_CACHE_LOCK:
+        _cache_settings(settings)
 
 
 def settings_from_values(enabled_services: list[str] | set[str], api_keys: dict[str, list[str] | str]) -> NetworkDiagnosticSettings:
@@ -217,6 +231,37 @@ def _read_settings_file() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def clear_settings_cache() -> None:
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_SIGNATURE
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE = None
+        _SETTINGS_CACHE_SIGNATURE = None
+
+
+def _settings_signature() -> tuple:
+    path_key = str(SETTINGS_FILE.resolve(strict=False))
+    try:
+        stat = SETTINGS_FILE.stat()
+        file_signature = (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        file_signature = (path_key, None, None)
+    env_signature = tuple((name, os.environ.get(name, "")) for names in ENV_KEYS.values() for name in names)
+    return file_signature + (env_signature,)
+
+
+def _clone_settings(settings: NetworkDiagnosticSettings) -> NetworkDiagnosticSettings:
+    return copy.deepcopy(settings)
+
+
+def _cache_settings(
+    settings: NetworkDiagnosticSettings,
+    signature: tuple | None = None,
+) -> None:
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_SIGNATURE
+    _SETTINGS_CACHE = _clone_settings(settings)
+    _SETTINGS_CACHE_SIGNATURE = signature or _settings_signature()
 
 
 def _collect_existing_refs() -> set[str]:
