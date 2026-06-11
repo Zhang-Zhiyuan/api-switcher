@@ -1858,7 +1858,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         scope = self._proxy_subscription_picker.batch_scope_label() if self._proxy_subscription_picker else "-"
         source = remote_proxy.quality_source_label_from_settings()
         color = COLORS["warning"] if source == "未启用检测源" else COLORS["muted_soft"]
-        self._proxy_subscription_action_hint_label.configure(text=f"范围: {scope}\n源: {source}", text_color=color)
+        self._proxy_subscription_action_hint_label.configure(
+            text=f"范围: {scope}\n未勾选=此范围\n源: {source}",
+            text_color=color,
+        )
 
     def _fetch_proxy_subscription(self, auto: bool = False, show_message: bool = True):
         if self._proxy_busy:
@@ -2106,8 +2109,18 @@ class SSHTab(ctk.CTkScrollableFrame):
             return self._proxy_subscription_picker.batch_scope_label()
         return f"全部 {len(self._proxy_subscription_nodes)} 个节点"
 
+    def _proxy_subscription_batch_has_checked_nodes(self) -> bool:
+        if not self._proxy_subscription_picker:
+            return False
+        try:
+            return bool(self._proxy_subscription_picker.checked_items())
+        except Exception:
+            return False
+
     def _proxy_quality_candidate_nodes(self, nodes=None):
         base_nodes = list(nodes if nodes is not None else self._proxy_subscription_batch_nodes())
+        if not self._proxy_subscription_batch_has_checked_nodes():
+            return base_nodes
         candidates = []
         measured_any = False
         for item in base_nodes:
