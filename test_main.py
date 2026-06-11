@@ -46,6 +46,16 @@ def test_primary_tabs_are_lazy_loaded_until_mainloop_is_responsive():
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
     assert all(eager is False for eager in specs.values())
+    assert hasattr(app_module.App, "_load_quick_switch_profiles_delayed")
+    assert hasattr(app_module.App, "_run_quick_switch_profile_load")
+
+
+def test_ssh_heavy_sections_are_delayed():
+    from ui.tabs.ssh_tab import SSHTab
+
+    assert hasattr(SSHTab, "_build_deployment_sections")
+    assert hasattr(SSHTab, "_install_remote_auto_section_placeholder")
+    assert hasattr(SSHTab, "_build_remote_auto_section")
 
 
 def test_proxy_quality_dialog_module_is_importable():

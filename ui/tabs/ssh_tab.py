@@ -48,6 +48,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._deployment_sections_frame = None
         self._deployment_sections_after_id = None
         self._deployment_sections_built = False
+        self._remote_auto_section_host = None
+        self._remote_auto_section_after_id = None
+        self._remote_auto_section_built = False
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
@@ -880,7 +883,41 @@ class SSHTab(ctk.CTkScrollableFrame):
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
         self._update_proxy_target_label()
 
-        auto_header = ctk.CTkFrame(deployment_parent, fg_color="transparent")
+        self._install_remote_auto_section_placeholder(deployment_parent)
+        self._update_proxy_target_label()
+        self._proxy_saved_subscription_after_id = self.after(50, self._load_saved_proxy_subscription_ui)
+        self._remote_auto_section_after_id = self.after(520, self._build_remote_auto_section)
+
+    def _install_remote_auto_section_placeholder(self, parent):
+        self._remote_auto_section_host = ctk.CTkFrame(parent, fg_color="transparent")
+        self._remote_auto_section_host.pack(fill="x")
+        placeholder = ctk.CTkFrame(self._remote_auto_section_host, **card_frame_kwargs())
+        placeholder.pack(fill="x", padx=14, pady=(4, 12))
+        ctk.CTkLabel(
+            placeholder,
+            text="远端自动续跑稍后加载...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=12)
+
+    def _build_remote_auto_section(self):
+        self._remote_auto_section_after_id = None
+        if self._destroyed or self._remote_auto_section_built:
+            return
+        parent = self._remote_auto_section_host or self._deployment_sections_frame
+        if parent is None:
+            return
+        try:
+            for child in parent.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._remote_auto_section_built = True
+        self._remote_auto_buttons = []
+        self._remote_auto_switches = []
+
+        auto_header = ctk.CTkFrame(parent, fg_color="transparent")
         auto_header.pack(fill="x", padx=14, pady=(4, 5))
         ctk.CTkLabel(
             auto_header,
@@ -895,7 +932,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
         ).pack(side="left", padx=(10, 0))
 
-        auto_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
+        auto_frame = ctk.CTkFrame(parent, **card_frame_kwargs())
         auto_frame.pack(fill="x", padx=14, pady=(0, 12))
         auto_controls = ctk.CTkFrame(auto_frame, fg_color="transparent")
         auto_controls.pack(fill="x", padx=14, pady=14)
@@ -1063,10 +1100,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_status_label.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
-        self._update_proxy_target_label()
         self._update_remote_auto_feature_label()
         self._refresh_remote_auto_switch_availability()
-        self._proxy_saved_subscription_after_id = self.after(50, self._load_saved_proxy_subscription_ui)
 
     def destroy(self):
         self._destroyed = True
@@ -1079,7 +1114,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         super().destroy()
 
     def _cancel_initial_after_callbacks(self):
-        for attr in ("_initial_refresh_after_id", "_proxy_saved_subscription_after_id", "_deployment_sections_after_id"):
+        for attr in (
+            "_initial_refresh_after_id",
+            "_proxy_saved_subscription_after_id",
+            "_deployment_sections_after_id",
+            "_remote_auto_section_after_id",
+        ):
             after_id = getattr(self, attr, None)
             if not after_id:
                 continue

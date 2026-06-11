@@ -53,6 +53,9 @@ class App(ctk.CTk):
         self._initial_tab_load_started = False
         self._pending_tab_load_after_ids = {}
         self._quick_switch_load_generation = 0
+        self._quick_switch_load_after_id = None
+        self._quick_switch_loading = False
+        self._quick_switch_reload_pending = False
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             setattr(self, attr, None)
@@ -233,7 +236,7 @@ class App(ctk.CTk):
 
         self.claude_switch.configure(values=["正在加载..."], state="disabled")
         self.codex_switch.configure(values=["正在加载..."], state="disabled")
-        self.after(20, self._load_quick_switch_profiles)
+        self.after(20, lambda: self._load_quick_switch_profiles(delay_ms=0))
         self.after(50, self._start_tray_icon)
         if not self._start_minimized_to_tray:
             self.after(90, self._schedule_initial_tab_load)
@@ -520,6 +523,31 @@ class App(ctk.CTk):
 
     def _load_quick_switch_profiles(self):
         """Load profiles for quick switch menus."""
+        self._load_quick_switch_profiles_delayed()
+
+    def _load_quick_switch_profiles_delayed(self, delay_ms: int = 80):
+        if self._exit_requested:
+            return
+        if self._quick_switch_load_after_id:
+            return
+
+        def start_load():
+            self._quick_switch_load_after_id = None
+            self._run_quick_switch_profile_load()
+
+        try:
+            self._quick_switch_load_after_id = self.after(max(0, int(delay_ms)), start_load)
+        except Exception:
+            self._quick_switch_load_after_id = None
+            self._run_quick_switch_profile_load()
+
+    def _run_quick_switch_profile_load(self):
+        if self._exit_requested:
+            return
+        if self._quick_switch_loading:
+            self._quick_switch_reload_pending = True
+            return
+        self._quick_switch_loading = True
         self._quick_switch_load_generation += 1
         generation = self._quick_switch_load_generation
 
@@ -532,6 +560,7 @@ class App(ctk.CTk):
                 payload = {"ok": False, "error": str(e)}
 
             def finish():
+                self._quick_switch_loading = False
                 if generation != self._quick_switch_load_generation or self._exit_requested:
                     return
                 if not payload["ok"]:
@@ -544,13 +573,16 @@ class App(ctk.CTk):
                 self._apply_quick_switch_profiles(
                     payload["claude_names"],
                     payload["claude_current"],
-                    payload["codex_names"],
-                    payload["codex_current"],
-                )
+                        payload["codex_names"],
+                        payload["codex_current"],
+                    )
+                if self._quick_switch_reload_pending:
+                    self._quick_switch_reload_pending = False
+                    self._load_quick_switch_profiles_delayed(delay_ms=120)
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run, name="quick-switch-refresh", daemon=True).start()
 
     def _apply_quick_switch_profiles(self, claude_names, claude_current, codex_names, codex_current):
         if claude_names:
@@ -756,6 +788,12 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self._pending_tab_load_after_ids.clear()
+        if self._quick_switch_load_after_id:
+            try:
+                self.after_cancel(self._quick_switch_load_after_id)
+            except Exception:
+                pass
+            self._quick_switch_load_after_id = None
 
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             tab = getattr(self, attr, None)
