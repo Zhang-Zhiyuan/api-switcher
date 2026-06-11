@@ -337,6 +337,8 @@ def fetch_proxy_subscription(
     persist: bool = True,
     retries: int = 3,
     retry_base_delay: float = 1.0,
+    profile_id: str = "",
+    activate: bool = True,
 ) -> ProxySubscriptionResult:
     parsed_url = urlparse.urlparse((url or "").strip())
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
@@ -364,16 +366,28 @@ def fetch_proxy_subscription(
     saved_path = _save_proxy_subscription(normalized_url, payload, content_type)
     fetched_at = _now_iso()
     if persist:
-        active_profile = save_proxy_subscription_profile("", normalized_url, activate=True, quiet=True)
-        save_proxy_subscription_state(
-            url=normalized_url,
-            saved_path=str(saved_path),
-            last_fetched_at=fetched_at,
-            node_count=len(nodes),
-            content_type=content_type,
-            charset=charset,
-            active_profile_id=active_profile.get("id") or "",
+        active_profile = save_proxy_subscription_profile(
+            "",
+            normalized_url,
+            profile_id=profile_id,
+            activate=activate,
+            quiet=True,
         )
+        updates = {
+            "url": normalized_url,
+            "saved_path": str(saved_path),
+            "last_fetched_at": fetched_at,
+            "node_count": len(nodes),
+            "content_type": content_type,
+            "charset": charset,
+        }
+        if activate:
+            save_proxy_subscription_state(
+                **updates,
+                active_profile_id=active_profile.get("id") or "",
+            )
+        else:
+            save_proxy_subscription_profile_state(active_profile.get("id") or "", **updates)
     return ProxySubscriptionResult(
         nodes=nodes,
         saved_path=str(saved_path),
@@ -382,8 +396,35 @@ def fetch_proxy_subscription(
     )
 
 
-def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
-    state = load_proxy_subscription_state()
+def save_proxy_subscription_profile_state(profile_id: str, **updates) -> dict:
+    clean_id = str(profile_id or "").strip()
+    if not clean_id:
+        raise ValueError("订阅配置不存在")
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        profiles = state.setdefault("profiles", {})
+        profile = dict(profiles.get(clean_id) or {})
+        if not profile:
+            updated_url = str(updates.get("url") or "").strip()
+            if not updated_url:
+                raise ValueError("订阅配置不存在")
+            profile = {
+                "id": clean_id,
+                "name": _proxy_subscription_default_name(updated_url),
+                "url": updated_url,
+            }
+        for key, value in updates.items():
+            if value is None:
+                continue
+            if key in _PROXY_SUBSCRIPTION_PROFILE_FIELDS:
+                profile[key] = value
+        profile["updated_at"] = _now_iso()
+        profiles[clean_id] = _normalize_proxy_subscription_profile(profile, clean_id)
+        return _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+
+
+def load_cached_proxy_subscription(state: dict | None = None) -> ProxySubscriptionResult | None:
+    state = _normalize_proxy_subscription_state(state) if state is not None else load_proxy_subscription_state()
     saved_path = str(state.get("saved_path") or "").strip()
     if not saved_path:
         return None
@@ -439,7 +480,7 @@ def save_proxy_subscription_profile(
     clean_id = str(profile_id or "").strip()
     if not clean_id:
         clean_id = _proxy_subscription_profile_id(normalized_url)
-    clean_name = str(name or "").strip() or _proxy_subscription_default_name(normalized_url)
+    requested_name = str(name or "").strip()
 
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
         state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
@@ -451,6 +492,7 @@ def save_proxy_subscription_profile(
                     existing_id = str(candidate_id)
                     break
         profile = dict(profiles.get(existing_id) or {})
+        clean_name = requested_name or str(profile.get("name") or "").strip() or _proxy_subscription_default_name(normalized_url)
         profile.update(
             {
                 "id": existing_id,
@@ -560,7 +602,7 @@ def _persist_proxy_subscription_state(state: dict) -> dict:
     temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(path)
+        _replace_proxy_subscription_state_file(temp_path, path)
         _cache_proxy_subscription_state(state)
     finally:
         temp_path.unlink(missing_ok=True)
@@ -689,6 +731,17 @@ def _cache_proxy_subscription_state(
     _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE = signature or _proxy_subscription_state_signature()
 
 
+def _replace_proxy_subscription_state_file(temp_path: Path, target_path: Path) -> None:
+    for attempt in range(6):
+        try:
+            temp_path.replace(target_path)
+            return
+        except PermissionError:
+            if attempt >= 5:
+                raise
+            time.sleep(0.03 * (attempt + 1))
+
+
 def _proxy_subscription_nodes_signature(path: Path, charset: str) -> tuple[str, int | None, int | None, str]:
     path_key = str(path.resolve(strict=False))
     charset_key = str(charset or "utf-8-sig")
@@ -784,8 +837,8 @@ def save_proxy_subscription_qualities(qualities: dict[str, ProxyNodeQualityResul
     return save_proxy_subscription_state(node_qualities=payload, node_qualities_updated_at=_now_iso())
 
 
-def load_proxy_subscription_latencies() -> dict[str, dict]:
-    state = load_proxy_subscription_state()
+def load_proxy_subscription_latencies(state: dict | None = None) -> dict[str, dict]:
+    state = _normalize_proxy_subscription_state(state) if state is not None else load_proxy_subscription_state()
     raw = state.get("node_latencies")
     if not isinstance(raw, dict):
         return {}
@@ -811,8 +864,8 @@ def load_proxy_subscription_latencies() -> dict[str, dict]:
     return results
 
 
-def load_proxy_subscription_qualities() -> dict[str, dict]:
-    state = load_proxy_subscription_state()
+def load_proxy_subscription_qualities(state: dict | None = None) -> dict[str, dict]:
+    state = _normalize_proxy_subscription_state(state) if state is not None else load_proxy_subscription_state()
     raw = state.get("node_qualities")
     if not isinstance(raw, dict):
         return {}

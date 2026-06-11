@@ -74,6 +74,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_entry = None
         self._proxy_subscription_profile_combo = None
         self._proxy_subscription_name_entry = None
+        self._proxy_subscription_profile_save_button = None
+        self._proxy_subscription_profile_delete_button = None
         self._proxy_subscription_profile_options = {}
         self._proxy_subscription_profile_loading = False
         self._proxy_subscription_picker = None
@@ -588,20 +590,22 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_name_entry.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(8, 0))
         proxy_profile_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_profile_actions.grid(row=1, column=3, sticky="e", pady=(8, 0))
-        ctk.CTkButton(
+        self._proxy_subscription_profile_save_button = ctk.CTkButton(
             proxy_profile_actions,
             text="保存",
             width=56,
             command=self._save_proxy_subscription_profile,
             **button_style("accent", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        )
+        self._proxy_subscription_profile_save_button.pack(side="left", padx=(0, 6))
+        self._proxy_subscription_profile_delete_button = ctk.CTkButton(
             proxy_profile_actions,
             text="删除",
             width=56,
             command=self._delete_proxy_subscription_profile,
             **button_style("secondary", compact=True),
-        ).pack(side="left")
+        )
+        self._proxy_subscription_profile_delete_button.pack(side="left")
         ctk.CTkLabel(
             proxy_controls,
             text="订阅链接",
@@ -1593,6 +1597,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_inspect_button,
             self._proxy_remote_test_button,
             self._proxy_remote_cleanup_button,
+            self._proxy_subscription_profile_save_button,
+            self._proxy_subscription_profile_delete_button,
         ):
             if not button:
                 continue
@@ -1616,6 +1622,17 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_subscription_picker:
             try:
                 self._proxy_subscription_picker.set_enabled((not busy) and bool(self._proxy_subscription_options))
+            except Exception:
+                pass
+        for widget in (
+            self._proxy_subscription_profile_combo,
+            self._proxy_subscription_name_entry,
+            self._proxy_subscription_entry,
+        ):
+            if not widget:
+                continue
+            try:
+                widget.configure(state=state)
             except Exception:
                 pass
 
@@ -1672,6 +1689,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._set_proxy_entry_text(self._proxy_subscription_entry, str(state.get("url") or ""))
 
     def _save_proxy_subscription_profile(self, show_message: bool = True):
+        if self._proxy_busy:
+            if show_message:
+                show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再保存订阅配置", is_error=True)
+            return None
         url = self._proxy_subscription_url_input()
         if not url:
             message = "请先填写订阅链接，再保存订阅配置"
@@ -1698,6 +1719,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         return profile
 
     def _delete_proxy_subscription_profile(self):
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再删除订阅配置", is_error=True)
+            return
         if not self._proxy_subscription_profile_combo:
             return
         label = self._proxy_subscription_profile_combo.get()
@@ -1740,6 +1764,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _on_proxy_subscription_profile_selected(self, label: str):
         if self._proxy_subscription_profile_loading:
+            return
+        if self._proxy_busy:
+            show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再切换订阅配置", is_error=True)
             return
         profile_id = self._proxy_subscription_profile_options.get(str(label or ""))
         if not profile_id:
@@ -1803,10 +1830,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._set_proxy_status("正在后台恢复本机缓存订阅；页面可先操作。")
 
         def run():
-            cached = remote_proxy.load_cached_proxy_subscription()
+            cached = remote_proxy.load_cached_proxy_subscription(state)
             payload = {
                 "cached": cached,
-                "qualities": remote_proxy.load_proxy_subscription_qualities() if cached and cached.nodes else {},
+                "qualities": remote_proxy.load_proxy_subscription_qualities(state) if cached and cached.nodes else {},
             }
 
             def finish():
@@ -1942,13 +1969,20 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_status("SSH 代理定时更新跳过：尚未选择 SSH 目标。", "warning")
             self._schedule_proxy_periodic_update()
             return
+        profile = self._save_proxy_subscription_profile(show_message=False)
+        if not profile:
+            self._set_proxy_status("SSH 代理定时更新跳过：订阅配置保存失败。", "warning")
+            self._schedule_proxy_periodic_update()
+            return
+        profile_id = str(profile.get("id") or "")
+        generation = self._proxy_saved_subscription_load_generation
         self._proxy_periodic_update_running = True
         self._set_proxy_cache_status("本机缓存: SSH 定时更新中...")
         self._set_proxy_status(f"正在定时刷新订阅，并热更新 {self._format_server_target(server_names)} 上运行中的代理...")
 
         def run():
             try:
-                result = remote_proxy.fetch_proxy_subscription(url)
+                result = remote_proxy.fetch_proxy_subscription(url, profile_id=profile_id, activate=False)
                 batch = self._run_server_batch(
                     server_names,
                     lambda server_name: remote_proxy.refresh_running_ai_proxy_from_subscription(server_name, result.nodes),
@@ -1961,6 +1995,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._proxy_periodic_update_running = False
+                if generation != self._proxy_saved_subscription_load_generation:
+                    self._schedule_proxy_periodic_update()
+                    return
                 if not payload["ok"]:
                     self._set_proxy_cache_status("本机缓存: SSH 定时更新失败，继续使用已有节点", "warning")
                     self._set_proxy_status(f"SSH 代理定时更新失败: {payload['error']}", "warning")
@@ -2070,17 +2107,21 @@ class SSHTab(ctk.CTkScrollableFrame):
             if show_message:
                 show_toast(self.winfo_toplevel(), message, is_error=True)
             return
-        if not self._save_proxy_subscription_profile(show_message=False):
+        profile = self._save_proxy_subscription_profile(show_message=False)
+        if not profile:
             return
 
         self._proxy_saved_subscription_load_generation += 1
+        generation = self._proxy_saved_subscription_load_generation
+        profile_id = str(profile.get("id") or "")
         self._set_proxy_busy(True)
         self._set_proxy_cache_status("本机缓存: 正在刷新订阅..." if auto else "本机缓存: 正在拉取订阅...")
         self._set_proxy_status("正在自动刷新订阅..." if auto else "正在拉取订阅并解析节点...")
 
         def run():
             try:
-                payload = {"ok": True, "result": remote_proxy.fetch_proxy_subscription(url), "error": None}
+                result = remote_proxy.fetch_proxy_subscription(url, profile_id=profile_id, activate=False)
+                payload = {"ok": True, "result": result, "error": None}
             except Exception as e:
                 payload = {"ok": False, "result": None, "error": str(e)}
 
@@ -2088,6 +2129,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._set_proxy_busy(False)
+                if generation != self._proxy_saved_subscription_load_generation:
+                    return
                 if not payload["ok"]:
                     if auto and self._proxy_subscription_options:
                         message = f"自动刷新失败，已保留本机缓存: {payload['error']}"

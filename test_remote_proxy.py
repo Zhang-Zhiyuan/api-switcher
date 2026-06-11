@@ -763,6 +763,76 @@ def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, t
     assert state["charset"] == "utf-8"
 
 
+def test_fetch_proxy_subscription_preserves_saved_profile_name(monkeypatch, tmp_path):
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: fetched, type: vless, server: example.com, port: 443 }\n"
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    remote_proxy.save_proxy_subscription_profile("香港家宽", "https://example.com/sub")
+    remote_proxy.fetch_proxy_subscription("https://example.com/sub", retry_base_delay=0)
+
+    profile = remote_proxy.active_proxy_subscription_profile()
+    assert profile["name"] == "香港家宽"
+
+
+def test_fetch_proxy_subscription_can_update_profile_without_activating(monkeypatch, tmp_path):
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: refreshed, type: vless, server: one.example.com, port: 443 }\n"
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    first = remote_proxy.save_proxy_subscription_profile("主力", "https://one.example/sub")
+    second = remote_proxy.save_proxy_subscription_profile("备用", "https://two.example/sub")
+
+    remote_proxy.fetch_proxy_subscription(
+        "https://one.example/sub",
+        retry_base_delay=0,
+        profile_id=first["id"],
+        activate=False,
+    )
+
+    state = remote_proxy.load_proxy_subscription_state()
+    assert state["active_profile_id"] == second["id"]
+    assert state["url"] == "https://two.example/sub"
+    assert state["profiles"][first["id"]]["node_count"] == 1
+    assert state["profiles"][first["id"]]["name"] == "主力"
+
+
 def test_fetch_proxy_subscription_retries_transient_download(monkeypatch, tmp_path):
     class Headers:
         def get_content_type(self):
@@ -1003,6 +1073,47 @@ def test_proxy_subscription_profiles_switch_active_state(monkeypatch, tmp_path):
     assert state["url"] == "https://one.example/sub"
     assert state["node_count"] == 1
     assert set(remote_proxy.load_proxy_subscription_latencies()) == {"one"}
+
+
+def test_proxy_subscription_cache_reads_from_state_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    cache_dir = tmp_path / "proxy_subscriptions"
+    cache_dir.mkdir()
+    first_path = cache_dir / "one.yaml"
+    second_path = cache_dir / "two.yaml"
+    first_path.write_text(
+        "proxies:\n  - { name: one, type: vless, server: one.example.com, port: 443 }\n",
+        encoding="utf-8",
+    )
+    second_path.write_text(
+        "proxies:\n  - { name: two, type: vless, server: two.example.com, port: 443 }\n",
+        encoding="utf-8",
+    )
+
+    first = remote_proxy.save_proxy_subscription_profile("主力", "https://one.example/sub")
+    remote_proxy.save_proxy_subscription_state(
+        saved_path=str(first_path),
+        node_count=1,
+        node_latencies={"one": {"ok": True, "latency_ms": 20}},
+        node_qualities={"one": {"ok": True, "quality_score": 90, "quality_label": "高质量"}},
+    )
+    first_state = remote_proxy.load_proxy_subscription_state()
+    second = remote_proxy.save_proxy_subscription_profile("备用", "https://two.example/sub")
+    remote_proxy.save_proxy_subscription_state(
+        saved_path=str(second_path),
+        node_count=1,
+        node_latencies={"two": {"ok": True, "latency_ms": 30}},
+        node_qualities={"two": {"ok": True, "quality_score": 60, "quality_label": "普通"}},
+    )
+
+    assert remote_proxy.load_proxy_subscription_state()["active_profile_id"] == second["id"]
+    cached = remote_proxy.load_cached_proxy_subscription(first_state)
+
+    assert first["id"] != second["id"]
+    assert cached is not None
+    assert cached.nodes[0].node["name"] == "one"
+    assert set(remote_proxy.load_proxy_subscription_latencies(first_state)) == {"one"}
+    assert set(remote_proxy.load_proxy_subscription_qualities(first_state)) == {"one"}
 
 
 def test_delete_proxy_subscription_profile_selects_remaining_profile(monkeypatch, tmp_path):
