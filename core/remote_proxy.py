@@ -94,6 +94,20 @@ _PROXY_SUBSCRIPTION_STATE_CACHE: dict | None = None
 _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 _PROXY_SUBSCRIPTION_NODES_CACHE: tuple[ProxySubscriptionNode, ...] | None = None
 _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE: tuple[str, int | None, int | None, str] | None = None
+_PROXY_SUBSCRIPTION_PROFILE_FIELDS = {
+    "url",
+    "saved_path",
+    "last_fetched_at",
+    "node_count",
+    "content_type",
+    "charset",
+    "selected_node_key",
+    "selected_node_display",
+    "node_latencies",
+    "node_latencies_updated_at",
+    "node_qualities",
+    "node_qualities_updated_at",
+}
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -350,6 +364,7 @@ def fetch_proxy_subscription(
     saved_path = _save_proxy_subscription(normalized_url, payload, content_type)
     fetched_at = _now_iso()
     if persist:
+        active_profile = save_proxy_subscription_profile("", normalized_url, activate=True, quiet=True)
         save_proxy_subscription_state(
             url=normalized_url,
             saved_path=str(saved_path),
@@ -357,6 +372,7 @@ def fetch_proxy_subscription(
             node_count=len(nodes),
             content_type=content_type,
             charset=charset,
+            active_profile_id=active_profile.get("id") or "",
         )
     return ProxySubscriptionResult(
         nodes=nodes,
@@ -388,6 +404,100 @@ def load_cached_proxy_subscription() -> ProxySubscriptionResult | None:
     )
 
 
+def list_proxy_subscription_profiles() -> list[dict]:
+    state = load_proxy_subscription_state()
+    active_id = str(state.get("active_profile_id") or "")
+    profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+    results = []
+    for profile_id, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        item = _normalize_proxy_subscription_profile(profile, str(profile_id))
+        item["active"] = item.get("id") == active_id
+        results.append(item)
+    return sorted(results, key=lambda item: (0 if item.get("active") else 1, str(item.get("name") or "").casefold()))
+
+
+def active_proxy_subscription_profile() -> dict:
+    state = load_proxy_subscription_state()
+    profile = _active_proxy_subscription_profile(state)
+    return copy.deepcopy(profile) if profile else {}
+
+
+def save_proxy_subscription_profile(
+    name: str,
+    url: str,
+    *,
+    profile_id: str = "",
+    activate: bool = True,
+    quiet: bool = False,
+) -> dict:
+    parsed_url = urlparse.urlparse((url or "").strip())
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ValueError("订阅链接必须是 http 或 https 地址")
+    normalized_url = urlparse.urlunparse(parsed_url)
+    clean_id = str(profile_id or "").strip()
+    if not clean_id:
+        clean_id = _proxy_subscription_profile_id(normalized_url)
+    clean_name = str(name or "").strip() or _proxy_subscription_default_name(normalized_url)
+
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        profiles = state.setdefault("profiles", {})
+        existing_id = clean_id
+        if existing_id not in profiles:
+            for candidate_id, candidate in profiles.items():
+                if isinstance(candidate, dict) and str(candidate.get("url") or "").strip() == normalized_url:
+                    existing_id = str(candidate_id)
+                    break
+        profile = dict(profiles.get(existing_id) or {})
+        profile.update(
+            {
+                "id": existing_id,
+                "name": clean_name[:80],
+                "url": normalized_url,
+                "updated_at": _now_iso(),
+            }
+        )
+        profiles[existing_id] = _normalize_proxy_subscription_profile(profile, existing_id)
+        if activate:
+            state["active_profile_id"] = existing_id
+        _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+        if not quiet:
+            clear_proxy_subscription_state_cache()
+        return copy.deepcopy(profiles[existing_id])
+
+
+def set_active_proxy_subscription_profile(profile_id: str) -> dict:
+    clean_id = str(profile_id or "").strip()
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+        if clean_id not in profiles:
+            raise ValueError("订阅配置不存在")
+        state["active_profile_id"] = clean_id
+        _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+        return copy.deepcopy(_active_proxy_subscription_profile(state) or {})
+
+
+def delete_proxy_subscription_profile(profile_id: str) -> dict:
+    clean_id = str(profile_id or "").strip()
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+        if clean_id not in profiles:
+            raise ValueError("订阅配置不存在")
+        profiles.pop(clean_id, None)
+        if state.get("active_profile_id") == clean_id:
+            state["active_profile_id"] = next(iter(profiles), "")
+        if not profiles:
+            state["active_profile_id"] = ""
+            for key in _PROXY_SUBSCRIPTION_PROFILE_FIELDS:
+                state.pop(key, None)
+        _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+        return copy.deepcopy(_active_proxy_subscription_profile(state) or {})
+
+
 def load_proxy_subscription_state() -> dict:
     path = _proxy_subscription_state_path()
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
@@ -405,30 +515,147 @@ def load_proxy_subscription_state() -> dict:
         except Exception:
             clear_proxy_subscription_state_cache()
             return {}
-        state = data if isinstance(data, dict) else {}
+        state = _normalize_proxy_subscription_state(data if isinstance(data, dict) else {})
         _cache_proxy_subscription_state(state, signature)
         return copy.deepcopy(state)
 
 
 def save_proxy_subscription_state(**updates) -> dict:
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
-        directory = _proxy_subscription_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        state = load_proxy_subscription_state()
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        active_id = str(updates.get("active_profile_id") or state.get("active_profile_id") or "")
+        updated_url = str(updates.get("url") or "").strip()
+        if not active_id and updated_url:
+            active_id = _proxy_subscription_profile_id(updated_url)
+        if active_id:
+            state["active_profile_id"] = active_id
+        profiles = state.setdefault("profiles", {})
+        active_profile = _active_proxy_subscription_profile(state)
+        if active_profile is None and active_id:
+            active_profile = {
+                "id": active_id,
+                "name": _proxy_subscription_default_name(updated_url) if updated_url else "默认订阅",
+            }
+            if updated_url:
+                active_profile["url"] = updated_url
+            profiles[active_id] = active_profile
         for key, value in updates.items():
             if value is None:
                 continue
+            if key in _PROXY_SUBSCRIPTION_PROFILE_FIELDS and active_profile is not None:
+                active_profile[key] = value
             state[key] = value
-        state["updated_at"] = _now_iso()
-        path = _proxy_subscription_state_path()
-        temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp_path.replace(path)
-            _cache_proxy_subscription_state(state)
-        finally:
-            temp_path.unlink(missing_ok=True)
-        return state
+        if active_profile is not None:
+            profile_id = str(active_profile.get("id") or state.get("active_profile_id") or "")
+            profiles[profile_id] = _normalize_proxy_subscription_profile(active_profile, profile_id)
+        return _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+
+
+def _persist_proxy_subscription_state(state: dict) -> dict:
+    directory = _proxy_subscription_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    state = _normalize_proxy_subscription_state(state)
+    state["updated_at"] = _now_iso()
+    path = _proxy_subscription_state_path()
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+        _cache_proxy_subscription_state(state)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return copy.deepcopy(state)
+
+
+def _normalize_proxy_subscription_state(state: dict) -> dict:
+    normalized = copy.deepcopy(state) if isinstance(state, dict) else {}
+    raw_profiles = normalized.get("profiles") if isinstance(normalized.get("profiles"), dict) else {}
+    profiles: dict[str, dict] = {}
+    for profile_id, profile in raw_profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        item = _normalize_proxy_subscription_profile(profile, str(profile_id))
+        profiles[item["id"]] = item
+
+    legacy_url = str(normalized.get("url") or "").strip()
+    active_id = str(normalized.get("active_profile_id") or "").strip()
+    should_migrate_legacy = bool(legacy_url) and (not profiles or not active_id or active_id not in profiles)
+    if should_migrate_legacy:
+        legacy_id = _proxy_subscription_profile_id(legacy_url)
+        profile = dict(profiles.get(active_id) or profiles.get(legacy_id) or {})
+        for key in _PROXY_SUBSCRIPTION_PROFILE_FIELDS:
+            if key in normalized and normalized.get(key) is not None:
+                profile[key] = normalized.get(key)
+        profile.setdefault("name", _proxy_subscription_default_name(legacy_url))
+        profile["url"] = legacy_url
+        profile = _normalize_proxy_subscription_profile(profile, active_id or legacy_id)
+        profiles[profile["id"]] = profile
+        active_id = profile["id"]
+    elif not active_id and profiles:
+        active_id = next(iter(profiles))
+    elif active_id and active_id not in profiles and profiles:
+        active_id = next(iter(profiles))
+
+    normalized["profiles"] = profiles
+    normalized["active_profile_id"] = active_id
+    return _sync_active_profile_to_state(normalized)
+
+
+def _normalize_proxy_subscription_profile(profile: dict, fallback_id: str = "") -> dict:
+    item = copy.deepcopy(profile) if isinstance(profile, dict) else {}
+    url = str(item.get("url") or "").strip()
+    profile_id = str(item.get("id") or fallback_id or "").strip()
+    if not profile_id:
+        profile_id = _proxy_subscription_profile_id(url) if url else uuid.uuid4().hex[:12]
+    item["id"] = profile_id[:64]
+    item["name"] = str(item.get("name") or _proxy_subscription_default_name(url) or "默认订阅").strip()[:80]
+    item["url"] = url
+    item["saved_path"] = str(item.get("saved_path") or "").strip()
+    item["last_fetched_at"] = str(item.get("last_fetched_at") or "").strip()
+    item["content_type"] = str(item.get("content_type") or "").strip()
+    item["charset"] = str(item.get("charset") or "utf-8-sig").strip() or "utf-8-sig"
+    item["selected_node_key"] = str(item.get("selected_node_key") or "").strip()
+    item["selected_node_display"] = str(item.get("selected_node_display") or "").strip()[:180]
+    item["node_count"] = max(0, _int_or_default(item.get("node_count"), 0))
+    item["node_latencies"] = item.get("node_latencies") if isinstance(item.get("node_latencies"), dict) else {}
+    item["node_qualities"] = item.get("node_qualities") if isinstance(item.get("node_qualities"), dict) else {}
+    return item
+
+
+def _sync_active_profile_to_state(state: dict) -> dict:
+    normalized = copy.deepcopy(state) if isinstance(state, dict) else {}
+    profiles = normalized.get("profiles") if isinstance(normalized.get("profiles"), dict) else {}
+    active_id = str(normalized.get("active_profile_id") or "").strip()
+    active = profiles.get(active_id) if active_id else None
+    if isinstance(active, dict):
+        active = _normalize_proxy_subscription_profile(active, active_id)
+        profiles[active["id"]] = active
+        normalized["active_profile_id"] = active["id"]
+        for key in _PROXY_SUBSCRIPTION_PROFILE_FIELDS:
+            if key in active:
+                normalized[key] = copy.deepcopy(active[key])
+    elif not profiles:
+        normalized["active_profile_id"] = ""
+    normalized["profiles"] = profiles
+    return normalized
+
+
+def _active_proxy_subscription_profile(state: dict) -> dict | None:
+    profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+    active_id = str(state.get("active_profile_id") or "").strip()
+    profile = profiles.get(active_id) if active_id else None
+    return profile if isinstance(profile, dict) else None
+
+
+def _proxy_subscription_profile_id(url: str) -> str:
+    normalized = str(url or "").strip()
+    return "sub-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _proxy_subscription_default_name(url: str) -> str:
+    parsed = urlparse.urlparse(str(url or "").strip())
+    host = parsed.netloc.split("@")[-1].split(":")[0] if parsed.netloc else ""
+    return host or "默认订阅"
 
 
 def clear_proxy_subscription_state_cache() -> None:
