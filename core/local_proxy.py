@@ -95,6 +95,9 @@ LOCAL_PROXY_DOMAIN_PATTERN = re.compile(
 _LOCAL_PROXY_PREFS_LOCK = threading.RLock()
 _LOCAL_PROXY_PREFS_CACHE: dict | None = None
 _LOCAL_PROXY_PREFS_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
+_LOCAL_PROXY_STATE_LOCK = threading.RLock()
+_LOCAL_PROXY_STATE_CACHE: dict | None = None
+_LOCAL_PROXY_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,13 @@ def clear_local_proxy_preferences_cache() -> None:
     with _LOCAL_PROXY_PREFS_LOCK:
         _LOCAL_PROXY_PREFS_CACHE = None
         _LOCAL_PROXY_PREFS_CACHE_SIGNATURE = None
+
+
+def clear_local_proxy_state_cache() -> None:
+    global _LOCAL_PROXY_STATE_CACHE, _LOCAL_PROXY_STATE_CACHE_SIGNATURE
+    with _LOCAL_PROXY_STATE_LOCK:
+        _LOCAL_PROXY_STATE_CACHE = None
+        _LOCAL_PROXY_STATE_CACHE_SIGNATURE = None
 
 
 def local_proxy_start_on_login_enabled() -> bool:
@@ -741,6 +751,24 @@ def _cache_local_proxy_preferences(
     _LOCAL_PROXY_PREFS_CACHE_SIGNATURE = signature or _local_proxy_preferences_signature()
 
 
+def _local_proxy_state_signature() -> tuple[str, int | None, int | None]:
+    path_key = str(LOCAL_PROXY_STATE_PATH.resolve(strict=False))
+    try:
+        stat = LOCAL_PROXY_STATE_PATH.stat()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return (path_key, None, None)
+
+
+def _cache_local_proxy_state(
+    state: dict,
+    signature: tuple[str, int | None, int | None] | None = None,
+) -> None:
+    global _LOCAL_PROXY_STATE_CACHE, _LOCAL_PROXY_STATE_CACHE_SIGNATURE
+    _LOCAL_PROXY_STATE_CACHE = copy.deepcopy(state)
+    _LOCAL_PROXY_STATE_CACHE_SIGNATURE = signature or _local_proxy_state_signature()
+
+
 def _normalize_local_proxy_preferences(data: dict | None) -> dict:
     raw = data if isinstance(data, dict) else {}
     builtin_sites = {}
@@ -897,19 +925,27 @@ def _remember_selected_subscription_node(proxy_node: dict) -> None:
 
 
 def _load_state() -> dict:
-    try:
-        data = json.loads(LOCAL_PROXY_STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    with _LOCAL_PROXY_STATE_LOCK:
+        signature = _local_proxy_state_signature()
+        if _LOCAL_PROXY_STATE_CACHE is not None and _LOCAL_PROXY_STATE_CACHE_SIGNATURE == signature:
+            return copy.deepcopy(_LOCAL_PROXY_STATE_CACHE)
+        try:
+            data = json.loads(LOCAL_PROXY_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        state = data if isinstance(data, dict) else {}
+        _cache_local_proxy_state(state, signature)
+        return copy.deepcopy(state)
 
 
 def _save_state(state: dict) -> None:
-    _ensure_local_dirs()
-    atomic_write_text(
-        LOCAL_PROXY_STATE_PATH,
-        json.dumps(state, ensure_ascii=False, indent=2),
-    )
+    with _LOCAL_PROXY_STATE_LOCK:
+        _ensure_local_dirs()
+        atomic_write_text(
+            LOCAL_PROXY_STATE_PATH,
+            json.dumps(state, ensure_ascii=False, indent=2),
+        )
+        _cache_local_proxy_state(state if isinstance(state, dict) else {})
 
 
 def _proxy_url(mixed_port: int) -> str:

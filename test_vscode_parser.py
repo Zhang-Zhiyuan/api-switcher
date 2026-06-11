@@ -1,3 +1,5 @@
+import json
+
 from core import vscode_parser
 
 
@@ -7,6 +9,41 @@ def test_read_vscode_settings_returns_empty_for_non_object_json(monkeypatch, tmp
     monkeypatch.setattr(vscode_parser, "VSCODE_SETTINGS", settings_path)
 
     assert vscode_parser.read_vscode_settings() == {}
+
+
+def test_vscode_settings_cache_reuses_reads_updates_on_write_and_detects_external_write(monkeypatch, tmp_path):
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(vscode_parser, "VSCODE_SETTINGS", settings_path)
+    settings_path.write_text(json.dumps({"claudeCode.selectedModel": "first"}), encoding="utf-8")
+    vscode_parser.clear_vscode_settings_cache()
+
+    original_read_text = type(settings_path).read_text
+    read_count = {"value": 0}
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == settings_path:
+            read_count["value"] += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(settings_path), "read_text", counting_read_text)
+
+    first = vscode_parser.read_vscode_settings()
+    first["claudeCode.selectedModel"] = "mutated"
+    second = vscode_parser.read_vscode_settings()
+
+    assert second["claudeCode.selectedModel"] == "first"
+    assert read_count["value"] == 1
+
+    vscode_parser.write_vscode_settings({"claudeCode.selectedModel": "written"})
+    assert vscode_parser.read_vscode_settings()["claudeCode.selectedModel"] == "written"
+    assert read_count["value"] == 1
+
+    settings_path.write_text(
+        json.dumps({"claudeCode.selectedModel": "external-change", "marker": True}),
+        encoding="utf-8",
+    )
+    assert vscode_parser.read_vscode_settings()["claudeCode.selectedModel"] == "external-change"
+    assert read_count["value"] == 2
 
 
 def test_apply_permissions_keeps_mode_and_prompt_skip_separate():

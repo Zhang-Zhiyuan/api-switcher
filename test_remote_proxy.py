@@ -2153,6 +2153,34 @@ def test_apply_local_proxy_routing_skips_unmanaged_listener(monkeypatch, tmp_pat
     assert "下次启动时生效" in message
 
 
+def test_local_proxy_state_cache_reuses_reads_and_detects_external_write(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    local_proxy.LOCAL_PROXY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    local_proxy.LOCAL_PROXY_STATE_PATH.write_text(json.dumps({"mixed_port": 17897}), encoding="utf-8")
+    local_proxy.clear_local_proxy_state_cache()
+    original_loads = local_proxy.json.loads
+    calls = {"count": 0}
+
+    def counting_loads(text, *args, **kwargs):
+        calls["count"] += 1
+        return original_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(local_proxy.json, "loads", counting_loads)
+
+    first = local_proxy._load_state()
+    first["mixed_port"] = 18000
+    second = local_proxy._load_state()
+
+    assert calls["count"] == 1
+    assert second["mixed_port"] == 17897
+
+    local_proxy.LOCAL_PROXY_STATE_PATH.write_text(json.dumps({"mixed_port": 17898}), encoding="utf-8")
+    third = local_proxy._load_state()
+
+    assert calls["count"] == 2
+    assert third["mixed_port"] == 17898
+
+
 def test_subscription_auto_update_skips_unmanaged_local_proxy(monkeypatch, tmp_path):
     node = remote_proxy.ProxySubscriptionNode(
         1,
