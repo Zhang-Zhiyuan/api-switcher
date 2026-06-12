@@ -124,8 +124,9 @@ class BrowserTab(ctk.CTkScrollableFrame):
 
         def worker():
             try:
-                profiles = profile_manager.list_browser_profiles()
-                active = profile_manager.get_active_browser_name()
+                summary = profile_manager.get_browser_profiles_summary()
+                profiles = summary["profiles"]
+                active = summary["active"]
                 diagnoses = {p.name: browser_profile_manager.diagnose_profile(p) for p in profiles}
                 payload = {"ok": True, "profiles": profiles, "active": active, "diagnoses": diagnoses, "error": ""}
             except Exception as exc:

@@ -1167,8 +1167,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         def worker():
             try:
-                profiles = profile_manager.list_ssh_profiles()
-                active = profile_manager.get_active_ssh_name()
+                summary = profile_manager.get_ssh_profiles_summary()
+                profiles = summary["profiles"]
+                active = summary["active"]
                 payload = {
                     "ok": True,
                     "profiles": [

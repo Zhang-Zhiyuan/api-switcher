@@ -1882,6 +1882,14 @@ def get_active_browser_name() -> str | None:
     return _load_store().get("active_browser_profile")
 
 
+def get_browser_profiles_summary() -> dict:
+    store = _load_store()
+    return {
+        "profiles": _load_profile_list(store.get("browser_profiles", []), BrowserProfile, "Browser"),
+        "active": store.get("active_browser_profile"),
+    }
+
+
 def set_active_browser(name: str) -> None:
     store = _load_store()
     store["active_browser_profile"] = name
@@ -1923,6 +1931,14 @@ def list_ssh_profiles() -> list[SSHProfile]:
 
 def get_active_ssh_name() -> str | None:
     return _load_store().get("active_ssh_profile")
+
+
+def get_ssh_profiles_summary() -> dict:
+    store = _load_store()
+    return {
+        "profiles": _load_profile_list(store.get("ssh_profiles", []), SSHProfile, "SSH"),
+        "active": store.get("active_ssh_profile"),
+    }
 
 
 def set_active_ssh(name: str) -> None:

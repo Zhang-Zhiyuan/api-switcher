@@ -180,6 +180,56 @@ def test_profile_models_coerce_dirty_persisted_values(tmp_path, monkeypatch):
     assert browser.launch_height == 4320
 
 
+def test_profile_summary_helpers_coalesce_store_loads(tmp_path, monkeypatch):
+    profiles_file = tmp_path / "profiles.json"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    store = profile_manager._get_default_store()
+    store["browser_profiles"] = [
+        {
+            "name": "Browser A",
+            "browser_type": "chrome",
+            "profile_mode": "managed",
+            "user_data_dir": str(tmp_path / "browser"),
+        }
+    ]
+    store["active_browser_profile"] = "Browser A"
+    store["ssh_profiles"] = [
+        {
+            "name": "SSH A",
+            "host": "example.com",
+            "port": 22,
+            "username": "root",
+            "auth_type": "password",
+        }
+    ]
+    store["active_ssh_profile"] = "SSH A"
+    profiles_file.parent.mkdir(parents=True, exist_ok=True)
+    profiles_file.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    profile_manager.clear_profile_store_cache()
+
+    original_load_store = profile_manager._load_store
+    calls = {"count": 0}
+
+    def counting_load_store():
+        calls["count"] += 1
+        return original_load_store()
+
+    monkeypatch.setattr(profile_manager, "_load_store", counting_load_store)
+
+    browser_summary = profile_manager.get_browser_profiles_summary()
+
+    assert calls["count"] == 1
+    assert browser_summary["active"] == "Browser A"
+    assert [profile.name for profile in browser_summary["profiles"]] == ["Browser A"]
+
+    calls["count"] = 0
+    ssh_summary = profile_manager.get_ssh_profiles_summary()
+
+    assert calls["count"] == 1
+    assert ssh_summary["active"] == "SSH A"
+    assert [profile.name for profile in ssh_summary["profiles"]] == ["SSH A"]
+
+
 def test_profile_migration_script_checks_are_collected_by_pytest(tmp_path, monkeypatch) -> None:
     profiles_file = tmp_path / "profiles.json"
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
