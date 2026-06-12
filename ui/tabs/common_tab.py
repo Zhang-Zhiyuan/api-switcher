@@ -1,3 +1,5 @@
+import threading
+
 import customtkinter as ctk
 from tkinter import filedialog
 
@@ -7,12 +9,84 @@ from ui.widgets.toast import show_toast
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
 
+def _build_storage_info_text(info: dict) -> str:
+    source_labels = {
+        paths.ENV_DATA_DIR: "环境变量",
+        paths.DATA_DIR_POINTER_FILE: "自定义目录文件",
+        "portable": "便携模式",
+        "%APPDATA%": "Windows Roaming",
+        "home-roaming": "Windows Roaming",
+        "%LOCALAPPDATA%": "Windows Local",
+        "home-local": "Windows Local",
+        "temp-fallback": "临时目录 fallback",
+        "cwd-fallback": "当前目录 fallback",
+    }
+    source = source_labels.get(info["source"], str(info["source"]))
+    writable = "可写" if info["writable"] else f"不可写: {info['write_error']}"
+    pointer_state = "已设置" if (info["data_dir_pointer_exists"] or info["user_data_dir_pointer_exists"]) else "未设置"
+    portable_state = "已启用" if info["portable_marker_exists"] or info["portable"] else "未启用"
+    warnings = info.get("warnings") or []
+    warning_text = "\n警告: " + " | ".join(warnings[:3]) if warnings else ""
+    return (
+        f"当前目录: {info['storage_dir']}\n"
+        f"来源: {source}  |  状态: {writable}\n"
+        f"程序目录: {info['app_dir']}\n"
+        f"自定义目录文件: {pointer_state}  |  便携模式: {portable_state}"
+        f"{warning_text}\n"
+        "更改目录或便携模式会复制当前数据，并在下次启动后生效。"
+    )
+
+
+def _build_overview_text(claude: dict, codex_cfg: dict, codex_auth: dict, vscode: dict) -> str:
+    lines = []
+
+    env = claude.get("env", {})
+    lines.append("=== Claude Code ===")
+    lines.append(f"  Base URL:    {env.get('ANTHROPIC_BASE_URL', '(未设置)')}")
+    token = env.get("ANTHROPIC_AUTH_TOKEN", "")
+    lines.append(f"  Auth Token:  {token[:12]}...{token[-4:]}" if len(token) > 16 else f"  Auth Token:  {token}")
+    lines.append(f"  Model:       {claude.get('model', '(未设置)')}")
+    lines.append(f"  Effort:      {claude.get('effortLevel', '(未设置)')}")
+    lines.append(f"  Permissions: {claude.get('permissions', {}).get('defaultMode', 'default')}")
+    lines.append("")
+
+    lines.append("=== Codex CLI ===")
+    lines.append(f"  Model:       {codex_cfg.get('model', '(未设置)')}")
+    lines.append(f"  Provider:    {codex_cfg.get('model_provider', '(未设置)')}")
+    lines.append(f"  Effort:      {codex_cfg.get('model_reasoning_effort', '(未设置)')}")
+    lines.append(f"  Approval:    {codex_cfg.get('approval_policy', '(未设置)')}")
+    lines.append(f"  Sandbox:     {codex_cfg.get('sandbox_mode', '(未设置)')}")
+    provider_id = codex_cfg.get("model_provider", "custom")
+    custom = codex_cfg.get("model_providers", {}).get(provider_id, {})
+    if custom:
+        lines.append(f"  Base URL:    {custom.get('base_url', '-')}")
+    lines.append("")
+
+    lines.append("=== Codex Auth ===")
+    lines.append(f"  Auth Mode:   {codex_auth.get('auth_mode', '(未设置)')}")
+    api_key = codex_auth.get("OPENAI_API_KEY") or ""
+    if api_key:
+        lines.append(f"  API Key:     {api_key[:8]}...{api_key[-4:]}")
+    tokens = codex_auth.get("tokens", {})
+    if tokens.get("account_id"):
+        lines.append(f"  Account:     {tokens['account_id']}")
+    lines.append(f"  Last Refresh: {codex_auth.get('last_refresh', '(无)')}")
+    lines.append("")
+
+    lines.append("=== VS Code (Claude 相关) ===")
+    lines.append(f"  Skip Perms:  {vscode.get('claudeCode.allowDangerouslySkipPermissions', '(未设置)')}")
+    lines.append(f"  Init Mode:   {vscode.get('claudeCode.initialPermissionMode', '(未设置)')}")
+    lines.append(f"  Model:       {vscode.get('claudeCode.selectedModel', '(未设置)')}")
+    return "\n".join(lines)
+
+
 class CommonTab(ctk.CTkScrollableFrame):
     """Tab for common settings and quick overview."""
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._refresh_generation = 0
         self._build_ui()
 
     def _build_ui(self):
@@ -216,12 +290,81 @@ class CommonTab(ctk.CTkScrollableFrame):
 
     def refresh(self):
         """Refresh current permission state and overview text."""
-        settings = parser.read_claude_settings()
-        enabled = settings.get("permissions", {}).get("defaultMode") == "bypassPermissions"
-        self._bypass_var.set(enabled)
-        self._refresh_startup_info()
-        self._refresh_storage_info()
-        self._refresh_overview()
+        self._run_refresh()
+
+    def _run_refresh(
+        self,
+        *,
+        include_permissions: bool = True,
+        include_startup: bool = True,
+        include_storage: bool = True,
+        include_overview: bool = True,
+    ):
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+
+        if include_storage:
+            self._storage_info_label.configure(text="正在读取数据存储信息...")
+        if include_overview:
+            self._set_overview_text("正在读取当前配置...")
+
+        def worker():
+            payload = {
+                "ok": True,
+                "error": "",
+                "bypass_enabled": None,
+                "startup_status": None,
+                "storage_text": None,
+                "overview_text": None,
+            }
+            try:
+                claude = parser.read_claude_settings() if include_permissions or include_overview else {}
+                if include_permissions:
+                    payload["bypass_enabled"] = claude.get("permissions", {}).get("defaultMode") == "bypassPermissions"
+                if include_startup:
+                    payload["startup_status"] = startup_manager.get_startup_status()
+                if include_storage:
+                    payload["storage_text"] = _build_storage_info_text(paths.get_storage_info())
+                if include_overview:
+                    payload["overview_text"] = _build_overview_text(
+                        claude,
+                        toml_parser.read_codex_config(),
+                        auth_parser.read_codex_auth(),
+                        vscode_parser.read_vscode_settings(),
+                    )
+            except Exception as exc:
+                payload["ok"] = False
+                payload["error"] = str(exc)
+
+            def finish():
+                try:
+                    if generation != self._refresh_generation or not self.winfo_exists():
+                        return
+                    if not payload["ok"]:
+                        message = f"刷新失败: {payload['error']}"
+                        if include_storage:
+                            self._storage_info_label.configure(text=message)
+                        if include_overview:
+                            self._set_overview_text(message)
+                        show_toast(self.winfo_toplevel(), message, is_error=True)
+                        return
+                    if payload["bypass_enabled"] is not None:
+                        self._bypass_var.set(bool(payload["bypass_enabled"]))
+                    if payload["startup_status"] is not None:
+                        self._apply_startup_status(payload["startup_status"])
+                    if payload["storage_text"] is not None:
+                        self._storage_info_label.configure(text=payload["storage_text"])
+                    if payload["overview_text"] is not None:
+                        self._set_overview_text(payload["overview_text"])
+                except Exception:
+                    return
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="common-tab-refresh", daemon=True).start()
 
     def _toggle_bypass(self):
         enabled = self._bypass_var.get()
@@ -233,7 +376,14 @@ class CommonTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"操作失败: {e}", is_error=True)
 
     def _refresh_startup_info(self):
-        status = startup_manager.get_startup_status()
+        self._run_refresh(
+            include_permissions=False,
+            include_startup=True,
+            include_storage=False,
+            include_overview=False,
+        )
+
+    def _apply_startup_status(self, status):
         self._startup_var.set(status.enabled)
 
         if not status.supported:
@@ -266,7 +416,7 @@ class CommonTab(ctk.CTkScrollableFrame):
         enabled = self._startup_var.get()
         try:
             status = startup_manager.set_startup_enabled(enabled)
-            self._refresh_startup_info()
+            self._apply_startup_status(status)
             top = self.winfo_toplevel()
             tray = getattr(top, "tray_manager", None)
             if tray and tray.is_running():
@@ -293,33 +443,11 @@ class CommonTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"修复失败: {e}", is_error=True)
 
     def _refresh_storage_info(self):
-        info = paths.get_storage_info()
-        source_labels = {
-            paths.ENV_DATA_DIR: "环境变量",
-            paths.DATA_DIR_POINTER_FILE: "自定义目录文件",
-            "portable": "便携模式",
-            "%APPDATA%": "Windows Roaming",
-            "home-roaming": "Windows Roaming",
-            "%LOCALAPPDATA%": "Windows Local",
-            "home-local": "Windows Local",
-            "temp-fallback": "临时目录 fallback",
-            "cwd-fallback": "当前目录 fallback",
-        }
-        source = source_labels.get(info["source"], str(info["source"]))
-        writable = "可写" if info["writable"] else f"不可写: {info['write_error']}"
-        pointer_state = "已设置" if (info["data_dir_pointer_exists"] or info["user_data_dir_pointer_exists"]) else "未设置"
-        portable_state = "已启用" if info["portable_marker_exists"] or info["portable"] else "未启用"
-        warnings = info.get("warnings") or []
-        warning_text = "\n警告: " + " | ".join(warnings[:3]) if warnings else ""
-        self._storage_info_label.configure(
-            text=(
-                f"当前目录: {info['storage_dir']}\n"
-                f"来源: {source}  |  状态: {writable}\n"
-                f"程序目录: {info['app_dir']}\n"
-                f"自定义目录文件: {pointer_state}  |  便携模式: {portable_state}"
-                f"{warning_text}\n"
-                "更改目录或便携模式会复制当前数据，并在下次启动后生效。"
-            )
+        self._run_refresh(
+            include_permissions=False,
+            include_startup=False,
+            include_storage=True,
+            include_overview=False,
         )
 
     def _open_data_dir(self):
@@ -379,56 +507,15 @@ class CommonTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), f"恢复失败: {e}", is_error=True)
 
     def _refresh_overview(self):
+        self._run_refresh(
+            include_permissions=False,
+            include_startup=False,
+            include_storage=False,
+            include_overview=True,
+        )
+
+    def _set_overview_text(self, text: str):
         self._overview_text.configure(state="normal")
         self._overview_text.delete("1.0", "end")
-
-        lines = []
-
-        # Claude
-        claude = parser.read_claude_settings()
-        env = claude.get("env", {})
-        lines.append("=== Claude Code ===")
-        lines.append(f"  Base URL:    {env.get('ANTHROPIC_BASE_URL', '(未设置)')}")
-        token = env.get("ANTHROPIC_AUTH_TOKEN", "")
-        lines.append(f"  Auth Token:  {token[:12]}...{token[-4:]}" if len(token) > 16 else f"  Auth Token:  {token}")
-        lines.append(f"  Model:       {claude.get('model', '(未设置)')}")
-        lines.append(f"  Effort:      {claude.get('effortLevel', '(未设置)')}")
-        lines.append(f"  Permissions: {claude.get('permissions', {}).get('defaultMode', 'default')}")
-        lines.append("")
-
-        # Codex
-        codex_cfg = toml_parser.read_codex_config()
-        lines.append("=== Codex CLI ===")
-        lines.append(f"  Model:       {codex_cfg.get('model', '(未设置)')}")
-        lines.append(f"  Provider:    {codex_cfg.get('model_provider', '(未设置)')}")
-        lines.append(f"  Effort:      {codex_cfg.get('model_reasoning_effort', '(未设置)')}")
-        lines.append(f"  Approval:    {codex_cfg.get('approval_policy', '(未设置)')}")
-        lines.append(f"  Sandbox:     {codex_cfg.get('sandbox_mode', '(未设置)')}")
-        provider_id = codex_cfg.get("model_provider", "custom")
-        custom = codex_cfg.get("model_providers", {}).get(provider_id, {})
-        if custom:
-            lines.append(f"  Base URL:    {custom.get('base_url', '-')}")
-        lines.append("")
-
-        # Codex Auth
-        codex_auth = auth_parser.read_codex_auth()
-        lines.append("=== Codex Auth ===")
-        lines.append(f"  Auth Mode:   {codex_auth.get('auth_mode', '(未设置)')}")
-        api_key = codex_auth.get("OPENAI_API_KEY") or ""
-        if api_key:
-            lines.append(f"  API Key:     {api_key[:8]}...{api_key[-4:]}")
-        tokens = codex_auth.get("tokens", {})
-        if tokens.get("account_id"):
-            lines.append(f"  Account:     {tokens['account_id']}")
-        lines.append(f"  Last Refresh: {codex_auth.get('last_refresh', '(无)')}")
-        lines.append("")
-
-        # VS Code
-        vscode = vscode_parser.read_vscode_settings()
-        lines.append("=== VS Code (Claude 相关) ===")
-        lines.append(f"  Skip Perms:  {vscode.get('claudeCode.allowDangerouslySkipPermissions', '(未设置)')}")
-        lines.append(f"  Init Mode:   {vscode.get('claudeCode.initialPermissionMode', '(未设置)')}")
-        lines.append(f"  Model:       {vscode.get('claudeCode.selectedModel', '(未设置)')}")
-
-        self._overview_text.insert("1.0", "\n".join(lines))
+        self._overview_text.insert("1.0", text)
         self._overview_text.configure(state="disabled")
