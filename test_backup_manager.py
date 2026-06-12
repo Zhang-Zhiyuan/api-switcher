@@ -1,3 +1,5 @@
+import json
+
 from core import backup_manager
 from models.profile import BackupEntry
 
@@ -40,6 +42,55 @@ def test_backup_allocator_reserves_unique_directory(tmp_path, monkeypatch):
 
     assert allocated == backups_dir / f"{timestamp}-03"
     assert allocated.exists()
+
+
+def test_list_backups_cache_reuses_meta_reads_and_detects_external_change(tmp_path, monkeypatch):
+    backups_dir = tmp_path / "backups"
+    backup_dir = backups_dir / "2026-01-01T00-00-00"
+    backup_dir.mkdir(parents=True)
+    meta_path = backup_dir / backup_manager.BACKUP_META_FILE
+    meta_path.write_text(
+        json.dumps({
+            "timestamp": "2026-01-01T00:00:00",
+            "directory": str(backup_dir),
+            "description": "first",
+            "files": ["config.json"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    backup_manager.clear_backup_list_cache()
+
+    original_loads = backup_manager.json.loads
+    calls = {"count": 0}
+
+    def counting_loads(value, *args, **kwargs):
+        calls["count"] += 1
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(backup_manager.json, "loads", counting_loads)
+
+    first = backup_manager.list_backups()
+    first[0].description = "mutated"
+    second = backup_manager.list_backups()
+
+    assert calls["count"] == 1
+    assert second[0].description == "first"
+
+    meta_path.write_text(
+        json.dumps({
+            "timestamp": "2026-01-01T00:00:00",
+            "directory": str(backup_dir),
+            "description": "external-change",
+            "files": ["config.json", "settings.json"],
+        }),
+        encoding="utf-8",
+    )
+
+    third = backup_manager.list_backups()
+
+    assert calls["count"] == 2
+    assert third[0].description == "external-change"
 
 
 def test_backup_prune_ignores_directory_from_metadata(tmp_path, monkeypatch):

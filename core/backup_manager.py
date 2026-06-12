@@ -1,5 +1,8 @@
-import shutil
+import copy
+import json
 import logging
+import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +19,9 @@ from core.atomic_io import atomic_write_bytes, atomic_write_text
 from models.profile import BackupEntry
 
 logger = logging.getLogger(__name__)
+_BACKUP_LIST_CACHE_LOCK = threading.RLock()
+_BACKUP_LIST_CACHE: list[BackupEntry] | None = None
+_BACKUP_LIST_CACHE_SIGNATURE: tuple | None = None
 
 BACKUP_FILES = {
     "claude_settings.json": CLAUDE_SETTINGS,
@@ -27,6 +33,56 @@ BACKUP_FILES = {
 }
 
 BACKUP_META_FILE = "backup_meta.json"
+
+
+def clear_backup_list_cache() -> None:
+    """Clear cached backup listing."""
+    global _BACKUP_LIST_CACHE, _BACKUP_LIST_CACHE_SIGNATURE
+    with _BACKUP_LIST_CACHE_LOCK:
+        _BACKUP_LIST_CACHE = None
+        _BACKUP_LIST_CACHE_SIGNATURE = None
+
+
+def _clone_backup_entries(entries: list[BackupEntry]) -> list[BackupEntry]:
+    return copy.deepcopy(entries)
+
+
+def _backup_list_signature() -> tuple:
+    root_key = str(BACKUPS_DIR.resolve(strict=False))
+    if not BACKUPS_DIR.exists():
+        return (root_key, None)
+    try:
+        root_stat = BACKUPS_DIR.stat()
+        children = []
+        for child in BACKUPS_DIR.iterdir():
+            try:
+                child_stat = child.stat()
+            except OSError:
+                continue
+            if not child.is_dir():
+                continue
+            meta_path = child / BACKUP_META_FILE
+            try:
+                meta_stat = meta_path.stat()
+                meta_signature = (int(meta_stat.st_mtime_ns), int(meta_stat.st_size))
+            except OSError:
+                meta_signature = None
+            children.append((
+                child.name,
+                int(child_stat.st_mtime_ns),
+                int(child_stat.st_size),
+                meta_signature,
+            ))
+        children.sort()
+        return (root_key, int(root_stat.st_mtime_ns), int(root_stat.st_size), tuple(children))
+    except OSError:
+        return (root_key, None)
+
+
+def _cache_backup_list(entries: list[BackupEntry], signature: tuple | None = None) -> None:
+    global _BACKUP_LIST_CACHE, _BACKUP_LIST_CACHE_SIGNATURE
+    _BACKUP_LIST_CACHE = _clone_backup_entries(entries)
+    _BACKUP_LIST_CACHE_SIGNATURE = signature or _backup_list_signature()
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -89,44 +145,50 @@ def create_backup(description: str = "") -> BackupEntry:
     )
 
     # Save metadata
-    import json
     meta_path = backup_dir / BACKUP_META_FILE
     atomic_write_text(meta_path, json.dumps(entry.to_dict(), indent=2, ensure_ascii=False))
+    clear_backup_list_cache()
 
     return entry
 
 
 def list_backups() -> list[BackupEntry]:
     """List all backups, most recent first."""
-    if not BACKUPS_DIR.exists():
-        return []
+    signature = _backup_list_signature()
+    with _BACKUP_LIST_CACHE_LOCK:
+        if _BACKUP_LIST_CACHE is not None and _BACKUP_LIST_CACHE_SIGNATURE == signature:
+            return _clone_backup_entries(_BACKUP_LIST_CACHE)
 
-    backups = []
-    for d in sorted(BACKUPS_DIR.iterdir(), reverse=True):
-        if not d.is_dir():
-            continue
-        meta_path = d / BACKUP_META_FILE
-        if meta_path.exists():
-            try:
-                import json
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
-                entry = BackupEntry.from_dict(data)
-                # Trust the directory we scanned, not editable metadata inside it.
-                entry.directory = d
-                backups.append(entry)
-            except Exception as e:
-                logger.warning(f"Failed to read backup meta in {d}: {e}")
-        else:
-            # Legacy backup without meta
-            files = [f.name for f in d.iterdir() if f.is_file()]
-            backups.append(BackupEntry(
-                timestamp=d.name,
-                directory=d,
-                description="(legacy backup)",
-                files=files,
-            ))
+        if not BACKUPS_DIR.exists():
+            _cache_backup_list([], signature)
+            return []
 
-    return backups
+        backups = []
+        for d in sorted(BACKUPS_DIR.iterdir(), reverse=True):
+            if not d.is_dir():
+                continue
+            meta_path = d / BACKUP_META_FILE
+            if meta_path.exists():
+                try:
+                    data = json.loads(meta_path.read_text(encoding="utf-8"))
+                    entry = BackupEntry.from_dict(data)
+                    # Trust the directory we scanned, not editable metadata inside it.
+                    entry.directory = d
+                    backups.append(entry)
+                except Exception as e:
+                    logger.warning(f"Failed to read backup meta in {d}: {e}")
+            else:
+                # Legacy backup without meta
+                files = [f.name for f in d.iterdir() if f.is_file()]
+                backups.append(BackupEntry(
+                    timestamp=d.name,
+                    directory=d,
+                    description="(legacy backup)",
+                    files=files,
+                ))
+
+        _cache_backup_list(backups, signature)
+        return _clone_backup_entries(backups)
 
 
 def get_latest_backup() -> BackupEntry | None:
@@ -182,4 +244,6 @@ def prune_backups(keep_count: int = 20) -> int:
         except Exception as e:
             logger.warning(f"Failed to remove backup {entry.directory}: {e}")
 
+    if removed:
+        clear_backup_list_cache()
     return removed
