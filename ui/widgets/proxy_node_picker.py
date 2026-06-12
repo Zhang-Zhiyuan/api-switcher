@@ -11,6 +11,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     MAX_VISIBLE_ROWS = 60
+    RENDER_BATCH_SIZE = 8
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -33,6 +34,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_batch_after_id = None
         self._render_generation = 0
         self._last_match_count = 0
+        self._metadata_version = 0
+        self._filter_cache_key = None
+        self._filter_cache_nodes = ()
         self._search_entry = None
         self._filter_combo = None
         self._region_combo = None
@@ -319,7 +323,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     def _render_plan_batch(self, generation: int, render_plan: list, start_index: int):
         if generation != self._render_generation or not self._list_frame:
             return
-        batch_size = 4
+        batch_size = self.RENDER_BATCH_SIZE
         end_index = min(len(render_plan), start_index + batch_size)
         for kind, payload, extra in render_plan[start_index:end_index]:
             if kind == "header":
@@ -630,6 +634,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         quality_filter = self._quality_combo.get() if self._quality_combo else "全部质量"
         if quality_filter not in self.QUALITY_OPTIONS:
             quality_filter = "全部质量"
+        cache_key = (self._metadata_version, query, mode, region_filter, quality_filter)
+        if self._filter_cache_key == cache_key:
+            return list(self._filter_cache_nodes)
         matches = []
         for item in self._nodes:
             meta = self._metadata_for(item)
@@ -648,6 +655,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             if query and query not in self._search_blob(item):
                 continue
             matches.append(item)
+        self._filter_cache_key = cache_key
+        self._filter_cache_nodes = tuple(matches)
         return matches
 
     def _empty_message(self, total: int, quality_count: int) -> str:
@@ -721,6 +730,12 @@ class ProxyNodePicker(ctk.CTkFrame):
             if meta.get("quality_ai_ok"):
                 counts["high_quality"] += 1
         self._summary_counts = counts
+        self._metadata_version += 1
+        self._invalidate_filter_cache()
+
+    def _invalidate_filter_cache(self):
+        self._filter_cache_key = None
+        self._filter_cache_nodes = ()
 
     def _build_item_metadata(self, item) -> dict:
         node = item.node
