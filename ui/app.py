@@ -521,9 +521,9 @@ class App(ctk.CTk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _load_quick_switch_profiles(self):
+    def _load_quick_switch_profiles(self, delay_ms: int = 80):
         """Load profiles for quick switch menus."""
-        self._load_quick_switch_profiles_delayed()
+        self._load_quick_switch_profiles_delayed(delay_ms=delay_ms)
 
     def _load_quick_switch_profiles_delayed(self, delay_ms: int = 80):
         if self._exit_requested:
@@ -573,9 +573,9 @@ class App(ctk.CTk):
                 self._apply_quick_switch_profiles(
                     payload["claude_names"],
                     payload["claude_current"],
-                        payload["codex_names"],
-                        payload["codex_current"],
-                    )
+                    payload["codex_names"],
+                    payload["codex_current"],
+                )
                 if self._quick_switch_reload_pending:
                     self._quick_switch_reload_pending = False
                     self._load_quick_switch_profiles_delayed(delay_ms=120)

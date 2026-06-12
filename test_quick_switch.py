@@ -18,6 +18,7 @@ from core.api_tester import APITester
 import core.usage_stats as usage_stats_module
 from core.usage_stats import format_token_count as format_tokens
 from models.auto_continue import AutoContinueSettings, DEFAULT_BLOCKER_PATTERNS, DEFAULT_INCOMPLETE_PATTERNS
+from ui.app import App
 
 
 def _isolated_usage_manager(tmp_path, monkeypatch=None):
@@ -334,6 +335,17 @@ def test_api_model_extraction_preserves_display_metadata():
 
     assert APITester._extract_model_ids(data) == ["opaque-chat", "opaque-utility"]
     assert APITester.recommend_best_model(models, metadata) == "opaque-chat"
+
+
+def test_app_quick_switch_loader_accepts_delay_override():
+    app = object.__new__(App)
+    app._exit_requested = False
+    calls = []
+    app._load_quick_switch_profiles_delayed = lambda delay_ms=80: calls.append(delay_ms)
+
+    App._load_quick_switch_profiles(app, delay_ms=0)
+
+    assert calls == [0]
 
 
 def test_token_formatting():
