@@ -3,6 +3,7 @@ from __future__ import annotations
 from core import remote_proxy
 from ui.tabs.local_proxy_tab import LocalProxyTab
 from ui.tabs.ssh_tab import SSHTab
+from ui.widgets.proxy_node_picker import ProxyNodePicker
 
 
 class _PickerStub:
@@ -18,6 +19,14 @@ class _PickerStub:
 
     def checked_items(self):
         return list(self._checked_items)
+
+
+class _ValueStub:
+    def __init__(self, value: str):
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
 
 
 def _node(index: int, name: str) -> remote_proxy.ProxySubscriptionNode:
@@ -101,3 +110,40 @@ def test_ssh_quality_candidates_filter_checked_scope_by_connectivity():
     }
 
     assert tab._proxy_quality_candidate_nodes([first, second]) == [first]
+
+
+def test_proxy_node_picker_reuses_filtered_nodes_until_filter_changes():
+    first = _node(1, "first")
+    second = _node(2, "second")
+    picker = object.__new__(ProxyNodePicker)
+    picker._nodes = [first, second]
+    picker._latency_results = {}
+    picker._quality_results = {}
+    picker._node_meta = {}
+    picker._summary_counts = {}
+    picker._metadata_version = 0
+    picker._filter_cache_key = None
+    picker._filter_cache_nodes = ()
+    picker._search_entry = _ValueStub("")
+    picker._filter_combo = _ValueStub("全部")
+    picker._region_combo = _ValueStub(ProxyNodePicker.REGION_ALL)
+    picker._quality_combo = _ValueStub("全部质量")
+
+    picker._build_node_metadata()
+    original_metadata_for = picker._metadata_for
+    calls = {"count": 0}
+
+    def counting_metadata_for(item):
+        calls["count"] += 1
+        return original_metadata_for(item)
+
+    picker._metadata_for = counting_metadata_for
+
+    assert picker._filtered_nodes() == [first, second]
+    assert calls["count"] == 2
+    assert picker._filtered_nodes() == [first, second]
+    assert calls["count"] == 2
+
+    picker._search_entry.value = "second"
+    assert picker._filtered_nodes() == [second]
+    assert calls["count"] > 2
