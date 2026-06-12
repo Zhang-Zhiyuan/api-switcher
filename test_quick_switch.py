@@ -159,6 +159,34 @@ def test_usage_stats_save_creates_parent_and_cleans_temp_file(tmp_path, monkeypa
     assert not stats_file.with_suffix(stats_file.suffix + ".tmp").exists()
 
 
+def test_usage_dashboard_data_reuses_one_filtered_stats_pass(tmp_path, monkeypatch):
+    manager = _isolated_usage_manager(tmp_path, monkeypatch)
+    manager.record_switch("Claude A", "claude")
+    manager.record_switch("Claude A", "claude")
+    manager.record_switch("Claude B", "claude")
+    manager.record_switch("Codex A", "codex")
+    manager.record_tokens("Claude A", "claude", input_tokens=1000, output_tokens=500)
+
+    original_get_all_stats = manager.get_all_stats
+    calls = {"count": 0}
+
+    def counting_get_all_stats(profile_type=None):
+        calls["count"] += 1
+        return original_get_all_stats(profile_type)
+
+    manager.get_all_stats = counting_get_all_stats
+
+    dashboard = manager.get_dashboard_data("claude", top_limit=1, recent_limit=2, trend_days=7)
+
+    assert calls["count"] == 1
+    assert dashboard["summary"]["total_profiles"] == 2
+    assert dashboard["summary"]["total_switches"] == 3
+    assert dashboard["summary"]["total_tokens"] == 1500
+    assert [item.profile_name for item in dashboard["top_profiles"]] == ["Claude A"]
+    assert {item.profile_name for item in dashboard["recent_profiles"]} == {"Claude A", "Claude B"}
+    assert len(dashboard["trend"]) == 7
+
+
 def _matches_incomplete(text: str, settings: AutoContinueSettings | None = None) -> bool:
     settings = settings or AutoContinueSettings()
     return any(re.search(pattern, text) for pattern in settings.incomplete_patterns)

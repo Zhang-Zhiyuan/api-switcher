@@ -314,7 +314,33 @@ class UsageStatsManager:
                    end_date: Optional[datetime] = None) -> dict:
         """Get summary statistics, optionally filtered by date range."""
         stats_list = self.get_all_stats(profile_type)
+        return self._build_summary(stats_list, start_date, end_date)
 
+    def get_dashboard_data(self, profile_type: Optional[str] = None,
+                           start_date: Optional[datetime] = None,
+                           end_date: Optional[datetime] = None,
+                           top_limit: int = 10,
+                           recent_limit: int = 10,
+                           trend_days: int = 7) -> dict:
+        """Return all dashboard sections from one filtered stats pass."""
+        stats_list = self.get_all_stats(profile_type)
+        top_profiles = sorted(stats_list, key=lambda s: s.switch_count, reverse=True)[: max(0, int(top_limit))]
+        recent_profiles = sorted(
+            (s for s in stats_list if s.last_used),
+            key=lambda s: s.last_used or "",
+            reverse=True,
+        )[: max(0, int(recent_limit))]
+        return {
+            "summary": self._build_summary(stats_list, start_date, end_date),
+            "top_profiles": top_profiles,
+            "recent_profiles": recent_profiles,
+            "trend": self._build_daily_trend(stats_list, trend_days),
+        }
+
+    def _build_summary(self, stats_list: List[ProfileUsageStats],
+                       start_date: Optional[datetime] = None,
+                       end_date: Optional[datetime] = None) -> dict:
+        """Build summary values for a pre-filtered stats list."""
         if not stats_list:
             return {
                 "total_profiles": 0,
@@ -368,10 +394,13 @@ class UsageStatsManager:
     def get_daily_trend(self, days: int = 7,
                        profile_type: Optional[str] = None) -> List[dict]:
         """Get daily trend data for the last N days."""
+        return self._build_daily_trend(self.get_all_stats(profile_type), days)
+
+    def _build_daily_trend(self, stats_list: List[ProfileUsageStats], days: int = 7) -> List[dict]:
+        """Build daily trend data for a pre-filtered stats list."""
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days-1)
 
-        stats_list = self.get_all_stats(profile_type)
         trend_data = []
 
         current = start_date

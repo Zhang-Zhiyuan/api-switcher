@@ -402,8 +402,15 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
             start_date, end_date = self._get_date_range()
 
-            # Load summary
-            summary = usage_stats.get_summary(profile_type, start_date, end_date)
+            dashboard = usage_stats.get_dashboard_data(
+                profile_type=profile_type,
+                start_date=start_date,
+                end_date=end_date,
+                top_limit=10,
+                recent_limit=10,
+                trend_days=7,
+            )
+            summary = dashboard["summary"]
 
             self.summary_cards["total_profiles"].value_label.configure(
                 text=str(summary["total_profiles"])
@@ -425,31 +432,23 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             else:
                 self.summary_cards["success_rate"].value_label.configure(text="N/A")
 
-            # Load top profiles
-            top_profiles = usage_stats.get_top_profiles(10, profile_type)
-            self._populate_profiles(self.top_profiles_frame, top_profiles, show_switch=True)
-
-            # Load recent profiles
-            recent_profiles = usage_stats.get_recent_profiles(10, profile_type)
-            self._populate_profiles(self.recent_profiles_frame, recent_profiles, show_switch=True)
-
-            # Load daily trend
-            self._populate_trend(profile_type)
+            self._populate_profiles(self.top_profiles_frame, dashboard["top_profiles"], show_switch=True)
+            self._populate_profiles(self.recent_profiles_frame, dashboard["recent_profiles"], show_switch=True)
+            self._populate_trend(profile_type, dashboard["trend"])
 
             logger.info("Refreshed usage statistics")
 
         except Exception as e:
             logger.error(f"Failed to refresh stats: {e}", exc_info=True)
 
-    def _populate_trend(self, profile_type: Optional[str] = None):
+    def _populate_trend(self, profile_type: Optional[str] = None, trend_data: Optional[list[dict]] = None):
         """Populate daily trend chart."""
         # Clear existing
         for widget in self.trend_frame.winfo_children():
             widget.destroy()
 
         try:
-            # Get trend data for last 7 days
-            trend_data = usage_stats.get_daily_trend(7, profile_type)
+            trend_data = trend_data if trend_data is not None else usage_stats.get_daily_trend(7, profile_type)
 
             if not trend_data or all(d["switch_count"] == 0 for d in trend_data):
                 empty_label = ctk.CTkLabel(
