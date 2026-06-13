@@ -16,8 +16,28 @@ from ui.widgets.toast import show_toast
 logger = logging.getLogger(__name__)
 
 
+def _nonnegative_int(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _session_record_summary(records, selected_keys: set[str]) -> dict:
+    visible_keys = {record.key for record in records}
+    selected_count = sum(1 for key in selected_keys if key in visible_keys)
+    total_size = sum(_nonnegative_int(getattr(record, "size_bytes", 0)) for record in records)
+    return {
+        "visible_keys": visible_keys,
+        "selected_count": selected_count,
+        "total_size": total_size,
+    }
+
+
 class SessionMigrationTab(ctk.CTkScrollableFrame):
     """Tab for exporting and importing Claude Code / Codex local sessions."""
+
+    RENDER_BATCH_SIZE = 8
 
     FILTER_OPTIONS = {
         "全部": "all",
@@ -38,7 +58,13 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._records: list[session_migration.SessionRecord] = []
         self._selected_keys: set[str] = set()
         self._refresh_generation = 0
+        self._record_render_generation = 0
+        self._record_render_after_id = None
         self._build_ui()
+
+    def destroy(self):
+        self._cancel_record_render()
+        super().destroy()
 
     def _build_ui(self):
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -183,6 +209,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._refresh_location_options()
         self._refresh_generation += 1
         generation = self._refresh_generation
+        self._cancel_record_render()
         provider_filter = self._provider_filter
         source_ssh_name = self._current_source_ssh_name()
         source_label = self._endpoint_label(source_ssh_name)
@@ -228,18 +255,23 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def _render_records(self):
         if not self._cards_frame:
             return
+        self._cancel_record_render()
+        self._record_render_generation += 1
+        generation = self._record_render_generation
         for widget in self._cards_frame.winfo_children():
             widget.destroy()
-        visible_keys = {record.key for record in self._records}
-        self._selected_keys.intersection_update(visible_keys)
-        total_size = sum(record.size_bytes for record in self._records)
-        selected_count = len(self._selected_keys)
+        records = list(self._records)
+        summary = _session_record_summary(records, self._selected_keys)
+        self._selected_keys.intersection_update(summary["visible_keys"])
         if self._stats_label:
             self._stats_label.configure(
-                text=f"会话 {len(self._records)}  |  已选 {selected_count}  |  主文件 {session_migration.format_size(total_size)}"
+                text=(
+                    f"会话 {len(records)}  |  已选 {summary['selected_count']}  |  "
+                    f"主文件 {session_migration.format_size(summary['total_size'])}"
+                )
             )
 
-        if not self._records:
+        if not records:
             source_label = self._endpoint_label(self._current_source_ssh_name()).strip()
             EmptyState(
                 self._cards_frame,
@@ -250,8 +282,33 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             ).pack(fill="x", pady=(12, 4))
             return
 
-        for record in self._records:
+        self._render_record_batch(records, generation, 0)
+
+    def _cancel_record_render(self):
+        if not self._record_render_after_id:
+            return
+        try:
+            self.after_cancel(self._record_render_after_id)
+        except Exception:
+            pass
+        self._record_render_after_id = None
+
+    def _render_record_batch(self, records: list[session_migration.SessionRecord], generation: int, start: int):
+        if generation != self._record_render_generation or not self._cards_frame:
+            return
+        end = min(start + self.RENDER_BATCH_SIZE, len(records))
+        for record in records[start:end]:
             self._add_record_card(record)
+        if end >= len(records):
+            self._record_render_after_id = None
+            return
+        try:
+            self._record_render_after_id = self.after(
+                1,
+                lambda: self._render_record_batch(records, generation, end),
+            )
+        except Exception:
+            self._record_render_after_id = None
 
     def _add_record_card(self, record: session_migration.SessionRecord):
         card = ctk.CTkFrame(self._cards_frame, **card_frame_kwargs())
