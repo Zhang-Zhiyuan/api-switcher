@@ -12,8 +12,43 @@ from ui.theme import COLORS, button_style, combo_style, font, textbox_style
 from ui.widgets.toast import show_toast
 
 
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _coerce_levelno(value, level: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(getattr(logging, level, logging.INFO))
+
+
+def _prepare_log_entries(log_entries: list[dict], filter_level: str) -> tuple[list[tuple[str, str]], dict[str, int]]:
+    filter_levelno = int(getattr(logging, filter_level, logging.DEBUG))
+    visible_entries: list[tuple[str, str]] = []
+    count_delta = {level: 0 for level in LOG_LEVELS}
+
+    for log_entry in log_entries:
+        if not isinstance(log_entry, dict):
+            continue
+        level = str(log_entry.get("level") or "INFO").upper()
+        if level not in count_delta:
+            level = "INFO"
+        levelno = _coerce_levelno(log_entry.get("levelno"), level)
+        message = str(log_entry.get("message") or "")
+
+        count_delta[level] += 1
+        if levelno >= filter_levelno:
+            visible_entries.append((level, message))
+
+    return visible_entries, count_delta
+
+
 class LogViewerTab(ctk.CTkScrollableFrame):
     """日志查看器 Tab"""
+
+    LOG_BATCH_LIMIT = 250
+    ACTIVE_POLL_MS = 80
+    IDLE_POLL_MS = 450
 
     # 日志级别颜色映射
     LEVEL_COLORS = {
@@ -134,21 +169,18 @@ class LogViewerTab(ctk.CTkScrollableFrame):
 
         # 统计计数器
         self._log_counts = {
-            'DEBUG': 0,
-            'INFO': 0,
-            'WARNING': 0,
-            'ERROR': 0,
-            'CRITICAL': 0
+            level: 0
+            for level in LOG_LEVELS
         }
 
     def _start_log_polling(self):
         """开始轮询日志队列"""
         self._poll_logs()
 
-    def _schedule_log_polling(self):
+    def _schedule_log_polling(self, delay_ms: int | None = None):
         self._cancel_log_polling()
         try:
-            self._poll_after_id = self.after(100, self._poll_logs)
+            self._poll_after_id = self.after(delay_ms or self.IDLE_POLL_MS, self._poll_logs)
         except Exception:
             self._poll_after_id = None
 
@@ -170,56 +202,47 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         except Exception:
             return
 
+        log_entries = []
         try:
-            # 批量处理日志（最多100条）
-            batch_count = 0
-            while batch_count < 100:
-                try:
-                    log_entry = log_manager.get_log_queue().get_nowait()
-                    self._add_log_entry(log_entry)
-                    batch_count += 1
-                except Empty:
-                    break
-
-            # 更新统计信息
-            if batch_count > 0:
+            log_entries = self._drain_log_queue()
+            if log_entries:
+                self._append_log_entries(log_entries)
                 self._update_stats()
 
         except Exception as e:
             logging.error(f"Error polling logs: {e}")
 
-        # 继续轮询（每100ms）
-        self._schedule_log_polling()
+        self._schedule_log_polling(self.ACTIVE_POLL_MS if log_entries else self.IDLE_POLL_MS)
+
+    def _drain_log_queue(self) -> list[dict]:
+        log_entries = []
+        while len(log_entries) < self.LOG_BATCH_LIMIT:
+            try:
+                log_entries.append(log_manager.get_log_queue().get_nowait())
+            except Empty:
+                break
+        return log_entries
 
     def _add_log_entry(self, log_entry: dict):
         """添加日志条目"""
-        level = log_entry['level']
-        levelno = log_entry['levelno']
-        message = log_entry['message']
+        self._append_log_entries([log_entry])
 
-        # 更新计数
-        if level in self._log_counts:
-            self._log_counts[level] += 1
+    def _append_log_entries(self, log_entries: list[dict]):
+        visible_entries, count_delta = _prepare_log_entries(log_entries, self._filter_level)
+        for level, count in count_delta.items():
+            self._log_counts[level] += count
 
-        # 检查过滤级别
-        filter_levelno = getattr(logging, self._filter_level)
-        if levelno < filter_levelno:
+        if not visible_entries:
             return
 
-        # 添加到文本框
         self._log_text.configure(state="normal")
-
-        # 插入日志消息
-        start_index = self._log_text.index("end-1c")
-        self._log_text.insert("end", message + "\n")
-        end_index = self._log_text.index("end-1c")
-
-        # 应用颜色标签
-        self._log_text.tag_add(level, start_index, end_index)
-
+        for level, message in visible_entries:
+            start_index = self._log_text.index("end-1c")
+            self._log_text.insert("end", message + "\n")
+            end_index = self._log_text.index("end-1c")
+            self._log_text.tag_add(level, start_index, end_index)
         self._log_text.configure(state="disabled")
 
-        # 自动滚动到底部
         if self._auto_scroll:
             self._log_text.see("end")
 
