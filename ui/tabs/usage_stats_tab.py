@@ -1,5 +1,6 @@
 """Usage statistics dashboard tab."""
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 import customtkinter as ctk
@@ -10,6 +11,21 @@ from ui.widgets.toast import show_toast
 logger = logging.getLogger(__name__)
 
 
+def _summary_int(summary: dict, key: str) -> int:
+    try:
+        return max(0, int(summary.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _summary_success_rate_text(summary: dict) -> str:
+    successes = _summary_int(summary, "total_successes")
+    total_ops = _summary_int(summary, "total_errors") + successes
+    if total_ops <= 0:
+        return "N/A"
+    return f"{(successes / total_ops) * 100:.1f}%"
+
+
 class UsageStatsTab(ctk.CTkScrollableFrame):
     """Usage statistics dashboard tab."""
 
@@ -17,6 +33,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._auto_refresh_after_id = None
+        self._refresh_generation = 0
         self._build_ui()
         self.after(20, self.refresh)
 
@@ -391,6 +408,8 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
     def refresh(self):
         """Refresh statistics display."""
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         try:
             # Get filters
             filter_text = self.type_filter.get()
@@ -402,44 +421,64 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
             start_date, end_date = self._get_date_range()
 
-            dashboard = usage_stats.get_dashboard_data(
-                profile_type=profile_type,
-                start_date=start_date,
-                end_date=end_date,
-                top_limit=10,
-                recent_limit=10,
-                trend_days=7,
-            )
-            summary = dashboard["summary"]
-
-            self.summary_cards["total_profiles"].value_label.configure(
-                text=str(summary["total_profiles"])
-            )
-            self.summary_cards["total_switches"].value_label.configure(
-                text=str(summary["total_switches"])
-            )
-            self.summary_cards["total_tokens"].value_label.configure(
-                text=format_token_count(summary["total_tokens"])
-            )
-
-            # Calculate success rate
-            total_ops = summary["total_errors"] + summary["total_successes"]
-            if total_ops > 0:
-                success_rate = (summary["total_successes"] / total_ops) * 100
-                self.summary_cards["success_rate"].value_label.configure(
-                    text=f"{success_rate:.1f}%"
-                )
-            else:
-                self.summary_cards["success_rate"].value_label.configure(text="N/A")
-
-            self._populate_profiles(self.top_profiles_frame, dashboard["top_profiles"], show_switch=True)
-            self._populate_profiles(self.recent_profiles_frame, dashboard["recent_profiles"], show_switch=True)
-            self._populate_trend(profile_type, dashboard["trend"])
-
-            logger.info("Refreshed usage statistics")
-
         except Exception as e:
             logger.error(f"Failed to refresh stats: {e}", exc_info=True)
+            return
+
+        def worker():
+            try:
+                payload = {
+                    "ok": True,
+                    "dashboard": usage_stats.get_dashboard_data(
+                        profile_type=profile_type,
+                        start_date=start_date,
+                        end_date=end_date,
+                        top_limit=10,
+                        recent_limit=10,
+                        trend_days=7,
+                    ),
+                    "error": "",
+                }
+            except Exception as exc:
+                payload = {"ok": False, "dashboard": None, "error": str(exc)}
+
+            def finish():
+                try:
+                    if generation != self._refresh_generation or not self.winfo_exists():
+                        return
+                    if not payload["ok"]:
+                        logger.error("Failed to refresh stats: %s", payload["error"])
+                        return
+                    self._apply_dashboard(profile_type, payload["dashboard"])
+                    logger.info("Refreshed usage statistics")
+                except Exception as exc:
+                    logger.error("Failed to apply usage statistics: %s", exc, exc_info=True)
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="usage-stats-refresh", daemon=True).start()
+
+    def _apply_dashboard(self, profile_type: Optional[str], dashboard: dict):
+        summary = dashboard["summary"]
+
+        self.summary_cards["total_profiles"].value_label.configure(
+            text=str(summary["total_profiles"])
+        )
+        self.summary_cards["total_switches"].value_label.configure(
+            text=str(summary["total_switches"])
+        )
+        self.summary_cards["total_tokens"].value_label.configure(
+            text=format_token_count(summary["total_tokens"])
+        )
+
+        self.summary_cards["success_rate"].value_label.configure(text=_summary_success_rate_text(summary))
+
+        self._populate_profiles(self.top_profiles_frame, dashboard["top_profiles"], show_switch=True)
+        self._populate_profiles(self.recent_profiles_frame, dashboard["recent_profiles"], show_switch=True)
+        self._populate_trend(profile_type, dashboard["trend"])
 
     def _populate_trend(self, profile_type: Optional[str] = None, trend_data: Optional[list[dict]] = None):
         """Populate daily trend chart."""

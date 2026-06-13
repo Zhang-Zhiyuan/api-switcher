@@ -1,3 +1,5 @@
+import threading
+
 import customtkinter as ctk
 from tkinter import filedialog
 
@@ -12,11 +14,19 @@ from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, f
 class BackupTab(ctk.CTkScrollableFrame):
     """Tab for managing backups."""
 
+    RENDER_BATCH_SIZE = 12
+
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._list_frame = None
+        self._refresh_generation = 0
+        self._render_after_id = None
         self._build_ui()
+
+    def destroy(self):
+        self._cancel_render()
+        super().destroy()
 
     def _build_ui(self):
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -83,11 +93,65 @@ class BackupTab(ctk.CTkScrollableFrame):
     def refresh(self):
         if not self._list_frame:
             return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        self._cancel_render()
+        for w in self._list_frame.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(
+            self._list_frame,
+            text="正在读取备份记录...",
+            text_color=COLORS["muted"],
+            font=font(13),
+        ).pack(fill="x", pady=(22, 6))
+
+        def worker():
+            try:
+                payload = {"ok": True, "backups": backup_manager.list_backups(), "error": ""}
+            except Exception as exc:
+                payload = {"ok": False, "backups": [], "error": str(exc)}
+
+            def finish():
+                try:
+                    if generation != self._refresh_generation or not self.winfo_exists():
+                        return
+                    self._render_backups(payload, generation)
+                except Exception:
+                    return
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="backup-tab-refresh", daemon=True).start()
+
+    def _cancel_render(self):
+        if not self._render_after_id:
+            return
+        try:
+            self.after_cancel(self._render_after_id)
+        except Exception:
+            pass
+        self._render_after_id = None
+
+    def _render_backups(self, payload: dict, generation: int):
+        if not self._list_frame:
+            return
         for w in self._list_frame.winfo_children():
             w.destroy()
 
-        backups = backup_manager.list_backups()
+        if not payload.get("ok"):
+            EmptyState(
+                self._list_frame,
+                "读取备份记录失败",
+                payload.get("error") or "请稍后重试。",
+                "重新读取",
+                self.refresh,
+            ).pack(fill="x", pady=(12, 4))
+            return
 
+        backups = list(payload.get("backups") or [])
         if not backups:
             EmptyState(
                 self._list_frame,
@@ -98,50 +162,63 @@ class BackupTab(ctk.CTkScrollableFrame):
             ).pack(fill="x", pady=(12, 4))
             return
 
-        for entry in backups:
-            card = ctk.CTkFrame(self._list_frame, **card_frame_kwargs())
-            card.pack(fill="x", pady=5)
+        self._render_backup_batch(backups, generation, 0)
 
-            # Timestamp and description
-            top = ctk.CTkFrame(card, fg_color="transparent")
-            top.pack(fill="x", padx=14, pady=(12, 4))
-            ctk.CTkLabel(
-                top,
-                text=entry.timestamp,
-                text_color=COLORS["text"],
-                font=font(14, "bold"),
-            ).pack(side="left")
-            ctk.CTkLabel(
-                top,
-                text=entry.description,
-                text_color=COLORS["primary"],
-                font=font(12, "bold"),
-            ).pack(side="left", padx=(10, 0))
+    def _render_backup_batch(self, backups, generation: int, start: int):
+        if generation != self._refresh_generation or not self._list_frame:
+            return
+        end = min(start + self.RENDER_BATCH_SIZE, len(backups))
+        for entry in backups[start:end]:
+            self._render_backup_card(entry)
+        if end >= len(backups):
+            self._render_after_id = None
+            return
+        self._render_after_id = self.after(
+            1,
+            lambda: self._render_backup_batch(backups, generation, end),
+        )
 
-            # Files info
-            files_text = ", ".join(entry.files) if entry.files else "(无文件)"
-            files_label = ctk.CTkLabel(
-                card,
-                text=f"包含: {files_text}",
-                text_color=COLORS["muted"],
-                font=font(12),
-                anchor="w",
-                justify="left",
-            )
-            files_label.pack(fill="x", padx=14, pady=(0, 8))
-            bind_wraplength(card, files_label, padding=36)
+    def _render_backup_card(self, entry):
+        card = ctk.CTkFrame(self._list_frame, **card_frame_kwargs())
+        card.pack(fill="x", pady=5)
 
-            # Actions
-            btn_frame = ctk.CTkFrame(card, fg_color="transparent")
-            btn_frame.pack(anchor="e", padx=14, pady=(0, 12))
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=14, pady=(12, 4))
+        ctk.CTkLabel(
+            top,
+            text=entry.timestamp,
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            top,
+            text=entry.description,
+            text_color=COLORS["primary"],
+            font=font(12, "bold"),
+        ).pack(side="left", padx=(10, 0))
 
-            ctk.CTkButton(
-                btn_frame,
-                text="回滚到此",
-                width=86,
-                command=lambda e=entry: self._restore(e),
-                **button_style("warning", compact=True),
-            ).pack(side="left", padx=(0, 5))
+        files_text = ", ".join(entry.files) if entry.files else "(无文件)"
+        files_label = ctk.CTkLabel(
+            card,
+            text=f"包含: {files_text}",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        files_label.pack(fill="x", padx=14, pady=(0, 8))
+        bind_wraplength(card, files_label, padding=36)
+
+        btn_frame = ctk.CTkFrame(card, fg_color="transparent")
+        btn_frame.pack(anchor="e", padx=14, pady=(0, 12))
+
+        ctk.CTkButton(
+            btn_frame,
+            text="回滚到此",
+            width=86,
+            command=lambda e=entry: self._restore(e),
+            **button_style("warning", compact=True),
+        ).pack(side="left", padx=(0, 5))
 
     def _build_local_config_zip_panel(self):
         panel = ctk.CTkFrame(self, **card_frame_kwargs())
