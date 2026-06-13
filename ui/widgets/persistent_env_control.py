@@ -18,12 +18,15 @@ class PersistentEnvControl(ctk.CTkFrame):
         delete_label: str = "删除",
         on_write=None,
         on_delete=None,
+        on_refresh_sources=None,
+        auto_refresh_sources: bool = True,
         **kwargs,
     ):
         super().__init__(master, **card_frame_kwargs(), **kwargs)
         self._sources = []
         self._on_write = on_write
         self._on_delete = on_delete
+        self._on_refresh_sources = on_refresh_sources
 
         if title:
             ctk.CTkLabel(
@@ -143,7 +146,8 @@ class PersistentEnvControl(ctk.CTkFrame):
         self.status_label.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self.status_label, padding=20)
 
-        self.refresh_sources()
+        if auto_refresh_sources:
+            self.refresh_sources()
 
     def env_name(self) -> str:
         return self.name_combo.get()
@@ -169,15 +173,26 @@ class PersistentEnvControl(ctk.CTkFrame):
         self.value_entry.set("")
         self.set_status("已清空当前值，变量名保留不变。")
 
-    def refresh_sources(self) -> None:
+    def set_sources_loading(self, message: str = "正在刷新来源...") -> None:
+        self._sources = []
+        self.source_combo.configure(values=[message])
+        self.source_combo.set(message)
+
+    def set_sources(self, sources) -> None:
         current = self.source_combo.get()
-        self._sources = persistent_env.list_env_import_sources()
+        self._sources = list(sources or [])
         labels = [source.display_label() for source in self._sources]
         self.source_combo.configure(values=labels if labels else ["(暂无可导入来源)"])
         if labels:
             self.source_combo.set(current if current in labels else labels[0])
         else:
             self.source_combo.set("(暂无可导入来源)")
+
+    def refresh_sources(self) -> None:
+        if self._on_refresh_sources:
+            self._on_refresh_sources(self)
+            return
+        self.set_sources(persistent_env.list_env_import_sources())
 
     def import_selected_source(self) -> None:
         label = self.source_combo.get()

@@ -18,6 +18,9 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._server_status_label = None
         self._local_env_control = None
         self._remote_env_control = None
+        self._source_refresh_generation = 0
+        self._server_refresh_generation = 0
+        self._server_profiles_by_name = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -48,6 +51,8 @@ class EnvTab(ctk.CTkScrollableFrame):
             delete_label="删除本机变量",
             on_write=self._write_local_env,
             on_delete=self._delete_local_env,
+            on_refresh_sources=lambda _control: self._refresh_import_sources(),
+            auto_refresh_sources=False,
         )
         self._local_env_control.pack(fill="x", padx=14, pady=(0, 12))
 
@@ -93,6 +98,8 @@ class EnvTab(ctk.CTkScrollableFrame):
             delete_label="删除 SSH 变量",
             on_write=self._write_remote_env,
             on_delete=self._delete_remote_env,
+            on_refresh_sources=lambda _control: self._refresh_import_sources(),
+            auto_refresh_sources=False,
         )
         self._remote_env_control.pack(fill="x", padx=14, pady=(0, 12))
 
@@ -103,10 +110,43 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._refresh_server_combo()
 
     def _refresh_import_sources(self):
-        if self._local_env_control:
-            self._local_env_control.refresh_sources()
-        if self._remote_env_control:
-            self._remote_env_control.refresh_sources()
+        self._source_refresh_generation += 1
+        generation = self._source_refresh_generation
+        for control in (self._local_env_control, self._remote_env_control):
+            if control:
+                control.set_sources_loading()
+
+        def worker():
+            try:
+                payload = {"ok": True, "sources": persistent_env.list_env_import_sources(), "error": ""}
+            except Exception as exc:
+                payload = {"ok": False, "sources": [], "error": str(exc)}
+
+            def finish():
+                if generation != self._source_refresh_generation:
+                    return
+                try:
+                    if not self.winfo_exists():
+                        return
+                    if not payload["ok"]:
+                        message = f"刷新导入来源失败: {payload['error']}"
+                        for control in (self._local_env_control, self._remote_env_control):
+                            if control:
+                                control.set_sources([])
+                                control.set_status(message, "error")
+                        return
+                    for control in (self._local_env_control, self._remote_env_control):
+                        if control:
+                            control.set_sources(payload["sources"])
+                except Exception:
+                    return
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="env-import-sources-refresh", daemon=True).start()
 
     def _write_local_env(self, control):
         try:
@@ -135,8 +175,44 @@ class EnvTab(ctk.CTkScrollableFrame):
     def _refresh_server_combo(self):
         if not self._server_combo:
             return
-        profiles = profile_manager.list_ssh_profiles()
+        self._server_refresh_generation += 1
+        generation = self._server_refresh_generation
+        self._server_combo.configure(values=["正在刷新服务器..."])
+        self._server_combo.set("正在刷新服务器...")
+        self._set_server_status("正在读取 SSH 服务器...")
+
+        def worker():
+            try:
+                payload = {"ok": True, "profiles": profile_manager.list_ssh_profiles(), "error": ""}
+            except Exception as exc:
+                payload = {"ok": False, "profiles": [], "error": str(exc)}
+
+            def finish():
+                if generation != self._server_refresh_generation:
+                    return
+                try:
+                    if not self.winfo_exists():
+                        return
+                    if not payload["ok"]:
+                        self._server_profiles_by_name = {}
+                        self._server_combo.configure(values=["(读取失败)"])
+                        self._server_combo.set("(读取失败)")
+                        self._set_server_status(f"读取 SSH 服务器失败: {payload['error']}", "error")
+                        return
+                    self._apply_server_profiles(payload["profiles"])
+                except Exception:
+                    return
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="env-server-refresh", daemon=True).start()
+
+    def _apply_server_profiles(self, profiles):
         names = [profile.name for profile in profiles]
+        self._server_profiles_by_name = {profile.name: profile for profile in profiles}
         current = self._server_combo.get()
         self._server_combo.configure(values=names if names else ["(暂无 SSH 服务器)"])
         if names:
@@ -201,7 +277,9 @@ class EnvTab(ctk.CTkScrollableFrame):
         if not server_name:
             return
 
-        profile = next((p for p in profile_manager.list_ssh_profiles() if p.name == server_name), None)
+        profile = self._server_profiles_by_name.get(server_name)
+        if not profile:
+            profile = next((p for p in profile_manager.list_ssh_profiles() if p.name == server_name), None)
         if not profile:
             message = f"未找到服务器: {server_name}"
             control.set_status(message, "error")
@@ -245,7 +323,9 @@ class EnvTab(ctk.CTkScrollableFrame):
         if not server_name:
             return
 
-        profile = next((p for p in profile_manager.list_ssh_profiles() if p.name == server_name), None)
+        profile = self._server_profiles_by_name.get(server_name)
+        if not profile:
+            profile = next((p for p in profile_manager.list_ssh_profiles() if p.name == server_name), None)
         if not profile:
             message = f"未找到服务器: {server_name}"
             control.set_status(message, "error")
