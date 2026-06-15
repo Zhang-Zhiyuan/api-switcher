@@ -1,12 +1,20 @@
+from __future__ import annotations
+
+import threading
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core.git_manager import GitManager
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style, textbox_style
 from ui.widgets.toast import show_toast
+
+
+def _git_manager_for_path(path: Path):
+    from core.git_manager import GitManager
+
+    return GitManager(path)
 
 
 class GitSnapshotHistoryDialog(ctk.CTkToplevel):
@@ -25,6 +33,8 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
         self._commits: list[dict] = []
         self._selected_hash = ""
         self._row_widgets: dict[str, ctk.CTkFrame] = {}
+        self._refresh_generation = 0
+        self._diff_generation = 0
         self._project_var = ctk.StringVar(value=str(Path(project_path or Path.cwd()).resolve()))
         self._count_var = ctk.StringVar(value="50")
         self._auto_only_var = ctk.BooleanVar(value=True)
@@ -187,8 +197,8 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
             raise ValueError("项目目录不能为空")
         return Path(raw).expanduser().resolve()
 
-    def _manager(self) -> GitManager:
-        return GitManager(self._project_path())
+    def _manager(self):
+        return _git_manager_for_path(self._project_path())
 
     def _count(self) -> int:
         try:
@@ -313,55 +323,99 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
     def _refresh(self):
         try:
             path = self._project_path()
-            if not path.exists() or not path.is_dir():
-                self._commits = []
-                self._selected_hash = ""
-                self._render_commit_list()
-                self._set_actions_enabled(False)
-                self._status_label.configure(text="项目目录不存在", text_color=COLORS["danger"])
-                self._set_text(f"项目目录不存在或不是目录:\n{path}")
-                return
-
-            manager = GitManager(path)
-            if not manager.is_git_repo():
-                self._commits = []
-                self._selected_hash = ""
-                self._render_commit_list()
-                self._set_actions_enabled(False)
-                self._status_label.configure(text="不是 Git 仓库", text_color=COLORS["warning"])
-                self._set_text("当前目录不是 Git 仓库。自动快照首次触发后会自动初始化仓库。")
-                return
-
+            count = self._count()
+            auto_only = bool(self._auto_only_var.get())
             previous_hash = self._selected_hash
-            self._commits = manager.get_recent_commits(
-                count=self._count(),
-                auto_only=bool(self._auto_only_var.get()),
-            )
-            if self._commits:
-                hashes = {self._commit_hash(commit) for commit in self._commits}
-                self._selected_hash = previous_hash if previous_hash in hashes else self._commit_hash(self._commits[0])
-                dirty = manager.has_changes()
-                dirty_text = "工作区有未提交更改" if dirty else "工作区干净"
-                self._status_label.configure(
-                    text=f"已读取 {len(self._commits)} 条快照，{dirty_text}",
-                    text_color=COLORS["warning"] if dirty else COLORS["muted"],
-                )
-                self._set_actions_enabled(True)
-                self._render_commit_list()
-                self._show_selected_commit(stat_only=True)
-            else:
-                self._selected_hash = ""
-                self._render_commit_list()
-                self._set_actions_enabled(False)
-                self._status_label.configure(text="没有找到匹配的快照", text_color=COLORS["warning"])
-                self._set_text("没有找到 Git 快照。可以取消“仅自动快照”，或确认该目录是否已经产生自动提交。")
         except Exception as e:
+            self._apply_refresh_error(f"读取 Git 快照失败: {e}", status="读取失败")
+            return
+
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        self._set_actions_enabled(False)
+        self._status_label.configure(text="正在读取快照...", text_color=COLORS["muted"])
+        self._set_text("正在后台读取 Git 快照，请稍候...")
+
+        def worker():
+            try:
+                if not path.exists() or not path.is_dir():
+                    payload = {"state": "bad_path", "path": path}
+                else:
+                    manager = _git_manager_for_path(path)
+                    if not manager.is_git_repo():
+                        payload = {"state": "not_repo"}
+                    else:
+                        commits = manager.get_recent_commits(count=count, auto_only=auto_only)
+                        dirty = manager.has_changes() if commits else False
+                        payload = {"state": "ok", "commits": commits, "dirty": dirty}
+            except Exception as exc:
+                payload = {"state": "error", "error": str(exc)}
+
+            def finish():
+                try:
+                    if generation != self._refresh_generation or not self.winfo_exists():
+                        return
+                    self._apply_refresh_payload(payload, previous_hash)
+                except Exception as exc:
+                    self._apply_refresh_error(f"读取 Git 快照失败: {exc}", status="读取失败")
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="git-snapshot-refresh", daemon=True).start()
+
+    def _apply_refresh_error(self, message: str, status: str = "读取失败"):
+        self._commits = []
+        self._selected_hash = ""
+        self._render_commit_list()
+        self._set_actions_enabled(False)
+        self._status_label.configure(text=status, text_color=COLORS["danger"])
+        self._set_text(message)
+
+    def _apply_refresh_payload(self, payload: dict, previous_hash: str):
+        state = payload.get("state")
+        if state == "bad_path":
+            path = payload.get("path")
             self._commits = []
             self._selected_hash = ""
             self._render_commit_list()
             self._set_actions_enabled(False)
-            self._status_label.configure(text="读取失败", text_color=COLORS["danger"])
-            self._set_text(f"读取 Git 快照失败: {e}")
+            self._status_label.configure(text="项目目录不存在", text_color=COLORS["danger"])
+            self._set_text(f"项目目录不存在或不是目录:\n{path}")
+            return
+        if state == "not_repo":
+            self._commits = []
+            self._selected_hash = ""
+            self._render_commit_list()
+            self._set_actions_enabled(False)
+            self._status_label.configure(text="不是 Git 仓库", text_color=COLORS["warning"])
+            self._set_text("当前目录不是 Git 仓库。自动快照首次触发后会自动初始化仓库。")
+            return
+        if state == "error":
+            self._apply_refresh_error(f"读取 Git 快照失败: {payload.get('error')}", status="读取失败")
+            return
+
+        self._commits = list(payload.get("commits") or [])
+        if self._commits:
+            hashes = {self._commit_hash(commit) for commit in self._commits}
+            self._selected_hash = previous_hash if previous_hash in hashes else self._commit_hash(self._commits[0])
+            dirty = bool(payload.get("dirty"))
+            dirty_text = "工作区有未提交更改" if dirty else "工作区干净"
+            self._status_label.configure(
+                text=f"已读取 {len(self._commits)} 条快照，{dirty_text}",
+                text_color=COLORS["warning"] if dirty else COLORS["muted"],
+            )
+            self._set_actions_enabled(True)
+            self._render_commit_list()
+            self._show_selected_commit(stat_only=True)
+        else:
+            self._selected_hash = ""
+            self._render_commit_list()
+            self._set_actions_enabled(False)
+            self._status_label.configure(text="没有找到匹配的快照", text_color=COLORS["warning"])
+            self._set_text("没有找到 Git 快照。可以取消“仅自动快照”，或确认该目录是否已经产生自动提交。")
 
     def _select_commit(self, commit_hash: str):
         self._selected_hash = commit_hash
@@ -378,10 +432,6 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
         if not commit:
             return
         commit_hash = self._commit_hash(commit)
-        ok, diff = self._manager().get_commit_diff(commit_hash, stat_only=stat_only)
-        if not ok:
-            self._set_text(diff)
-            return
         header = [
             f"Commit: {commit_hash}",
             f"短 hash: {commit.get('short_hash') or commit_hash[:8]}",
@@ -391,7 +441,37 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
             f"自动快照: {'是' if commit.get('auto_snapshot') else '否'}",
             "",
         ]
-        self._set_text("\n".join(header) + self._display_text(diff))
+        path = self._project_path()
+        self._diff_generation += 1
+        generation = self._diff_generation
+        self._set_text("\n".join(header) + "\n正在后台读取 diff，请稍候...")
+
+        def worker():
+            try:
+                ok, diff = _git_manager_for_path(path).get_commit_diff(commit_hash, stat_only=stat_only)
+                payload = {"ok": ok, "diff": diff}
+            except Exception as exc:
+                payload = {"ok": False, "diff": str(exc)}
+
+            def finish():
+                if generation != self._diff_generation:
+                    return
+                try:
+                    if not self.winfo_exists():
+                        return
+                    if not payload["ok"]:
+                        self._set_text(str(payload["diff"]))
+                        return
+                    self._set_text("\n".join(header) + self._display_text(str(payload["diff"])))
+                except Exception:
+                    pass
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="git-snapshot-diff", daemon=True).start()
 
     def _copy_hash(self):
         commit = self._selected_commit()

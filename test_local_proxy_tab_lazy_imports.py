@@ -249,3 +249,12 @@ def test_switch_preview_dialog_import_does_not_eagerly_load_preview_core():
             "keyring",
         ),
     )
+
+
+def test_git_snapshot_history_dialog_import_does_not_eagerly_load_git_core():
+    _run_import_check(
+        "ui.dialogs.git_snapshot_history_dialog",
+        (
+            "core.git_manager",
+        ),
+    )
