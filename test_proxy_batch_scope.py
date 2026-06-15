@@ -171,3 +171,21 @@ def test_proxy_node_picker_set_enabled_skips_redundant_render():
     picker.set_enabled(False)
     assert picker._enabled is False
     assert calls["render"] == 1
+
+
+def test_proxy_tabs_dispatch_worker_callbacks_through_top_level_queue():
+    calls = []
+    for tab_class in (LocalProxyTab, SSHTab):
+        tab = object.__new__(tab_class)
+        tab._destroyed = False
+        tab._ui_dispatch = lambda callback, tab_class=tab_class: calls.append(tab_class.__name__) or callback()
+        tab.after = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct after should not be used"))
+
+        tab._run_on_ui_thread(lambda tab_class=tab_class: calls.append(f"{tab_class.__name__}:callback"))
+
+    assert calls == [
+        "LocalProxyTab",
+        "LocalProxyTab:callback",
+        "SSHTab",
+        "SSHTab:callback",
+    ]

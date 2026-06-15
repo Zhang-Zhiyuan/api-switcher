@@ -36,6 +36,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._ui_dispatch = self._resolve_ui_dispatch()
         self._cards_frame = None
         self._server_refresh_generation = 0
         self._server_render_after_id = None
@@ -1114,6 +1115,25 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._cancel_proxy_periodic_update()
         super().destroy()
 
+    def _resolve_ui_dispatch(self):
+        try:
+            dispatch = getattr(self.winfo_toplevel(), "_run_on_ui_thread", None)
+        except Exception:
+            return None
+        return dispatch if callable(dispatch) else None
+
+    def _run_on_ui_thread(self, callback):
+        if getattr(self, "_destroyed", False):
+            return
+        dispatch = getattr(self, "_ui_dispatch", None)
+        if callable(dispatch):
+            dispatch(callback)
+            return
+        try:
+            self.after(0, callback)
+        except Exception:
+            pass
+
     def _cancel_initial_after_callbacks(self):
         for attr in (
             "_initial_refresh_after_id",
@@ -1192,11 +1212,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     return
                 self._render_server_refresh_payload(payload, generation)
 
-            try:
-                if not self._destroyed:
-                    self._server_refresh_finish_after_id = self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=worker, name="ssh-tab-refresh", daemon=True).start()
 
@@ -1921,10 +1937,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if schedule_periodic:
                     self._schedule_proxy_periodic_update(initial=True)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, name="ssh-proxy-cache-load", daemon=True).start()
 
@@ -2082,10 +2095,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_proxy_status(message, severity)
                 self._schedule_proxy_periodic_update()
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2222,10 +2232,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if show_message:
                     show_toast(self.winfo_toplevel(), message)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2309,10 +2316,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_proxy_status(message, severity)
                 show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2619,10 +2623,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_proxy_status(message, severity)
                 show_toast(self.winfo_toplevel(), message, is_error=bool(save_error or verify_failures))
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -3045,10 +3046,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if refresh:
                     self.refresh()
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -3547,10 +3545,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_remote_auto_busy(False)
                 on_done(payload)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 

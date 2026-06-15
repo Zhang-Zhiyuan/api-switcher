@@ -1,6 +1,7 @@
 import importlib
 import logging
 import os
+import queue
 import threading
 import time
 
@@ -90,6 +91,9 @@ class App(ctk.CTk):
         self.minsize(980, 620)
         self.configure(fg_color=COLORS["app_bg"])
         self._exit_requested = False
+        self._ui_thread_id = threading.get_ident()
+        self._ui_callback_queue = queue.Queue()
+        self._ui_callback_after_id = None
         self._tray_hint_shown = False
         self._tray_starting = False
         self._close_dialog = None
@@ -285,6 +289,7 @@ class App(ctk.CTk):
             font=font(11),
         )
         self._status.pack(anchor="w", padx=10, pady=6)
+        self._schedule_ui_callback_pump(delay_ms=50)
 
         self.claude_switch.configure(values=["正在加载..."], state="disabled")
         self.codex_switch.configure(values=["正在加载..."], state="disabled")
@@ -966,6 +971,13 @@ class App(ctk.CTk):
             except Exception:
                 pass
             self._quick_switch_load_after_id = None
+        if self._ui_callback_after_id:
+            try:
+                self.after_cancel(self._ui_callback_after_id)
+            except Exception:
+                pass
+            self._ui_callback_after_id = None
+        self._clear_ui_callback_queue()
 
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             tab = getattr(self, attr, None)
@@ -1006,7 +1018,61 @@ class App(ctk.CTk):
 
         self._run_on_ui_thread(refresh_startup)
 
+    def _schedule_ui_callback_pump(self, delay_ms: int = 35):
+        if self._exit_requested or self._ui_callback_after_id:
+            return
+        try:
+            self._ui_callback_after_id = self.after(max(1, int(delay_ms)), self._drain_ui_callback_queue)
+        except Exception as e:
+            logger.debug("Failed to schedule UI callback pump: %s", e)
+            self._ui_callback_after_id = None
+
+    def _drain_ui_callback_queue(self):
+        self._ui_callback_after_id = None
+        callbacks = getattr(self, "_ui_callback_queue", None)
+        if callbacks is None:
+            return
+        if self._exit_requested:
+            self._clear_ui_callback_queue()
+            return
+        processed = 0
+        while processed < 80:
+            try:
+                callback = callbacks.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+            try:
+                if not self._exit_requested and self.winfo_exists():
+                    callback()
+            except Exception as e:
+                logger.debug("UI callback failed: %s", e, exc_info=True)
+        self._schedule_ui_callback_pump(delay_ms=1 if processed >= 80 else 35)
+
+    def _clear_ui_callback_queue(self):
+        callbacks = getattr(self, "_ui_callback_queue", None)
+        if callbacks is None:
+            return
+        while True:
+            try:
+                callbacks.get_nowait()
+            except queue.Empty:
+                return
+
     def _run_on_ui_thread(self, callback):
+        if self._exit_requested:
+            return
+        if getattr(self, "_ui_thread_id", None) == threading.get_ident():
+            try:
+                if self.winfo_exists():
+                    self.after(0, callback)
+            except Exception as e:
+                logger.debug("Failed to schedule UI callback: %s", e)
+            return
+        callbacks = getattr(self, "_ui_callback_queue", None)
+        if callbacks is not None:
+            callbacks.put(callback)
+            return
         try:
             if self.winfo_exists():
                 self.after(0, callback)

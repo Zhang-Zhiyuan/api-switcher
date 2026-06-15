@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import queue
 import sys
 import time
 import threading
@@ -134,6 +135,80 @@ def test_lazy_tray_manager_status_check_does_not_load_tray_core():
 
     assert manager.is_running() is False
     assert "core.tray_manager" not in sys.modules
+
+
+def test_run_on_ui_thread_queues_worker_callbacks_until_ui_pump():
+    callbacks = []
+    after_calls = []
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._ui_thread_id = threading.get_ident()
+    app._ui_callback_queue = queue.Queue()
+    app._ui_callback_after_id = None
+    app.winfo_exists = lambda: True
+    app.after = lambda delay, callback: after_calls.append((delay, callback)) or "after-id"
+
+    worker_finished = threading.Event()
+
+    def worker():
+        app_module.App._run_on_ui_thread(app, lambda: callbacks.append("done"))
+        worker_finished.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    assert worker_finished.wait(1)
+    assert callbacks == []
+    assert after_calls == []
+
+    app_module.App._drain_ui_callback_queue(app)
+
+    assert callbacks == ["done"]
+    assert len(after_calls) == 1
+    assert after_calls[0][0] == 35
+    assert after_calls[0][1].__self__ is app
+    assert after_calls[0][1].__func__ is app_module.App._drain_ui_callback_queue
+
+
+def test_shutdown_clears_pending_ui_callbacks(monkeypatch):
+    import core
+
+    local_proxy_module = ModuleType("core.local_proxy")
+    local_proxy_module.local_proxy_keep_running_on_exit_enabled = lambda: True
+    ssh_module = ModuleType("core.ssh_manager")
+
+    class FakeSSHManager:
+        def disconnect_all(self):
+            pass
+
+    ssh_module.ssh_manager = FakeSSHManager()
+    monkeypatch.setitem(sys.modules, "core.local_proxy", local_proxy_module)
+    monkeypatch.setitem(sys.modules, "core.ssh_manager", ssh_module)
+    monkeypatch.setattr(core, "local_proxy", local_proxy_module, raising=False)
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = True
+    app._close_dialog = None
+    app._pending_tab_load_after_ids = {}
+    app._tab_class_loading = set()
+    app._tab_load_generations = {}
+    app._quick_switch_load_after_id = None
+    app._ui_callback_after_id = "after-id"
+    app._ui_callback_queue = queue.Queue()
+    app._ui_callback_queue.put(lambda: None)
+    app._proxy_quality_dialog = None
+    app.tray_manager = type("Tray", (), {"stop": lambda self: None})()
+    app.after_cancel = lambda after_id: callbacks.append(after_id)
+    app.winfo_exists = lambda: True
+    callbacks = []
+    for _label, attr, _module_name, _class_name, _eager in app_module.TAB_SPECS:
+        setattr(app, attr, None)
+
+    app_module.App._shutdown_runtime_resources(app)
+
+    assert callbacks == ["after-id"]
+    assert app._ui_callback_after_id is None
+    assert app._ui_callback_queue.empty()
 
 
 def test_switch_preview_build_runs_off_ui_thread(monkeypatch):

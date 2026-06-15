@@ -24,6 +24,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._destroyed = False
+        self._ui_dispatch = self._resolve_ui_dispatch()
         self._subscription_entry = None
         self._subscription_profile_combo = None
         self._subscription_name_entry = None
@@ -603,12 +605,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._node_text.pack(fill="both", expand=True)
 
     def destroy(self):
+        self._destroyed = True
         self._cancel_deferred_widget_builds()
         self._cancel_initial_refresh()
         self._cancel_saved_subscription_refresh()
         self._cancel_startup_refresh()
         self._cancel_periodic_update()
         super().destroy()
+
+    def _resolve_ui_dispatch(self):
+        try:
+            dispatch = getattr(self.winfo_toplevel(), "_run_on_ui_thread", None)
+        except Exception:
+            return None
+        return dispatch if callable(dispatch) else None
+
+    def _run_on_ui_thread(self, callback):
+        if getattr(self, "_destroyed", False):
+            return
+        dispatch = getattr(self, "_ui_dispatch", None)
+        if callable(dispatch):
+            dispatch(callback)
+            return
+        try:
+            self.after(0, callback)
+        except Exception:
+            pass
 
     def _cancel_deferred_widget_builds(self):
         for attr in ("_subscription_picker_after_id", "_node_text_after_id"):
@@ -1187,10 +1209,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if schedule_periodic:
                     self._schedule_periodic_update(initial=True)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, name="local-proxy-cache-load", daemon=True).start()
 
@@ -1325,10 +1344,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._set_status(f"Win11 代理定时热更新完成；{payload['apply']}", severity)
                 self._schedule_periodic_update()
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1464,10 +1480,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if show_message:
                     show_toast(self.winfo_toplevel(), message)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1550,10 +1563,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._set_status(message, severity)
                 show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1758,10 +1768,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._set_status(message, severity)
                 show_toast(self.winfo_toplevel(), message, is_error=bool(save_error or verify_error))
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1845,10 +1852,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._set_status(message, severity)
                 show_toast(self.winfo_toplevel(), message, is_error=bool(save_error))
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1954,10 +1958,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._set_status(message, severity)
                 show_toast(self.winfo_toplevel(), message, is_error=severity == "warning")
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
