@@ -103,3 +103,62 @@ def test_common_tab_import_does_not_eagerly_load_config_cores():
             "keyring",
         ),
     )
+
+
+def test_browser_tab_import_does_not_eagerly_load_browser_cores():
+    _run_import_check(
+        "ui.tabs.browser_tab",
+        (
+            "core.profile_manager",
+            "core.browser_data_manager",
+            "core.browser_launcher",
+            "core.browser_profile_manager",
+            "ui.dialogs.browser_profile_editor",
+            "ui.dialogs.bulk_operation_result_dialog",
+            "core.security",
+            "keyring",
+        ),
+    )
+
+
+def test_backup_tab_import_does_not_eagerly_load_backup_cores():
+    _run_import_check(
+        "ui.tabs.backup_tab",
+        (
+            "core.backup_manager",
+            "core.local_config_bundle",
+            "core.portable_migration",
+            "core.profile_manager",
+            "core.security",
+            "ui.dialogs.password_dialog",
+            "keyring",
+        ),
+    )
+
+
+def test_claude_tab_import_does_not_eagerly_load_profile_cores():
+    _run_import_check(
+        "ui.tabs.claude_tab",
+        (
+            "core.profile_manager",
+            "core.providers",
+            "ui.dialogs.profile_editor",
+            "models.profile",
+            "core.security",
+            "keyring",
+        ),
+    )
+
+
+def test_codex_tab_import_does_not_eagerly_load_profile_cores():
+    _run_import_check(
+        "ui.tabs.codex_tab",
+        (
+            "core.profile_manager",
+            "core.providers",
+            "ui.dialogs.profile_editor",
+            "models.profile",
+            "core.security",
+            "keyring",
+        ),
+    )
