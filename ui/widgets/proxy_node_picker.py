@@ -1,7 +1,31 @@
+import importlib
+import threading
+
 import customtkinter as ctk
 
-from core import remote_proxy
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style
+
+
+class _LazyModule:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+        self._module = None
+        self._lock = threading.RLock()
+
+    def _load(self):
+        module = self._module
+        if module is not None:
+            return module
+        with self._lock:
+            if self._module is None:
+                self._module = importlib.import_module(self._module_name)
+            return self._module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+remote_proxy = _LazyModule("core.remote_proxy")
 
 
 class ProxyNodePicker(ctk.CTkFrame):

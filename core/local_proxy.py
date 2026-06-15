@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser
 from core.atomic_io import atomic_write_bytes, atomic_write_text
+from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITE_IDS, LOCAL_PROXY_BUILTIN_SITES
 
 
 DEFAULT_LOCAL_MIXED_PORT = 17897
@@ -45,49 +46,6 @@ LOCAL_AI_PROBE_TARGETS = (
     ("Claude/Anthropic", "https://api.anthropic.com/"),
     ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
 )
-LOCAL_PROXY_BUILTIN_SITES = (
-    {
-        "id": "youtube",
-        "label": "YouTube",
-        "targets": ("youtube.com", "youtu.be", "ytimg.com", "googlevideo.com"),
-    },
-    {
-        "id": "google",
-        "label": "Google 搜索/账号",
-        "targets": ("google.com", "gstatic.com", "googleapis.com", "googleusercontent.com"),
-    },
-    {
-        "id": "github",
-        "label": "GitHub",
-        "targets": ("github.com", "githubusercontent.com", "githubassets.com", "github.io"),
-    },
-    {
-        "id": "huggingface",
-        "label": "Hugging Face",
-        "targets": ("huggingface.co", "hf.co"),
-    },
-    {
-        "id": "x_twitter",
-        "label": "X / Twitter",
-        "targets": ("x.com", "twitter.com", "twimg.com", "t.co"),
-    },
-    {
-        "id": "reddit",
-        "label": "Reddit",
-        "targets": ("reddit.com", "redd.it", "redditstatic.com", "redditmedia.com"),
-    },
-    {
-        "id": "discord",
-        "label": "Discord",
-        "targets": ("discord.com", "discordapp.com", "discord.gg", "discordcdn.com"),
-    },
-    {
-        "id": "telegram",
-        "label": "Telegram",
-        "targets": ("telegram.org", "t.me", "tdesktop.com"),
-    },
-)
-LOCAL_PROXY_BUILTIN_SITE_IDS = {str(item["id"]) for item in LOCAL_PROXY_BUILTIN_SITES}
 LOCAL_PROXY_DOMAIN_PATTERN = re.compile(
     r"^(?=.{1,253}$)(?!-)[a-z0-9][a-z0-9-]{0,62}(\.[a-z0-9][a-z0-9-]{0,62})+$",
     re.IGNORECASE,
