@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import copy
 import threading
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from config.paths import STORAGE_DIR
 from core import security
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_write_text, replace_with_retry
 from core.network_diagnostic_constants import (
     DEFAULT_ENABLED,
     ENV_KEYS,
@@ -56,6 +60,7 @@ __all__ = [
 
 
 SETTINGS_FILE = STORAGE_DIR / "network_diagnostics.json"
+logger = logging.getLogger(__name__)
 _SETTINGS_CACHE_LOCK = threading.RLock()
 _SETTINGS_CACHE: NetworkDiagnosticSettings | None = None
 _SETTINGS_CACHE_SIGNATURE: tuple | None = None
@@ -98,6 +103,7 @@ def load_settings() -> NetworkDiagnosticSettings:
             return _clone_settings(_SETTINGS_CACHE)
 
     data = _read_settings_file()
+    signature = _settings_signature()
     raw_services = data.get("services") if isinstance(data.get("services"), dict) else {}
     settings = NetworkDiagnosticSettings()
 
@@ -143,10 +149,14 @@ def save_settings(settings: NetworkDiagnosticSettings) -> None:
             "key_refs": refs,
         }
 
-    for ref in existing_refs - saved_refs:
-        security.delete_secret(ref)
-
     atomic_write_text(SETTINGS_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    for ref in existing_refs - saved_refs:
+        try:
+            security.delete_secret(ref)
+        except Exception as exc:
+            logger.warning("Failed to delete stale network diagnostic secret %s: %s", ref, exc)
+
     with _SETTINGS_CACHE_LOCK:
         _cache_settings(settings)
 
@@ -216,9 +226,35 @@ def _read_settings_file() -> dict[str, Any]:
         return {}
     try:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError as exc:
+        logger.warning("Failed to read network diagnostic settings %s: %s", SETTINGS_FILE, exc)
         return {}
-    return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("Network diagnostic settings file is corrupt: %s", exc)
+        _quarantine_corrupt_settings_file(SETTINGS_FILE)
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("Network diagnostic settings root is invalid, quarantining %s", SETTINGS_FILE)
+        _quarantine_corrupt_settings_file(SETTINGS_FILE)
+        return {}
+    return data
+
+
+def _quarantine_corrupt_settings_file(path: Path) -> Path | None:
+    try:
+        if not path.exists():
+            return None
+    except OSError as exc:
+        logger.warning("Failed to inspect corrupt network diagnostic settings %s: %s", path, exc)
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = path.with_name(f"{path.name}.corrupt-{timestamp}-{uuid.uuid4().hex[:8]}")
+    try:
+        replace_with_retry(path, target)
+    except OSError as exc:
+        logger.warning("Failed to quarantine corrupt network diagnostic settings %s: %s", path, exc)
+        return None
+    return target
 
 
 def clear_settings_cache() -> None:
