@@ -1,14 +1,28 @@
+from __future__ import annotations
+
 import json
+import threading
+from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
-from core.auto_continue.diagnostics import (
-    AutoContinueLogEvent,
-    format_auto_continue_diagnostics,
-    load_auto_continue_events,
-)
 from ui.theme import COLORS, button_style, card_frame_kwargs, center_window, combo_style, font, textbox_style
 from ui.widgets.toast import show_toast
+
+if TYPE_CHECKING:
+    from core.auto_continue.diagnostics import AutoContinueLogEvent
+
+
+def _load_auto_continue_events(provider: str, limit: int):
+    from core.auto_continue.diagnostics import load_auto_continue_events
+
+    return load_auto_continue_events(provider, limit)
+
+
+def _format_auto_continue_diagnostics(provider: str, limit: int) -> str:
+    from core.auto_continue.diagnostics import format_auto_continue_diagnostics
+
+    return format_auto_continue_diagnostics(provider, limit)
 
 
 class AutoContinueLogsDialog(ctk.CTkToplevel):
@@ -30,6 +44,7 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         self._selected_index: int | None = None
         self._row_widgets: list[ctk.CTkFrame] = []
         self._diagnostics_text = ""
+        self._refresh_generation = 0
 
         self._build_ui()
         center_window(self, master)
@@ -175,22 +190,59 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         self._git_value.configure(text=str(git_count))
 
     def _refresh(self):
-        try:
-            self._events = load_auto_continue_events(self.provider, self._limit())
-            self._diagnostics_text = format_auto_continue_diagnostics(self.provider, self._limit())
-            self._update_stats()
-            self._apply_filter()
-            self._status_label.configure(
-                text=f"{self.provider} 日志已刷新，当前显示 {len(self._filtered_events)} 条",
-                text_color=COLORS["muted"],
-            )
-        except Exception as e:
-            self._events = []
-            self._filtered_events = []
-            self._diagnostics_text = f"读取失败: {e}"
-            self._render_events()
-            self._set_detail(f"读取失败: {e}")
-            self._status_label.configure(text="读取失败", text_color=COLORS["danger"])
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        limit = self._limit()
+        self._status_label.configure(text="正在后台读取自动续跑日志...", text_color=COLORS["muted"])
+        self._set_detail("正在后台读取自动续跑日志，请稍候...")
+
+        def worker():
+            try:
+                payload = {
+                    "ok": True,
+                    "events": _load_auto_continue_events(self.provider, limit),
+                    "diagnostics": _format_auto_continue_diagnostics(self.provider, limit),
+                    "error": "",
+                }
+            except Exception as exc:
+                payload = {"ok": False, "events": [], "diagnostics": f"读取失败: {exc}", "error": str(exc)}
+
+            def finish():
+                try:
+                    if generation != self._refresh_generation or not self.winfo_exists():
+                        return
+                    self._apply_refresh_payload(payload)
+                except Exception as exc:
+                    self._apply_refresh_error(str(exc))
+
+            try:
+                self.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name=f"auto-continue-logs-{self.provider}", daemon=True).start()
+
+    def _apply_refresh_payload(self, payload: dict):
+        if not payload.get("ok"):
+            self._apply_refresh_error(str(payload.get("error") or "读取失败"))
+            return
+
+        self._events = list(payload.get("events") or [])
+        self._diagnostics_text = str(payload.get("diagnostics") or "")
+        self._update_stats()
+        self._apply_filter()
+        self._status_label.configure(
+            text=f"{self.provider} 日志已刷新，当前显示 {len(self._filtered_events)} 条",
+            text_color=COLORS["muted"],
+        )
+
+    def _apply_refresh_error(self, error: str):
+        self._events = []
+        self._filtered_events = []
+        self._diagnostics_text = f"读取失败: {error}"
+        self._render_events()
+        self._set_detail(f"读取失败: {error}")
+        self._status_label.configure(text="读取失败", text_color=COLORS["danger"])
 
     def _apply_filter(self):
         selected = self._filter_combo.get()
@@ -345,7 +397,7 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         self._set_detail(self._event_detail(self._filtered_events[index]))
 
     def _copy_diagnostics(self):
-        text = self._diagnostics_text or format_auto_continue_diagnostics(self.provider, self._limit())
+        text = self._diagnostics_text or _format_auto_continue_diagnostics(self.provider, self._limit())
         self.clipboard_clear()
         self.clipboard_append(text)
         show_toast(self, "自动续跑诊断信息已复制")

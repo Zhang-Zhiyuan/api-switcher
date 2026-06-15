@@ -258,3 +258,13 @@ def test_git_snapshot_history_dialog_import_does_not_eagerly_load_git_core():
             "core.git_manager",
         ),
     )
+
+
+def test_auto_continue_logs_dialog_import_does_not_eagerly_load_diagnostics():
+    _run_import_check(
+        "ui.dialogs.auto_continue_logs_dialog",
+        (
+            "core.auto_continue.diagnostics",
+            "core.auto_continue.manager",
+        ),
+    )
