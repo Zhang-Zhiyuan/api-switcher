@@ -15,6 +15,75 @@ from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 
 
+PROFILE_RENDER_BATCH_SIZE = 6
+
+
+def _diagnosis_bool(diagnosis: dict | None, key: str, default: bool = False) -> bool:
+    if not isinstance(diagnosis, dict):
+        return default
+    return bool(diagnosis.get(key, default))
+
+
+def _diagnosis_text(diagnosis: dict | None, key: str) -> str:
+    if not isinstance(diagnosis, dict):
+        return ""
+    value = diagnosis.get(key)
+    return str(value).strip() if value is not None else ""
+
+
+def _browser_diagnosis_matches_filter(diagnosis: dict | None, filter_mode: str) -> bool:
+    if filter_mode == "all":
+        return True
+    valid = _diagnosis_bool(diagnosis, "valid")
+    executable_found = _diagnosis_bool(diagnosis, "executable_found")
+    profile_path_exists = _diagnosis_bool(diagnosis, "profile_path_exists")
+    browser_running = _diagnosis_bool(diagnosis, "browser_running")
+    if filter_mode == "issues":
+        return (not valid) or (not executable_found) or (not profile_path_exists) or browser_running
+    if filter_mode == "launchable":
+        return valid and executable_found and profile_path_exists
+    if filter_mode == "resettable":
+        return _diagnosis_bool(diagnosis, "can_full_reset")
+    return True
+
+
+def _browser_profiles_summary(profiles, diagnoses: dict, selected_names: set[str]) -> dict:
+    profile_names = {p.name for p in profiles}
+    diagnosis_items = [diagnoses.get(name, {}) for name in profile_names]
+    issues_count = sum(1 for d in diagnosis_items if _browser_diagnosis_matches_filter(d, "issues"))
+    launchable_count = sum(1 for d in diagnosis_items if _browser_diagnosis_matches_filter(d, "launchable"))
+    resettable_count = sum(1 for d in diagnosis_items if _browser_diagnosis_matches_filter(d, "resettable"))
+    return {
+        "visible_names": profile_names,
+        "total_count": len(profile_names),
+        "issues_count": issues_count,
+        "launchable_count": launchable_count,
+        "resettable_count": resettable_count,
+        "selected_count": len(selected_names & profile_names),
+    }
+
+
+def _visible_profile_names(profiles, diagnoses: dict, filter_mode: str) -> list[str]:
+    return [
+        p.name
+        for p in profiles
+        if _browser_diagnosis_matches_filter(diagnoses.get(p.name, {}), filter_mode)
+    ]
+
+
+def _diagnosis_failure(error: Exception) -> dict[str, bool | str]:
+    message = str(error).strip() or error.__class__.__name__
+    return {
+        "valid": False,
+        "executable_found": False,
+        "profile_path_exists": False,
+        "browser_running": False,
+        "can_full_reset": False,
+        "validation_error": f"诊断失败: {message}",
+        "full_reset_reason": "诊断失败，暂不允许整目录清理",
+    }
+
+
 class BrowserTab(ctk.CTkScrollableFrame):
     """Tab for managing Chrome / Edge browser profiles."""
 
@@ -32,7 +101,17 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._filter_mode = "all"
         self._selected_names: set[str] = set()
         self._refresh_generation = 0
+        self._profile_render_generation = 0
+        self._profile_render_after_id = None
+        self._cached_profiles = ()
+        self._cached_active = ""
+        self._cached_diagnoses = {}
+        self._has_profile_cache = False
         self._build_ui()
+
+    def destroy(self):
+        self._cancel_profile_render()
+        super().destroy()
 
     def _toast(self, message: str, is_error: bool = False):
         """Helper to show toast messages."""
@@ -111,6 +190,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
             return
         self._refresh_generation += 1
         generation = self._refresh_generation
+        self._cancel_profile_render()
         for w in self._cards_frame.winfo_children():
             w.destroy()
         if self._stats_label:
@@ -125,9 +205,14 @@ class BrowserTab(ctk.CTkScrollableFrame):
         def worker():
             try:
                 summary = profile_manager.get_browser_profiles_summary()
-                profiles = summary["profiles"]
-                active = summary["active"]
-                diagnoses = {p.name: browser_profile_manager.diagnose_profile(p) for p in profiles}
+                profiles = tuple(summary.get("profiles") or ())
+                active = summary.get("active") or ""
+                diagnoses = {}
+                for p in profiles:
+                    try:
+                        diagnoses[p.name] = browser_profile_manager.diagnose_profile(p)
+                    except Exception as exc:
+                        diagnoses[p.name] = _diagnosis_failure(exc)
                 payload = {"ok": True, "profiles": profiles, "active": active, "diagnoses": diagnoses, "error": ""}
             except Exception as exc:
                 payload = {"ok": False, "profiles": [], "active": "", "diagnoses": {}, "error": str(exc)}
@@ -137,6 +222,10 @@ class BrowserTab(ctk.CTkScrollableFrame):
                     if not self.winfo_exists() or generation != self._refresh_generation:
                         return
                     if not payload["ok"]:
+                        self._has_profile_cache = False
+                        self._cached_profiles = ()
+                        self._cached_active = ""
+                        self._cached_diagnoses = {}
                         for w in self._cards_frame.winfo_children():
                             w.destroy()
                         if self._stats_label:
@@ -149,6 +238,10 @@ class BrowserTab(ctk.CTkScrollableFrame):
                             self.refresh,
                         ).pack(fill="x", pady=(12, 4))
                         return
+                    self._cached_profiles = tuple(payload["profiles"])
+                    self._cached_active = payload["active"]
+                    self._cached_diagnoses = dict(payload["diagnoses"])
+                    self._has_profile_cache = True
                     self._render_profiles(payload["profiles"], payload["active"], payload["diagnoses"])
                 except Exception:
                     return
@@ -160,23 +253,28 @@ class BrowserTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=worker, name="browser-profile-diagnostics", daemon=True).start()
 
+    def _cancel_profile_render(self):
+        self._profile_render_generation += 1
+        if not self._profile_render_after_id:
+            return
+        try:
+            self.after_cancel(self._profile_render_after_id)
+        except Exception:
+            pass
+        self._profile_render_after_id = None
+
     def _render_profiles(self, profiles, active, diagnoses):
         if not self._cards_frame:
             return
+        self._cancel_profile_render()
+        profiles = tuple(profiles or ())
+        diagnoses = dict(diagnoses or {})
         for w in self._cards_frame.winfo_children():
             w.destroy()
 
-        existing_names = {p.name for p in profiles}
-        self._selected_names.intersection_update(existing_names)
-
-        total_count = len(profiles)
-        issues_count = sum(1 for d in diagnoses.values() if (not d["valid"]) or (not d["executable_found"]) or (not d["profile_path_exists"]) or d["browser_running"])
-        launchable_count = sum(1 for d in diagnoses.values() if d["valid"] and d["executable_found"] and d["profile_path_exists"])
-        resettable_count = sum(1 for d in diagnoses.values() if d["can_full_reset"])
-        selected_count = len(self._selected_names)
-        self._stats_label.configure(
-            text=f"总数 {total_count}  |  异常 {issues_count}  |  可启动 {launchable_count}  |  可重置 {resettable_count}  |  已选中 {selected_count}"
-        )
+        summary = _browser_profiles_summary(profiles, diagnoses, self._selected_names)
+        self._selected_names.intersection_update(summary["visible_names"])
+        self._update_stats_label(profiles, diagnoses)
 
         if not profiles:
             EmptyState(
@@ -188,87 +286,13 @@ class BrowserTab(ctk.CTkScrollableFrame):
             ).pack(fill="x", pady=(12, 4))
             return
 
-        visible_count = 0
-        for p in profiles:
-            is_active = p.name == active
-            diagnosis = diagnoses[p.name]
-            if not self._matches_filter(diagnosis):
-                continue
-            visible_count += 1
-            card = ctk.CTkFrame(
-                self._cards_frame,
-                **card_frame_kwargs(COLORS["primary"] if is_active else COLORS["border_soft"]),
-            )
-            card.pack(fill="x", pady=5)
+        visible_profiles = [
+            p
+            for p in profiles
+            if _browser_diagnosis_matches_filter(diagnoses.get(p.name, {}), self._filter_mode)
+        ]
 
-            top = ctk.CTkFrame(card, fg_color="transparent")
-            top.pack(fill="x", padx=14, pady=(12, 4))
-            selected_var = ctk.BooleanVar(value=p.name in self._selected_names)
-            ctk.CTkCheckBox(top, text="", width=20, checkbox_width=18, checkbox_height=18, variable=selected_var,
-                            command=lambda name=p.name, var=selected_var: self._toggle_selected(name, var.get())).pack(side="left", padx=(0, 6))
-            ctk.CTkLabel(top, text=p.name, text_color=COLORS["text"], font=font(15, "bold")).pack(side="left")
-            if is_active:
-                ctk.CTkLabel(
-                    top,
-                    text="当前",
-                    fg_color=COLORS["primary"],
-                    corner_radius=4,
-                    text_color=COLORS["text"],
-                    font=font(11, "bold"),
-                    padx=7,
-                    pady=1,
-                ).pack(side="left", padx=(8, 0))
-
-            info_frame = ctk.CTkFrame(card, fg_color="transparent")
-            info_frame.pack(fill="x", padx=14, pady=(0, 8))
-            info_lines = [
-                f"浏览器: {p.browser_type}  |  模式: {p.profile_mode}  |  默认目标: {p.start_target}",
-                f"隔离启动: Default 分区  |  窗口 {p.launch_width}x{p.launch_height}  |  语言 {p.launch_language or '浏览器默认'}",
-                f"路径: {p.user_data_dir}",
-                f"可执行文件: {p.browser_executable or '(自动探测)'}",
-                f"诊断: 配置{'正常' if diagnosis['valid'] else '异常'}  |  EXE {'就绪' if diagnosis['executable_found'] else '缺失'}  |  路径 {'存在' if diagnosis['profile_path_exists'] else '缺失'}  |  占用 {'是' if diagnosis['browser_running'] else '否'}",
-                f"整目录清理: {'允许' if diagnosis['can_full_reset'] else '不允许'}",
-                "设备一致性: 可保持站点数据隔离；不承诺跨机器硬件/系统指纹完全相同",
-            ]
-            if not diagnosis["valid"] and diagnosis["validation_error"]:
-                info_lines.append(f"配置问题: {diagnosis['validation_error']}")
-            if not diagnosis["can_full_reset"] and diagnosis["full_reset_reason"]:
-                info_lines.append(f"重置限制: {diagnosis['full_reset_reason']}")
-            if p.notes:
-                info_lines.append(f"备注: {p.notes}")
-            for line in info_lines:
-                info_label = ctk.CTkLabel(
-                    info_frame,
-                    text=line,
-                    text_color=COLORS["muted"],
-                    font=font(12),
-                    anchor="w",
-                    justify="left",
-                )
-                info_label.pack(fill="x")
-                bind_wraplength(info_frame, info_label, padding=4)
-
-            btn_frame = ctk.CTkFrame(card, fg_color="transparent")
-            btn_frame.pack(fill="x", padx=14, pady=(0, 12))
-
-            btn_row1 = ctk.CTkFrame(btn_frame, fg_color="transparent")
-            btn_row1.pack(fill="x", pady=(0, 4))
-            ctk.CTkButton(btn_row1, text="启动 ChatGPT", width=96, command=lambda prof=p: self._launch(prof, "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row1, text="启动 Claude", width=96, command=lambda prof=p: self._launch(prof, "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row1, text="清理 GPT", width=76, command=lambda prof=p: self._clear_sites(prof, "chatgpt"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row1, text="清理 Claude", width=86, command=lambda prof=p: self._clear_sites(prof, "claude"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row1, text="清理两者", width=86, command=lambda prof=p: self._clear_sites(prof, "both"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
-            if diagnosis["can_full_reset"]:
-                ctk.CTkButton(btn_row1, text="整目录清理", width=96, command=lambda prof=p: self._full_reset(prof), **button_style("danger", compact=True)).pack(side="left", padx=(0, 6))
-
-            btn_row2 = ctk.CTkFrame(btn_frame, fg_color="transparent")
-            btn_row2.pack(fill="x")
-            ctk.CTkButton(btn_row2, text="打开目录", width=78, command=lambda prof=p: self._open_dir(prof), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row2, text="复制", width=58, command=lambda prof=p: self._clone_profile(prof), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row2, text="编辑", width=58, command=lambda name=p.name: self._edit_profile(name), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-            ctk.CTkButton(btn_row2, text="删除", width=58, command=lambda name=p.name: self._delete_profile(name), **button_style("danger", compact=True)).pack(side="left")
-
-        if visible_count == 0:
+        if not visible_profiles:
             EmptyState(
                 self._cards_frame,
                 "没有匹配的 Profile",
@@ -276,46 +300,182 @@ class BrowserTab(ctk.CTkScrollableFrame):
                 "重置筛选",
                 self._reset_filter,
             ).pack(fill="x", pady=(12, 4))
+            return
+
+        self._profile_render_generation += 1
+        render_generation = self._profile_render_generation
+        self._render_profile_batch(visible_profiles, active, diagnoses, render_generation, 0)
+
+    def _update_stats_label(self, profiles, diagnoses):
+        if not self._stats_label:
+            return
+        summary = _browser_profiles_summary(tuple(profiles or ()), dict(diagnoses or {}), self._selected_names)
+        self._stats_label.configure(
+            text=(
+                f"总数 {summary['total_count']}  |  异常 {summary['issues_count']}  |  "
+                f"可启动 {summary['launchable_count']}  |  可重置 {summary['resettable_count']}  |  "
+                f"已选中 {summary['selected_count']}"
+            )
+        )
+
+    def _render_profile_batch(self, profiles, active, diagnoses, generation: int, start: int):
+        if generation != self._profile_render_generation or not self._cards_frame:
+            return
+        end = min(start + PROFILE_RENDER_BATCH_SIZE, len(profiles))
+        for p in profiles[start:end]:
+            self._render_profile_card(p, active, diagnoses.get(p.name, {}))
+        if end >= len(profiles):
+            self._profile_render_after_id = None
+            return
+
+        try:
+            self._profile_render_after_id = self.after(
+                1,
+                lambda: self._render_profile_batch(profiles, active, diagnoses, generation, end),
+            )
+        except Exception:
+            self._profile_render_after_id = None
+
+    def _render_profile_card(self, p, active, diagnosis):
+        if not self._cards_frame:
+            return
+        is_active = p.name == active
+        valid = _diagnosis_bool(diagnosis, "valid")
+        executable_found = _diagnosis_bool(diagnosis, "executable_found")
+        profile_path_exists = _diagnosis_bool(diagnosis, "profile_path_exists")
+        browser_running = _diagnosis_bool(diagnosis, "browser_running")
+        can_full_reset = _diagnosis_bool(diagnosis, "can_full_reset")
+        validation_error = _diagnosis_text(diagnosis, "validation_error")
+        full_reset_reason = _diagnosis_text(diagnosis, "full_reset_reason")
+
+        card = ctk.CTkFrame(
+            self._cards_frame,
+            **card_frame_kwargs(COLORS["primary"] if is_active else COLORS["border_soft"]),
+        )
+        card.pack(fill="x", pady=5)
+
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=14, pady=(12, 4))
+        selected_var = ctk.BooleanVar(value=p.name in self._selected_names)
+        ctk.CTkCheckBox(
+            top,
+            text="",
+            width=20,
+            checkbox_width=18,
+            checkbox_height=18,
+            variable=selected_var,
+            command=lambda name=p.name, var=selected_var: self._toggle_selected(name, var.get()),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(top, text=p.name, text_color=COLORS["text"], font=font(15, "bold")).pack(side="left")
+        if is_active:
+            ctk.CTkLabel(
+                top,
+                text="当前",
+                fg_color=COLORS["primary"],
+                corner_radius=4,
+                text_color=COLORS["text"],
+                font=font(11, "bold"),
+                padx=7,
+                pady=1,
+            ).pack(side="left", padx=(8, 0))
+
+        info_frame = ctk.CTkFrame(card, fg_color="transparent")
+        info_frame.pack(fill="x", padx=14, pady=(0, 8))
+        info_lines = [
+            f"浏览器: {p.browser_type}  |  模式: {p.profile_mode}  |  默认目标: {p.start_target}",
+            f"隔离启动: Default 分区  |  窗口 {p.launch_width}x{p.launch_height}  |  语言 {p.launch_language or '浏览器默认'}",
+            f"路径: {p.user_data_dir}",
+            f"可执行文件: {p.browser_executable or '(自动探测)'}",
+            (
+                f"诊断: 配置{'正常' if valid else '异常'}  |  "
+                f"EXE {'就绪' if executable_found else '缺失'}  |  "
+                f"路径 {'存在' if profile_path_exists else '缺失'}  |  "
+                f"占用 {'是' if browser_running else '否'}"
+            ),
+            f"整目录清理: {'允许' if can_full_reset else '不允许'}",
+            "设备一致性: 可保持站点数据隔离；不承诺跨机器硬件/系统指纹完全相同",
+        ]
+        if not valid and validation_error:
+            info_lines.append(f"配置问题: {validation_error}")
+        if not can_full_reset and full_reset_reason:
+            info_lines.append(f"重置限制: {full_reset_reason}")
+        if p.notes:
+            info_lines.append(f"备注: {p.notes}")
+        for line in info_lines:
+            info_label = ctk.CTkLabel(
+                info_frame,
+                text=line,
+                text_color=COLORS["muted"],
+                font=font(12),
+                anchor="w",
+                justify="left",
+            )
+            info_label.pack(fill="x")
+            bind_wraplength(info_frame, info_label, padding=4)
+
+        btn_frame = ctk.CTkFrame(card, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=14, pady=(0, 12))
+
+        btn_row1 = ctk.CTkFrame(btn_frame, fg_color="transparent")
+        btn_row1.pack(fill="x", pady=(0, 4))
+        ctk.CTkButton(btn_row1, text="启动 ChatGPT", width=96, command=lambda prof=p: self._launch(prof, "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row1, text="启动 Claude", width=96, command=lambda prof=p: self._launch(prof, "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row1, text="清理 GPT", width=76, command=lambda prof=p: self._clear_sites(prof, "chatgpt"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row1, text="清理 Claude", width=86, command=lambda prof=p: self._clear_sites(prof, "claude"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row1, text="清理两者", width=86, command=lambda prof=p: self._clear_sites(prof, "both"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
+        if can_full_reset:
+            ctk.CTkButton(btn_row1, text="整目录清理", width=96, command=lambda prof=p: self._full_reset(prof), **button_style("danger", compact=True)).pack(side="left", padx=(0, 6))
+
+        btn_row2 = ctk.CTkFrame(btn_frame, fg_color="transparent")
+        btn_row2.pack(fill="x")
+        ctk.CTkButton(btn_row2, text="打开目录", width=78, command=lambda prof=p: self._open_dir(prof), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row2, text="复制", width=58, command=lambda prof=p: self._clone_profile(prof), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row2, text="编辑", width=58, command=lambda name=p.name: self._edit_profile(name), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row2, text="删除", width=58, command=lambda name=p.name: self._delete_profile(name), **button_style("danger", compact=True)).pack(side="left")
 
     def _on_filter_change(self, value: str):
         self._filter_mode = self.FILTER_OPTIONS.get(value, "all")
-        self.refresh()
+        if self._has_profile_cache:
+            self._render_profiles(self._cached_profiles, self._cached_active, self._cached_diagnoses)
+        else:
+            self.refresh()
 
     def _matches_filter(self, diagnosis: dict) -> bool:
-        if self._filter_mode == "all":
-            return True
-        if self._filter_mode == "issues":
-            return (not diagnosis["valid"]) or (not diagnosis["executable_found"]) or (not diagnosis["profile_path_exists"]) or diagnosis["browser_running"]
-        if self._filter_mode == "launchable":
-            return diagnosis["valid"] and diagnosis["executable_found"] and diagnosis["profile_path_exists"]
-        if self._filter_mode == "resettable":
-            return diagnosis["can_full_reset"]
-        return True
+        return _browser_diagnosis_matches_filter(diagnosis, self._filter_mode)
 
     def _reset_filter(self):
         self._filter_mode = "all"
         self._filter_combo.set("全部")
-        self.refresh()
+        if self._has_profile_cache:
+            self._render_profiles(self._cached_profiles, self._cached_active, self._cached_diagnoses)
+        else:
+            self.refresh()
 
     def _toggle_selected(self, name: str, selected: bool):
         if selected:
             self._selected_names.add(name)
         else:
             self._selected_names.discard(name)
+        if self._has_profile_cache:
+            self._update_stats_label(self._cached_profiles, self._cached_diagnoses)
 
     def _select_visible(self):
-        profiles = profile_manager.list_browser_profiles()
-        for p in profiles:
-            diagnosis = browser_profile_manager.diagnose_profile(p)
-            if self._matches_filter(diagnosis):
-                self._selected_names.add(p.name)
-        self._toast(f"已选中 {len(self._selected_names)} 个 Profile")
-        self.refresh()
+        if not self._has_profile_cache:
+            self._toast("正在刷新诊断后再全选当前")
+            self.refresh()
+            return
+        visible_names = _visible_profile_names(self._cached_profiles, self._cached_diagnoses, self._filter_mode)
+        self._selected_names.update(visible_names)
+        self._toast(f"已选中当前筛选下 {len(visible_names)} 个 Profile")
+        self._render_profiles(self._cached_profiles, self._cached_active, self._cached_diagnoses)
 
     def _clear_selection(self):
         self._selected_names.clear()
         self._toast("已清空选择")
-        self.refresh()
+        if self._has_profile_cache:
+            self._render_profiles(self._cached_profiles, self._cached_active, self._cached_diagnoses)
+        else:
+            self.refresh()
 
     def _bulk_clear_sites(self, scope: str):
         if not self._selected_names:
