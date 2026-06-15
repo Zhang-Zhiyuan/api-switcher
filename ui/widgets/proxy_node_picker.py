@@ -200,7 +200,10 @@ class ProxyNodePicker(ctk.CTkFrame):
         super().destroy()
 
     def set_enabled(self, enabled: bool):
-        self._enabled = bool(enabled)
+        enabled = bool(enabled)
+        if self._enabled == enabled:
+            return
+        self._enabled = enabled
         state = "normal" if self._enabled else "disabled"
         for widget in (
             self._search_entry,
@@ -404,18 +407,19 @@ class ProxyNodePicker(ctk.CTkFrame):
         ).grid(row=0, column=2, sticky="e", padx=(0, 6), pady=5)
 
     def _render_row(self, item):
-        node_key = self._node_key(item)
+        meta = self._metadata_for(item)
+        node_key = str(meta.get("key") or "")
         node = item.node
         selected = node_key == self._selected_key
-        latency = self._latency_for(item)
-        latency_label = remote_proxy.proxy_node_latency_label(latency)
-        latency_detail = remote_proxy.proxy_node_latency_detail(latency)
+        latency = meta.get("latency")
+        latency_label = str(meta.get("latency_label") or "")
+        latency_detail = str(meta.get("latency_detail") or "")
         latency_color = self._latency_color(latency)
-        quality = self._quality_for(item)
-        quality_label = remote_proxy.proxy_node_quality_label(quality)
-        quality_score = remote_proxy.proxy_node_quality_score(quality)
-        quality_ip = remote_proxy.proxy_node_quality_ip(quality)
-        region = self._node_region(item)
+        quality = meta.get("quality")
+        quality_label = str(meta.get("quality_label") or "")
+        quality_score = int(meta.get("quality_score") or 0)
+        quality_ip = str(meta.get("quality_ip") or "")
+        region = str(meta.get("region") or "其他")
         node_type = str(node.get("type") or "").upper()
         server = str(node.get("server") or "")
         port = str(node.get("port") or "")
@@ -467,7 +471,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             quality_part = f"{quality_label} {quality_score}"
             if quality_ip:
                 quality_part += f" {quality_ip}"
-            source_label = remote_proxy.proxy_node_quality_source_label(quality)
+            source_label = str(meta.get("quality_source_label") or "")
             if source_label and source_label != "未标明检测源":
                 quality_part += f" 基于{source_label}"
             meta_parts.append(quality_part)
@@ -758,6 +762,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         quality_detail = remote_proxy.proxy_node_quality_detail(quality)
         quality_ip_type = remote_proxy.proxy_node_quality_ip_type(quality)
         quality_ip = remote_proxy.proxy_node_quality_ip(quality)
+        quality_source_label = remote_proxy.proxy_node_quality_source_label(quality)
         quality_score = remote_proxy.proxy_node_quality_score(quality)
         quality_risk = remote_proxy.proxy_node_quality_risk_score(quality)
         quality_measured = remote_proxy.proxy_node_quality_measured(quality)
@@ -784,9 +789,16 @@ class ProxyNodePicker(ctk.CTkFrame):
             "search_static": " ".join(static_parts).casefold(),
             "search_blob": " ".join(part for part in search_parts if part).casefold(),
             "latency": latency,
+            "latency_label": latency_label,
+            "latency_detail": latency_detail,
             "latency_ok": remote_proxy.proxy_node_latency_ok(latency),
             "latency_measured": latency is not None,
             "quality": quality,
+            "quality_label": quality_label,
+            "quality_detail": quality_detail,
+            "quality_ip_type": quality_ip_type,
+            "quality_ip": quality_ip,
+            "quality_source_label": quality_source_label,
             "quality_measured": quality_measured,
             "quality_ai_ok": quality_ai_ok,
             "quality_score": quality_score,

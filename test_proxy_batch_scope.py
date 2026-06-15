@@ -147,3 +147,27 @@ def test_proxy_node_picker_reuses_filtered_nodes_until_filter_changes():
     picker._search_entry.value = "second"
     assert picker._filtered_nodes() == [second]
     assert calls["count"] > 2
+
+
+def test_proxy_node_picker_set_enabled_skips_redundant_render():
+    picker = object.__new__(ProxyNodePicker)
+    picker._enabled = True
+    picker._search_entry = None
+    picker._filter_combo = None
+    picker._region_combo = None
+    picker._quality_combo = None
+    picker._filter_reset_button = None
+    picker._batch_buttons = []
+    calls = {"render": 0}
+
+    def render_nodes():
+        calls["render"] += 1
+
+    picker._render_nodes = render_nodes
+
+    picker.set_enabled(True)
+    assert calls["render"] == 0
+
+    picker.set_enabled(False)
+    assert picker._enabled is False
+    assert calls["render"] == 1

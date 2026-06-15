@@ -15,6 +15,7 @@ QUICK_SWITCH_TITLE = "快速切换 API"
 CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 DEFAULT_TAB_LABEL = "Claude Code"
+DEFAULT_TAB_PRELOAD_MODE = "0"
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
@@ -100,6 +101,8 @@ class App(ctk.CTk):
         self._lazy_tab_preload_started = False
         self._initial_tab_load_started = False
         self._pending_tab_load_after_ids = {}
+        self._tab_class_loading = set()
+        self._tab_load_generations = {}
         self._quick_switch_load_generation = 0
         self._quick_switch_load_after_id = None
         self._quick_switch_loading = False
@@ -290,7 +293,7 @@ class App(ctk.CTk):
         if not self._start_minimized_to_tray:
             self.after(90, self._schedule_initial_tab_load)
         self.after(900, self._auto_start_local_proxy)
-        preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", "priority").strip().lower()
+        preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", DEFAULT_TAB_PRELOAD_MODE).strip().lower()
         if preload_mode != "0":
             self.after(1400, lambda mode=preload_mode: self._preload_lazy_tab_classes(priority_only=mode != "1"))
 
@@ -401,6 +404,13 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(8, 0))
         self._set_app_status(f"{label} 加载失败，可点击重试加载")
 
+    def _tab_is_loaded(self, attr: str) -> bool:
+        existing = getattr(self, attr, None)
+        try:
+            return existing is not None and existing.winfo_exists()
+        except Exception:
+            return False
+
     def _ensure_tab(self, label: str):
         spec = self._tab_specs.get(label)
         frame = self._tab_frames.get(label)
@@ -408,29 +418,35 @@ class App(ctk.CTk):
             return None
 
         attr, module_name, class_name, _eager = spec
-        existing = getattr(self, attr, None)
-        try:
-            if existing is not None and existing.winfo_exists():
-                return existing
-        except Exception:
-            pass
+        if self._tab_is_loaded(attr):
+            return getattr(self, attr, None)
 
         self._show_tab_loading(label)
         try:
             tab_class = self._resolve_tab_class(label, module_name, class_name)
-            for child in frame.winfo_children():
-                child.destroy()
-            tab = tab_class(frame)
-            tab.pack(fill="both", expand=True)
-            setattr(self, attr, tab)
-            self._set_app_status(f"已加载 {label}")
-            logger.debug("Loaded tab: %s", label)
-            return tab
+            return self._instantiate_tab_from_class(label, tab_class)
         except Exception as e:
             setattr(self, attr, None)
             logger.error("Failed to load tab %s: %s", label, e, exc_info=True)
             self._show_tab_error(label, e)
             return None
+
+    def _instantiate_tab_from_class(self, label: str, tab_class):
+        spec = self._tab_specs.get(label)
+        frame = self._tab_frames.get(label)
+        if not spec or frame is None:
+            return None
+        attr, _module_name, _class_name, _eager = spec
+        if self._tab_is_loaded(attr):
+            return getattr(self, attr, None)
+        for child in frame.winfo_children():
+            child.destroy()
+        tab = tab_class(frame)
+        tab.pack(fill="both", expand=True)
+        setattr(self, attr, tab)
+        self._set_app_status(f"已加载 {label}")
+        logger.debug("Loaded tab: %s", label)
+        return tab
 
     def _resolve_tab_class(self, label: str, module_name: str, class_name: str):
         with self._tab_class_cache_lock:
@@ -491,26 +507,70 @@ class App(ctk.CTk):
         if not spec:
             return
         attr, _module_name, _class_name, _eager = spec
-        existing = getattr(self, attr, None)
-        try:
-            if existing is not None and existing.winfo_exists():
-                return
-        except Exception:
-            pass
+        if self._tab_is_loaded(attr):
+            return
         if label in self._pending_tab_load_after_ids:
+            return
+        if label in self._tab_class_loading:
+            self._show_tab_loading(label)
             return
         self._show_tab_loading(label)
 
         def load_now():
             self._pending_tab_load_after_ids.pop(label, None)
             if not self._exit_requested:
-                self._ensure_tab(label)
+                self._load_tab_class_async(label)
 
+        self._pending_tab_load_after_ids[label] = None
         try:
-            self._pending_tab_load_after_ids[label] = self.after(max(1, int(delay_ms)), load_now)
+            after_id = self.after(max(1, int(delay_ms)), load_now)
+            if label in self._pending_tab_load_after_ids:
+                self._pending_tab_load_after_ids[label] = after_id
         except Exception:
             self._pending_tab_load_after_ids.pop(label, None)
             self._ensure_tab(label)
+
+    def _load_tab_class_async(self, label: str):
+        spec = self._tab_specs.get(label)
+        if not spec or self._exit_requested:
+            return
+        attr, module_name, class_name, _eager = spec
+        if self._tab_is_loaded(attr):
+            return
+        if label in self._tab_class_loading:
+            return
+        self._tab_class_loading.add(label)
+        generation = self._tab_load_generations.get(label, 0) + 1
+        self._tab_load_generations[label] = generation
+
+        def worker():
+            payload = {"ok": False, "tab_class": None, "error": None}
+            try:
+                payload["tab_class"] = self._resolve_tab_class(label, module_name, class_name)
+                payload["ok"] = True
+            except Exception as exc:
+                payload["error"] = exc
+
+            def finish():
+                self._tab_class_loading.discard(label)
+                if self._exit_requested or generation != self._tab_load_generations.get(label):
+                    return
+                if not payload["ok"]:
+                    error = payload["error"] or RuntimeError("未知加载错误")
+                    setattr(self, attr, None)
+                    logger.error("Failed to load tab %s: %s", label, error)
+                    self._show_tab_error(label, error)
+                    return
+                try:
+                    self._instantiate_tab_from_class(label, payload["tab_class"])
+                except Exception as exc:
+                    setattr(self, attr, None)
+                    logger.error("Failed to create tab %s: %s", label, exc, exc_info=True)
+                    self._show_tab_error(label, exc)
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(target=worker, name=f"tab-class-load-{label}", daemon=True).start()
 
     def _on_tab_changed(self):
         self._schedule_tab_load(self._tabview.get())
@@ -891,11 +951,15 @@ class App(ctk.CTk):
         self._close_dialog = None
 
         for after_id in list(self._pending_tab_load_after_ids.values()):
+            if not after_id:
+                continue
             try:
                 self.after_cancel(after_id)
             except Exception:
                 pass
         self._pending_tab_load_after_ids.clear()
+        self._tab_class_loading.clear()
+        self._tab_load_generations.clear()
         if self._quick_switch_load_after_id:
             try:
                 self.after_cancel(self._quick_switch_load_after_id)
@@ -951,9 +1015,11 @@ class App(ctk.CTk):
 
     def _show_env_tab(self):
         self._tabview.set(ENV_TAB_LABEL)
-        tab = self._ensure_tab(ENV_TAB_LABEL)
+        tab = self._loaded_tab("_env_tab")
         if tab:
             self.after(30, tab.refresh)
+        else:
+            self._schedule_tab_load(ENV_TAB_LABEL, delay_ms=1)
         self._status.configure(text="已打开环境变量管理")
 
     def _show_proxy_quality_dialog(self):

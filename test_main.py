@@ -45,6 +45,7 @@ def test_proxy_quality_is_not_a_primary_tab():
 def test_primary_tabs_are_lazy_loaded_until_mainloop_is_responsive():
     specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
 
+    assert app_module.DEFAULT_TAB_PRELOAD_MODE == "0"
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
     assert all(eager is False for eager in specs.values())
@@ -182,6 +183,73 @@ def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
     assert captured["dialog"][1] is preview
     assert statuses[0] == "正在生成切换预览: fast-profile"
     assert statuses[-1] == "切换预览已打开"
+
+
+def test_lazy_tab_class_load_runs_off_ui_thread(monkeypatch):
+    import_started = threading.Event()
+    tab_created = threading.Event()
+    captured = {}
+
+    slow_module = ModuleType("slow_tab_module")
+
+    class FakeFrame:
+        def winfo_children(self):
+            return []
+
+    class SlowTab:
+        def __init__(self, master):
+            captured["master"] = master
+            tab_created.set()
+
+        def pack(self, **kwargs):
+            captured["pack"] = kwargs
+
+        def winfo_exists(self):
+            return True
+
+    slow_module.SlowTab = SlowTab
+    real_import_module = app_module.importlib.import_module
+
+    def slow_import_module(name):
+        if name == "slow_tab_module":
+            import_started.set()
+            time.sleep(0.15)
+            return slow_module
+        return real_import_module(name)
+
+    monkeypatch.setattr(app_module.importlib, "import_module", slow_import_module)
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._pending_tab_load_after_ids = {}
+    app._tab_class_loading = set()
+    app._tab_load_generations = {}
+    app._tab_class_cache = {}
+    app._tab_class_cache_lock = threading.RLock()
+    app._tab_specs = {"Slow": ("_slow_tab", "slow_tab_module", "SlowTab", False)}
+    app._tab_frames = {"Slow": FakeFrame()}
+    app._slow_tab = None
+    app._show_tab_loading = lambda _label: None
+    app._show_tab_error = lambda _label, error: (_ for _ in ()).throw(error)
+    app._set_app_status = lambda message: captured.setdefault("statuses", []).append(message)
+    app._run_on_ui_thread = lambda callback: callback()
+
+    def fake_after(_delay_ms, callback):
+        threading.Timer(0, callback).start()
+        return "after-id"
+
+    app.after = fake_after
+
+    started_at = time.perf_counter()
+    app_module.App._schedule_tab_load(app, "Slow", delay_ms=1)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.05
+    assert import_started.wait(1)
+    assert tab_created.wait(1)
+    assert app._slow_tab is not None
+    assert captured["master"] is app._tab_frames["Slow"]
+    assert captured["pack"] == {"fill": "both", "expand": True}
 
 
 def test_ssh_heavy_sections_are_delayed():
