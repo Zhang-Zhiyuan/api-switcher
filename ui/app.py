@@ -43,6 +43,7 @@ class App(ctk.CTk):
         self.configure(fg_color=COLORS["app_bg"])
         self._exit_requested = False
         self._tray_hint_shown = False
+        self._tray_starting = False
         self._close_dialog = None
         self._force_exit_timer_started = False
         self._proxy_quality_dialog = None
@@ -483,11 +484,26 @@ class App(ctk.CTk):
     def _start_tray_icon(self):
         if self._exit_requested:
             return
-        if self.tray_manager.is_available():
-            self.tray_manager.start()
-            logger.info("Tray icon started")
-        else:
-            logger.info("Tray icon disabled: pystray is not installed")
+        if self._tray_starting or self.tray_manager.is_running():
+            return
+        self._tray_starting = True
+
+        def run():
+            try:
+                if self._exit_requested:
+                    return
+                if self.tray_manager.is_available():
+                    if not self._exit_requested:
+                        self.tray_manager.start()
+                        logger.info("Tray icon started")
+                else:
+                    logger.info("Tray icon disabled: pystray is not installed")
+            except Exception as exc:
+                logger.error("Failed to start tray icon: %s", exc, exc_info=True)
+            finally:
+                self._tray_starting = False
+
+        threading.Thread(target=run, name="tray-startup", daemon=True).start()
 
     def _auto_start_local_proxy(self):
         if self._exit_requested:

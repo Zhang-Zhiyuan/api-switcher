@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import sys
+import time
+import threading
 from types import ModuleType
 
 import main
@@ -48,6 +50,75 @@ def test_primary_tabs_are_lazy_loaded_until_mainloop_is_responsive():
     assert all(eager is False for eager in specs.values())
     assert hasattr(app_module.App, "_load_quick_switch_profiles_delayed")
     assert hasattr(app_module.App, "_run_quick_switch_profile_load")
+
+
+def test_tray_startup_runs_off_ui_thread():
+    class SlowTray:
+        def __init__(self):
+            self.available_entered = threading.Event()
+            self.start_called = threading.Event()
+
+        def is_running(self):
+            return False
+
+        def is_available(self):
+            self.available_entered.set()
+            time.sleep(0.15)
+            return True
+
+        def start(self):
+            self.start_called.set()
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._tray_starting = False
+    app.tray_manager = SlowTray()
+
+    started_at = time.perf_counter()
+    app_module.App._start_tray_icon(app)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.05
+    assert app.tray_manager.available_entered.wait(1)
+    assert app.tray_manager.start_called.wait(1)
+
+
+def test_tray_startup_ignores_duplicate_start_while_pending():
+    class BlockingTray:
+        def __init__(self):
+            self.release = threading.Event()
+            self.available_entered = threading.Event()
+            self.available_calls = 0
+            self.start_calls = 0
+
+        def is_running(self):
+            return False
+
+        def is_available(self):
+            self.available_calls += 1
+            self.available_entered.set()
+            self.release.wait(1)
+            return True
+
+        def start(self):
+            self.start_calls += 1
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._tray_starting = False
+    app.tray_manager = BlockingTray()
+
+    app_module.App._start_tray_icon(app)
+    assert app.tray_manager.available_entered.wait(1)
+    app_module.App._start_tray_icon(app)
+    app.tray_manager.release.set()
+
+    deadline = time.time() + 1
+    while app._tray_starting and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert app.tray_manager.available_calls == 1
+    assert app.tray_manager.start_calls == 1
 
 
 def test_ssh_heavy_sections_are_delayed():
