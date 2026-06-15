@@ -1,19 +1,45 @@
+from __future__ import annotations
+
+import importlib
 import threading
 import webbrowser
 
 import customtkinter as ctk
 
-from core import network_diagnostic_settings, network_diagnostics
+from core import network_diagnostic_constants as diagnostic_constants
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
 from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
 
 
+class _LazyModule:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+        self._module = None
+        self._lock = threading.RLock()
+
+    def _load(self):
+        module = self._module
+        if module is not None:
+            return module
+        with self._lock:
+            if self._module is None:
+                self._module = importlib.import_module(self._module_name)
+            return self._module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+network_diagnostic_settings = _LazyModule("core.network_diagnostic_settings")
+network_diagnostics = _LazyModule("core.network_diagnostics")
+
+
 KEYLESS_SERVICES = {
-    network_diagnostic_settings.SERVICE_PROXYCHECK,
-    network_diagnostic_settings.SERVICE_IPAPI,
+    diagnostic_constants.SERVICE_PROXYCHECK,
+    diagnostic_constants.SERVICE_IPAPI,
 }
-OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {network_diagnostic_settings.SERVICE_PING0}
+OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {diagnostic_constants.SERVICE_PING0}
 
 
 class ProxyQualityPanel(ctk.CTkScrollableFrame):
@@ -135,7 +161,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         saved_settings = network_diagnostic_settings.load_settings()
         self._hidden_service_settings = {
             service: saved_settings.service(service)
-            for service in network_diagnostic_settings.HIDDEN_SERVICES
+            for service in diagnostic_constants.HIDDEN_SERVICES
         }
         preset_bar = ctk.CTkFrame(settings_section, fg_color="transparent")
         preset_bar.pack(fill="x", pady=(0, 6))
@@ -163,22 +189,22 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             self._settings_controls.append(button)
         service_rows = [
             (
-                network_diagnostic_settings.SERVICE_PING0,
+                diagnostic_constants.SERVICE_PING0,
                 "Ping0",
                 "免费 Geo；Key 增强 isidc、iprisk、isnative",
             ),
             (
-                network_diagnostic_settings.SERVICE_PROXYCHECK,
+                diagnostic_constants.SERVICE_PROXYCHECK,
                 "ProxyCheck",
                 "家宽/商宽/共享人数；可无 Key",
             ),
             (
-                network_diagnostic_settings.SERVICE_IPAPI,
+                diagnostic_constants.SERVICE_IPAPI,
                 "ipapi.is",
                 "可无 Key；补充机房、ASN、Abuser、VPN/Proxy 信号",
             ),
             (
-                network_diagnostic_settings.SERVICE_VPNAPI,
+                diagnostic_constants.SERVICE_VPNAPI,
                 "VPNAPI.io",
                 "VPN、Proxy、Tor、Relay",
             ),
@@ -329,7 +355,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         key_index = len(self._service_key_entries.get(service, [])) + 1
         ctk.CTkLabel(
             row,
-            text=network_diagnostic_settings.SERVICE_LABELS.get(service, service),
+            text=diagnostic_constants.SERVICE_LABELS.get(service, service),
             text_color=COLORS["muted_soft"],
             font=font(11, "bold"),
             width=86,
@@ -373,15 +399,15 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
     def _assign_first_key_entry(self, service: str):
         entries = self._service_key_entries.get(service, [])
         first = entries[0] if entries else None
-        if service == network_diagnostic_settings.SERVICE_PING0:
+        if service == diagnostic_constants.SERVICE_PING0:
             self._ping0_key_entry = first
-        elif service == network_diagnostic_settings.SERVICE_PROXYCHECK:
+        elif service == diagnostic_constants.SERVICE_PROXYCHECK:
             self._proxycheck_key_entry = first
-        elif service == network_diagnostic_settings.SERVICE_IPAPI:
+        elif service == diagnostic_constants.SERVICE_IPAPI:
             self._ipapi_key_entry = first
-        elif service == network_diagnostic_settings.SERVICE_IPQS:
+        elif service == diagnostic_constants.SERVICE_IPQS:
             self._ipqs_key_entry = first
-        elif service == network_diagnostic_settings.SERVICE_VPNAPI:
+        elif service == diagnostic_constants.SERVICE_VPNAPI:
             self._vpnapi_key_entry = first
 
     def _update_key_frame_spacing(self, service: str):
@@ -402,21 +428,21 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 pass
 
     def _key_placeholder(self, service: str, index: int) -> str:
-        label = network_diagnostic_settings.SERVICE_LABELS.get(service, service)
+        label = diagnostic_constants.SERVICE_LABELS.get(service, service)
         return f"{label} Key #{index}"
 
     def _apply_service_preset(self, mode: str):
         settings = self._collect_detection_settings()
         if mode == "all":
-            enabled = set(network_diagnostic_settings.VISIBLE_SERVICE_ORDER)
+            enabled = set(diagnostic_constants.VISIBLE_SERVICE_ORDER)
         else:
             enabled = {
-                network_diagnostic_settings.SERVICE_PING0,
-                network_diagnostic_settings.SERVICE_PROXYCHECK,
-                network_diagnostic_settings.SERVICE_IPAPI,
+                diagnostic_constants.SERVICE_PING0,
+                diagnostic_constants.SERVICE_PROXYCHECK,
+                diagnostic_constants.SERVICE_IPAPI,
             }
-            if mode == "recommended" and settings.keys_for(network_diagnostic_settings.SERVICE_VPNAPI):
-                enabled.add(network_diagnostic_settings.SERVICE_VPNAPI)
+            if mode == "recommended" and settings.keys_for(diagnostic_constants.SERVICE_VPNAPI):
+                enabled.add(diagnostic_constants.SERVICE_VPNAPI)
 
         for service, var in self._service_vars.items():
             var.set(service in enabled)
@@ -432,7 +458,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             service: [entry.get() for entry in entries]
             for service, entries in self._service_key_entries.items()
         }
-        for service in network_diagnostic_settings.HIDDEN_SERVICES:
+        for service in diagnostic_constants.HIDDEN_SERVICES:
             service_settings = self._hidden_service_settings.get(service)
             if service_settings is None:
                 continue
@@ -446,7 +472,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             settings = self._collect_detection_settings()
         except Exception:
             return
-        for service in network_diagnostic_settings.VISIBLE_SERVICE_ORDER:
+        for service in diagnostic_constants.VISIBLE_SERVICE_ORDER:
             service_settings = settings.service(service)
             count_label = self._service_count_labels.get(service)
             if count_label:
@@ -457,7 +483,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                     count_label.configure(text=f"Key x{count}", text_color=COLORS["success"])
                 elif service in KEYLESS_SERVICES:
                     count_label.configure(text="可无 Key", text_color=COLORS["muted_soft"])
-                elif service == network_diagnostic_settings.SERVICE_PING0:
+                elif service == diagnostic_constants.SERVICE_PING0:
                     count_label.configure(text="免费 Geo", text_color=COLORS["muted_soft"])
                 else:
                     count_label.configure(text="缺 Key", text_color=COLORS["warning"])
@@ -505,15 +531,15 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         key_counts = []
         direct_labels = []
         missing_key_labels = []
-        for service in network_diagnostic_settings.VISIBLE_SERVICE_ORDER:
+        for service in diagnostic_constants.VISIBLE_SERVICE_ORDER:
             service_settings = settings.service(service)
-            label = network_diagnostic_settings.SERVICE_LABELS.get(service, service)
+            label = diagnostic_constants.SERVICE_LABELS.get(service, service)
             if service_settings.enabled:
                 enabled_labels.append(label)
                 if not service_settings.api_keys:
                     if service in KEYLESS_SERVICES:
                         direct_labels.append(label)
-                    elif service == network_diagnostic_settings.SERVICE_PING0:
+                    elif service == diagnostic_constants.SERVICE_PING0:
                         direct_labels.append("Ping0 免费 Geo")
                     else:
                         missing_key_labels.append(label)
@@ -558,7 +584,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             return
 
         enabled_services = detection_settings.enabled_services()
-        enabled_text = "、".join(network_diagnostic_settings.SERVICE_LABELS.get(item, item) for item in enabled_services) or "无"
+        enabled_text = "、".join(diagnostic_constants.SERVICE_LABELS.get(item, item) for item in enabled_services) or "无"
         self._set_status(f"正在测速公网出口；可连通后调用已启用检测源: {enabled_text}...")
         self._clear_content()
         self._add_info_card("检测中", [f"正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 调用: {enabled_text}。"])
@@ -568,11 +594,11 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             try:
                 report = network_diagnostics.detect_network(
                     enabled_services=enabled_services,
-                    ping0_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_PING0),
-                    proxycheck_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_PROXYCHECK),
-                    ipapi_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_IPAPI),
-                    ipqs_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_IPQS),
-                    vpnapi_api_keys=detection_settings.keys_for(network_diagnostic_settings.SERVICE_VPNAPI),
+                    ping0_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_PING0),
+                    proxycheck_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_PROXYCHECK),
+                    ipapi_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_IPAPI),
+                    ipqs_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_IPQS),
+                    vpnapi_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_VPNAPI),
                 )
                 payload = {"ok": True, "report": report, "error": ""}
             except Exception as exc:

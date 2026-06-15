@@ -162,3 +162,43 @@ def test_codex_tab_import_does_not_eagerly_load_profile_cores():
             "keyring",
         ),
     )
+
+
+def test_auto_continue_control_import_does_not_eagerly_load_manager():
+    _run_import_check(
+        "ui.widgets.auto_continue_control",
+        (
+            "core.auto_continue.manager",
+            "core.auto_continue.claude_provider",
+            "core.auto_continue.codex_provider",
+            "models.auto_continue",
+            "core.git_manager",
+            "keyring",
+        ),
+    )
+
+
+def test_proxy_quality_panel_import_does_not_eagerly_load_network_cores():
+    _run_import_check(
+        "ui.widgets.proxy_quality_panel",
+        (
+            "core.network_diagnostic_settings",
+            "core.network_diagnostics",
+            "core.security",
+            "urllib.request",
+            "keyring",
+        ),
+    )
+
+
+def test_proxy_quality_dialog_import_does_not_eagerly_load_network_cores():
+    _run_import_check(
+        "ui.dialogs.proxy_quality_dialog",
+        (
+            "core.network_diagnostic_settings",
+            "core.network_diagnostics",
+            "core.security",
+            "urllib.request",
+            "keyring",
+        ),
+    )

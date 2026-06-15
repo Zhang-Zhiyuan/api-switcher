@@ -12,65 +12,53 @@ from typing import Any
 from config.paths import STORAGE_DIR
 from core import security
 from core.atomic_io import atomic_write_text
+from core.network_diagnostic_constants import (
+    DEFAULT_ENABLED,
+    ENV_KEYS,
+    HIDDEN_SERVICES,
+    SERVICE_ALIASES,
+    SERVICE_IPAPI,
+    SERVICE_IPQS,
+    SERVICE_LABELS,
+    SERVICE_ORDER,
+    SERVICE_PING0,
+    SERVICE_PROXYCHECK,
+    SERVICE_SET,
+    SERVICE_VPNAPI,
+    VISIBLE_SERVICE_ORDER,
+)
+
+__all__ = [
+    "DEFAULT_ENABLED",
+    "DiagnosticServiceSettings",
+    "ENV_KEYS",
+    "HIDDEN_SERVICES",
+    "NetworkDiagnosticSettings",
+    "SERVICE_ALIASES",
+    "SERVICE_IPAPI",
+    "SERVICE_IPQS",
+    "SERVICE_LABELS",
+    "SERVICE_ORDER",
+    "SERVICE_PING0",
+    "SERVICE_PROXYCHECK",
+    "SERVICE_SET",
+    "SERVICE_VPNAPI",
+    "VISIBLE_SERVICE_ORDER",
+    "clear_settings_cache",
+    "load_settings",
+    "masked_key_summary",
+    "normalize_service",
+    "normalize_services",
+    "parse_api_keys",
+    "save_settings",
+    "settings_from_values",
+]
 
 
 SETTINGS_FILE = STORAGE_DIR / "network_diagnostics.json"
 _SETTINGS_CACHE_LOCK = threading.RLock()
 _SETTINGS_CACHE: NetworkDiagnosticSettings | None = None
 _SETTINGS_CACHE_SIGNATURE: tuple | None = None
-
-SERVICE_PING0 = "ping0"
-SERVICE_PROXYCHECK = "proxycheck"
-SERVICE_IPAPI = "ipapi"
-SERVICE_IPQS = "ipqs"
-SERVICE_VPNAPI = "vpnapi"
-SERVICE_ORDER = (SERVICE_PING0, SERVICE_PROXYCHECK, SERVICE_IPAPI, SERVICE_IPQS, SERVICE_VPNAPI)
-SERVICE_SET = set(SERVICE_ORDER)
-HIDDEN_SERVICES = {SERVICE_IPQS}
-VISIBLE_SERVICE_ORDER = tuple(service for service in SERVICE_ORDER if service not in HIDDEN_SERVICES)
-
-SERVICE_ALIASES = {
-    "ping0": SERVICE_PING0,
-    "ping0.cc": SERVICE_PING0,
-    "ping0cc": SERVICE_PING0,
-    "proxycheck": SERVICE_PROXYCHECK,
-    "proxycheck.io": SERVICE_PROXYCHECK,
-    "proxycheckio": SERVICE_PROXYCHECK,
-    "ipapi": SERVICE_IPAPI,
-    "ipapi.is": SERVICE_IPAPI,
-    "ipapiis": SERVICE_IPAPI,
-    "ipqs": SERVICE_IPQS,
-    "ipqualityscore": SERVICE_IPQS,
-    "ipqualityscore.com": SERVICE_IPQS,
-    "ipqualityscorecom": SERVICE_IPQS,
-    "vpnapi": SERVICE_VPNAPI,
-    "vpnapi.io": SERVICE_VPNAPI,
-    "vpnapiio": SERVICE_VPNAPI,
-}
-
-SERVICE_LABELS = {
-    SERVICE_PING0: "Ping0",
-    SERVICE_PROXYCHECK: "ProxyCheck",
-    SERVICE_IPAPI: "ipapi.is",
-    SERVICE_IPQS: "IPQualityScore",
-    SERVICE_VPNAPI: "VPNAPI.io",
-}
-
-DEFAULT_ENABLED = {
-    SERVICE_PING0: True,
-    SERVICE_PROXYCHECK: True,
-    SERVICE_IPAPI: True,
-    SERVICE_IPQS: False,
-    SERVICE_VPNAPI: False,
-}
-
-ENV_KEYS = {
-    SERVICE_PING0: ("PING0_API_KEY",),
-    SERVICE_PROXYCHECK: ("PROXYCHECK_API_KEY",),
-    SERVICE_IPAPI: ("IPAPI_IS_API_KEY", "IPAPI_API_KEY"),
-    SERVICE_IPQS: ("IPQS_API_KEY", "IPQUALITYSCORE_API_KEY"),
-    SERVICE_VPNAPI: ("VPNAPI_KEY", "VPNAPI_API_KEY"),
-}
 
 KNOWN_API_KEY_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]{6}-){3}[A-Za-z0-9]{6}(?![A-Za-z0-9])"
