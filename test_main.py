@@ -121,6 +121,20 @@ def test_tray_startup_ignores_duplicate_start_while_pending():
     assert app.tray_manager.start_calls == 1
 
 
+def test_lazy_tray_manager_status_check_does_not_load_tray_core():
+    sys.modules.pop("core.tray_manager", None)
+
+    manager = app_module._LazyTrayManager(
+        on_show_window=lambda: None,
+        on_exit=lambda: None,
+        on_startup_changed=lambda: None,
+        on_hide_window=lambda: None,
+    )
+
+    assert manager.is_running() is False
+    assert "core.tray_manager" not in sys.modules
+
+
 def test_ssh_heavy_sections_are_delayed():
     from ui.tabs.ssh_tab import SSHTab
 

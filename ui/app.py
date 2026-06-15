@@ -6,7 +6,6 @@ import time
 
 import customtkinter as ctk
 from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
-from core.tray_manager import TrayManager
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
@@ -29,6 +28,54 @@ TAB_SPECS = [
     ("备份管理", "_backup_tab", "ui.tabs.backup_tab", "BackupTab", False),
     ("日志查看器", "_log_viewer_tab", "ui.tabs.log_viewer_tab", "LogViewerTab", False),
 ]
+
+
+class _LazyTrayManager:
+    """Delay tray imports until tray support is actually needed."""
+
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+        self._manager = None
+        self._lock = threading.RLock()
+
+    def _load(self):
+        manager = self._manager
+        if manager is not None:
+            return manager
+        with self._lock:
+            if self._manager is None:
+                from core.tray_manager import TrayManager
+
+                self._manager = TrayManager(**self._kwargs)
+            return self._manager
+
+    def is_running(self) -> bool:
+        manager = self._manager
+        return bool(manager and manager.is_running())
+
+    def is_available(self) -> bool:
+        return self._load().is_available()
+
+    def start(self) -> None:
+        self._load().start()
+
+    def stop(self) -> None:
+        manager = self._manager
+        if manager is not None:
+            manager.stop()
+
+    def update_menu(self) -> None:
+        manager = self._manager
+        if manager is not None:
+            manager.update_menu()
+
+    def notify(self, *args, **kwargs) -> None:
+        manager = self._manager
+        if manager is not None:
+            manager.notify(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
 
 
 class App(ctk.CTk):
@@ -62,7 +109,7 @@ class App(ctk.CTk):
             setattr(self, attr, None)
 
         # Initialize tray manager
-        self.tray_manager = TrayManager(
+        self.tray_manager = _LazyTrayManager(
             on_show_window=self._show_window,
             on_exit=self._exit_app,
             on_startup_changed=self._on_startup_changed_from_tray,
@@ -484,13 +531,15 @@ class App(ctk.CTk):
     def _start_tray_icon(self):
         if self._exit_requested:
             return
-        if self._tray_starting or self.tray_manager.is_running():
+        if self._tray_starting:
             return
         self._tray_starting = True
 
         def run():
             try:
                 if self._exit_requested:
+                    return
+                if self.tray_manager.is_running():
                     return
                 if self.tray_manager.is_available():
                     if not self._exit_requested:

@@ -202,3 +202,23 @@ def test_proxy_quality_dialog_import_does_not_eagerly_load_network_cores():
             "keyring",
         ),
     )
+
+
+def test_usage_stats_tab_import_does_not_eagerly_load_stats_store():
+    _run_import_check(
+        "ui.tabs.usage_stats_tab",
+        (
+            "core.usage_stats",
+            "core.usage_recorder",
+        ),
+    )
+
+
+def test_app_import_does_not_eagerly_load_tray_core():
+    _run_import_check(
+        "ui.app",
+        (
+            "core.tray_manager",
+            "pystray",
+        ),
+    )

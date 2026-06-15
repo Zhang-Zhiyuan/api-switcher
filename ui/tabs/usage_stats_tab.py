@@ -4,11 +4,13 @@ import threading
 from datetime import datetime, timedelta
 from typing import Optional
 import customtkinter as ctk
+from core.lazy_imports import LazyAttribute
 from ui.theme import COLORS, button_style, combo_style, font
-from core.usage_stats import usage_stats, format_token_count
 from ui.widgets.toast import show_toast
 
 logger = logging.getLogger(__name__)
+usage_stats = LazyAttribute("core.usage_stats", "usage_stats")
+format_token_count = LazyAttribute("core.usage_stats", "format_token_count")
 
 
 def _summary_int(summary: dict, key: str) -> int:
