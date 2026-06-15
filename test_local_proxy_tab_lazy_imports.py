@@ -222,3 +222,30 @@ def test_app_import_does_not_eagerly_load_tray_core():
             "pystray",
         ),
     )
+
+
+def test_browser_profile_editor_import_does_not_eagerly_load_browser_cores():
+    _run_import_check(
+        "ui.dialogs.browser_profile_editor",
+        (
+            "core.browser_profile_manager",
+            "core.browser_launcher",
+            "core.browser_data_manager",
+            "models.profile",
+            "keyring",
+        ),
+    )
+
+
+def test_switch_preview_dialog_import_does_not_eagerly_load_preview_core():
+    _run_import_check(
+        "ui.dialogs.switch_preview_dialog",
+        (
+            "core.switch_preview",
+            "core.profile_manager",
+            "core.parser",
+            "core.toml_parser",
+            "core.auth_parser",
+            "keyring",
+        ),
+    )

@@ -104,6 +104,7 @@ class App(ctk.CTk):
         self._quick_switch_load_after_id = None
         self._quick_switch_loading = False
         self._quick_switch_reload_pending = False
+        self._switch_preview_generation = 0
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             setattr(self, attr, None)
@@ -727,16 +728,58 @@ class App(ctk.CTk):
         self._show_switch_preview("codex_api", profile_name, perform_switch, self._load_quick_switch_profiles)
 
     def _show_switch_preview(self, kind: str, profile_name: str, on_confirm, on_cancel=None):
-        try:
-            from ui.dialogs.switch_preview_dialog import show_switch_preview
+        if self._exit_requested:
+            return
+        self._switch_preview_generation += 1
+        generation = self._switch_preview_generation
+        self._set_app_status(f"正在生成切换预览: {profile_name}")
 
-            show_switch_preview(self, kind, profile_name, on_confirm=on_confirm, on_cancel=on_cancel)
-        except Exception as e:
-            logger.error(f"Failed to show switch preview: {e}", exc_info=True)
-            from ui.widgets.toast import show_toast
-            show_toast(self, f"切换预览失败: {e}", is_error=True)
-            if on_cancel:
-                on_cancel()
+        def worker():
+            try:
+                from core.switch_preview import build_switch_preview
+
+                payload = {
+                    "ok": True,
+                    "preview": build_switch_preview(kind, profile_name),
+                    "error": "",
+                }
+            except Exception as exc:
+                payload = {"ok": False, "preview": None, "error": str(exc)}
+
+            def finish():
+                if generation != self._switch_preview_generation or self._exit_requested:
+                    return
+                if not payload["ok"]:
+                    logger.error("Failed to build switch preview: %s", payload["error"])
+                    from ui.widgets.toast import show_toast
+
+                    show_toast(self, f"切换预览失败: {payload['error']}", is_error=True)
+                    self._set_app_status("切换预览失败")
+                    if on_cancel:
+                        on_cancel()
+                    return
+                try:
+                    from ui.dialogs.switch_preview_dialog import SwitchPreviewDialog
+
+                    SwitchPreviewDialog(
+                        self,
+                        payload["preview"],
+                        on_confirm=on_confirm,
+                        on_cancel=on_cancel,
+                    )
+                    self._set_app_status("切换预览已打开")
+                except Exception as exc:
+                    logger.error("Failed to show switch preview: %s", exc, exc_info=True)
+                    from ui.widgets.toast import show_toast
+
+                    show_toast(self, f"切换预览失败: {exc}", is_error=True)
+                    self._set_app_status("切换预览失败")
+                    if on_cancel:
+                        on_cancel()
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(target=worker, name="switch-preview-build", daemon=True).start()
 
     def _on_closing(self):
         """Ask whether the close button should exit or minimize to tray."""

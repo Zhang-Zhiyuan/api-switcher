@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import customtkinter as ctk
 from tkinter import filedialog
 
-from core.browser_profile_manager import browser_profile_manager
-from models.profile import BrowserProfile
+from core.lazy_imports import LazyAttribute
 from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style
+
+browser_profile_manager = LazyAttribute("core.browser_profile_manager", "browser_profile_manager")
+BrowserProfile = LazyAttribute("models.profile", "BrowserProfile")
 
 
 class BrowserProfileEditorDialog(ctk.CTkToplevel):

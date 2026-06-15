@@ -1,7 +1,13 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import customtkinter as ctk
 
-from core.switch_preview import SwitchPreview, build_switch_preview
 from ui.theme import COLORS, button_style, center_window, font, textbox_style
+
+if TYPE_CHECKING:
+    from core.switch_preview import SwitchPreview
 
 
 class SwitchPreviewDialog(ctk.CTkToplevel):
@@ -144,5 +150,7 @@ class SwitchPreviewDialog(ctk.CTkToplevel):
 
 
 def show_switch_preview(master, kind: str, name: str, on_confirm=None, on_cancel=None) -> SwitchPreviewDialog:
+    from core.switch_preview import build_switch_preview
+
     preview = build_switch_preview(kind, name)
     return SwitchPreviewDialog(master, preview, on_confirm=on_confirm, on_cancel=on_cancel)

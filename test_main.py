@@ -135,6 +135,55 @@ def test_lazy_tray_manager_status_check_does_not_load_tray_core():
     assert "core.tray_manager" not in sys.modules
 
 
+def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
+    build_started = threading.Event()
+    dialog_created = threading.Event()
+    preview = object()
+    statuses = []
+    captured = {}
+
+    switch_module = ModuleType("core.switch_preview")
+
+    def build_switch_preview(kind, name):
+        build_started.set()
+        time.sleep(0.15)
+        captured["build"] = (kind, name)
+        return preview
+
+    switch_module.build_switch_preview = build_switch_preview
+
+    dialog_module = ModuleType("ui.dialogs.switch_preview_dialog")
+
+    class FakeSwitchPreviewDialog:
+        def __init__(self, master, preview_arg, on_confirm=None, on_cancel=None):
+            captured["dialog"] = (master, preview_arg, on_confirm, on_cancel)
+            dialog_created.set()
+
+    dialog_module.SwitchPreviewDialog = FakeSwitchPreviewDialog
+
+    monkeypatch.setitem(sys.modules, "core.switch_preview", switch_module)
+    monkeypatch.setitem(sys.modules, "ui.dialogs.switch_preview_dialog", dialog_module)
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._switch_preview_generation = 0
+    app._set_app_status = lambda message: statuses.append(message)
+    app._run_on_ui_thread = lambda callback: callback()
+
+    started_at = time.perf_counter()
+    app_module.App._show_switch_preview(app, "claude_api", "fast-profile", on_confirm=lambda: None)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.05
+    assert build_started.wait(1)
+    assert dialog_created.wait(1)
+    assert captured["build"] == ("claude_api", "fast-profile")
+    assert captured["dialog"][0] is app
+    assert captured["dialog"][1] is preview
+    assert statuses[0] == "正在生成切换预览: fast-profile"
+    assert statuses[-1] == "切换预览已打开"
+
+
 def test_ssh_heavy_sections_are_delayed():
     from ui.tabs.ssh_tab import SSHTab
 
