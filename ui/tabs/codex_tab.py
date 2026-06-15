@@ -4,7 +4,6 @@ import customtkinter as ctk
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
-from ui.widgets.auto_continue_control import AutoContinueControl
 from ui.dialogs.profile_editor import ProfileEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from models.profile import CodexProfile
@@ -27,6 +26,9 @@ class CodexTab(ctk.CTkScrollableFrame):
         self._profile_render_after_ids = set()
         self._refresh_finish_after_id = None
         self._destroyed = False
+        self._auto_continue_control = None
+        self._auto_continue_host = None
+        self._auto_continue_after_id = None
         self._build_ui()
 
     def _build_ui(self):
@@ -163,18 +165,44 @@ class CodexTab(ctk.CTkScrollableFrame):
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
 
-        # Auto Continue control
-        self._auto_continue_control = AutoContinueControl(self, provider="codex")
-        self._auto_continue_control.pack(fill="x", padx=14, pady=(0, 10))
+        self._auto_continue_host = ctk.CTkFrame(self, fg_color="transparent")
+        self._auto_continue_host.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(
+            self._auto_continue_host,
+            text="自动续跑控制正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(fill="x", pady=(10, 12))
+        self._auto_continue_after_id = self.after(220, self._build_auto_continue_control)
 
         self.after(20, self.refresh)
 
     def destroy(self):
         self._destroyed = True
         self._refresh_generation += 1
+        if self._auto_continue_after_id:
+            try:
+                self.after_cancel(self._auto_continue_after_id)
+            except Exception:
+                pass
+            self._auto_continue_after_id = None
         self._cancel_profile_render()
         self._cancel_refresh_finish()
         super().destroy()
+
+    def _build_auto_continue_control(self):
+        self._auto_continue_after_id = None
+        if self._destroyed or self._auto_continue_control or not self._auto_continue_host:
+            return
+        try:
+            for child in self._auto_continue_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        from ui.widgets.auto_continue_control import AutoContinueControl
+
+        self._auto_continue_control = AutoContinueControl(self._auto_continue_host, provider="codex")
+        self._auto_continue_control.pack(fill="x")
 
     def _cancel_profile_render(self):
         after_ids = set(self._profile_render_after_ids)
