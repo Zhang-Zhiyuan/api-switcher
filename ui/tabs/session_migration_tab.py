@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import importlib
 import logging
 import tempfile
 import threading
@@ -7,13 +10,35 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core import profile_manager, session_migration
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 
 logger = logging.getLogger(__name__)
+
+
+class _LazyModule:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+        self._module = None
+        self._lock = threading.RLock()
+
+    def _load(self):
+        module = self._module
+        if module is not None:
+            return module
+        with self._lock:
+            if self._module is None:
+                self._module = importlib.import_module(self._module_name)
+            return self._module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+profile_manager = _LazyModule("core.profile_manager")
+session_migration = _LazyModule("core.session_migration")
 
 
 def _nonnegative_int(value) -> int:
@@ -135,7 +160,6 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             border_color=COLORS["border_soft"],
         )
         filter_bar.pack(fill="x", padx=14, pady=(0, 8))
-        self._refresh_location_options()
         location_values = list(self._location_options.keys())
         ctk.CTkLabel(filter_bar, text="读取位置", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
         self._source_location_combo = ctk.CTkComboBox(

@@ -1,12 +1,39 @@
+import importlib
 import threading
 
 import customtkinter as ctk
 from tkinter import filedialog
 
 from config import paths
-from core import parser, toml_parser, auth_parser, startup_manager, vscode_parser, switcher
 from ui.widgets.toast import show_toast
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
+
+
+class _LazyModule:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+        self._module = None
+        self._lock = threading.RLock()
+
+    def _load(self):
+        module = self._module
+        if module is not None:
+            return module
+        with self._lock:
+            if self._module is None:
+                self._module = importlib.import_module(self._module_name)
+            return self._module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+parser = _LazyModule("core.parser")
+toml_parser = _LazyModule("core.toml_parser")
+auth_parser = _LazyModule("core.auth_parser")
+startup_manager = _LazyModule("core.startup_manager")
+vscode_parser = _LazyModule("core.vscode_parser")
+switcher = _LazyModule("core.switcher")
 
 
 def _build_storage_info_text(info: dict) -> str:

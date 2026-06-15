@@ -62,3 +62,44 @@ def test_ssh_tab_import_does_not_eagerly_load_remote_cores():
             "keyring",
         ),
     )
+
+
+def test_env_tab_import_does_not_eagerly_load_ssh_core():
+    _run_import_check(
+        "ui.tabs.env_tab",
+        (
+            "core.profile_manager",
+            "core.ssh_manager",
+            "paramiko",
+            "keyring",
+        ),
+    )
+
+
+def test_session_migration_tab_import_does_not_eagerly_load_session_core():
+    _run_import_check(
+        "ui.tabs.session_migration_tab",
+        (
+            "core.session_migration",
+            "core.remote_config",
+            "core.ssh_manager",
+            "paramiko",
+            "keyring",
+        ),
+    )
+
+
+def test_common_tab_import_does_not_eagerly_load_config_cores():
+    _run_import_check(
+        "ui.tabs.common_tab",
+        (
+            "core.parser",
+            "core.toml_parser",
+            "core.auth_parser",
+            "core.startup_manager",
+            "core.vscode_parser",
+            "core.switcher",
+            "core.profile_manager",
+            "keyring",
+        ),
+    )
