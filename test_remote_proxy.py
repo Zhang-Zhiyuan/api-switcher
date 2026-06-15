@@ -1204,6 +1204,29 @@ def test_proxy_subscription_state_cache_reuses_reads_and_detects_external_write(
     assert read_count["value"] == 2
 
 
+def test_corrupt_proxy_subscription_state_is_quarantined(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    state_dir = tmp_path / "proxy_subscriptions"
+    state_dir.mkdir()
+    state_path = state_dir / "subscription_state.json"
+    state_path.write_text("{not valid json", encoding="utf-8")
+    remote_proxy.clear_proxy_subscription_state_cache()
+
+    state = remote_proxy.load_proxy_subscription_state()
+
+    assert state == {}
+    assert not state_path.exists()
+    corrupt_files = list(state_dir.glob("subscription_state.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert corrupt_files[0].read_text(encoding="utf-8") == "{not valid json"
+
+    remote_proxy.save_proxy_subscription_profile("恢复", "https://example.com/restored")
+    restored = remote_proxy.load_proxy_subscription_state()
+
+    assert restored["url"] == "https://example.com/restored"
+    assert state_path.exists()
+
+
 def test_describe_proxy_node_uses_normalized_endpoint():
     node = remote_proxy.parse_proxy_node("{ name: node, type: vless, server: example.com, port: '443' }")
 
@@ -2036,6 +2059,26 @@ def test_local_proxy_preferences_cache_reuses_unchanged_file(monkeypatch, tmp_pa
     assert second["builtin_sites"]["youtube"] is True
 
 
+def test_corrupt_local_proxy_preferences_are_quarantined(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    local_proxy.LOCAL_PROXY_PREFS_PATH.write_text("{bad prefs", encoding="utf-8")
+    local_proxy.clear_local_proxy_preferences_cache()
+
+    preferences = local_proxy.load_local_proxy_preferences()
+
+    assert preferences["keep_running_on_exit"] is True
+    assert not local_proxy.LOCAL_PROXY_PREFS_PATH.exists()
+    corrupt_files = list(tmp_path.glob("preferences.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert corrupt_files[0].read_text(encoding="utf-8") == "{bad prefs"
+
+    local_proxy.set_local_proxy_start_on_login(True)
+    restored = local_proxy.load_local_proxy_preferences()
+
+    assert restored["start_on_login"] is True
+    assert local_proxy.LOCAL_PROXY_PREFS_PATH.exists()
+
+
 def test_local_proxy_preference_setters_parse_string_booleans(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
 
@@ -2179,6 +2222,26 @@ def test_local_proxy_state_cache_reuses_reads_and_detects_external_write(monkeyp
 
     assert calls["count"] == 2
     assert third["mixed_port"] == 17898
+
+
+def test_corrupt_local_proxy_state_is_quarantined(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    local_proxy.LOCAL_PROXY_STATE_PATH.write_text("{bad state", encoding="utf-8")
+    local_proxy.clear_local_proxy_state_cache()
+
+    state = local_proxy._load_state()
+
+    assert state == {}
+    assert not local_proxy.LOCAL_PROXY_STATE_PATH.exists()
+    corrupt_files = list(tmp_path.glob("state.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert corrupt_files[0].read_text(encoding="utf-8") == "{bad state"
+
+    local_proxy._save_state({"mixed_port": 17899})
+    restored = local_proxy._load_state()
+
+    assert restored["mixed_port"] == 17899
+    assert local_proxy.LOCAL_PROXY_STATE_PATH.exists()
 
 
 def test_subscription_auto_update_skips_unmanaged_local_proxy(monkeypatch, tmp_path):

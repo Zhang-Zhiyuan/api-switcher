@@ -96,6 +96,10 @@ def load_local_proxy_preferences() -> dict:
             return copy.deepcopy(_LOCAL_PROXY_PREFS_CACHE)
         try:
             data = json.loads(LOCAL_PROXY_PREFS_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _quarantine_corrupt_local_json_file(LOCAL_PROXY_PREFS_PATH)
+            data = {}
+            signature = _local_proxy_preferences_signature()
         except Exception:
             data = {}
         preferences = _normalize_local_proxy_preferences(data)
@@ -889,6 +893,10 @@ def _load_state() -> dict:
             return copy.deepcopy(_LOCAL_PROXY_STATE_CACHE)
         try:
             data = json.loads(LOCAL_PROXY_STATE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _quarantine_corrupt_local_json_file(LOCAL_PROXY_STATE_PATH)
+            data = {}
+            signature = _local_proxy_state_signature()
         except Exception:
             data = {}
         state = data if isinstance(data, dict) else {}
@@ -904,6 +912,18 @@ def _save_state(state: dict) -> None:
             json.dumps(state, ensure_ascii=False, indent=2),
         )
         _cache_local_proxy_state(state if isinstance(state, dict) else {})
+
+
+def _quarantine_corrupt_local_json_file(path: Path) -> Path | None:
+    try:
+        if not path.exists():
+            return None
+        timestamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+        target = path.with_name(f"{path.name}.corrupt-{timestamp}-{uuid.uuid4().hex[:8]}")
+        path.replace(target)
+        return target
+    except OSError:
+        return None
 
 
 def _proxy_url(mixed_port: int) -> str:

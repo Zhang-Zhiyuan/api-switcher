@@ -560,6 +560,10 @@ def load_proxy_subscription_state() -> dict:
         except FileNotFoundError:
             _cache_proxy_subscription_state({}, signature)
             return {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _quarantine_corrupt_proxy_subscription_state(path)
+            _cache_proxy_subscription_state({}, _proxy_subscription_state_signature(path))
+            return {}
         except Exception:
             clear_proxy_subscription_state_cache()
             return {}
@@ -746,6 +750,18 @@ def _replace_proxy_subscription_state_file(temp_path: Path, target_path: Path) -
             if attempt >= 5:
                 raise
             time.sleep(0.03 * (attempt + 1))
+
+
+def _quarantine_corrupt_proxy_subscription_state(path: Path) -> Path | None:
+    try:
+        if not path.exists():
+            return None
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        target = path.with_name(f"{path.name}.corrupt-{timestamp}-{uuid.uuid4().hex[:8]}")
+        path.replace(target)
+        return target
+    except OSError:
+        return None
 
 
 def _proxy_subscription_nodes_signature(path: Path, charset: str) -> tuple[str, int | None, int | None, str]:
