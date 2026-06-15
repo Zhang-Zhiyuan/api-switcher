@@ -1,10 +1,10 @@
-import importlib
 import threading
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
+from core.lazy_imports import LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITES
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
@@ -12,29 +12,10 @@ from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.toast import show_toast
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-local_proxy = _LazyModule("core.local_proxy")
-network_diagnostic_settings = _LazyModule("core.network_diagnostic_settings")
-remote_proxy = _LazyModule("core.remote_proxy")
-startup_manager = _LazyModule("core.startup_manager")
+local_proxy = LazyModule("core.local_proxy")
+network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
+remote_proxy = LazyModule("core.remote_proxy")
+startup_manager = LazyModule("core.startup_manager")
 
 
 class LocalProxyTab(ctk.CTkScrollableFrame):

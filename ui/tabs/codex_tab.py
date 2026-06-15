@@ -1,51 +1,17 @@
-import importlib
 import threading
 
 import customtkinter as ctk
+from core.lazy_imports import LazyAttribute, LazyModule
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.theme import COLORS, bind_wraplength, button_style, font
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-class _LazyAttribute:
-    def __init__(self, module_name: str, attr_name: str):
-        self._module = _LazyModule(module_name)
-        self._attr_name = attr_name
-
-    def _load(self):
-        return getattr(self._module, self._attr_name)
-
-    def __call__(self, *args, **kwargs):
-        return self._load()(*args, **kwargs)
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-profile_manager = _LazyModule("core.profile_manager")
-ProfileEditorDialog = _LazyAttribute("ui.dialogs.profile_editor", "ProfileEditorDialog")
-ConfirmDialog = _LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
-CodexProfile = _LazyAttribute("models.profile", "CodexProfile")
+profile_manager = LazyModule("core.profile_manager")
+ProfileEditorDialog = LazyAttribute("ui.dialogs.profile_editor", "ProfileEditorDialog")
+ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
+CodexProfile = LazyAttribute("models.profile", "CodexProfile")
 
 
 class CodexTab(ctk.CTkScrollableFrame):

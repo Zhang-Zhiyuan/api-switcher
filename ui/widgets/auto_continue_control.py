@@ -1,50 +1,16 @@
 from __future__ import annotations
 
-import importlib
 import threading
 
 import customtkinter as ctk
+from core.lazy_imports import LazyAttribute
 from ui.widgets.toast import show_toast
 from ui.theme import COLORS, button_style, card_frame_kwargs, font, textbox_style
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-class _LazyAttribute:
-    def __init__(self, module_name: str, attr_name: str):
-        self._module = _LazyModule(module_name)
-        self._attr_name = attr_name
-
-    def _load(self):
-        return getattr(self._module, self._attr_name)
-
-    def __call__(self, *args, **kwargs):
-        return self._load()(*args, **kwargs)
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-AutoContinueSettings = _LazyAttribute("models.auto_continue", "AutoContinueSettings")
-training_prompt_template_by_key = _LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
-auto_continue_manager = _LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
+AutoContinueSettings = LazyAttribute("models.auto_continue", "AutoContinueSettings")
+training_prompt_template_by_key = LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
+auto_continue_manager = LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
 
 
 class AutoContinueControl(ctk.CTkFrame):

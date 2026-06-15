@@ -1,53 +1,19 @@
-import importlib
 import threading
 
 import customtkinter as ctk
 from tkinter import filedialog
 
+from core.lazy_imports import LazyAttribute, LazyModule
 from ui.widgets.toast import show_toast
 from ui.widgets.empty_state import EmptyState
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-class _LazyAttribute:
-    def __init__(self, module_name: str, attr_name: str):
-        self._module = _LazyModule(module_name)
-        self._attr_name = attr_name
-
-    def _load(self):
-        return getattr(self._module, self._attr_name)
-
-    def __call__(self, *args, **kwargs):
-        return self._load()(*args, **kwargs)
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-backup_manager = _LazyModule("core.backup_manager")
-local_config_bundle = _LazyModule("core.local_config_bundle")
-portable_migration = _LazyModule("core.portable_migration")
-ConfirmDialog = _LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
-PasswordDialog = _LazyAttribute("ui.dialogs.password_dialog", "PasswordDialog")
+backup_manager = LazyModule("core.backup_manager")
+local_config_bundle = LazyModule("core.local_config_bundle")
+portable_migration = LazyModule("core.portable_migration")
+ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
+PasswordDialog = LazyAttribute("ui.dialogs.password_dialog", "PasswordDialog")
 
 
 class BackupTab(ctk.CTkScrollableFrame):

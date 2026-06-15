@@ -5,7 +5,6 @@ import binascii
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
-import importlib
 import ipaddress
 import json
 import posixpath
@@ -26,53 +25,14 @@ from urllib import request as urlrequest
 import yaml
 
 from config.paths import STORAGE_DIR
+from core.lazy_imports import LazyAttribute, LazyModule
 
 
-class _LazyModule:
-    """Import heavy optional collaborators only when a code path actually needs them."""
-
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-class _LazyAttribute(_LazyModule):
-    def __init__(self, module_name: str, attr_name: str):
-        super().__init__(module_name)
-        self._attr_name = attr_name
-        self._attr = None
-
-    def _load_attr(self):
-        attr = self._attr
-        if attr is not None:
-            return attr
-        with self._lock:
-            if self._attr is None:
-                self._attr = getattr(self._load(), self._attr_name)
-            return self._attr
-
-    def __getattr__(self, name: str):
-        return getattr(self._load_attr(), name)
-
-
-network_diagnostic_settings = _LazyModule("core.network_diagnostic_settings")
-network_diagnostics = _LazyModule("core.network_diagnostics")
-profile_manager = _LazyModule("core.profile_manager")
-remote_config = _LazyModule("core.remote_config")
-ssh_manager = _LazyAttribute("core.ssh_manager", "ssh_manager")
+network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
+network_diagnostics = LazyModule("core.network_diagnostics")
+profile_manager = LazyModule("core.profile_manager")
+remote_config = LazyModule("core.remote_config")
+ssh_manager = LazyAttribute("core.ssh_manager", "ssh_manager")
 
 
 AI_PROXY_DOMAINS = (

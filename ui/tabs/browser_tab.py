@@ -1,8 +1,8 @@
-import importlib
 import threading
 
 import customtkinter as ctk
 
+from core.lazy_imports import LazyAttribute, LazyModule
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -11,48 +11,14 @@ from ui.widgets.toast import show_toast
 PROFILE_RENDER_BATCH_SIZE = 6
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-class _LazyAttribute:
-    def __init__(self, module_name: str, attr_name: str):
-        self._module = _LazyModule(module_name)
-        self._attr_name = attr_name
-
-    def _load(self):
-        return getattr(self._module, self._attr_name)
-
-    def __call__(self, *args, **kwargs):
-        return self._load()(*args, **kwargs)
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-profile_manager = _LazyModule("core.profile_manager")
-browser_data_manager = _LazyAttribute("core.browser_data_manager", "browser_data_manager")
-browser_launcher = _LazyAttribute("core.browser_launcher", "browser_launcher")
-browser_profile_manager = _LazyAttribute("core.browser_profile_manager", "browser_profile_manager")
-BrowserProfileEditorDialog = _LazyAttribute("ui.dialogs.browser_profile_editor", "BrowserProfileEditorDialog")
-BulkOperationResultDialog = _LazyAttribute("ui.dialogs.bulk_operation_result_dialog", "BulkOperationResultDialog")
-ConfirmDialog = _LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
-DangerConfirmDialog = _LazyAttribute("ui.dialogs.danger_confirm_dialog", "DangerConfirmDialog")
+profile_manager = LazyModule("core.profile_manager")
+browser_data_manager = LazyAttribute("core.browser_data_manager", "browser_data_manager")
+browser_launcher = LazyAttribute("core.browser_launcher", "browser_launcher")
+browser_profile_manager = LazyAttribute("core.browser_profile_manager", "browser_profile_manager")
+BrowserProfileEditorDialog = LazyAttribute("ui.dialogs.browser_profile_editor", "BrowserProfileEditorDialog")
+BulkOperationResultDialog = LazyAttribute("ui.dialogs.bulk_operation_result_dialog", "BulkOperationResultDialog")
+ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
+DangerConfirmDialog = LazyAttribute("ui.dialogs.danger_confirm_dialog", "DangerConfirmDialog")
 
 
 def _diagnosis_bool(diagnosis: dict | None, key: str, default: bool = False) -> bool:

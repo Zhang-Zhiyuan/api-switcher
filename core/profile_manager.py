@@ -1,5 +1,4 @@
 import hashlib
-import importlib
 import json
 import logging
 import re
@@ -12,6 +11,7 @@ from urllib.parse import urlparse
 
 from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
 from core.atomic_io import atomic_write_text
+from core.lazy_imports import LazyModule
 from models.profile import (
     ClaudeProfile,
     CodexProfile,
@@ -22,26 +22,7 @@ from models.profile import (
 )
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-security = _LazyModule("core.security")
+security = LazyModule("core.security")
 
 logger = logging.getLogger(__name__)
 _STORE_CACHE_LOCK = threading.RLock()

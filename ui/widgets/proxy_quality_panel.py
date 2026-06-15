@@ -1,38 +1,19 @@
 from __future__ import annotations
 
-import importlib
 import threading
 import webbrowser
 
 import customtkinter as ctk
 
 from core import network_diagnostic_constants as diagnostic_constants
+from core.lazy_imports import LazyModule
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
 from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-network_diagnostic_settings = _LazyModule("core.network_diagnostic_settings")
-network_diagnostics = _LazyModule("core.network_diagnostics")
+network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
+network_diagnostics = LazyModule("core.network_diagnostics")
 
 
 KEYLESS_SERVICES = {

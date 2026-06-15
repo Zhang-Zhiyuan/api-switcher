@@ -1,9 +1,9 @@
-import importlib
 import threading
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
+from core.lazy_imports import LazyAttribute, LazyModule
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
@@ -12,56 +12,15 @@ from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, c
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 
 
-class _LazyModule:
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-        self._lock = threading.RLock()
-
-    def _load(self):
-        module = self._module
-        if module is not None:
-            return module
-        with self._lock:
-            if self._module is None:
-                self._module = importlib.import_module(self._module_name)
-            return self._module
-
-    def __getattr__(self, name: str):
-        return getattr(self._load(), name)
-
-
-class _LazyAttribute(_LazyModule):
-    def __init__(self, module_name: str, attr_name: str):
-        super().__init__(module_name)
-        self._attr_name = attr_name
-        self._attr = None
-
-    def _load_attr(self):
-        attr = self._attr
-        if attr is not None:
-            return attr
-        with self._lock:
-            if self._attr is None:
-                self._attr = getattr(self._load(), self._attr_name)
-            return self._attr
-
-    def __getattr__(self, name: str):
-        return getattr(self._load_attr(), name)
-
-    def __call__(self, *args, **kwargs):
-        return self._load_attr()(*args, **kwargs)
-
-
-profile_manager = _LazyModule("core.profile_manager")
-network_diagnostic_settings = _LazyModule("core.network_diagnostic_settings")
-remote_auto_continue = _LazyModule("core.remote_auto_continue")
-remote_git_login = _LazyModule("core.remote_git_login")
-remote_proxy = _LazyModule("core.remote_proxy")
-ssh_manager = _LazyModule("core.ssh_manager")
-sync_manager = _LazyModule("core.sync_manager")
-auto_continue_manager = _LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
-training_prompt_template_by_key = _LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
+profile_manager = LazyModule("core.profile_manager")
+network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
+remote_auto_continue = LazyModule("core.remote_auto_continue")
+remote_git_login = LazyModule("core.remote_git_login")
+remote_proxy = LazyModule("core.remote_proxy")
+ssh_manager = LazyModule("core.ssh_manager")
+sync_manager = LazyModule("core.sync_manager")
+auto_continue_manager = LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
+training_prompt_template_by_key = LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
 
 
 def _format_server_batch_item(server_name: str, result) -> str:
