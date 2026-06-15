@@ -1,21 +1,34 @@
 import json
 import zlib
 import base64
+import importlib
 import logging
 import hashlib
 import re
+import threading
 from pathlib import Path
 
-import keyring
 from config.paths import KEYRING_SERVICE, SECRETS_DIR
 
 logger = logging.getLogger(__name__)
+_KEYRING = None
+_KEYRING_LOCK = threading.RLock()
+
+
+def _keyring():
+    global _KEYRING
+    if _KEYRING is not None:
+        return _KEYRING
+    with _KEYRING_LOCK:
+        if _KEYRING is None:
+            _KEYRING = importlib.import_module("keyring")
+        return _KEYRING
 
 
 def _get_backend_type() -> str:
     """Check which keyring backend is available."""
     try:
-        backend = keyring.get_keyring()
+        backend = _keyring().get_keyring()
         return type(backend).__name__
     except Exception:
         return "unknown"
@@ -28,7 +41,7 @@ def set_secret(key: str | None, value: str | None) -> None:
     if value is None:
         value = ""
     try:
-        keyring.set_password(KEYRING_SERVICE, key, value)
+        _keyring().set_password(KEYRING_SERVICE, key, value)
         logger.debug(f"Stored secret via keyring: {key}")
     except Exception as e:
         logger.warning(f"Keyring failed for {key}: {e}, falling back to DPAPI file")
@@ -40,7 +53,7 @@ def get_secret(key: str | None) -> str | None:
     if not key:
         return None
     try:
-        value = keyring.get_password(KEYRING_SERVICE, key)
+        value = _keyring().get_password(KEYRING_SERVICE, key)
         if value is not None:
             return value
     except Exception as e:
@@ -55,14 +68,18 @@ def delete_secret(key: str | None) -> None:
     if not key:
         return
     try:
-        keyring.delete_password(KEYRING_SERVICE, key)
-    except keyring.errors.PasswordDeleteError:
-        pass
+        _keyring().delete_password(KEYRING_SERVICE, key)
     except Exception as e:
-        logger.warning(f"Keyring delete failed for {key}: {e}")
+        if e.__class__.__name__ == "PasswordDeleteError":
+            pass
+        else:
+            logger.warning(f"Keyring delete failed for {key}: {e}")
 
-    # Also clean up DPAPI fallback file
-    _dpapi_delete(key)
+    try:
+        # Also clean up DPAPI fallback file.
+        _dpapi_delete(key)
+    except Exception as e:
+        logger.warning(f"DPAPI delete failed for {key}: {e}")
 
 
 def set_secret_json(key: str | None, data: dict) -> None:

@@ -7,7 +7,7 @@ from ui.widgets.toast import show_toast
 from ui.dialogs.profile_editor import ProfileEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from models.profile import ClaudeProfile
-from core import profile_manager, switcher, security
+from core import profile_manager
 from ui.theme import COLORS, bind_wraplength, button_style, font
 
 
@@ -497,6 +497,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
     def _switch_profile(self, name):
         def perform_switch():
             try:
+                from core import switcher
+
                 switcher.switch_claude_profile(name)
                 show_toast(self.winfo_toplevel(), f"已切换 Claude API 配置: {name}")
                 self.refresh()
@@ -509,6 +511,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
     def _switch_account(self, name):
         def perform_switch():
             try:
+                from core import switcher
+
                 switcher.switch_claude_account(name)
                 show_toast(self.winfo_toplevel(), f"已切换 Claude 官方账号: {name}；新开的终端会话生效")
                 self.refresh()
@@ -524,6 +528,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         if not profile:
             show_toast(self.winfo_toplevel(), f"未找到 API 配置: {name}", is_error=True)
             return
+
+        from core import security
 
         api_key = (
             security.get_secret(profile.auth_token_ref)
@@ -567,6 +573,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         profile = next((p for p in profiles if p.name == name), None)
 
         def on_save(data, old_profile):
+            from core import security
+
             token_ref = old_profile.auth_token_ref if old_profile else f"claude:{data['name']}:auth_token"
             primary_api_key_ref = old_profile.primary_api_key_ref if old_profile else None
             if data.get("auth_token"):
@@ -601,6 +609,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
 
     def _create_profile(self):
         def on_save(data, _):
+            from core import security
+
             token_ref = f"claude:{data['name']}:auth_token"
             primary_api_key_ref = None
             if data.get("auth_token"):
