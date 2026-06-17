@@ -7,8 +7,9 @@ from pathlib import Path
 import build_exe
 
 
-def _lazy_core_targets(*roots: Path) -> set[str]:
+def _lazy_project_targets(*roots: Path) -> set[str]:
     targets: set[str] = set()
+    prefixes = ("core.", "models.", "ui.")
     for root in roots:
         for path in root.rglob("*.py"):
             if "__pycache__" in path.parts:
@@ -22,7 +23,11 @@ def _lazy_core_targets(*roots: Path) -> set[str]:
                 if name not in {"LazyModule", "LazyAttribute"}:
                     continue
                 target = node.args[0]
-                if isinstance(target, ast.Constant) and isinstance(target.value, str) and target.value.startswith("core."):
+                if (
+                    isinstance(target, ast.Constant)
+                    and isinstance(target.value, str)
+                    and target.value.startswith(prefixes)
+                ):
                     targets.add(target.value)
     return targets
 
@@ -37,11 +42,13 @@ def test_tab_hidden_imports_cover_app_tab_specs():
 
 def test_project_hidden_imports_include_core_sync_manager():
     assert "core.sync_manager" in build_exe._project_hidden_imports()
+    assert "models.auto_continue" in build_exe._project_hidden_imports()
+    assert "ui.dialogs.confirm_dialog" in build_exe._project_hidden_imports()
 
 
-def test_project_hidden_imports_cover_lazy_core_targets():
+def test_project_hidden_imports_cover_lazy_project_targets():
     hidden_imports = set(build_exe._project_hidden_imports())
-    lazy_targets = _lazy_core_targets(Path("core"), Path("ui"))
+    lazy_targets = _lazy_project_targets(Path("core"), Path("ui"), Path("models"))
 
     assert lazy_targets
     assert lazy_targets <= hidden_imports
@@ -135,12 +142,19 @@ def test_create_spec_file_includes_lazy_tab_hidden_imports(monkeypatch, tmp_path
 def test_create_spec_file_includes_project_core_hidden_imports(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "core").mkdir()
+    (tmp_path / "models").mkdir()
+    (tmp_path / "ui" / "dialogs").mkdir(parents=True)
     (tmp_path / "core" / "sync_manager.py").write_text("", encoding="utf-8")
+    (tmp_path / "models" / "auto_continue.py").write_text("", encoding="utf-8")
+    (tmp_path / "ui" / "dialogs" / "confirm_dialog.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(build_exe, "SPEC_PATH", tmp_path / "ApiSwitcher.spec")
 
     build_exe.create_spec_file()
 
-    assert "core.sync_manager" in build_exe.SPEC_PATH.read_text(encoding="utf-8")
+    spec_text = build_exe.SPEC_PATH.read_text(encoding="utf-8")
+    assert "core.sync_manager" in spec_text
+    assert "models.auto_continue" in spec_text
+    assert "ui.dialogs.confirm_dialog" in spec_text
 
 
 def test_create_spec_file_excludes_heavy_optional_modules(monkeypatch, tmp_path):

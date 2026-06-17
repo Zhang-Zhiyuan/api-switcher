@@ -2897,7 +2897,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         def finish(payload):
             self._set_proxy_busy(False)
             if on_done:
-                on_done(payload)
+                try:
+                    on_done(payload)
+                except Exception as e:
+                    self._set_proxy_status(f"AI 代理结果处理失败: {e}", "error")
+                    raise
 
         self._run_ssh_task(busy_message, worker, on_done=finish)
 
@@ -3029,22 +3033,33 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._ssh_busy = False
-                if self._remote_inspect_button:
-                    self._remote_inspect_button.configure(state="normal")
-                if on_done:
-                    on_done(payload)
-                elif payload["ok"]:
-                    message = str(payload["result"] or "操作完成")
-                    self._set_sync_status(message, "success")
-                    show_toast(self.winfo_toplevel(), message)
-                else:
-                    message = f"操作失败: {payload['error']}"
+                try:
+                    if self._remote_inspect_button:
+                        self._remote_inspect_button.configure(state="normal")
+                    if on_done:
+                        on_done(payload)
+                    elif payload["ok"]:
+                        message = str(payload["result"] or "操作完成")
+                        self._set_sync_status(message, "success")
+                        show_toast(self.winfo_toplevel(), message)
+                    else:
+                        message = f"操作失败: {payload['error']}"
+                        self._set_sync_status(message, "error")
+                        show_toast(self.winfo_toplevel(), message, is_error=True)
+                except Exception as e:
+                    message = f"操作结果处理失败: {e}"
                     self._set_sync_status(message, "error")
                     show_toast(self.winfo_toplevel(), message, is_error=True)
-                if self._remote_pull_button and self._remote_pull_options:
-                    self._remote_pull_button.configure(state="normal")
-                if refresh:
-                    self.refresh()
+                finally:
+                    if self._remote_pull_button and self._remote_pull_options:
+                        self._remote_pull_button.configure(state="normal")
+                    if refresh:
+                        try:
+                            self.refresh()
+                        except Exception as e:
+                            message = f"刷新 SSH 页面失败: {e}"
+                            self._set_sync_status(message, "error")
+                            show_toast(self.winfo_toplevel(), message, is_error=True)
 
             self._run_on_ui_thread(finish)
 
@@ -3543,7 +3558,12 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._set_remote_auto_busy(False)
-                on_done(payload)
+                try:
+                    on_done(payload)
+                except Exception as e:
+                    message = f"远端自动续跑结果处理失败: {e}"
+                    self._set_remote_auto_status(message, "error")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
 
             self._run_on_ui_thread(finish)
 

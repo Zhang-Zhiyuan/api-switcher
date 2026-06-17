@@ -56,7 +56,10 @@ def _collect_project_modules(package_dir: Path, package_name: str) -> list[str]:
 
 
 def _project_hidden_imports() -> list[str]:
-    return _collect_project_modules(Path("core"), "core")
+    modules: list[str] = []
+    for package_name in ("core", "models", "ui"):
+        modules.extend(_collect_project_modules(Path(package_name), package_name))
+    return sorted(set(modules))
 
 
 if hasattr(sys.stdout, "reconfigure"):
