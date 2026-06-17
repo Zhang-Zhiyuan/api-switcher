@@ -41,6 +41,24 @@ EXCLUDED_MODULES = [
 ]
 
 
+def _collect_project_modules(package_dir: Path, package_name: str) -> list[str]:
+    """Return import names for project modules that PyInstaller cannot infer from lazy imports."""
+    if not package_dir.exists():
+        return []
+
+    modules: list[str] = []
+    for path in package_dir.rglob("*.py"):
+        if path.name == "__init__.py" or "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(package_dir).with_suffix("")
+        modules.append(".".join((package_name, *relative.parts)))
+    return sorted(set(modules))
+
+
+def _project_hidden_imports() -> list[str]:
+    return _collect_project_modules(Path("core"), "core")
+
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -183,6 +201,7 @@ coll = COLLECT(
         "ui.dialogs.proxy_quality_dialog",
         "ui.widgets.proxy_quality_panel",
         *UI_TAB_HIDDEN_IMPORTS,
+        *_project_hidden_imports(),
     ]
 
     spec_content = f"""# -*- mode: python ; coding: utf-8 -*-
