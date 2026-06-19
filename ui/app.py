@@ -17,6 +17,9 @@ CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 DEFAULT_TAB_LABEL = "Claude Code"
 DEFAULT_TAB_PRELOAD_MODE = "priority"
+DEFAULT_TAB_WARMUP_MODE = "all"
+TAB_WARMUP_START_MS = 2600
+TAB_WARMUP_STEP_MS = 750
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
@@ -103,6 +106,9 @@ class App(ctk.CTk):
         self._tab_class_cache = {}
         self._tab_class_cache_lock = threading.RLock()
         self._lazy_tab_preload_started = False
+        self._lazy_tab_warmup_started = False
+        self._pending_tab_warmup_after_id = None
+        self._tab_warmup_queue = []
         self._initial_tab_load_started = False
         self._pending_tab_load_after_ids = {}
         self._tab_class_loading = set()
@@ -301,6 +307,12 @@ class App(ctk.CTk):
         preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", DEFAULT_TAB_PRELOAD_MODE).strip().lower()
         if preload_mode != "0":
             self.after(1400, lambda mode=preload_mode: self._preload_lazy_tab_classes(priority_only=mode != "1"))
+        warmup_mode = os.environ.get("API_SWITCHER_WARM_TABS", DEFAULT_TAB_WARMUP_MODE).strip().lower()
+        if warmup_mode != "0":
+            self.after(
+                TAB_WARMUP_START_MS,
+                lambda mode=warmup_mode: self._start_lazy_tab_warmup(priority_only=mode not in {"1", "all"}),
+            )
 
     def _install_tab_placeholder(self, label: str):
         frame = self._tab_frames.get(label)
@@ -436,7 +448,7 @@ class App(ctk.CTk):
             self._show_tab_error(label, e)
             return None
 
-    def _instantiate_tab_from_class(self, label: str, tab_class):
+    def _instantiate_tab_from_class(self, label: str, tab_class, *, background: bool = False):
         spec = self._tab_specs.get(label)
         frame = self._tab_frames.get(label)
         if not spec or frame is None:
@@ -449,7 +461,8 @@ class App(ctk.CTk):
         tab = tab_class(frame)
         tab.pack(fill="both", expand=True)
         setattr(self, attr, tab)
-        self._set_app_status(f"已加载 {label}")
+        if not background or self._tabview.get() == label:
+            self._set_app_status(f"已加载 {label}")
         logger.debug("Loaded tab: %s", label)
         return tab
 
@@ -497,6 +510,70 @@ class App(ctk.CTk):
                     logger.debug("Lazy tab preload skipped for %s: %s", label, exc)
 
         threading.Thread(target=run, name="lazy-tab-preload", daemon=True).start()
+
+    def _start_lazy_tab_warmup(self, priority_only: bool = False):
+        if self._exit_requested or self._lazy_tab_warmup_started:
+            return
+        self._lazy_tab_warmup_started = True
+        current = self._tabview.get() or DEFAULT_TAB_LABEL
+        priority = {
+            "Win11 代理": 0,
+            "SSH 服务器": 1,
+            "浏览器 Profile": 2,
+            "会话迁移": 3,
+            "Codex CLI": 4,
+            ENV_TAB_LABEL: 5,
+        }
+        priority_labels = set(priority)
+        queue_items = [
+            (priority.get(label, 50), label)
+            for label, _attr, _module_name, _class_name, eager in TAB_SPECS
+            if not eager
+            and label != current
+            and (not priority_only or label in priority_labels)
+        ]
+        queue_items.sort(key=lambda item: (item[0], item[1]))
+        self._tab_warmup_queue = [label for _order, label in queue_items]
+        self._schedule_next_tab_warmup(0)
+
+    def _schedule_next_tab_warmup(self, delay_ms: int = TAB_WARMUP_STEP_MS):
+        if self._exit_requested or not self._tab_warmup_queue:
+            self._pending_tab_warmup_after_id = None
+            return
+
+        def warm_next():
+            self._pending_tab_warmup_after_id = None
+            self._warm_next_lazy_tab()
+
+        try:
+            self._pending_tab_warmup_after_id = self.after(max(1, int(delay_ms)), warm_next)
+        except Exception:
+            self._pending_tab_warmup_after_id = None
+
+    def _warm_next_lazy_tab(self):
+        if self._exit_requested:
+            return
+        while self._tab_warmup_queue:
+            label = self._tab_warmup_queue.pop(0)
+            spec = self._tab_specs.get(label)
+            if not spec:
+                continue
+            attr, module_name, class_name, _eager = spec
+            if self._tab_is_loaded(attr):
+                continue
+            if label in self._pending_tab_load_after_ids or label in self._tab_class_loading:
+                self._tab_warmup_queue.append(label)
+                self._schedule_next_tab_warmup(TAB_WARMUP_STEP_MS)
+                return
+            try:
+                tab_class = self._resolve_tab_class(label, module_name, class_name)
+                self._instantiate_tab_from_class(label, tab_class, background=True)
+                logger.debug("Warmed lazy tab: %s", label)
+            except Exception as exc:
+                logger.debug("Lazy tab warmup skipped for %s: %s", label, exc, exc_info=True)
+            self._schedule_next_tab_warmup(TAB_WARMUP_STEP_MS)
+            return
+        self._pending_tab_warmup_after_id = None
 
     def _schedule_initial_tab_load(self):
         if self._exit_requested or self._initial_tab_load_started:
@@ -963,6 +1040,16 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self._pending_tab_load_after_ids.clear()
+        pending_warmup_after_id = self.__dict__.get("_pending_tab_warmup_after_id")
+        if pending_warmup_after_id:
+            try:
+                self.after_cancel(pending_warmup_after_id)
+            except Exception:
+                pass
+        self._pending_tab_warmup_after_id = None
+        tab_warmup_queue = self.__dict__.get("_tab_warmup_queue")
+        if tab_warmup_queue is not None:
+            tab_warmup_queue.clear()
         self._tab_class_loading.clear()
         self._tab_load_generations.clear()
         if self._quick_switch_load_after_id:

@@ -44,6 +44,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     """Tab for exporting and importing Claude Code / Codex local sessions."""
 
     RENDER_BATCH_SIZE = 8
+    RENDER_BATCH_DELAY_MS = 8
 
     FILTER_OPTIONS = {
         "全部": "all",
@@ -309,7 +310,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             return
         try:
             self._record_render_after_id = self.after(
-                1,
+                self.RENDER_BATCH_DELAY_MS,
                 lambda: self._render_record_batch(records, generation, end),
             )
         except Exception:

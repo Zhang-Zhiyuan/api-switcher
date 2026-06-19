@@ -20,6 +20,7 @@ class BackupTab(ctk.CTkScrollableFrame):
     """Tab for managing backups."""
 
     RENDER_BATCH_SIZE = 12
+    RENDER_BATCH_DELAY_MS = 8
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -179,7 +180,7 @@ class BackupTab(ctk.CTkScrollableFrame):
             self._render_after_id = None
             return
         self._render_after_id = self.after(
-            1,
+            self.RENDER_BATCH_DELAY_MS,
             lambda: self._render_backup_batch(backups, generation, end),
         )
 

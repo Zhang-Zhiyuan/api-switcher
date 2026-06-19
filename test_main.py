@@ -47,11 +47,35 @@ def test_primary_tabs_are_lazy_loaded_and_priority_preloaded_after_startup():
     specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
 
     assert app_module.DEFAULT_TAB_PRELOAD_MODE == "priority"
+    assert app_module.DEFAULT_TAB_WARMUP_MODE == "all"
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
     assert all(eager is False for eager in specs.values())
     assert hasattr(app_module.App, "_load_quick_switch_profiles_delayed")
     assert hasattr(app_module.App, "_run_quick_switch_profile_load")
+    assert hasattr(app_module.App, "_start_lazy_tab_warmup")
+    assert hasattr(app_module.App, "_warm_next_lazy_tab")
+
+
+def test_lazy_tab_warmup_prioritizes_heavy_tabs_after_current_tab():
+    class FakeTabView:
+        def get(self):
+            return "Claude Code"
+
+    scheduled = []
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._lazy_tab_warmup_started = False
+    app._tab_warmup_queue = []
+    app._tabview = FakeTabView()
+    app._schedule_next_tab_warmup = lambda delay_ms=0: scheduled.append(delay_ms)
+
+    app_module.App._start_lazy_tab_warmup(app, priority_only=True)
+
+    assert app._tab_warmup_queue[:2] == ["Win11 代理", "SSH 服务器"]
+    assert "Claude Code" not in app._tab_warmup_queue
+    assert "Codex CLI" in app._tab_warmup_queue
+    assert scheduled == [0]
 
 
 def test_tray_startup_runs_off_ui_thread():

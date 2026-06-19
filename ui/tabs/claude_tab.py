@@ -13,6 +13,8 @@ ProfileEditorDialog = LazyAttribute("ui.dialogs.profile_editor", "ProfileEditorD
 ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
 ClaudeProfile = LazyAttribute("models.profile", "ClaudeProfile")
 
+CARD_RENDER_BATCH_DELAY_MS = 8
+
 
 class ClaudeTab(ctk.CTkScrollableFrame):
     """Tab for managing Claude Code API configs and official accounts."""
@@ -459,7 +461,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             self._profile_render_after_id = None
             return
         after_id = self.after(
-            1,
+            CARD_RENDER_BATCH_DELAY_MS,
             lambda: self._render_profile_cards_batch(profiles, generation, end),
         )
         self._profile_render_after_id = after_id
@@ -491,7 +493,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             self._profile_render_after_id = None
             return
         after_id = self.after(
-            1,
+            CARD_RENDER_BATCH_DELAY_MS,
             lambda: self._render_account_cards_batch(accounts, generation, end),
         )
         self._profile_render_after_id = after_id

@@ -33,6 +33,8 @@ def _format_server_batch_item(server_name: str, result) -> str:
 class SSHTab(ctk.CTkScrollableFrame):
     """Tab for managing SSH servers and syncing configs."""
 
+    SERVER_RENDER_BATCH_DELAY_MS = 8
+
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
@@ -1283,7 +1285,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._server_render_after_id = None
             return
         self._server_render_after_id = self.after(
-            1,
+            self.SERVER_RENDER_BATCH_DELAY_MS,
             lambda: self._render_server_cards_batch(profile_items, generation, end),
         )
 

@@ -9,6 +9,7 @@ from ui.widgets.toast import show_toast
 
 
 PROFILE_RENDER_BATCH_SIZE = 6
+PROFILE_RENDER_BATCH_DELAY_MS = 8
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -333,7 +334,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
 
         try:
             self._profile_render_after_id = self.after(
-                1,
+                PROFILE_RENDER_BATCH_DELAY_MS,
                 lambda: self._render_profile_batch(profiles, active, diagnoses, generation, end),
             )
         except Exception:
