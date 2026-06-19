@@ -1,7 +1,8 @@
 from ui.tabs.common_tab import _build_overview_text, _build_storage_info_text
 
 
-def test_common_tab_overview_masks_sensitive_values():
+def test_common_tab_overview_masks_sensitive_values(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     text = _build_overview_text(
         {
             "env": {
@@ -40,10 +41,60 @@ def test_common_tab_overview_masks_sensitive_values():
     assert "anthropic-secret-token-123456" not in text
     assert "sk-test-secret-value-abcdef" not in text
     assert "anthropic-se...3456" in text
-    assert "sk-test-...cdef" in text
+    assert "OPENAI_API_KEY=sk-test-...cdef" in text
     assert "=== Claude Code ===" in text
     assert "=== Codex CLI ===" in text
     assert "=== VS Code (Claude 相关) ===" in text
+
+
+def test_common_tab_overview_uses_codex_provider_env_key(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-secret-abcdef")
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-openai-secret")
+
+    text = _build_overview_text(
+        {},
+        {
+            "model": "deepseek-v4-flash",
+            "model_provider": "deepseek",
+            "model_providers": {
+                "deepseek": {
+                    "name": "DeepSeek",
+                    "base_url": "https://api.deepseek.com",
+                    "env_key": "DEEPSEEK_API_KEY",
+                }
+            },
+        },
+        {"auth_mode": "chatgpt", "OPENAI_API_KEY": "stale-auth-key"},
+        {},
+    )
+
+    assert "DEEPSEEK_API_KEY=sk-deeps...cdef" in text
+    assert "stale-auth-key" not in text
+    assert "stale-openai-secret" not in text
+
+
+def test_common_tab_overview_marks_openai_auth_provider(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-official-abcdef")
+
+    text = _build_overview_text(
+        {},
+        {
+            "model": "gpt-5.5",
+            "model_provider": "custom",
+            "model_providers": {
+                "custom": {
+                    "name": "Proxy",
+                    "base_url": "https://proxy.example.com/v1",
+                    "requires_openai_auth": True,
+                }
+            },
+        },
+        {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-openai-official-abcdef"},
+        {},
+    )
+
+    assert "OpenAI auth (requires_openai_auth=true)" in text
+    assert "OPENAI_API_KEY=sk-opena...cdef" in text
 
 
 def test_common_tab_storage_info_text_keeps_status_details():

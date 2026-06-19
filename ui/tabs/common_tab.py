@@ -13,6 +13,9 @@ from ui.widgets.toast import show_toast
 parser = LazyModule("core.parser")
 toml_parser = LazyModule("core.toml_parser")
 auth_parser = LazyModule("core.auth_parser")
+codex_env = LazyModule("core.codex_env")
+persistent_env = LazyModule("core.persistent_env")
+providers = LazyModule("core.providers")
 startup_manager = LazyModule("core.startup_manager")
 vscode_parser = LazyModule("core.vscode_parser")
 switcher = LazyModule("core.switcher")
@@ -46,6 +49,42 @@ def _build_storage_info_text(info: dict) -> str:
     )
 
 
+def _short_secret(value: object, prefix: int = 8, suffix: int = 4) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) > prefix + suffix + 4:
+        return f"{text[:prefix]}...{text[-suffix:]}"
+    return text
+
+
+def _codex_provider_table(config: dict, provider_id: str) -> dict:
+    model_providers = config.get("model_providers", {})
+    if not isinstance(model_providers, dict):
+        return {}
+    table = model_providers.get(provider_id, {})
+    return table if isinstance(table, dict) else {}
+
+
+def _codex_env_key(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai").strip() or "openai"
+    custom = _codex_provider_table(config, provider_id)
+    explicit = str(custom.get("env_key") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        return providers.ProviderRegistry.get_codex_env_key(provider_id, custom_name=custom.get("name"))
+    except Exception:
+        return "OPENAI_API_KEY"
+
+
+def _codex_env_value(env_key: str) -> str:
+    try:
+        return persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+    except Exception:
+        return ""
+
+
 def _build_overview_text(claude: dict, codex_cfg: dict, codex_auth: dict, vscode: dict) -> str:
     lines = []
 
@@ -73,9 +112,21 @@ def _build_overview_text(claude: dict, codex_cfg: dict, codex_auth: dict, vscode
 
     lines.append("=== Codex Auth ===")
     lines.append(f"  Auth Mode:   {codex_auth.get('auth_mode', '(未设置)')}")
-    api_key = codex_auth.get("OPENAI_API_KEY") or ""
-    if api_key:
-        lines.append(f"  API Key:     {api_key[:8]}...{api_key[-4:]}")
+    env_key = _codex_env_key(codex_cfg)
+    env_value = _codex_env_value(env_key)
+    provider_id = str(codex_cfg.get("model_provider") or "openai").strip() or "openai"
+    custom = _codex_provider_table(codex_cfg, provider_id)
+    if custom.get("requires_openai_auth"):
+        lines.append("  Provider Auth: OpenAI auth (requires_openai_auth=true)")
+    if env_value:
+        lines.append(f"  API Key:     {env_key}={_short_secret(env_value)}")
+    else:
+        api_key = codex_auth.get("OPENAI_API_KEY") or ""
+        if api_key:
+            label = "OPENAI_API_KEY" if env_key == "OPENAI_API_KEY" else "OPENAI_API_KEY (legacy)"
+            lines.append(f"  API Key:     {label}={_short_secret(api_key)}")
+        elif env_key:
+            lines.append(f"  API Key:     {env_key}=(未设置)")
     tokens = codex_auth.get("tokens", {})
     if tokens.get("account_id"):
         lines.append(f"  Account:     {tokens['account_id']}")
