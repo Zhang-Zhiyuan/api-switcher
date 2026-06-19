@@ -149,7 +149,7 @@ def test_proxy_node_picker_reuses_filtered_nodes_until_filter_changes():
     assert calls["count"] > 2
 
 
-def test_proxy_node_picker_set_enabled_skips_redundant_render():
+def test_proxy_node_picker_set_enabled_updates_visible_controls_without_rerender():
     picker = object.__new__(ProxyNodePicker)
     picker._enabled = True
     picker._search_entry = None
@@ -158,19 +158,24 @@ def test_proxy_node_picker_set_enabled_skips_redundant_render():
     picker._quality_combo = None
     picker._filter_reset_button = None
     picker._batch_buttons = []
-    calls = {"render": 0}
+    calls = {"render": 0, "enabled": []}
 
     def render_nodes():
         calls["render"] += 1
 
+    def set_visible_rows_enabled(enabled):
+        calls["enabled"].append(enabled)
+
     picker._render_nodes = render_nodes
+    picker._set_visible_rows_enabled = set_visible_rows_enabled
 
     picker.set_enabled(True)
     assert calls["render"] == 0
 
     picker.set_enabled(False)
     assert picker._enabled is False
-    assert calls["render"] == 1
+    assert calls["render"] == 0
+    assert calls["enabled"] == [False]
 
 
 def test_proxy_tabs_dispatch_worker_callbacks_through_top_level_queue():

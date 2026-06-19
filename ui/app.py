@@ -16,7 +16,7 @@ QUICK_SWITCH_TITLE = "快速切换 API"
 CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 DEFAULT_TAB_LABEL = "Claude Code"
-DEFAULT_TAB_PRELOAD_MODE = "0"
+DEFAULT_TAB_PRELOAD_MODE = "priority"
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),

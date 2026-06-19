@@ -80,6 +80,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._busy = False
         self._saved_subscription_loaded = False
         self._saved_subscription_load_generation = 0
+        self._preferences_load_generation = 0
         self._build_ui()
 
     def _build_ui(self):
@@ -565,9 +566,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
-        self._subscription_picker_after_id = self.after(20, self._build_subscription_picker)
-        self._node_text_after_id = self.after(45, self._build_node_text)
-        self._initial_refresh_after_id = self.after(90, self.refresh)
+        self._subscription_picker_after_id = self.after(120, self._build_subscription_picker)
+        self._node_text_after_id = self.after(180, self._build_node_text)
+        self._initial_refresh_after_id = self.after(260, self.refresh)
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None
@@ -665,7 +666,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._initial_refresh_after_id = None
         self._load_proxy_preferences_ui()
         self._cancel_saved_subscription_refresh()
-        self._saved_subscription_after_id = self.after(30, self._load_saved_subscription_ui)
+        self._saved_subscription_after_id = self.after(220, self._load_saved_subscription_ui)
 
     def _set_status(self, message: str, severity: str = "info"):
         if not self._status_label:
@@ -763,7 +764,33 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pass
 
     def _load_proxy_preferences_ui(self):
-        preferences = local_proxy.load_local_proxy_preferences()
+        self._preferences_load_generation += 1
+        generation = self._preferences_load_generation
+        self._set_routing_status("正在后台加载 Win11 代理偏好...")
+
+        def run():
+            try:
+                payload = {
+                    "ok": True,
+                    "preferences": local_proxy.load_local_proxy_preferences(),
+                    "error": "",
+                }
+            except Exception as e:
+                payload = {"ok": False, "preferences": {}, "error": str(e)}
+
+            def finish():
+                if not self.winfo_exists() or generation != self._preferences_load_generation:
+                    return
+                if not payload["ok"]:
+                    self._set_routing_status(f"加载 Win11 代理偏好失败: {payload['error']}", "error")
+                    return
+                self._apply_proxy_preferences_ui(payload["preferences"])
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(target=run, name="local-proxy-preferences-load", daemon=True).start()
+
+    def _apply_proxy_preferences_ui(self, preferences: dict):
         self._start_on_login_var.set(bool(preferences.get("start_on_login")))
         self._keep_running_on_exit_var.set(bool(preferences.get("keep_running_on_exit", True)))
         self._proxy_non_cn_var.set(bool(preferences.get("proxy_non_cn")))
@@ -1140,25 +1167,51 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._saved_subscription_loaded = True
         self._saved_subscription_load_generation += 1
         generation = self._saved_subscription_load_generation
-        state = remote_proxy.load_proxy_subscription_state()
-        self._refresh_subscription_profile_options(state)
-        self._apply_subscription_profile_inputs(state)
-        url = str(state.get("url") or "").strip()
-        auto_refresh = remote_proxy.proxy_subscription_auto_refresh_enabled("local")
-        periodic_update = bool(state.get("local_periodic_update_enabled"))
-        interval_minutes = str(state.get("local_periodic_update_interval_minutes") or "60")
-        self._auto_refresh_var.set(auto_refresh)
-        self._periodic_update_var.set(periodic_update)
+        self._set_cache_status("本机缓存: 正在后台读取订阅状态...")
 
-        if self._periodic_update_entry:
-            self._periodic_update_entry.delete(0, "end")
-            self._periodic_update_entry.insert(0, interval_minutes)
+        def run():
+            try:
+                state = remote_proxy.load_proxy_subscription_state()
+                payload = {
+                    "ok": True,
+                    "state": state,
+                    "auto_refresh": remote_proxy.proxy_subscription_auto_refresh_enabled("local"),
+                    "error": "",
+                }
+            except Exception as e:
+                payload = {"ok": False, "state": {}, "auto_refresh": False, "error": str(e)}
 
-        if not url:
-            self._schedule_periodic_update(initial=True)
-            return
+            def finish():
+                if not self.winfo_exists() or generation != self._saved_subscription_load_generation:
+                    return
+                if not payload["ok"]:
+                    self._saved_subscription_loaded = False
+                    self._set_cache_status("本机缓存: 订阅状态读取失败", "error")
+                    self._set_status(f"读取 Win11 代理订阅状态失败: {payload['error']}", "error")
+                    return
+                state = payload["state"]
+                self._refresh_subscription_profile_options(state)
+                self._apply_subscription_profile_inputs(state)
+                url = str(state.get("url") or "").strip()
+                auto_refresh = bool(payload["auto_refresh"])
+                periodic_update = bool(state.get("local_periodic_update_enabled"))
+                interval_minutes = str(state.get("local_periodic_update_interval_minutes") or "60")
+                self._auto_refresh_var.set(auto_refresh)
+                self._periodic_update_var.set(periodic_update)
 
-        self._load_subscription_cache_for_state(state, generation, auto_refresh=auto_refresh, schedule_periodic=True)
+                if self._periodic_update_entry:
+                    self._periodic_update_entry.delete(0, "end")
+                    self._periodic_update_entry.insert(0, interval_minutes)
+
+                if not url:
+                    self._schedule_periodic_update(initial=True)
+                    return
+
+                self._load_subscription_cache_for_state(state, generation, auto_refresh=auto_refresh, schedule_periodic=True)
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(target=run, name="local-proxy-subscription-state-load", daemon=True).start()
 
     def _load_subscription_cache_for_state(
         self,

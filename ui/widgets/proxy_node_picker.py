@@ -13,8 +13,9 @@ class ProxyNodePicker(ctk.CTkFrame):
     FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速")
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
-    MAX_VISIBLE_ROWS = 60
-    RENDER_BATCH_SIZE = 8
+    MAX_VISIBLE_ROWS = 36
+    RENDER_BATCH_SIZE = 4
+    RENDER_BATCH_DELAY_MS = 8
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -36,7 +37,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_after_id = None
         self._render_batch_after_id = None
         self._render_generation = 0
+        self._render_plan_pending = False
         self._last_match_count = 0
+        self._last_visible_count = 0
         self._metadata_version = 0
         self._filter_cache_key = None
         self._filter_cache_nodes = ()
@@ -218,7 +221,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                     widget.configure(state=state)
                 except Exception:
                     pass
-        self._render_nodes()
+        self._set_visible_rows_enabled(self._enabled)
 
     def selected_key(self) -> str:
         return self._selected_key
@@ -290,7 +293,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._cancel_incremental_render()
         self._render_generation += 1
         generation = self._render_generation
+        self._render_plan_pending = True
         if not self._list_frame:
+            self._render_plan_pending = False
             return
         self._visible_group_headers = []
         for child in self._list_frame.winfo_children():
@@ -304,11 +309,13 @@ class ProxyNodePicker(ctk.CTkFrame):
         selected_item = self.selected_item()
         if selected_item in matches and selected_item not in visible:
             visible = [selected_item] + visible[: max(0, self.MAX_VISIBLE_ROWS - 1)]
+        self._last_visible_count = len(visible)
 
         self._update_summary_label(match_count=len(matches), visible_count=len(visible))
         self._update_scope_label()
 
         if not visible:
+            self._render_plan_pending = False
             ctk.CTkLabel(
                 self._list_frame,
                 text=self._empty_message(total, quality_count),
@@ -328,6 +335,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
     def _render_plan_batch(self, generation: int, render_plan: list, start_index: int):
         if generation != self._render_generation or not self._list_frame:
+            self._render_plan_pending = False
             return
         batch_size = self.RENDER_BATCH_SIZE
         end_index = min(len(render_plan), start_index + batch_size)
@@ -338,14 +346,17 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._render_row(payload)
         if end_index >= len(render_plan):
             self._render_batch_after_id = None
+            self._render_plan_pending = False
+            self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
             return
         try:
             self._render_batch_after_id = self.after(
-                1,
+                self.RENDER_BATCH_DELAY_MS,
                 lambda: self._render_plan_batch(generation, render_plan, end_index),
             )
         except Exception:
             self._render_batch_after_id = None
+            self._render_plan_pending = False
 
     def _group_visible_nodes(self, items):
         groups = []
@@ -587,7 +598,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         checked_count = len(self._checked_keys)
         suffix = ""
         if visible_count is not None and match_count > visible_count:
-            suffix = f"；显示前 {visible_count} 个，请继续搜索缩小范围"
+            suffix = f"；先显示 {visible_count} 个，搜索/筛选可缩小范围"
+        if self._render_plan_pending:
+            suffix += "；正在分批渲染"
         self._summary_label.configure(
             text=(
                 f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"
@@ -710,6 +723,26 @@ class ProxyNodePicker(ctk.CTkFrame):
 
     def _node_region(self, item) -> str:
         return str(self._metadata_for(item).get("region") or "其他")
+
+    def _set_visible_rows_enabled(self, enabled: bool):
+        if not self._list_frame:
+            return
+        state = "normal" if enabled else "disabled"
+
+        def visit(widget):
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                return
+            for child in children:
+                if isinstance(child, (ctk.CTkButton, ctk.CTkCheckBox)):
+                    try:
+                        child.configure(state=state)
+                    except Exception:
+                        pass
+                visit(child)
+
+        visit(self._list_frame)
 
     def _metadata_for(self, item) -> dict:
         meta = self._node_meta.get(id(item))

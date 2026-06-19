@@ -43,10 +43,10 @@ def test_proxy_quality_is_not_a_primary_tab():
     assert not hasattr(app_module.App, "_show_network_diagnostics_tab")
 
 
-def test_primary_tabs_are_lazy_loaded_until_mainloop_is_responsive():
+def test_primary_tabs_are_lazy_loaded_and_priority_preloaded_after_startup():
     specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
 
-    assert app_module.DEFAULT_TAB_PRELOAD_MODE == "0"
+    assert app_module.DEFAULT_TAB_PRELOAD_MODE == "priority"
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
     assert all(eager is False for eager in specs.values())
