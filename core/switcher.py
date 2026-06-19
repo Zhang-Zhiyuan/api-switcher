@@ -8,6 +8,44 @@ from core.usage_recorder import usage_recorder
 logger = logging.getLogger(__name__)
 
 
+def _codex_api_env_names_to_clear(config: dict | None = None) -> list[str]:
+    names = ["OPENAI_API_KEY"]
+    for provider in ProviderRegistry.get_codex_providers():
+        names.append(provider.codex_env_key)
+    for profile in profile_manager.list_switchable_codex_profiles():
+        names.extend(ProviderRegistry.get_codex_runtime_env_keys_for_profile(profile))
+
+    model_providers = (config or {}).get("model_providers")
+    if isinstance(model_providers, dict):
+        for table in model_providers.values():
+            if isinstance(table, dict):
+                names.append(str(table.get("env_key") or ""))
+
+    normalized = []
+    for name in names:
+        name = str(name or "").strip()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized
+
+
+def _clear_local_codex_api_env(config: dict | None = None) -> None:
+    env_names = _codex_api_env_names_to_clear(config)
+    for name in env_names:
+        os.environ.pop(name, None)
+
+    if os.name != "nt":
+        logger.warning("Local persistent Codex API env cleanup skipped on non-Windows platform")
+        return
+
+    from core import persistent_env
+
+    try:
+        persistent_env.delete_local_user_env(env_names)
+    except Exception as e:
+        raise RuntimeError(f"清理 Codex API 环境变量失败: {e}") from e
+
+
 def switch_claude_profile(name: str) -> None:
     """Switch to a named Claude API configuration. Auto-backup before switching."""
     profiles = profile_manager.list_switchable_claude_profiles()
@@ -135,6 +173,7 @@ def switch_codex_account(name: str) -> None:
     auth_parser.write_codex_auth(auth)
 
     config = toml_parser.read_codex_config()
+    _clear_local_codex_api_env(config)
     config = toml_parser.apply_codex_official_account(config)
     toml_parser.write_codex_config(config)
 

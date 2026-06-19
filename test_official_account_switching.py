@@ -24,6 +24,7 @@ def isolated_accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(security, "set_secret_json", lambda key, data: secret_store.__setitem__(key, json.dumps(data)))
     monkeypatch.setattr(security, "get_secret_json", lambda key: json.loads(secret_store[key]) if key in secret_store else None)
     monkeypatch.setattr(backup_manager, "create_backup", lambda description="": SimpleNamespace(description=description))
+    monkeypatch.setattr(persistent_env, "delete_local_user_env", lambda names: SimpleNamespace(variable_names=list(names)))
 
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
     monkeypatch.setattr(profile_manager, "CLAUDE_CREDENTIALS", tmp_path / "claude" / ".credentials.json")
@@ -129,6 +130,47 @@ def test_switch_codex_account_normalizes_mixed_auth_and_provider(isolated_accoun
     assert config["model"] == "gpt-5.5"
     assert config["cli_auth_credentials_store"] == "file"
     assert profile_manager.get_current_codex_account_name() == account.name
+
+
+def test_switch_codex_account_clears_local_api_environment(isolated_accounts, monkeypatch):
+    from models.profile import CodexProfile
+
+    deleted_env_names = []
+    monkeypatch.setattr(
+        persistent_env,
+        "delete_local_user_env",
+        lambda names: deleted_env_names.extend(list(names)) or SimpleNamespace(variable_names=list(names)),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "stale-deepseek")
+    security.set_secret("codex:deepseek:api_key", "sk-deepseek")
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="deepseek",
+            api_key_ref="codex:deepseek:api_key",
+            model="deepseek-v4-flash",
+            model_provider="deepseek",
+        )
+    )
+    auth_parser.write_codex_auth({
+        "auth_mode": "chatgpt",
+        "tokens": {"id_token": _jwt({"email": "codex@example.test"})},
+    })
+    toml_parser.write_codex_config({
+        "model_provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "model_providers": {"deepseek": {"env_key": "DEEPSEEK_API_KEY"}},
+    })
+    account = profile_manager.import_current_codex_account()
+    assert account is not None
+    profile_manager.save_codex_account_profile(account)
+
+    switcher.switch_codex_account(account.name)
+
+    assert "OPENAI_API_KEY" not in os.environ
+    assert "DEEPSEEK_API_KEY" not in os.environ
+    assert "OPENAI_API_KEY" in deleted_env_names
+    assert "DEEPSEEK_API_KEY" in deleted_env_names
 
 
 def test_invalid_account_snapshot_is_reported(isolated_accounts):
