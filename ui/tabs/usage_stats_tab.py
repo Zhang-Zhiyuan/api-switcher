@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute
+from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, button_style, combo_style, font
 from ui.widgets.toast import show_toast
 
@@ -36,6 +37,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self.configure(fg_color="transparent")
         self._auto_refresh_after_id = None
         self._refresh_generation = 0
+        self._deferred_dashboard = None
         self._build_ui()
         self.after(20, self.refresh)
 
@@ -68,6 +70,13 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         except Exception:
             pass
         self._auto_refresh_after_id = None
+
+    def _resume_background_work(self):
+        if not self._deferred_dashboard:
+            return
+        profile_type, dashboard = self._deferred_dashboard
+        self._deferred_dashboard = None
+        self._apply_dashboard(profile_type, dashboard)
 
     def destroy(self):
         self._cancel_auto_refresh()
@@ -464,6 +473,9 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         threading.Thread(target=worker, name="usage-stats-refresh", daemon=True).start()
 
     def _apply_dashboard(self, profile_type: Optional[str], dashboard: dict):
+        if not is_active_tab(self):
+            self._deferred_dashboard = (profile_type, dashboard)
+            return
         summary = dashboard["summary"]
 
         self.summary_cards["total_profiles"].value_label.configure(

@@ -3,12 +3,13 @@ import threading
 import customtkinter as ctk
 
 from core.lazy_imports import LazyAttribute, LazyModule
+from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 
 
-PROFILE_RENDER_BATCH_SIZE = 6
+PROFILE_RENDER_BATCH_SIZE = 3
 PROFILE_RENDER_BATCH_DELAY_MS = 8
 
 
@@ -111,6 +112,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._cached_active = ""
         self._cached_diagnoses = {}
         self._has_profile_cache = False
+        self._deferred_render_pending = False
         self._build_ui()
 
     def destroy(self):
@@ -267,8 +269,25 @@ class BrowserTab(ctk.CTkScrollableFrame):
             pass
         self._profile_render_after_id = None
 
+    def _suspend_background_work(self):
+        if self._profile_render_after_id:
+            self._deferred_render_pending = True
+            self._cancel_profile_render()
+
+    def _resume_background_work(self):
+        if not self._deferred_render_pending:
+            return
+        self._deferred_render_pending = False
+        if self._has_profile_cache:
+            self._render_profiles(self._cached_profiles, self._cached_active, self._cached_diagnoses)
+        else:
+            self.refresh()
+
     def _render_profiles(self, profiles, active, diagnoses):
         if not self._cards_frame:
+            return
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
             return
         self._cancel_profile_render()
         profiles = tuple(profiles or ())
@@ -324,6 +343,10 @@ class BrowserTab(ctk.CTkScrollableFrame):
 
     def _render_profile_batch(self, profiles, active, diagnoses, generation: int, start: int):
         if generation != self._profile_render_generation or not self._cards_frame:
+            return
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            self._profile_render_after_id = None
             return
         end = min(start + PROFILE_RENDER_BATCH_SIZE, len(profiles))
         for p in profiles[start:end]:

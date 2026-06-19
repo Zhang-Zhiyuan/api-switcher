@@ -8,6 +8,7 @@ from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
+from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 
@@ -33,6 +34,7 @@ def _format_server_batch_item(server_name: str, result) -> str:
 class SSHTab(ctk.CTkScrollableFrame):
     """Tab for managing SSH servers and syncing configs."""
 
+    SERVER_RENDER_BATCH_SIZE = 2
     SERVER_RENDER_BATCH_DELAY_MS = 8
 
     def __init__(self, master, **kwargs):
@@ -43,6 +45,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_refresh_generation = 0
         self._server_render_after_id = None
         self._server_refresh_finish_after_id = None
+        self._deferred_server_render_pending = False
         self._initial_refresh_after_id = None
         self._server_profiles_loaded = False
         self._server_profiles = []
@@ -1161,6 +1164,17 @@ class SSHTab(ctk.CTkScrollableFrame):
             pass
         self._server_render_after_id = None
 
+    def _suspend_background_work(self):
+        if self._server_render_after_id:
+            self._deferred_server_render_pending = True
+            self._cancel_server_render()
+
+    def _resume_background_work(self):
+        if not self._deferred_server_render_pending:
+            return
+        self._deferred_server_render_pending = False
+        self.refresh()
+
     def _cancel_server_refresh_finish(self):
         if not self._server_refresh_finish_after_id:
             return
@@ -1229,6 +1243,9 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _render_server_refresh_payload(self, payload: dict, generation: int):
         if not self._cards_frame:
             return
+        if not is_active_tab(self):
+            self._deferred_server_render_pending = True
+            return
         for w in self._cards_frame.winfo_children():
             w.destroy()
         if not payload.get("ok"):
@@ -1277,7 +1294,11 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _render_server_cards_batch(self, profile_items: list[dict], generation: int, start: int = 0):
         if generation != self._server_refresh_generation or not self._is_alive():
             return
-        batch_size = 4
+        if not is_active_tab(self):
+            self._deferred_server_render_pending = True
+            self._server_render_after_id = None
+            return
+        batch_size = self.SERVER_RENDER_BATCH_SIZE
         end = min(len(profile_items), start + batch_size)
         for item in profile_items[start:end]:
             self._render_server_card(item)

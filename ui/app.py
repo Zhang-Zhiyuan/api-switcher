@@ -17,7 +17,7 @@ CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 DEFAULT_TAB_LABEL = "Claude Code"
 DEFAULT_TAB_PRELOAD_MODE = "priority"
-DEFAULT_TAB_WARMUP_MODE = "all"
+DEFAULT_TAB_WARMUP_MODE = "0"
 TAB_WARMUP_START_MS = 2600
 TAB_WARMUP_STEP_MS = 750
 TAB_SPECS = [
@@ -459,6 +459,7 @@ class App(ctk.CTk):
         for child in frame.winfo_children():
             child.destroy()
         tab = tab_class(frame)
+        setattr(tab, "_api_switcher_tab_label", label)
         tab.pack(fill="both", expand=True)
         setattr(self, attr, tab)
         if not background or self._tabview.get() == label:
@@ -655,7 +656,38 @@ class App(ctk.CTk):
         threading.Thread(target=worker, name=f"tab-class-load-{label}", daemon=True).start()
 
     def _on_tab_changed(self):
-        self._schedule_tab_load(self._tabview.get())
+        label = self._tabview.get()
+        self._suspend_inactive_tab_work(label)
+        self._schedule_tab_load(label)
+        self._resume_active_tab_work(label)
+
+    def _suspend_inactive_tab_work(self, active_label: str) -> None:
+        for label, attr, _module_name, _class_name, _eager in TAB_SPECS:
+            if label == active_label:
+                continue
+            tab = self._loaded_tab(attr)
+            if tab is None:
+                continue
+            suspend = getattr(tab, "_suspend_background_work", None)
+            if callable(suspend):
+                try:
+                    suspend()
+                except Exception as exc:
+                    logger.debug("Failed to suspend background work for %s: %s", label, exc)
+
+    def _resume_active_tab_work(self, active_label: str) -> None:
+        spec = self._tab_specs.get(active_label)
+        if not spec:
+            return
+        tab = self._loaded_tab(spec[0])
+        if tab is None:
+            return
+        resume = getattr(tab, "_resume_background_work", None)
+        if callable(resume):
+            try:
+                resume()
+            except Exception as exc:
+                logger.debug("Failed to resume background work for %s: %s", active_label, exc)
 
     def _loaded_tab(self, attr: str):
         tab = getattr(self, attr, None)

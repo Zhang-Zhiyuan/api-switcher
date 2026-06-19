@@ -2,6 +2,7 @@ import threading
 
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
+from ui.tabs.tab_visibility import is_active_tab
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -13,6 +14,7 @@ ProfileEditorDialog = LazyAttribute("ui.dialogs.profile_editor", "ProfileEditorD
 ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
 ClaudeProfile = LazyAttribute("models.profile", "ClaudeProfile")
 
+CARD_RENDER_BATCH_SIZE = 2
 CARD_RENDER_BATCH_DELAY_MS = 8
 
 
@@ -30,6 +32,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._profile_render_after_id = None
         self._profile_render_after_ids = set()
         self._refresh_finish_after_id = None
+        self._deferred_render_pending = False
         self._destroyed = False
         self._auto_continue_control = None
         self._auto_continue_host = None
@@ -223,6 +226,17 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._profile_render_after_id = None
         self._profile_render_after_ids.clear()
 
+    def _suspend_background_work(self):
+        if self._profile_render_after_id or self._profile_render_after_ids:
+            self._deferred_render_pending = True
+            self._cancel_profile_render()
+
+    def _resume_background_work(self):
+        if not self._deferred_render_pending:
+            return
+        self._deferred_render_pending = False
+        self.refresh()
+
     def _cancel_refresh_finish(self):
         if not self._refresh_finish_after_id:
             return
@@ -354,6 +368,9 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             self._runtime_label.configure(text=text, text_color=COLORS["danger"])
 
     def _render_refresh_payload(self, payload: dict, generation: int):
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            return
         for w in self._cards_frame.winfo_children():
             w.destroy()
         for w in self._account_cards_frame.winfo_children():
@@ -436,7 +453,11 @@ class ClaudeTab(ctk.CTkScrollableFrame):
     def _render_profile_cards_batch(self, profiles: list[dict], generation: int, start: int = 0):
         if generation != self._refresh_generation or not self._is_alive():
             return
-        batch_size = 4
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            self._profile_render_after_id = None
+            return
+        batch_size = CARD_RENDER_BATCH_SIZE
         end = min(len(profiles), start + batch_size)
         for item in profiles[start:end]:
             profile = item["profile"]
@@ -470,7 +491,11 @@ class ClaudeTab(ctk.CTkScrollableFrame):
     def _render_account_cards_batch(self, accounts: list[dict], generation: int, start: int = 0):
         if generation != self._refresh_generation or not self._is_alive():
             return
-        batch_size = 4
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            self._profile_render_after_id = None
+            return
+        batch_size = CARD_RENDER_BATCH_SIZE
         end = min(len(accounts), start + batch_size)
         for item in accounts[start:end]:
             account = item["profile"]

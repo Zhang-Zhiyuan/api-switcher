@@ -11,6 +11,7 @@ import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
 from ui.dialogs.confirm_dialog import ConfirmDialog
+from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -43,7 +44,7 @@ def _session_record_summary(records, selected_keys: set[str]) -> dict:
 class SessionMigrationTab(ctk.CTkScrollableFrame):
     """Tab for exporting and importing Claude Code / Codex local sessions."""
 
-    RENDER_BATCH_SIZE = 8
+    RENDER_BATCH_SIZE = 2
     RENDER_BATCH_DELAY_MS = 8
 
     FILTER_OPTIONS = {
@@ -67,6 +68,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._refresh_generation = 0
         self._record_render_generation = 0
         self._record_render_after_id = None
+        self._deferred_render_pending = False
         self._build_ui()
 
     def destroy(self):
@@ -261,6 +263,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def _render_records(self):
         if not self._cards_frame:
             return
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            return
         self._cancel_record_render()
         self._record_render_generation += 1
         generation = self._record_render_generation
@@ -299,8 +304,23 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             pass
         self._record_render_after_id = None
 
+    def _suspend_background_work(self):
+        if self._record_render_after_id:
+            self._deferred_render_pending = True
+            self._cancel_record_render()
+
+    def _resume_background_work(self):
+        if not self._deferred_render_pending:
+            return
+        self._deferred_render_pending = False
+        self._render_records()
+
     def _render_record_batch(self, records: list[session_migration.SessionRecord], generation: int, start: int):
         if generation != self._record_render_generation or not self._cards_frame:
+            return
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            self._record_render_after_id = None
             return
         end = min(start + self.RENDER_BATCH_SIZE, len(records))
         for record in records[start:end]:

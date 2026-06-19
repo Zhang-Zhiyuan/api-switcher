@@ -47,7 +47,7 @@ def test_primary_tabs_are_lazy_loaded_and_priority_preloaded_after_startup():
     specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
 
     assert app_module.DEFAULT_TAB_PRELOAD_MODE == "priority"
-    assert app_module.DEFAULT_TAB_WARMUP_MODE == "all"
+    assert app_module.DEFAULT_TAB_WARMUP_MODE == "0"
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
     assert all(eager is False for eager in specs.values())

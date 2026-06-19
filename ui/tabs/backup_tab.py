@@ -4,6 +4,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from core.lazy_imports import LazyAttribute, LazyModule
+from ui.tabs.tab_visibility import is_active_tab
 from ui.widgets.toast import show_toast
 from ui.widgets.empty_state import EmptyState
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
@@ -19,7 +20,7 @@ PasswordDialog = LazyAttribute("ui.dialogs.password_dialog", "PasswordDialog")
 class BackupTab(ctk.CTkScrollableFrame):
     """Tab for managing backups."""
 
-    RENDER_BATCH_SIZE = 12
+    RENDER_BATCH_SIZE = 4
     RENDER_BATCH_DELAY_MS = 8
 
     def __init__(self, master, **kwargs):
@@ -28,6 +29,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         self._list_frame = None
         self._refresh_generation = 0
         self._render_after_id = None
+        self._deferred_render_pending = False
         self._build_ui()
 
     def destroy(self):
@@ -141,6 +143,17 @@ class BackupTab(ctk.CTkScrollableFrame):
             pass
         self._render_after_id = None
 
+    def _suspend_background_work(self):
+        if self._render_after_id:
+            self._deferred_render_pending = True
+            self._cancel_render()
+
+    def _resume_background_work(self):
+        if not self._deferred_render_pending:
+            return
+        self._deferred_render_pending = False
+        self.refresh()
+
     def _render_backups(self, payload: dict, generation: int):
         if not self._list_frame:
             return
@@ -172,6 +185,10 @@ class BackupTab(ctk.CTkScrollableFrame):
 
     def _render_backup_batch(self, backups, generation: int, start: int):
         if generation != self._refresh_generation or not self._list_frame:
+            return
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            self._render_after_id = None
             return
         end = min(start + self.RENDER_BATCH_SIZE, len(backups))
         for entry in backups[start:end]:
