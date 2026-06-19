@@ -144,8 +144,15 @@ def update_codex_env(updates: Mapping[str, str] | None = None, deletes: Iterable
         if not ENV_NAME_RE.match(name):
             raise ValueError(f"环境变量名无效: {name}")
 
+    path = paths.CODEX_ENV
+    if not normalized_updates and not path.exists():
+        return []
+
     updated = _update_text(_read_text(), normalized_updates, normalized_deletes)
-    atomic_write_text(paths.CODEX_ENV, updated)
+    if updated:
+        atomic_write_text(path, updated)
+    else:
+        path.unlink(missing_ok=True)
     return list(normalized_updates.keys())
 
 

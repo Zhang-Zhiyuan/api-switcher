@@ -304,10 +304,8 @@ def test_switch_codex_profile_with_openai_auth_does_not_require_provider_key(iso
             custom_requires_openai_auth=True,
         )
     )
-    auth_parser.write_codex_auth({
-        "auth_mode": "chatgpt",
-        "tokens": {"id_token": _jwt({"email": "codex@example.test"})},
-    })
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-official")
+    auth_parser.write_codex_auth({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-openai-official"})
 
     switcher.switch_codex_profile("relay-openai-auth")
 
@@ -315,7 +313,8 @@ def test_switch_codex_profile_with_openai_auth_does_not_require_provider_key(iso
     custom = config["model_providers"]["custom"]
     assert custom["requires_openai_auth"] is True
     assert "env_key" not in custom
-    assert auth_parser.read_codex_auth()["auth_mode"] == "chatgpt"
+    assert auth_parser.read_codex_auth()["OPENAI_API_KEY"] == "sk-openai-official"
+    assert os.environ["OPENAI_API_KEY"] == "sk-openai-official"
     assert written_env == {}
     assert profile_manager.get_current_codex_name() == "relay-openai-auth"
 

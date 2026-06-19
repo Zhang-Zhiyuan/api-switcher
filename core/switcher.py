@@ -137,6 +137,8 @@ def switch_codex_profile(name: str) -> None:
     env_keys = [] if uses_openai_auth else ProviderRegistry.get_codex_runtime_env_keys_for_profile(target)
     env_updates = {key: api_key for key in env_keys if api_key}
     stale_env_names = [key for key in _codex_active_api_env_names_to_clear(current_config) if key not in env_updates]
+    if uses_openai_auth:
+        stale_env_names = [key for key in stale_env_names if key != "OPENAI_API_KEY"]
 
     for key in stale_env_names:
         os.environ.pop(key, None)

@@ -54,6 +54,8 @@ def apply_codex_apikey(auth: dict, profile) -> dict:
     collides with official ChatGPT login snapshots and makes provider-specific
     env_key switching harder to reason about.
     """
+    if getattr(profile, "custom_requires_openai_auth", False):
+        return dict(auth or {})
     return clear_codex_api_auth(auth)
 
 
