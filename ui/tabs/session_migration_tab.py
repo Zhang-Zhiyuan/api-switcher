@@ -56,6 +56,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._destroyed = False
+        self._ui_dispatch = self._resolve_ui_dispatch()
         self._cards_frame = None
         self._stats_label = None
         self._filter_combo = None
@@ -72,8 +74,28 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._build_ui()
 
     def destroy(self):
+        self._destroyed = True
         self._cancel_record_render()
         super().destroy()
+
+    def _resolve_ui_dispatch(self):
+        try:
+            dispatch = getattr(self.winfo_toplevel(), "_run_on_ui_thread", None)
+        except Exception:
+            return None
+        return dispatch if callable(dispatch) else None
+
+    def _run_on_ui_thread(self, callback):
+        if getattr(self, "_destroyed", False):
+            return
+        dispatch = getattr(self, "_ui_dispatch", None)
+        if callable(dispatch):
+            dispatch(callback)
+            return
+        try:
+            self.after(0, callback)
+        except Exception:
+            logger.exception("Failed to schedule session migration UI callback")
 
     def _build_ui(self):
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -253,10 +275,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 except Exception:
                     logger.exception("Failed to finish session migration refresh")
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                logger.exception("Failed to schedule session migration refresh")
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -619,10 +638,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 show_toast(self.winfo_toplevel(), message)
                 self.refresh()
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                logger.exception("Failed to schedule session transfer result")
+            self._run_on_ui_thread(finish)
 
         threading.Thread(target=worker, daemon=True).start()
 

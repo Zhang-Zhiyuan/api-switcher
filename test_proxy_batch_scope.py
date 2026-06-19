@@ -178,6 +178,67 @@ def test_proxy_node_picker_set_enabled_updates_visible_controls_without_rerender
     assert calls["enabled"] == [False]
 
 
+def test_proxy_node_picker_suspend_cancels_pending_render_work():
+    picker = object.__new__(ProxyNodePicker)
+    picker._render_after_id = "render"
+    picker._render_batch_after_id = "batch"
+    picker._render_plan_pending = True
+    picker._render_deferred = False
+    picker._summary_label = None
+    picker._last_match_count = 0
+    picker._nodes = []
+    picker._summary_counts = {}
+    picker._checked_keys = set()
+    cancelled = []
+    picker.after_cancel = lambda after_id: cancelled.append(after_id)
+
+    ProxyNodePicker._suspend_background_work(picker)
+
+    assert cancelled == ["render", "batch"]
+    assert picker._render_after_id is None
+    assert picker._render_batch_after_id is None
+    assert picker._render_plan_pending is False
+    assert picker._render_deferred is True
+
+
+def test_proxy_node_picker_defers_hidden_render_without_clearing_rows(monkeypatch):
+    class _Child:
+        destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    class _ListFrame:
+        def __init__(self, children):
+            self.children = children
+
+        def winfo_children(self):
+            return list(self.children)
+
+    child = _Child()
+    picker = object.__new__(ProxyNodePicker)
+    picker._render_after_id = None
+    picker._render_batch_after_id = None
+    picker._render_generation = 3
+    picker._render_plan_pending = True
+    picker._render_deferred = False
+    picker._summary_label = None
+    picker._list_frame = _ListFrame([child])
+    picker._last_match_count = 0
+    picker._nodes = []
+    picker._summary_counts = {}
+    picker._checked_keys = set()
+
+    monkeypatch.setattr("ui.widgets.proxy_node_picker.is_active_tab", lambda _widget: False)
+
+    ProxyNodePicker._render_nodes(picker)
+
+    assert child.destroyed is False
+    assert picker._render_generation == 3
+    assert picker._render_plan_pending is False
+    assert picker._render_deferred is True
+
+
 def test_proxy_tabs_dispatch_worker_callbacks_through_top_level_queue():
     calls = []
     for tab_class in (LocalProxyTab, SSHTab):

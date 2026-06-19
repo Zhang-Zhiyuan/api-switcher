@@ -668,12 +668,7 @@ class App(ctk.CTk):
             tab = self._loaded_tab(attr)
             if tab is None:
                 continue
-            suspend = getattr(tab, "_suspend_background_work", None)
-            if callable(suspend):
-                try:
-                    suspend()
-                except Exception as exc:
-                    logger.debug("Failed to suspend background work for %s: %s", label, exc)
+            self._call_background_work_hook(tab, "_suspend_background_work", label)
 
     def _resume_active_tab_work(self, active_label: str) -> None:
         spec = self._tab_specs.get(active_label)
@@ -682,12 +677,38 @@ class App(ctk.CTk):
         tab = self._loaded_tab(spec[0])
         if tab is None:
             return
-        resume = getattr(tab, "_resume_background_work", None)
-        if callable(resume):
+        self._call_background_work_hook(tab, "_resume_background_work", active_label)
+
+    def _call_background_work_hook(self, tab, hook_name: str, label: str) -> None:
+        for widget in self._iter_widget_tree(tab):
+            hook = getattr(widget, hook_name, None)
+            if not callable(hook):
+                continue
             try:
-                resume()
+                hook()
             except Exception as exc:
-                logger.debug("Failed to resume background work for %s: %s", active_label, exc)
+                logger.debug("Failed to call %s for %s: %s", hook_name, label, exc)
+
+    def _iter_widget_tree(self, widget):
+        stack = [widget]
+        seen = set()
+        while stack:
+            current = stack.pop()
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            try:
+                if not current.winfo_exists():
+                    continue
+            except Exception:
+                continue
+            yield current
+            try:
+                children = list(current.winfo_children())
+            except Exception:
+                children = []
+            stack.extend(reversed(children))
 
     def _loaded_tab(self, attr: str):
         tab = getattr(self, attr, None)

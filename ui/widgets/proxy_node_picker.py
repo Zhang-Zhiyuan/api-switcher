@@ -1,6 +1,7 @@
 import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
+from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style
 
 
@@ -13,9 +14,10 @@ class ProxyNodePicker(ctk.CTkFrame):
     FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速")
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
-    MAX_VISIBLE_ROWS = 36
-    RENDER_BATCH_SIZE = 4
-    RENDER_BATCH_DELAY_MS = 8
+    MAX_VISIBLE_ROWS = 18
+    VISIBLE_ROWS_STEP = 18
+    RENDER_BATCH_SIZE = 3
+    RENDER_BATCH_DELAY_MS = 12
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -38,8 +40,10 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_batch_after_id = None
         self._render_generation = 0
         self._render_plan_pending = False
+        self._render_deferred = False
         self._last_match_count = 0
         self._last_visible_count = 0
+        self._visible_limit = self.MAX_VISIBLE_ROWS
         self._metadata_version = 0
         self._filter_cache_key = None
         self._filter_cache_nodes = ()
@@ -66,7 +70,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             **input_style(),
         )
         self._search_entry.grid(row=0, column=0, columnspan=4, sticky="ew")
-        self._search_entry.bind("<KeyRelease>", lambda _event: self._request_render_nodes(120))
+        self._search_entry.bind("<KeyRelease>", lambda _event: self._request_render_nodes(120, reset_limit=True))
 
         filter_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
         filter_bar.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -81,7 +85,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             filter_bar,
             values=list(self.FILTER_OPTIONS),
             width=88,
-            command=lambda _value: self._request_render_nodes(20),
+            command=lambda _value: self._request_render_nodes(20, reset_limit=True),
             **combo_style(),
         )
         self._filter_combo.set("全部")
@@ -97,7 +101,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             filter_bar,
             values=[self.REGION_ALL],
             width=106,
-            command=lambda _value: self._request_render_nodes(20),
+            command=lambda _value: self._request_render_nodes(20, reset_limit=True),
             **combo_style(),
         )
         self._region_combo.set(self.REGION_ALL)
@@ -113,7 +117,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             filter_bar,
             values=list(self.QUALITY_OPTIONS),
             width=110,
-            command=lambda _value: self._request_render_nodes(20),
+            command=lambda _value: self._request_render_nodes(20, reset_limit=True),
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
@@ -183,6 +187,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._nodes = list(nodes or [])
         self._latency_results = latency_results if isinstance(latency_results, dict) else {}
         self._quality_results = quality_results if isinstance(quality_results, dict) else {}
+        self._visible_limit = self.MAX_VISIBLE_ROWS
         self._build_node_metadata()
         self._update_region_options()
         available_keys = {self._node_key(item) for item in self._nodes}
@@ -200,7 +205,22 @@ class ProxyNodePicker(ctk.CTkFrame):
     def destroy(self):
         self._cancel_pending_render()
         self._cancel_incremental_render()
+        self._render_deferred = False
         super().destroy()
+
+    def _suspend_background_work(self):
+        if self._render_after_id or self._render_batch_after_id or self._render_plan_pending:
+            self._render_deferred = True
+        self._cancel_pending_render()
+        self._cancel_incremental_render()
+        self._render_plan_pending = False
+        self._update_summary_label()
+
+    def _resume_background_work(self):
+        if not self._render_deferred:
+            return
+        self._render_deferred = False
+        self._request_render_nodes(20)
 
     def set_enabled(self, enabled: bool):
         enabled = bool(enabled)
@@ -280,6 +300,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._quality_combo.set("全部质量")
         except Exception:
             pass
+        self._visible_limit = self.MAX_VISIBLE_ROWS
         self._render_nodes()
 
     def _render_nodes(self):
@@ -291,6 +312,12 @@ class ProxyNodePicker(ctk.CTkFrame):
             except Exception:
                 pass
         self._cancel_incremental_render()
+        if not is_active_tab(self):
+            self._render_deferred = True
+            self._render_plan_pending = False
+            self._update_summary_label()
+            return
+        self._render_deferred = False
         self._render_generation += 1
         generation = self._render_generation
         self._render_plan_pending = True
@@ -305,10 +332,11 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._last_match_count = len(matches)
         total = len(self._nodes)
         quality_count = int(self._summary_counts.get("quality") or 0)
-        visible = matches[: self.MAX_VISIBLE_ROWS]
+        visible_limit = max(self.MAX_VISIBLE_ROWS, int(self._visible_limit or self.MAX_VISIBLE_ROWS))
+        visible = matches[:visible_limit]
         selected_item = self.selected_item()
         if selected_item in matches and selected_item not in visible:
-            visible = [selected_item] + visible[: max(0, self.MAX_VISIBLE_ROWS - 1)]
+            visible = [selected_item] + visible[: max(0, visible_limit - 1)]
         self._last_visible_count = len(visible)
 
         self._update_summary_label(match_count=len(matches), visible_count=len(visible))
@@ -330,20 +358,38 @@ class ProxyNodePicker(ctk.CTkFrame):
             render_plan.append(("header", region, group_items))
             for item in group_items:
                 render_plan.append(("row", item, None))
+        remaining = max(0, len(matches) - len(visible))
+        if remaining:
+            render_plan.append(("more", remaining, None))
         self._emit_scope_change()
-        self._render_plan_batch(generation, render_plan, 0)
+        try:
+            self._render_batch_after_id = self.after(
+                1,
+                lambda: self._render_plan_batch(generation, render_plan, 0),
+            )
+        except Exception:
+            self._render_batch_after_id = None
+            self._render_plan_batch(generation, render_plan, 0)
 
     def _render_plan_batch(self, generation: int, render_plan: list, start_index: int):
         if generation != self._render_generation or not self._list_frame:
             self._render_plan_pending = False
+            return
+        if not is_active_tab(self):
+            self._render_batch_after_id = None
+            self._render_deferred = True
+            self._render_plan_pending = False
+            self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
             return
         batch_size = self.RENDER_BATCH_SIZE
         end_index = min(len(render_plan), start_index + batch_size)
         for kind, payload, extra in render_plan[start_index:end_index]:
             if kind == "header":
                 self._render_group_header(payload, extra)
-            else:
+            elif kind == "row":
                 self._render_row(payload)
+            else:
+                self._render_more_footer(int(payload or 0))
         if end_index >= len(render_plan):
             self._render_batch_after_id = None
             self._render_plan_pending = False
@@ -519,6 +565,26 @@ class ProxyNodePicker(ctk.CTkFrame):
             anchor="e",
         ).grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 8))
 
+    def _render_more_footer(self, remaining: int):
+        footer = ctk.CTkFrame(self._list_frame, fg_color="transparent")
+        footer.pack(fill="x", padx=5, pady=(8, 4))
+        footer.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            footer,
+            text=f"还有 {remaining} 个匹配节点",
+            text_color=COLORS["muted"],
+            font=font(11),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(
+            footer,
+            text="显示更多",
+            width=82,
+            state="normal" if self._enabled else "disabled",
+            command=self._show_more_nodes,
+            **button_style("secondary", compact=True),
+        ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+
     def _select(self, node_key: str):
         self._selected_key = node_key
         item = self.selected_item()
@@ -544,6 +610,11 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._checked_keys.discard(key)
         self._render_nodes()
 
+    def _show_more_nodes(self):
+        self._visible_limit = max(self.MAX_VISIBLE_ROWS, int(self._visible_limit or self.MAX_VISIBLE_ROWS))
+        self._visible_limit += self.VISIBLE_ROWS_STEP
+        self._render_nodes()
+
     def _set_matching_checked(self, checked: bool):
         keys = [self._node_key(item) for item in self._filtered_nodes()]
         if checked:
@@ -553,7 +624,9 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._checked_keys.discard(key)
         self._render_nodes()
 
-    def _request_render_nodes(self, delay_ms: int = 60):
+    def _request_render_nodes(self, delay_ms: int = 60, reset_limit: bool = False):
+        if reset_limit:
+            self._visible_limit = self.MAX_VISIBLE_ROWS
         self._cancel_pending_render()
         self._cancel_incremental_render()
         try:
@@ -598,7 +671,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         checked_count = len(self._checked_keys)
         suffix = ""
         if visible_count is not None and match_count > visible_count:
-            suffix = f"；先显示 {visible_count} 个，搜索/筛选可缩小范围"
+            suffix = f"；先显示 {visible_count} 个，可显示更多或继续筛选"
         if self._render_plan_pending:
             suffix += "；正在分批渲染"
         self._summary_label.configure(

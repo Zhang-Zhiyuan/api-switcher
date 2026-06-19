@@ -46,6 +46,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_render_after_id = None
         self._server_refresh_finish_after_id = None
         self._deferred_server_render_pending = False
+        self._deferred_initial_refresh_pending = False
         self._initial_refresh_after_id = None
         self._server_profiles_loaded = False
         self._server_profiles = []
@@ -55,9 +56,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._deployment_sections_frame = None
         self._deployment_sections_after_id = None
         self._deployment_sections_built = False
+        self._deferred_deployment_sections_pending = False
         self._remote_auto_section_host = None
         self._remote_auto_section_after_id = None
         self._remote_auto_section_built = False
+        self._deferred_remote_auto_section_pending = False
         self._sync_frame = None
         self._sync_kind_combo = None
         self._profile_combo = None
@@ -92,6 +95,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_profile_options = {}
         self._proxy_subscription_profile_loading = False
         self._proxy_subscription_picker = None
+        self._proxy_subscription_picker_host = None
+        self._proxy_subscription_picker_after_id = None
+        self._deferred_proxy_subscription_picker_pending = False
         self._proxy_fetch_button = None
         self._proxy_use_node_button = None
         self._proxy_latency_button = None
@@ -116,6 +122,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_busy = False
         self._proxy_saved_subscription_loaded = False
         self._proxy_saved_subscription_load_generation = 0
+        self._deferred_proxy_saved_subscription_pending = False
         self._proxy_node_text = None
         self._proxy_target_label = None
         self._proxy_cache_label = None
@@ -517,7 +524,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._install_deployment_sections_placeholder()
         self._initial_refresh_after_id = self.after(20, self.refresh)
-        self._deployment_sections_after_id = self.after(180, self._build_deployment_sections)
+        self._deployment_sections_after_id = self.after(420, self._build_deployment_sections)
 
     def _install_deployment_sections_placeholder(self):
         self._deployment_sections_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -536,6 +543,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._deployment_sections_after_id = None
         if self._destroyed or self._deployment_sections_built:
             return
+        if not is_active_tab(self):
+            self._deferred_deployment_sections_pending = True
+            return
+        self._deferred_deployment_sections_pending = False
         deployment_parent = self._deployment_sections_frame or self
         try:
             for child in deployment_parent.winfo_children():
@@ -704,13 +715,16 @@ class SSHTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         ).grid(row=5, column=0, sticky="w", pady=(8, 0))
-        self._proxy_subscription_picker = ProxyNodePicker(
-            proxy_controls,
-            on_select=lambda _item: self._use_selected_proxy_subscription_node(show_message=False),
-            on_scope_change=self._refresh_proxy_subscription_action_hint,
-        )
-        self._proxy_subscription_picker.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-        self._proxy_subscription_picker.set_enabled(False)
+        self._proxy_subscription_picker_host = ctk.CTkFrame(proxy_controls, fg_color="transparent")
+        self._proxy_subscription_picker_host.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        ctk.CTkLabel(
+            self._proxy_subscription_picker_host,
+            text="节点列表稍后加载...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=12)
+        self._proxy_subscription_picker_after_id = self.after(120, self._build_proxy_subscription_picker)
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_node_actions.grid(row=5, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
@@ -895,6 +909,33 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_saved_subscription_after_id = self.after(50, self._load_saved_proxy_subscription_ui)
         self._remote_auto_section_after_id = self.after(520, self._build_remote_auto_section)
 
+    def _build_proxy_subscription_picker(self):
+        self._proxy_subscription_picker_after_id = None
+        if self._destroyed or self._proxy_subscription_picker:
+            return
+        if not self._proxy_subscription_picker_host:
+            return
+        if not is_active_tab(self):
+            self._deferred_proxy_subscription_picker_pending = True
+            return
+        self._deferred_proxy_subscription_picker_pending = False
+        try:
+            for child in self._proxy_subscription_picker_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._proxy_subscription_picker = ProxyNodePicker(
+            self._proxy_subscription_picker_host,
+            on_select=lambda _item: self._use_selected_proxy_subscription_node(show_message=False),
+            on_scope_change=self._refresh_proxy_subscription_action_hint,
+        )
+        self._proxy_subscription_picker.pack(fill="x")
+        self._proxy_subscription_picker.set_enabled(False)
+        if self._proxy_subscription_nodes:
+            self._set_proxy_subscription_nodes(self._proxy_subscription_nodes, preserve_key=self._selected_proxy_subscription_node_key())
+        else:
+            self._refresh_proxy_subscription_action_hint()
+
     def _install_remote_auto_section_placeholder(self, parent):
         self._remote_auto_section_host = ctk.CTkFrame(parent, fg_color="transparent")
         self._remote_auto_section_host.pack(fill="x")
@@ -912,6 +953,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_section_after_id = None
         if self._destroyed or self._remote_auto_section_built:
             return
+        if not is_active_tab(self):
+            self._deferred_remote_auto_section_pending = True
+            return
+        self._deferred_remote_auto_section_pending = False
         parent = self._remote_auto_section_host or self._deployment_sections_frame
         if parent is None:
             return
@@ -1144,16 +1189,20 @@ class SSHTab(ctk.CTkScrollableFrame):
             "_initial_refresh_after_id",
             "_proxy_saved_subscription_after_id",
             "_deployment_sections_after_id",
+            "_proxy_subscription_picker_after_id",
             "_remote_auto_section_after_id",
         ):
-            after_id = getattr(self, attr, None)
-            if not after_id:
-                continue
-            try:
-                self.after_cancel(after_id)
-            except Exception:
-                pass
-            setattr(self, attr, None)
+            self._cancel_after_callback(attr)
+
+    def _cancel_after_callback(self, attr: str):
+        after_id = getattr(self, attr, None)
+        if not after_id:
+            return
+        try:
+            self.after_cancel(after_id)
+        except Exception:
+            pass
+        setattr(self, attr, None)
 
     def _cancel_server_render(self):
         if not self._server_render_after_id:
@@ -1165,15 +1214,55 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_render_after_id = None
 
     def _suspend_background_work(self):
+        if self._initial_refresh_after_id:
+            self._deferred_initial_refresh_pending = True
+            self._cancel_after_callback("_initial_refresh_after_id")
+        if self._deployment_sections_after_id:
+            self._deferred_deployment_sections_pending = True
+            self._cancel_after_callback("_deployment_sections_after_id")
+        if self._proxy_subscription_picker_after_id:
+            self._deferred_proxy_subscription_picker_pending = True
+            self._cancel_after_callback("_proxy_subscription_picker_after_id")
+        if self._proxy_saved_subscription_after_id:
+            self._deferred_proxy_saved_subscription_pending = True
+            self._cancel_after_callback("_proxy_saved_subscription_after_id")
+        if self._remote_auto_section_after_id:
+            self._deferred_remote_auto_section_pending = True
+            self._cancel_after_callback("_remote_auto_section_after_id")
         if self._server_render_after_id:
             self._deferred_server_render_pending = True
             self._cancel_server_render()
 
     def _resume_background_work(self):
-        if not self._deferred_server_render_pending:
+        if not is_active_tab(self):
             return
-        self._deferred_server_render_pending = False
-        self.refresh()
+        if self._deferred_initial_refresh_pending:
+            self._deferred_initial_refresh_pending = False
+            self._schedule_after_once("_initial_refresh_after_id", 20, self.refresh)
+        if self._deferred_deployment_sections_pending and not self._deployment_sections_built:
+            self._deferred_deployment_sections_pending = False
+            self._schedule_after_once("_deployment_sections_after_id", 80, self._build_deployment_sections)
+        if self._deferred_proxy_subscription_picker_pending and not self._proxy_subscription_picker:
+            self._deferred_proxy_subscription_picker_pending = False
+            self._schedule_after_once("_proxy_subscription_picker_after_id", 80, self._build_proxy_subscription_picker)
+        if self._deferred_proxy_saved_subscription_pending and not self._proxy_saved_subscription_loaded:
+            self._deferred_proxy_saved_subscription_pending = False
+            self._schedule_after_once("_proxy_saved_subscription_after_id", 120, self._load_saved_proxy_subscription_ui)
+        if self._deferred_remote_auto_section_pending and not self._remote_auto_section_built:
+            self._deferred_remote_auto_section_pending = False
+            self._schedule_after_once("_remote_auto_section_after_id", 180, self._build_remote_auto_section)
+        if self._deferred_server_render_pending:
+            self._deferred_server_render_pending = False
+            self.refresh()
+
+    def _schedule_after_once(self, attr: str, delay_ms: int, callback):
+        if getattr(self, attr, None):
+            return
+        try:
+            setattr(self, attr, self.after(max(1, int(delay_ms)), callback))
+        except Exception:
+            setattr(self, attr, None)
+            callback()
 
     def _cancel_server_refresh_finish(self):
         if not self._server_refresh_finish_after_id:
@@ -1886,6 +1975,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _load_saved_proxy_subscription_ui(self):
         self._proxy_saved_subscription_after_id = None
+        if not is_active_tab(self):
+            self._deferred_proxy_saved_subscription_pending = True
+            return
         if self._proxy_saved_subscription_loaded:
             return
         self._proxy_saved_subscription_loaded = True

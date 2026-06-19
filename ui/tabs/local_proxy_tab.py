@@ -7,6 +7,7 @@ import customtkinter as ctk
 from core.lazy_imports import LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITES
 from ui.dialogs.confirm_dialog import ConfirmDialog
+from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.toast import show_toast
@@ -36,6 +37,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_picker = None
         self._subscription_picker_host = None
         self._subscription_picker_after_id = None
+        self._deferred_subscription_picker_pending = False
         self._fetch_button = None
         self._use_node_button = None
         self._latency_button = None
@@ -66,6 +68,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._node_text = None
         self._node_text_host = None
         self._node_text_after_id = None
+        self._deferred_node_text_pending = False
+        self._deferred_initial_refresh_pending = False
+        self._deferred_saved_subscription_pending = False
         self._load_file_button = None
         self._start_button = None
         self._inspect_button = None
@@ -572,6 +577,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None
+        if not is_active_tab(self):
+            self._deferred_subscription_picker_pending = True
+            return
+        self._deferred_subscription_picker_pending = False
         if self._subscription_picker or not self._subscription_picker_host:
             return
         try:
@@ -591,6 +600,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _build_node_text(self):
         self._node_text_after_id = None
+        if not is_active_tab(self):
+            self._deferred_node_text_pending = True
+            return
+        self._deferred_node_text_pending = False
         if self._node_text or not self._node_text_host:
             return
         try:
@@ -662,8 +675,50 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             pass
         self._saved_subscription_after_id = None
 
+    def _suspend_background_work(self):
+        if self._subscription_picker_after_id:
+            self._deferred_subscription_picker_pending = True
+        if self._node_text_after_id:
+            self._deferred_node_text_pending = True
+        if self._initial_refresh_after_id:
+            self._deferred_initial_refresh_pending = True
+        if self._saved_subscription_after_id:
+            self._deferred_saved_subscription_pending = True
+        self._cancel_deferred_widget_builds()
+        self._cancel_initial_refresh()
+        self._cancel_saved_subscription_refresh()
+
+    def _resume_background_work(self):
+        if not is_active_tab(self):
+            return
+        if self._deferred_subscription_picker_pending and not self._subscription_picker:
+            self._deferred_subscription_picker_pending = False
+            self._schedule_after_once("_subscription_picker_after_id", 20, self._build_subscription_picker)
+        if self._deferred_node_text_pending and not self._node_text:
+            self._deferred_node_text_pending = False
+            self._schedule_after_once("_node_text_after_id", 40, self._build_node_text)
+        if self._deferred_initial_refresh_pending:
+            self._deferred_initial_refresh_pending = False
+            self._deferred_saved_subscription_pending = False
+            self._schedule_after_once("_initial_refresh_after_id", 80, self.refresh)
+        elif self._deferred_saved_subscription_pending:
+            self._deferred_saved_subscription_pending = False
+            self._schedule_after_once("_saved_subscription_after_id", 120, self._load_saved_subscription_ui)
+
+    def _schedule_after_once(self, attr: str, delay_ms: int, callback):
+        if getattr(self, attr, None):
+            return
+        try:
+            setattr(self, attr, self.after(max(1, int(delay_ms)), callback))
+        except Exception:
+            setattr(self, attr, None)
+            callback()
+
     def refresh(self):
         self._initial_refresh_after_id = None
+        if not is_active_tab(self):
+            self._deferred_initial_refresh_pending = True
+            return
         self._load_proxy_preferences_ui()
         self._cancel_saved_subscription_refresh()
         self._saved_subscription_after_id = self.after(220, self._load_saved_subscription_ui)
@@ -1162,6 +1217,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _load_saved_subscription_ui(self):
         self._saved_subscription_after_id = None
+        if not is_active_tab(self):
+            self._deferred_saved_subscription_pending = True
+            return
         if self._saved_subscription_loaded:
             return
         self._saved_subscription_loaded = True
