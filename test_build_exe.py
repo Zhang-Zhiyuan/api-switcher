@@ -46,6 +46,19 @@ def test_project_hidden_imports_include_core_sync_manager():
     assert "ui.dialogs.confirm_dialog" in build_exe._project_hidden_imports()
 
 
+def test_project_hidden_imports_cover_all_project_modules():
+    expected: set[str] = set()
+    for package_name in ("core", "models", "ui"):
+        package_dir = Path(package_name)
+        for path in package_dir.rglob("*.py"):
+            if path.name == "__init__.py" or "__pycache__" in path.parts:
+                continue
+            expected.add(".".join((package_name, *path.relative_to(package_dir).with_suffix("").parts)))
+
+    assert expected
+    assert expected <= set(build_exe._project_hidden_imports())
+
+
 def test_project_hidden_imports_cover_lazy_project_targets():
     hidden_imports = set(build_exe._project_hidden_imports())
     lazy_targets = _lazy_project_targets(Path("core"), Path("ui"), Path("models"))
@@ -155,6 +168,16 @@ def test_create_spec_file_includes_project_core_hidden_imports(tmp_path, monkeyp
     assert "core.sync_manager" in spec_text
     assert "models.auto_continue" in spec_text
     assert "ui.dialogs.confirm_dialog" in spec_text
+
+
+def test_create_spec_file_includes_current_project_hidden_imports(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_exe, "SPEC_PATH", tmp_path / "ApiSwitcher.spec")
+
+    build_exe.create_spec_file()
+
+    spec_text = build_exe.SPEC_PATH.read_text(encoding="utf-8")
+    missing = [module for module in build_exe._project_hidden_imports() if module not in spec_text]
+    assert missing == []
 
 
 def test_create_spec_file_excludes_heavy_optional_modules(monkeypatch, tmp_path):
