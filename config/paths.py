@@ -347,6 +347,7 @@ CLAUDE_CREDENTIALS = CLAUDE_HOME / ".credentials.json"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 CODEX_CONFIG = CODEX_HOME / "config.toml"
 CODEX_AUTH = CODEX_HOME / "auth.json"
+CODEX_ENV = CODEX_HOME / ".env"
 VSCODE_SETTINGS = Path.home() / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
 
 # Local storage

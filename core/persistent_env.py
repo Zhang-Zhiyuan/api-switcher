@@ -328,30 +328,18 @@ def _profile_sources(sources: list[EnvImportSource], seen: set[tuple[str, str, s
             if not token:
                 continue
             provider = getattr(profile, "model_provider", "")
+            codex_env_key = _codex_profile_env_key(profile)
             _append_source(
                 sources,
                 seen,
                 EnvImportSource(
-                    f"Codex API: {profile.name} -> OPENAI_API_KEY",
-                    "OPENAI_API_KEY",
+                    f"Codex API: {profile.name} -> {codex_env_key}",
+                    codex_env_key,
                     token,
                     "profile",
                     details=f"provider={provider}",
                 ),
             )
-            codex_env_key = _codex_profile_env_key(profile)
-            if codex_env_key != "OPENAI_API_KEY":
-                _append_source(
-                    sources,
-                    seen,
-                    EnvImportSource(
-                        f"Codex API: {profile.name} -> {codex_env_key}",
-                        codex_env_key,
-                        token,
-                        "profile",
-                        details=f"provider={provider}",
-                    ),
-                )
     except Exception as e:
         logger.debug("Failed to collect profile env sources: %s", e)
 

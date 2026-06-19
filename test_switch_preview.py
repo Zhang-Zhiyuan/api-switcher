@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config import paths
 from core import auth_parser, backup_manager, parser, profile_manager, security, switch_preview, toml_parser, vscode_parser
 from models.profile import ClaudeAccountProfile, CodexAccountProfile, CodexProfile
 
@@ -24,12 +25,13 @@ def isolated_preview(tmp_path, monkeypatch):
     monkeypatch.setattr(parser, "CLAUDE_CREDENTIALS", tmp_path / "claude" / ".credentials.json")
     monkeypatch.setattr(auth_parser, "CODEX_AUTH", tmp_path / "codex" / "auth.json")
     monkeypatch.setattr(toml_parser, "CODEX_CONFIG", tmp_path / "codex" / "config.toml")
+    monkeypatch.setattr(paths, "CODEX_ENV", tmp_path / "codex" / ".env")
     monkeypatch.setattr(vscode_parser, "VSCODE_SETTINGS", tmp_path / "vscode" / "settings.json")
 
     return secret_store
 
 
-def test_codex_api_preview_warns_when_overriding_official_auth(isolated_preview):
+def test_codex_api_preview_preserves_official_auth(isolated_preview):
     security.set_secret("codex:relay:api_key", "sk-relay")
     profile_manager.save_codex_profile(
         CodexProfile(
@@ -45,8 +47,8 @@ def test_codex_api_preview_warns_when_overriding_official_auth(isolated_preview)
     preview = switch_preview.build_switch_preview("codex_api", "Relay")
 
     assert preview.can_proceed
-    assert any(check.status == "warning" and "官方" in check.item for check in preview.checks)
-    assert any(change.label == "认证模式" and change.after == "api_key" for change in preview.changes)
+    assert any(check.status == "ok" and "官方" in check.item for check in preview.checks)
+    assert any(change.label == "认证模式" and "env_key=" in change.after for change in preview.changes)
 
 
 def test_preview_blocks_missing_codex_api_key(isolated_preview):

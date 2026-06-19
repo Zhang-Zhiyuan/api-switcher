@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from config import paths
 from core import auth_parser, parser, profile_manager, security, toml_parser, vscode_parser
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile
 
@@ -131,18 +132,25 @@ def build_codex_api_preview(name: str) -> SwitchPreview:
     config = toml_parser.read_codex_config()
     auth = auth_parser.read_codex_auth()
     target_base_url = _codex_target_base_url(target)
+    target_env_key = _codex_target_env_key(target)
     current_profile = _current_label(runtime, "has_config", "has_auth")
     account_before = _account_runtime_label(account_runtime, "has_official_auth")
-    account_after = "会被 API Key 模式覆盖"
+    account_after = "保留 auth.json；Provider 配置生效"
+    auth_after = "OpenAI 认证" if target.custom_requires_openai_auth else f"env_key={target_env_key}"
+    auth_note = (
+        "requires_openai_auth=true 时 Codex 会忽略 env_key。"
+        if target.custom_requires_openai_auth
+        else "API Key 写入 provider env_key、Windows 用户环境和 Codex .env。"
+    )
 
     changes = [
         PreviewChange("Codex API 配置", current_profile, target.name, important=True),
         PreviewChange("Provider", _display(runtime.get("provider")), _display(target.model_provider)),
         PreviewChange("模型", _display(runtime.get("model")), _display(target.model)),
         PreviewChange("Base URL", _display(_current_codex_base_url(config)), _display(target_base_url)),
-        PreviewChange("认证模式", _display(runtime.get("auth_mode")), "api_key", important=True),
+        PreviewChange("认证模式", _display(runtime.get("auth_mode")), auth_after, auth_note, True),
         PreviewChange("认证", _display(runtime.get("auth_identity")), profile_manager.describe_codex_profile_identity(target)),
-        PreviewChange("官方账号状态", account_before, account_after, "auth.json 中的官方登录 token 会被清空。", True),
+        PreviewChange("官方账号状态", account_before, account_after, "官方登录 token 会保留；当前 provider 会切到第三方配置。", True),
         PreviewChange("沙盒/审批", f"{runtime.get('approval_policy', '-')}/{runtime.get('sandbox_mode', '-')}",
                       f"{target.approval_policy}/{target.sandbox_mode}"),
     ]
@@ -153,14 +161,15 @@ def build_codex_api_preview(name: str) -> SwitchPreview:
     checks.extend(_path_checks("Codex 写入路径", [
         toml_parser.CODEX_CONFIG,
         auth_parser.CODEX_AUTH,
+        paths.CODEX_ENV,
     ]))
     if _codex_has_official_tokens(auth):
         checks.append(PreviewCheck(
             "Codex CLI",
-            "官方账号覆盖",
-            "warning",
-            "当前 auth.json 存在 ChatGPT 登录 token，切换第三方 API 会清空这些运行态 token。",
-            "需要恢复官方账号时，切回已保存的官方账号快照。",
+            "官方账号保留",
+            "ok",
+            "当前 auth.json 存在 ChatGPT 登录 token；切换第三方 Provider 时会保留它。",
+            "第三方 API Key 不再写入 auth.json。",
         ))
     if target.sandbox_mode == "danger-full-access":
         checks.append(PreviewCheck(
@@ -180,7 +189,7 @@ def build_codex_api_preview(name: str) -> SwitchPreview:
         summary=f"准备把 Codex CLI 切换到第三方 API 配置「{name}」。",
         changes=changes,
         checks=checks,
-        files=[str(toml_parser.CODEX_CONFIG), str(auth_parser.CODEX_AUTH)],
+        files=[str(toml_parser.CODEX_CONFIG), str(auth_parser.CODEX_AUTH), str(paths.CODEX_ENV)],
     )
 
 
@@ -242,13 +251,13 @@ def build_codex_account_preview(name: str) -> SwitchPreview:
     ]
 
     checks = _validate_codex_account_target(target)
-    checks.extend(_path_checks("Codex 写入路径", [auth_parser.CODEX_AUTH, toml_parser.CODEX_CONFIG]))
+    checks.extend(_path_checks("Codex 写入路径", [auth_parser.CODEX_AUTH, toml_parser.CODEX_CONFIG, paths.CODEX_ENV]))
     if runtime.get("profile_name") or account_runtime.get("api_override_active"):
         checks.append(PreviewCheck(
             "Codex CLI",
             "API 覆盖清理",
             "warning",
-            "切换官方账号会覆盖当前第三方 API Key 运行态，并把 provider 设回 openai。",
+            "切换官方账号会清理第三方 Provider 环境变量，并把 provider 设回 openai。",
             "如果还需要该 API 配置，可稍后从 API 配置列表切回。",
         ))
 
@@ -345,7 +354,9 @@ def _validate_codex_api_target(profile: CodexProfile) -> list[PreviewCheck]:
     else:
         checks.append(PreviewCheck(category, "配置类型", "ok", "第三方 Codex API 配置。"))
 
-    if security.get_secret(profile.api_key_ref):
+    if profile.custom_requires_openai_auth:
+        checks.append(PreviewCheck(category, "API Key", "ok", "该 Provider 使用 OpenAI 认证，不需要单独 API Key。"))
+    elif security.get_secret(profile.api_key_ref):
         checks.append(PreviewCheck(category, "API Key", "ok", "已找到本机保存的 API Key。"))
     else:
         checks.append(PreviewCheck(category, "API Key", "error", "未找到本机保存的 API Key。", "编辑该 API 配置并重新保存密钥。"))
@@ -500,6 +511,15 @@ def _codex_target_base_url(profile: CodexProfile) -> str:
         return ProviderRegistry.get_codex_base_url(profile.model_provider) or ""
     except Exception:
         return ""
+
+
+def _codex_target_env_key(profile: CodexProfile) -> str:
+    try:
+        from core.providers import ProviderRegistry
+
+        return ProviderRegistry.get_codex_env_key_for_profile(profile) or "-"
+    except Exception:
+        return profile.custom_env_key or "OPENAI_API_KEY"
 
 
 def _current_codex_base_url(config: dict) -> str:

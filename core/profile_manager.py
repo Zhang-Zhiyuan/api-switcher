@@ -1302,6 +1302,8 @@ def _codex_auth_identity_from_auth(auth: dict) -> str:
 
 def describe_codex_profile_identity(profile: CodexProfile) -> str:
     """Return a non-secret auth identity label for display."""
+    if getattr(profile, "custom_requires_openai_auth", False):
+        return "openai-auth"
     api_key = security.get_secret(profile.api_key_ref)
     return f"key-{_short_fingerprint(api_key)}" if api_key else "api-key"
 
@@ -1352,6 +1354,8 @@ def _codex_profile_kwargs_from_current(name: str, config: dict, auth: dict) -> d
 
 
 def _store_codex_auth_secrets(name: str, profile_kwargs: dict, auth: dict) -> None:
+    if profile_kwargs.get("custom_requires_openai_auth"):
+        return
     api_key = auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None
     if api_key:
         ref = f"codex:{name}:api_key"
@@ -1372,18 +1376,32 @@ def _codex_config_env_key(config: dict) -> str:
         return "OPENAI_API_KEY"
 
 
+def _codex_config_explicit_env_key(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    return str(custom.get("env_key") or "").strip()
+
+
 def _codex_api_key_from_config_or_env(config: dict, auth: dict) -> tuple[str, str]:
+    env_key = _codex_config_env_key(config)
+    explicit_env_key = _codex_config_explicit_env_key(config)
     auth_key = str(auth.get("OPENAI_API_KEY") or "") if isinstance(auth, dict) else ""
-    if auth_key:
+
+    if not explicit_env_key and auth_key:
         return auth_key, "OPENAI_API_KEY"
 
-    env_key = _codex_config_env_key(config)
     try:
-        from core import persistent_env
+        from core import codex_env, persistent_env
 
-        return persistent_env._environment_value(env_key), env_key
+        env_value = persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+        if env_value:
+            return env_value, env_key
     except Exception:
-        return "", env_key
+        pass
+
+    if auth_key:
+        return auth_key, "OPENAI_API_KEY"
+    return "", env_key
 
 
 def _codex_expected_base_url(profile: CodexProfile) -> str:
@@ -1460,22 +1478,47 @@ def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
         expected_env_key = ProviderRegistry.get_codex_env_key_for_profile(profile)
     except Exception:
         expected_env_key = profile.custom_env_key or "OPENAI_API_KEY"
-    current_env_key = custom.get("env_key") or expected_env_key
-    if current_env_key != expected_env_key:
-        return False
     if bool(profile.custom_requires_openai_auth) != bool(custom.get("requires_openai_auth", False)):
         return False
+    if profile.custom_requires_openai_auth:
+        if custom.get("env_key"):
+            return False
+    else:
+        current_env_key = custom.get("env_key") or expected_env_key
+        if current_env_key != expected_env_key:
+            return False
     return True
 
 
-def _codex_auth_matches(profile: CodexProfile, auth: dict) -> bool:
-    auth_mode = _codex_auth_mode(auth)
+def _codex_auth_matches(profile: CodexProfile, auth: dict, config: dict | None = None) -> bool:
     if not is_third_party_codex_profile(profile):
         return False
-    if auth_mode != "api_key":
-        return False
+    if profile.custom_requires_openai_auth:
+        return True
 
-    current_key = auth.get("OPENAI_API_KEY") or ""
+    explicit_env_key = _codex_config_explicit_env_key(config or {})
+    try:
+        from core import codex_env, persistent_env
+        from core.providers import ProviderRegistry
+
+        env_key = ProviderRegistry.get_codex_env_key_for_profile(profile)
+        if explicit_env_key:
+            current_key = persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+        else:
+            current_key = ""
+    except Exception:
+        current_key = ""
+    if not current_key and isinstance(auth, dict):
+        current_key = auth.get("OPENAI_API_KEY") or ""
+    if not current_key and not explicit_env_key:
+        try:
+            from core import codex_env, persistent_env
+            from core.providers import ProviderRegistry
+
+            env_key = ProviderRegistry.get_codex_env_key_for_profile(profile)
+            current_key = persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+        except Exception:
+            current_key = ""
     stored_key = security.get_secret(profile.api_key_ref) or ""
     return bool(current_key and stored_key) and current_key == stored_key
 
@@ -1488,7 +1531,7 @@ def codex_profile_matches_current(profile: CodexProfile) -> bool:
 
 
 def _codex_profile_matches(profile: CodexProfile, config: dict, auth: dict) -> bool:
-    return _codex_config_matches(profile, config) and _codex_auth_matches(profile, auth)
+    return _codex_config_matches(profile, config) and _codex_auth_matches(profile, auth, config)
 
 
 def get_current_codex_name() -> str | None:
@@ -1860,16 +1903,22 @@ def import_current_codex() -> CodexProfile | None:
         return None
     if config.get("model_provider", "openai") == "openai":
         return None
-    api_key, env_key = _codex_api_key_from_config_or_env(config, auth)
-    if not api_key:
-        return None
-
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    requires_openai_auth = bool(custom.get("requires_openai_auth", False))
+    api_key, env_key = ("", "")
     auth_for_import = dict(auth)
-    auth_for_import["auth_mode"] = "apikey"
-    auth_for_import["OPENAI_API_KEY"] = api_key
+    if requires_openai_auth:
+        auth_for_import = dict(auth)
+    else:
+        api_key, env_key = _codex_api_key_from_config_or_env(config, auth)
+        if not api_key:
+            return None
+        auth_for_import["auth_mode"] = "apikey"
+        auth_for_import["OPENAI_API_KEY"] = api_key
     name = _pick_codex_import_name(config, auth_for_import)
     profile_kwargs = _codex_profile_kwargs_from_current(name, config, auth_for_import)
-    if env_key != "OPENAI_API_KEY":
+    if api_key and env_key != "OPENAI_API_KEY":
         profile_kwargs["custom_env_key"] = env_key
     return CodexProfile(**profile_kwargs)
 

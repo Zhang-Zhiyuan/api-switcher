@@ -16,6 +16,7 @@ REMOTE_FILENAMES = {
     "claude_credentials": ("claude", ".credentials.json"),
     "codex_config": ("codex", "config.toml"),
     "codex_auth": ("codex", "auth.json"),
+    "codex_env": ("codex", ".env"),
 }
 
 REMOTE_VSCODE_SETTINGS_PATHS = (
@@ -130,6 +131,22 @@ def write_remote_json(client: paramiko.SSHClient, remote_path: str, data: dict, 
     ssh_manager.write_remote_file(client, expanded, content, file_mode=file_mode)
 
 
+def read_remote_text(client: paramiko.SSHClient, remote_path: str) -> str | None:
+    """Read a text file from remote server."""
+    from core.ssh_manager import ssh_manager
+
+    expanded = _expand_remote_path(client, remote_path)
+    return ssh_manager.read_remote_file(client, expanded)
+
+
+def write_remote_text(client: paramiko.SSHClient, remote_path: str, content: str, file_mode: int | None = None):
+    """Write a text file to remote server."""
+    from core.ssh_manager import ssh_manager
+
+    expanded = _expand_remote_path(client, remote_path)
+    ssh_manager.write_remote_file(client, expanded, content, file_mode=file_mode)
+
+
 def _existing_remote_paths(client: paramiko.SSHClient, paths: tuple[str, ...]) -> list[str]:
     """Return expanded candidate paths that already exist on the remote host."""
     from core.ssh_manager import ssh_manager
@@ -235,3 +252,11 @@ def read_remote_codex_auth(client: paramiko.SSHClient, profile: object | None = 
 
 def write_remote_codex_auth(client: paramiko.SSHClient, data: dict, profile: object | None = None):
     write_remote_json(client, _remote_path("codex_auth", profile), data, file_mode=0o600)
+
+
+def read_remote_codex_env(client: paramiko.SSHClient, profile: object | None = None) -> str | None:
+    return read_remote_text(client, _remote_path("codex_env", profile))
+
+
+def write_remote_codex_env(client: paramiko.SSHClient, content: str, profile: object | None = None):
+    write_remote_text(client, _remote_path("codex_env", profile), content, file_mode=0o600)

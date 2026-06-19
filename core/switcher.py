@@ -1,7 +1,7 @@
 import logging
 import os
 
-from core import backup_manager, parser, toml_parser, auth_parser, vscode_parser, profile_manager, security
+from core import backup_manager, codex_env, parser, toml_parser, auth_parser, vscode_parser, profile_manager, security
 from core.providers import ProviderRegistry
 from core.usage_recorder import usage_recorder
 
@@ -29,10 +29,43 @@ def _codex_api_env_names_to_clear(config: dict | None = None) -> list[str]:
     return normalized
 
 
+def _codex_active_api_env_names_to_clear(config: dict | None = None) -> list[str]:
+    names = ["OPENAI_API_KEY"]
+    provider_id = str((config or {}).get("model_provider") or "").strip()
+    model_providers = (config or {}).get("model_providers")
+    custom = {}
+    if provider_id and isinstance(model_providers, dict):
+        maybe_custom = model_providers.get(provider_id)
+        if isinstance(maybe_custom, dict):
+            custom = maybe_custom
+            names.append(str(custom.get("env_key") or ""))
+    if provider_id and provider_id != "openai":
+        names.append(ProviderRegistry.get_codex_env_key(provider_id, custom_name=custom.get("name")))
+
+    active_name = profile_manager.get_active_codex_name()
+    if active_name:
+        for profile in profile_manager.list_switchable_codex_profiles():
+            if profile.name == active_name:
+                names.extend(ProviderRegistry.get_codex_runtime_env_keys_for_profile(profile))
+                break
+
+    normalized = []
+    for name in names:
+        name = str(name or "").strip()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized
+
+
 def _clear_local_codex_api_env(config: dict | None = None) -> None:
     env_names = _codex_api_env_names_to_clear(config)
     for name in env_names:
         os.environ.pop(name, None)
+
+    try:
+        codex_env.delete_codex_env(env_names)
+    except Exception as e:
+        raise RuntimeError(f"清理 Codex .env 环境变量失败: {e}") from e
 
     if os.name != "nt":
         logger.warning("Local persistent Codex API env cleanup skipped on non-Windows platform")
@@ -93,29 +126,42 @@ def switch_codex_profile(name: str) -> None:
 
     if not profile_manager.is_third_party_codex_profile(target):
         raise ValueError("只能切换第三方 Codex API 配置")
-    api_key = security.get_secret(target.api_key_ref)
-    if not api_key:
+    uses_openai_auth = bool(getattr(target, "custom_requires_openai_auth", False))
+    api_key = security.get_secret(target.api_key_ref) if not uses_openai_auth else ""
+    if not uses_openai_auth and not api_key:
         raise ValueError("Codex API 配置需要 API Key")
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 
-    env_keys = ProviderRegistry.get_codex_runtime_env_keys_for_profile(target)
-    env_updates = {key: api_key for key in env_keys}
+    current_config = toml_parser.read_codex_config()
+    env_keys = [] if uses_openai_auth else ProviderRegistry.get_codex_runtime_env_keys_for_profile(target)
+    env_updates = {key: api_key for key in env_keys if api_key}
+    stale_env_names = [key for key in _codex_active_api_env_names_to_clear(current_config) if key not in env_updates]
+
+    for key in stale_env_names:
+        os.environ.pop(key, None)
     for key, value in env_updates.items():
         os.environ[key] = value
+    if stale_env_names:
+        codex_env.delete_codex_env(stale_env_names)
+    if env_updates:
+        codex_env.set_codex_env(env_updates)
+
     if os.name == "nt":
         from core import persistent_env
 
         try:
-            persistent_env.set_local_user_env(env_updates)
+            if stale_env_names:
+                persistent_env.delete_local_user_env(stale_env_names)
+            if env_updates:
+                persistent_env.set_local_user_env(env_updates)
         except Exception as e:
             raise RuntimeError(f"写入 Codex API 环境变量 {', '.join(env_keys)} 失败: {e}") from e
     else:
         logger.warning("Local persistent env write skipped on non-Windows platform for %s", ", ".join(env_keys))
 
     # Update config.toml
-    config = toml_parser.read_codex_config()
-    config = toml_parser.apply_codex_profile(config, target)
+    config = toml_parser.apply_codex_profile(current_config, target)
     toml_parser.write_codex_config(config)
 
     # Update auth.json

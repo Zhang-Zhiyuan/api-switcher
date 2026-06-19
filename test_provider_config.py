@@ -44,13 +44,10 @@ def check_codex_provider(provider_id, model, base_url, wire_api, writes_effort):
     assert_equal(has_effort, writes_effort, f"{provider_id} reasoning effort presence")
 
 
-def test_codex_runtime_env_keys_include_openai_fallback():
+def test_codex_runtime_env_keys_follow_provider_env_key():
     profile = CodexProfile(name="deepseek", model_provider="deepseek")
 
-    assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(profile) == [
-        "DEEPSEEK_API_KEY",
-        "OPENAI_API_KEY",
-    ]
+    assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(profile) == ["DEEPSEEK_API_KEY"]
 
     openai_profile = CodexProfile(name="openai", model_provider="openai")
     assert ProviderRegistry.get_codex_runtime_env_keys_for_profile(openai_profile) == ["OPENAI_API_KEY"]
@@ -216,10 +213,13 @@ def test_malformed_config_shapes_are_repaired():
 
 
 def test_stale_codex_auth_is_cleared():
-    api_auth = apply_codex_apikey({"OPENAI_API_KEY": "old", "tokens": {"old": True}}, CodexProfile(name="api"))
-    assert_equal(api_auth.get("OPENAI_API_KEY"), "", "stale codex api key")
-    assert_equal("tokens" in api_auth, False, "codex api mode stale tokens")
-    assert_equal(api_auth.get("auth_mode"), "apikey", "codex api mode")
+    api_auth = apply_codex_apikey(
+        {"auth_mode": "apikey", "OPENAI_API_KEY": "old", "tokens": {"old": True}},
+        CodexProfile(name="api", model_provider="deepseek"),
+    )
+    assert_equal("OPENAI_API_KEY" in api_auth, False, "stale codex api key")
+    assert_equal("tokens" in api_auth, True, "codex chatgpt tokens preserved")
+    assert_equal(api_auth.get("auth_mode"), "chatgpt", "codex auth mode restored")
     assert_equal("last_refresh" in api_auth, False, "codex api mode stale last_refresh")
 
 
@@ -252,6 +252,7 @@ def _set_codex_identity_test_paths(root: Path) -> None:
     paths.SECRETS_DIR = data_dir / "secrets"
     paths.CODEX_CONFIG = root / "codex" / "config.toml"
     paths.CODEX_AUTH = root / "codex" / "auth.json"
+    paths.CODEX_ENV = root / "codex" / ".env"
 
     profile_manager.PROFILES_FILE = paths.PROFILES_FILE
     security.SECRETS_DIR = paths.SECRETS_DIR

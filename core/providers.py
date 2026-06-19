@@ -417,16 +417,13 @@ class ProviderRegistry:
     def get_codex_runtime_env_keys_for_profile(profile) -> list[str]:
         """Environment variable names that should carry the Codex API key.
 
-        Codex provider tables can point to provider-specific keys such as
-        DEEPSEEK_API_KEY, while some Codex versions and wrappers still check
-        OPENAI_API_KEY directly. Keep the provider key first for config
-        fidelity, and always add OPENAI_API_KEY as a compatibility fallback.
+        Codex reads the variable named by the provider table's env_key. Keep
+        this aligned with config.toml instead of writing unrelated OpenAI keys.
         """
         keys = []
-        for key in (ProviderRegistry.get_codex_env_key_for_profile(profile), "OPENAI_API_KEY"):
-            key = str(key or "").strip()
-            if key and key not in keys:
-                keys.append(key)
+        key = str(ProviderRegistry.get_codex_env_key_for_profile(profile) or "").strip()
+        if key:
+            keys.append(key)
         return keys
 
     @staticmethod

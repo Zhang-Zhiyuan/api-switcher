@@ -223,15 +223,15 @@ def test_sync_codex_to_server_uses_ssh_manager_instance(isolated_ssh, monkeypatc
 
     assert connected["profile"].name == "remote"
     assert written["config"][0] is fake_client
-    assert written["auth"][1]["auth_mode"] == "apikey"
-    assert written["auth"][1]["OPENAI_API_KEY"] == "sk-relay"
+    assert written["auth"][1]["auth_mode"] == "chatgpt"
+    assert "OPENAI_API_KEY" not in written["auth"][1]
     assert written["auth"][2].name == "remote"
     assert written["env"] == (fake_client, {"OPENAI_API_KEY": "sk-relay"})
     assert "OPENAI_API_KEY" in message
     assert "ssh.example.com" in message
 
 
-def test_sync_codex_to_server_writes_openai_key_fallback_for_provider_env(isolated_ssh, monkeypatch):
+def test_sync_codex_to_server_writes_provider_env_key(isolated_ssh, monkeypatch):
     security.set_secret("codex:deepseek:api_key", "sk-deepseek")
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
     profile_manager.save_codex_profile(
@@ -255,12 +255,9 @@ def test_sync_codex_to_server_writes_openai_key_fallback_for_provider_env(isolat
 
     message = sync_manager.sync_codex_to_server("remote", "deepseek")
 
-    assert written["env"] == {
-        "DEEPSEEK_API_KEY": "sk-deepseek",
-        "OPENAI_API_KEY": "sk-deepseek",
-    }
+    assert written["env"] == {"DEEPSEEK_API_KEY": "sk-deepseek"}
     assert "DEEPSEEK_API_KEY" in message
-    assert "OPENAI_API_KEY" in message
+    assert "OPENAI_API_KEY" not in message
 
 
 def test_sync_codex_to_server_applies_remote_wire_api_benchmark(isolated_ssh, monkeypatch):
@@ -841,7 +838,8 @@ def test_inspect_remote_configs_keeps_codex_visible_when_claude_read_fails(isola
     assert candidates[0].importable is False
     assert "读取失败" in candidates[0].reason
     assert candidates[2].kind == "codex"
-    assert candidates[2].importable is False  # No OPENAI_API_KEY fallback found
+    assert candidates[2].importable is True
+    assert candidates[2].has_api_key is True
     assert candidates[2].provider_label == "DeepSeek"
 
 
@@ -1541,7 +1539,6 @@ def test_persistent_env_import_sources_include_saved_api_profiles(isolated_ssh):
 
     assert ("Claude API: relay -> ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "deepseek-key") in values
     assert ("Claude API: relay -> DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY", "deepseek-key") in values
-    assert ("Codex API: kimi -> OPENAI_API_KEY", "OPENAI_API_KEY", "moonshot-key") in values
     assert ("Codex API: kimi -> MOONSHOT_API_KEY", "MOONSHOT_API_KEY", "moonshot-key") in values
 
 

@@ -115,8 +115,11 @@ def apply_codex_profile(config: dict, profile) -> dict:
 
             custom["base_url"] = base_url
             custom["name"] = profile.custom_name or (provider.display_name if provider else profile.model_provider)
-            custom["env_key"] = ProviderRegistry.get_codex_env_key_for_profile(profile)
-            custom["requires_openai_auth"] = profile.custom_requires_openai_auth
+            custom["requires_openai_auth"] = bool(profile.custom_requires_openai_auth)
+            if profile.custom_requires_openai_auth:
+                custom.pop("env_key", None)
+            else:
+                custom["env_key"] = ProviderRegistry.get_codex_env_key_for_profile(profile)
 
             custom["wire_api"] = ProviderRegistry.get_codex_wire_api_for_profile(profile)
 

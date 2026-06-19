@@ -47,24 +47,14 @@ def write_codex_auth(data: dict) -> None:
 
 
 def apply_codex_apikey(auth: dict, profile) -> dict:
-    """Apply API key from a CodexProfile to auth.json."""
-    from core import security
+    """Remove stale Codex API-key auth while preserving official login tokens.
 
-    # Third-party API profiles must override any official ChatGPT login state.
-    # Newer Codex CLI builds parse optional token/refresh fields strictly, so
-    # keep API-key auth minimal instead of leaving stale ChatGPT fields behind.
-    auth = {"auth_mode": "apikey"}
-
-    api_key = security.get_secret(profile.api_key_ref)
-    if api_key:
-        auth["OPENAI_API_KEY"] = api_key
-    elif profile.api_key_ref:
-        logger.warning("API key reference exists but no secret value was found")
-        auth["OPENAI_API_KEY"] = ""
-    else:
-        auth["OPENAI_API_KEY"] = ""
-
-    return auth
+    Third-party Codex providers read their key from the env var named by
+    config.toml's model_providers.<id>.env_key. Keeping that secret in auth.json
+    collides with official ChatGPT login snapshots and makes provider-specific
+    env_key switching harder to reason about.
+    """
+    return clear_codex_api_auth(auth)
 
 
 def clear_codex_api_auth(auth: dict) -> dict:

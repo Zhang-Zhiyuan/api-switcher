@@ -1,5 +1,6 @@
 import json
 import logging
+import posixpath
 import re
 import shlex
 from dataclasses import dataclass
@@ -81,6 +82,9 @@ REMOTE_CODEX_API_ENV_NAMES = (
     "DEEPSEEK_API_KEY",
     "KIMI_API_KEY",
     "MOONSHOT_API_KEY",
+    "MINIMAX_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "GEMINI_API_KEY",
     "ZHIPUAI_API_KEY",
 )
 
@@ -403,10 +407,22 @@ def _codex_profile_runtime_env_keys(profile) -> list[str]:
 
 
 def _persist_remote_codex_env(client, profile, api_key: str) -> list[str]:
-    from core import persistent_env
+    if not api_key:
+        return []
+    from core import codex_env, persistent_env
 
     env_keys = _codex_profile_runtime_env_keys(profile)
-    persistent_env.set_remote_user_env(client, {key: api_key for key in env_keys})
+    updates = {key: api_key for key in env_keys}
+    persistent_env.set_remote_user_env(client, updates)
+    try:
+        current_codex_env = remote_config.read_remote_codex_env(client, profile) or ""
+        remote_config.write_remote_codex_env(
+            client,
+            codex_env.merge_codex_env_text(current_codex_env, updates=updates),
+            profile,
+        )
+    except Exception as e:
+        logger.warning("Failed to update remote Codex .env: %s", e)
     return env_keys
 
 
@@ -472,6 +488,86 @@ def _remote_codex_current_wire_api(config: dict, profile) -> str:
         return wire_api
 
     return ProviderRegistry.get_codex_wire_api(provider_id, custom_name=table.get("name"))
+
+
+def _remote_codex_env_key(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai").strip() or "openai"
+    model_providers = config.get("model_providers")
+    custom = {}
+    if isinstance(model_providers, dict):
+        maybe_custom = model_providers.get(provider_id)
+        if isinstance(maybe_custom, dict):
+            custom = maybe_custom
+    env_key = str(custom.get("env_key") or "").strip()
+    if env_key:
+        return env_key
+    return ProviderRegistry.get_codex_env_key(provider_id, custom_name=custom.get("name"))
+
+
+def _remote_codex_explicit_env_key(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai").strip() or "openai"
+    model_providers = config.get("model_providers")
+    if not isinstance(model_providers, dict):
+        return ""
+    custom = model_providers.get(provider_id)
+    if not isinstance(custom, dict):
+        return ""
+    return str(custom.get("env_key") or "").strip()
+
+
+def _remote_codex_requires_openai_auth(config: dict) -> bool:
+    provider_id = str(config.get("model_provider") or "openai").strip() or "openai"
+    model_providers = config.get("model_providers")
+    if not isinstance(model_providers, dict):
+        return False
+    custom = model_providers.get(provider_id)
+    return bool(custom.get("requires_openai_auth", False)) if isinstance(custom, dict) else False
+
+
+def _remote_text_env_value(content: str | None, env_key: str) -> str:
+    if not content:
+        return ""
+    try:
+        from core import codex_env
+
+        values = codex_env.parse_codex_env_text(content)
+    except Exception:
+        values = {}
+    return str(values.get(env_key) or values.get("OPENAI_API_KEY") or "").strip()
+
+
+def _remote_codex_api_key_from_sources(client, ssh_profile, config: dict, auth: dict) -> tuple[str, str]:
+    env_key = _remote_codex_env_key(config)
+    explicit_env_key = _remote_codex_explicit_env_key(config)
+    auth_openai_key = str(auth.get("OPENAI_API_KEY") or "").strip() if isinstance(auth, dict) else ""
+    if isinstance(auth, dict):
+        key = str(auth.get(env_key) or "").strip()
+        if key:
+            return key, env_key
+    if not explicit_env_key and auth_openai_key:
+        return auth_openai_key, "OPENAI_API_KEY"
+
+    try:
+        key = _remote_text_env_value(remote_config.read_remote_codex_env(client, ssh_profile), env_key)
+        if key:
+            return key, env_key
+    except Exception as e:
+        logger.debug("Failed to read remote Codex .env for import: %s", e)
+
+    try:
+        from core import persistent_env
+
+        home = remote_config._remote_home(client)
+        env_path = posixpath.join(home, persistent_env.REMOTE_ENV_FILENAME)
+        key = _remote_text_env_value(ssh_manager.read_remote_file(client, env_path), env_key)
+        if key:
+            return key, env_key
+    except Exception as e:
+        logger.debug("Failed to read remote shell env file for Codex import: %s", e)
+
+    if auth_openai_key:
+        return auth_openai_key, "OPENAI_API_KEY"
+    return "", env_key
 
 
 def _format_remote_wire_summary(summaries: list[dict]) -> str:
@@ -616,8 +712,9 @@ def sync_codex_to_server(ssh_name: str, codex_name: str, wire_api_mode: str | No
     codex_profile = _find_profile(profile_manager.list_switchable_codex_profiles(), codex_name, "Codex API Profile")
     if not profile_manager.is_third_party_codex_profile(codex_profile):
         raise ValueError("只能同步第三方 Codex API Profile")
-    api_key = _codex_profile_api_key(codex_profile)
-    if not api_key:
+    uses_openai_auth = bool(getattr(codex_profile, "custom_requires_openai_auth", False))
+    api_key = "" if uses_openai_auth else _codex_profile_api_key(codex_profile)
+    if not uses_openai_auth and not api_key:
         raise ValueError("Codex API Profile 需要 API Key")
 
     ssh_profile, client = _connect_ssh(ssh_name)
@@ -633,14 +730,17 @@ def sync_codex_to_server(ssh_name: str, codex_name: str, wire_api_mode: str | No
     remote_config.write_remote_codex_auth(client, auth, ssh_profile)
     env_keys = _persist_remote_codex_env(client, codex_profile, api_key)
     benchmark = None
-    if wire_api_mode == CODEX_WIRE_API_AUTO:
+    if wire_api_mode == CODEX_WIRE_API_AUTO and api_key:
         benchmark = _remote_benchmark_codex_wire_api(client, codex_profile, config, api_key)
         if benchmark.success and benchmark.recommended_wire_api:
             if _set_remote_codex_wire_api(config, codex_profile, benchmark.recommended_wire_api):
                 remote_config.write_remote_codex_config(client, config, ssh_profile)
 
     logger.info(f"Synced Codex API profile '{codex_name}' to {ssh_profile.host}")
-    message = f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
+    if uses_openai_auth:
+        message = f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 使用 OpenAI 登录/API Key 认证"
+    else:
+        message = f"已同步 Codex API '{codex_name}' 到 {ssh_profile.host} | 已写入远端环境变量 {', '.join(env_keys)}"
     current_wire_api = _remote_codex_current_wire_api(config, codex_profile)
     validation_ok, validation_output = _remote_codex_login_status(client)
     validation_detail = ""
@@ -807,9 +907,20 @@ def _clear_remote_codex_api_info(client, ssh_profile) -> str:
             changed = True
         remote_config.write_remote_codex_auth(client, cleaned_auth, ssh_profile)
 
-    from core import persistent_env
+    from core import codex_env, persistent_env
 
-    persistent_env.delete_remote_user_env(client, _remote_codex_api_env_names(config))
+    env_names = _remote_codex_api_env_names(config)
+    persistent_env.delete_remote_user_env(client, env_names)
+    try:
+        current_codex_env = remote_config.read_remote_codex_env(client, ssh_profile)
+        if current_codex_env is not None:
+            remote_config.write_remote_codex_env(
+                client,
+                codex_env.merge_codex_env_text(current_codex_env, deletes=env_names),
+                ssh_profile,
+            )
+    except Exception as e:
+        logger.warning("Failed to clear remote Codex .env: %s", e)
 
     if changed:
         return "Codex API 信息已清除"
@@ -950,13 +1061,16 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
     if not isinstance(auth, dict):
         auth = {}
     provider_id = str(config.get("model_provider") or "openai")
-    api_key = str(auth.get("OPENAI_API_KEY") or "").strip()
+    requires_openai_auth = _remote_codex_requires_openai_auth(config)
+    api_key, env_key = _remote_codex_api_key_from_sources(client, ssh_profile, config, auth)
     has_key = bool(api_key)
     reason = "可导入为第三方 Codex API Profile"
     if provider_id == "openai":
         reason = "官方 OpenAI 配置，当前只导入第三方 API Profile"
+    elif requires_openai_auth:
+        reason = "使用 OpenAI 认证，可导入第三方 Provider 设置"
     elif not has_key:
-        reason = "未找到 OPENAI_API_KEY"
+        reason = f"未找到 {env_key}"
     custom_name = ""
     model_providers = config.get("model_providers")
     if isinstance(model_providers, dict):
@@ -972,7 +1086,7 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
         model=str(config.get("model") or ""),
         base_url=str((model_providers.get(provider_id, {}) if isinstance(model_providers, dict) else {}).get("base_url") or ""),
         has_api_key=has_key,
-        importable=has_key and provider_id != "openai",
+        importable=(has_key or requires_openai_auth) and provider_id != "openai",
         reason=reason,
         paths=paths,
     )
@@ -1165,9 +1279,10 @@ def pull_codex_from_server(ssh_name: str) -> str:
     provider_id = config.get("model_provider", "openai") if config else "openai"
     if provider_id == "openai":
         return "远程 Codex 配置是官方 OpenAI，已跳过；当前只导入第三方 API Profile"
-    api_key = str((auth or {}).get("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        return "远程 Codex 配置没有 API Key，已跳过；当前只导入第三方 API Profile"
+    requires_openai_auth = _remote_codex_requires_openai_auth(config or {})
+    api_key, env_key = _remote_codex_api_key_from_sources(client, ssh_profile, config or {}, auth or {})
+    if not api_key and not requires_openai_auth:
+        return f"远程 Codex 配置没有 API Key（{env_key}），已跳过；当前只导入第三方 API Profile"
 
     from models.profile import CodexProfile
     profile_kwargs = {
@@ -1194,10 +1309,13 @@ def pull_codex_from_server(ssh_name: str) -> str:
             profile_kwargs["custom_wire_api"] = ProviderRegistry.normalize_codex_wire_api(custom.get("wire_api")) or ""
             profile_kwargs["custom_env_key"] = custom.get("env_key")
             profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
+    if api_key and env_key != "OPENAI_API_KEY":
+        profile_kwargs["custom_env_key"] = env_key
 
-    ref = f"codex:{name}:api_key"
-    security.set_secret(ref, api_key)
-    profile_kwargs["api_key_ref"] = ref
+    if api_key:
+        ref = f"codex:{name}:api_key"
+        security.set_secret(ref, api_key)
+        profile_kwargs["api_key_ref"] = ref
 
     profile = CodexProfile(**profile_kwargs)
     profile_manager.save_codex_profile(profile)

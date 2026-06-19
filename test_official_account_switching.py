@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from core import auth_parser, backup_manager, parser, persistent_env, profile_manager, security, switcher, toml_parser
+from config import paths
+from core import auth_parser, backup_manager, codex_env, parser, persistent_env, profile_manager, security, switcher, toml_parser
 from core.providers import ProviderRegistry
 
 
@@ -33,6 +34,7 @@ def isolated_accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(parser, "CLAUDE_CONFIG", tmp_path / "claude" / "config.json")
     monkeypatch.setattr(auth_parser, "CODEX_AUTH", tmp_path / "codex" / "auth.json")
     monkeypatch.setattr(toml_parser, "CODEX_CONFIG", tmp_path / "codex" / "config.toml")
+    monkeypatch.setattr(paths, "CODEX_ENV", tmp_path / "codex" / ".env")
 
     return tmp_path
 
@@ -239,14 +241,13 @@ def test_switch_codex_profile_writes_matching_environment_key(isolated_accounts,
     auth = auth_parser.read_codex_auth()
     assert config["model_providers"]["deepseek"]["env_key"] == "DEEPSEEK_API_KEY"
     assert profile_manager.get_current_codex_name() == "deepseek"
-    assert auth["OPENAI_API_KEY"] == "sk-deepseek"
+    assert "OPENAI_API_KEY" not in auth
     if os.name == "nt":
-        assert written_env == {
-            "DEEPSEEK_API_KEY": "sk-deepseek",
-            "OPENAI_API_KEY": "sk-deepseek",
-        }
+        assert written_env == {"DEEPSEEK_API_KEY": "sk-deepseek"}
     assert os.environ["DEEPSEEK_API_KEY"] == "sk-deepseek"
-    assert os.environ["OPENAI_API_KEY"] == "sk-deepseek"
+    assert "OPENAI_API_KEY" not in os.environ
+    assert codex_env.get_codex_env_value("DEEPSEEK_API_KEY") == "sk-deepseek"
+    assert not codex_env.get_codex_env_value("OPENAI_API_KEY")
 
 
 def test_current_codex_rejects_invalid_wire_api_until_repaired(isolated_accounts, monkeypatch):
@@ -287,6 +288,36 @@ def test_current_codex_rejects_invalid_wire_api_until_repaired(isolated_accounts
 
     assert toml_parser.read_codex_config()["model_providers"]["deepseek"]["wire_api"] == "responses"
     assert profile_manager.get_current_codex_name() == "deepseek"
+
+
+def test_switch_codex_profile_with_openai_auth_does_not_require_provider_key(isolated_accounts, monkeypatch):
+    from models.profile import CodexProfile
+
+    written_env = {}
+    monkeypatch.setattr(persistent_env, "set_local_user_env", lambda data: written_env.update(data))
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="relay-openai-auth",
+            model="gpt-5.5",
+            model_provider="custom",
+            custom_base_url="https://relay.example.com/v1",
+            custom_requires_openai_auth=True,
+        )
+    )
+    auth_parser.write_codex_auth({
+        "auth_mode": "chatgpt",
+        "tokens": {"id_token": _jwt({"email": "codex@example.test"})},
+    })
+
+    switcher.switch_codex_profile("relay-openai-auth")
+
+    config = toml_parser.read_codex_config()
+    custom = config["model_providers"]["custom"]
+    assert custom["requires_openai_auth"] is True
+    assert "env_key" not in custom
+    assert auth_parser.read_codex_auth()["auth_mode"] == "chatgpt"
+    assert written_env == {}
+    assert profile_manager.get_current_codex_name() == "relay-openai-auth"
 
 
 def test_import_current_codex_can_read_key_from_config_env_key(isolated_accounts, monkeypatch):
