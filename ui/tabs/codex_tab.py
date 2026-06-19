@@ -3,6 +3,7 @@ import threading
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
 from ui.tabs.tab_visibility import is_active_tab
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -312,11 +313,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                     return
                 self._render_refresh_payload(payload, generation)
 
-            try:
-                if not self._destroyed:
-                    self._refresh_finish_after_id = self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, name="codex-tab-refresh", daemon=True).start()
 
@@ -599,10 +596,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                         name,
                     )
 
-            try:
-                self.after(0, show_result)
-            except Exception:
-                pass
+            run_on_ui_thread(self, show_result)
 
         import threading
         threading.Thread(target=run_test, daemon=True).start()

@@ -5,9 +5,10 @@ from tkinter import filedialog
 
 from core.lazy_imports import LazyAttribute, LazyModule
 from ui.tabs.tab_visibility import is_active_tab
-from ui.widgets.toast import show_toast
-from ui.widgets.empty_state import EmptyState
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
+from ui.ui_dispatch import run_on_ui_thread
+from ui.widgets.empty_state import EmptyState
+from ui.widgets.toast import show_toast
 
 
 backup_manager = LazyModule("core.backup_manager")
@@ -127,10 +128,7 @@ class BackupTab(ctk.CTkScrollableFrame):
                 except Exception:
                     return
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, name="backup-tab-refresh", daemon=True).start()
 

@@ -8,6 +8,7 @@ import customtkinter as ctk
 from core import network_diagnostic_constants as diagnostic_constants
 from core.lazy_imports import LazyModule
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
 
@@ -606,10 +607,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 if self._open_ping0_button and payload["report"].diagnostics:
                     self._open_ping0_button.configure(state="normal")
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, daemon=True).start()
 

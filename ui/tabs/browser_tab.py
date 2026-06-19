@@ -5,6 +5,7 @@ import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 
@@ -252,10 +253,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
                 except Exception:
                     return
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, name="browser-profile-diagnostics", daemon=True).start()
 

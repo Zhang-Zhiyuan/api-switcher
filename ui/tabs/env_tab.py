@@ -4,6 +4,7 @@ import customtkinter as ctk
 from core import persistent_env
 from core.lazy_imports import LazyModule
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.persistent_env_control import PersistentEnvControl
 from ui.widgets.toast import show_toast
 
@@ -146,10 +147,7 @@ class EnvTab(ctk.CTkScrollableFrame):
                 except Exception:
                     return
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, name="env-import-sources-refresh", daemon=True).start()
 
@@ -208,10 +206,7 @@ class EnvTab(ctk.CTkScrollableFrame):
                 except Exception:
                     return
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, name="env-server-refresh", daemon=True).start()
 
@@ -270,10 +265,7 @@ class EnvTab(ctk.CTkScrollableFrame):
                 self._ssh_busy = False
                 on_done(payload)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=run, daemon=True).start()
 

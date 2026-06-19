@@ -7,6 +7,7 @@ import customtkinter as ctk
 from core.lazy_imports import LazyAttribute
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, button_style, combo_style, font
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.toast import show_toast
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self._auto_refresh_after_id = None
         self._refresh_generation = 0
         self._deferred_dashboard = None
+        self._current_dashboard_payload = None
+        self._dashboard_render_generation = 0
+        self._dashboard_render_after_ids = set()
         self._build_ui()
         self.after(20, self.refresh)
 
@@ -78,9 +82,32 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self._deferred_dashboard = None
         self._apply_dashboard(profile_type, dashboard)
 
+    def _suspend_background_work(self):
+        if self._dashboard_render_after_ids and self._current_dashboard_payload is not None:
+            self._deferred_dashboard = self._current_dashboard_payload
+        self._cancel_dashboard_render()
+
     def destroy(self):
         self._cancel_auto_refresh()
+        self._cancel_dashboard_render()
         super().destroy()
+
+    def _cancel_dashboard_render(self):
+        for after_id in list(self._dashboard_render_after_ids):
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._dashboard_render_after_ids.clear()
+
+    def _schedule_dashboard_render(self, delay_ms: int, callback):
+        try:
+            after_id = self.after(max(1, int(delay_ms)), callback)
+            self._dashboard_render_after_ids.add(after_id)
+            return after_id
+        except Exception:
+            callback()
+            return None
 
     def _build_ui(self):
         """Build the UI."""
@@ -465,10 +492,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
                 except Exception as exc:
                     logger.error("Failed to apply usage statistics: %s", exc, exc_info=True)
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish, logger, "usage statistics refresh")
 
         threading.Thread(target=worker, name="usage-stats-refresh", daemon=True).start()
 
@@ -476,6 +500,10 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_dashboard = (profile_type, dashboard)
             return
+        self._cancel_dashboard_render()
+        self._dashboard_render_generation += 1
+        generation = self._dashboard_render_generation
+        self._current_dashboard_payload = (profile_type, dashboard)
         summary = dashboard["summary"]
 
         self.summary_cards["total_profiles"].value_label.configure(
@@ -490,9 +518,52 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         self.summary_cards["success_rate"].value_label.configure(text=_summary_success_rate_text(summary))
 
-        self._populate_profiles(self.top_profiles_frame, dashboard["top_profiles"], show_switch=True)
-        self._populate_profiles(self.recent_profiles_frame, dashboard["recent_profiles"], show_switch=True)
-        self._populate_trend(profile_type, dashboard["trend"])
+        self._schedule_dashboard_step(
+            1,
+            generation,
+            profile_type,
+            dashboard,
+            lambda: self._populate_profiles(
+                self.top_profiles_frame,
+                dashboard["top_profiles"],
+                show_switch=True,
+                generation=generation,
+            ),
+        )
+        self._schedule_dashboard_step(
+            45,
+            generation,
+            profile_type,
+            dashboard,
+            lambda: self._populate_profiles(
+                self.recent_profiles_frame,
+                dashboard["recent_profiles"],
+                show_switch=True,
+                generation=generation,
+            ),
+        )
+        self._schedule_dashboard_step(
+            90,
+            generation,
+            profile_type,
+            dashboard,
+            lambda: self._populate_trend(profile_type, dashboard["trend"]),
+        )
+
+    def _schedule_dashboard_step(self, delay_ms: int, generation: int, profile_type, dashboard: dict, callback):
+        after_id = None
+
+        def run():
+            if after_id is not None:
+                self._dashboard_render_after_ids.discard(after_id)
+            if generation != self._dashboard_render_generation:
+                return
+            if not is_active_tab(self):
+                self._deferred_dashboard = (profile_type, dashboard)
+                return
+            callback()
+
+        after_id = self._schedule_dashboard_render(delay_ms, run)
 
     def _populate_trend(self, profile_type: Optional[str] = None, trend_data: Optional[list[dict]] = None):
         """Populate daily trend chart."""
@@ -606,7 +677,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             )
             error_label.pack(pady=20)
 
-    def _populate_profiles(self, parent, stats_list, show_switch=False):
+    def _populate_profiles(self, parent, stats_list, show_switch=False, generation: int | None = None):
         """Populate profiles list."""
         # Clear existing
         for widget in parent.winfo_children():
@@ -622,10 +693,30 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             empty_label.pack(pady=20)
             return
 
-        # Add rows
-        for stats in stats_list:
+        self._populate_profile_batch(parent, list(stats_list), show_switch, generation, 0)
+
+    def _populate_profile_batch(self, parent, stats_list, show_switch: bool, generation: int | None, start: int):
+        if generation is not None and generation != self._dashboard_render_generation:
+            return
+        if not is_active_tab(self):
+            if self._current_dashboard_payload is not None:
+                self._deferred_dashboard = self._current_dashboard_payload
+            return
+        end = min(len(stats_list), start + 3)
+        for stats in stats_list[start:end]:
             row = self._create_profile_row(parent, stats, show_switch_button=show_switch)
             row.pack(fill="x", pady=3)
+        if end >= len(stats_list):
+            return
+
+        after_id = None
+
+        def render_next():
+            if after_id is not None:
+                self._dashboard_render_after_ids.discard(after_id)
+            self._populate_profile_batch(parent, stats_list, show_switch, generation, end)
+
+        after_id = self._schedule_dashboard_render(10, render_next)
 
     def _clear_stats(self):
         """Clear statistics with options."""

@@ -34,20 +34,37 @@ COLORS = {
 }
 
 
-def _child_scroll_widget(widget, parent_canvas):
-    current = widget
+def _event_scroll_chain(event):
+    cached = getattr(event, "_api_switcher_scroll_chain", None)
+    if cached is not None:
+        return cached
+
+    chain = []
+    seen = set()
+    current = getattr(event, "widget", None)
     while current is not None:
-        if current == parent_canvas:
-            return None
+        candidate = None
         if current.__class__.__name__ == "CTkTextbox":
-            return getattr(current, "_textbox", current)
-        child_canvas = getattr(current, "_parent_canvas", None)
-        if child_canvas is not None and child_canvas != parent_canvas:
-            return child_canvas
-        if isinstance(current, (tkinter.Canvas, tkinter.Text)):
-            return current
+            candidate = getattr(current, "_textbox", current)
+        else:
+            child_canvas = getattr(current, "_parent_canvas", None)
+            if child_canvas is not None:
+                candidate = child_canvas
+            elif isinstance(current, (tkinter.Canvas, tkinter.Text)):
+                candidate = current
+        if candidate is not None:
+            marker = id(candidate)
+            if marker not in seen:
+                seen.add(marker)
+                chain.append(candidate)
         current = getattr(current, "master", None)
-    return None
+
+    cached = tuple(chain)
+    try:
+        setattr(event, "_api_switcher_scroll_chain", cached)
+    except Exception:
+        pass
+    return cached
 
 
 def _wheel_delta(event) -> int:
@@ -93,13 +110,15 @@ def _patch_nested_scrollable_frame_mousewheel() -> None:
     original_mouse_wheel_all = scrollable_cls._mouse_wheel_all
 
     def guarded_mouse_wheel_all(self, event):
-        child_scroll = _child_scroll_widget(event.widget, self._parent_canvas)
-        if child_scroll is not None and _scroll_widget_can_consume(
-            child_scroll,
-            event,
-            horizontal=bool(getattr(self, "_shift_pressed", False)),
-        ):
+        chain = _event_scroll_chain(event)
+        try:
+            parent_index = chain.index(self._parent_canvas)
+        except ValueError:
             return None
+        horizontal = bool(getattr(self, "_shift_pressed", False))
+        for child_scroll in chain[:parent_index]:
+            if _scroll_widget_can_consume(child_scroll, event, horizontal=horizontal):
+                return None
         return original_mouse_wheel_all(self, event)
 
     scrollable_cls._mouse_wheel_all = guarded_mouse_wheel_all

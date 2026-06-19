@@ -4,8 +4,9 @@ import threading
 
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute
-from ui.widgets.toast import show_toast
 from ui.theme import COLORS, button_style, card_frame_kwargs, font, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
+from ui.widgets.toast import show_toast
 
 
 AutoContinueSettings = LazyAttribute("models.auto_continue", "AutoContinueSettings")
@@ -378,11 +379,7 @@ class AutoContinueControl(ctk.CTkFrame):
                     return
                 self._apply_refresh_payload(payload["status"], payload["settings"])
 
-            try:
-                if not self._destroyed:
-                    self._refresh_finish_after_id = self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
         threading.Thread(target=worker, name=f"auto-continue-refresh-{self.provider}", daemon=True).start()
 
