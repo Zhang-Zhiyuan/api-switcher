@@ -1,4 +1,5 @@
 import re
+import sys
 import tkinter
 import customtkinter as ctk
 from typing import Optional
@@ -7,6 +8,9 @@ from typing import Optional
 DEFAULT_FONT_FAMILY = "Microsoft YaHei UI"
 MONO_FONT_FAMILY = "Consolas"
 _FONT_CACHE: dict[tuple[int, int, str, str], ctk.CTkFont] = {}
+_SCROLL_START_EPSILON = 0.001
+_SCROLL_END_EPSILON = 0.999
+_SCROLL_CONSUMED_ATTR = "_api_switcher_scroll_consumed"
 
 COLORS = {
     "app_bg": "#101216",
@@ -67,14 +71,41 @@ def _event_scroll_chain(event):
     return cached
 
 
-def _wheel_delta(event) -> int:
-    delta = int(getattr(event, "delta", 0) or 0)
+def _event_scroll_consumed(event) -> bool:
+    return bool(getattr(event, _SCROLL_CONSUMED_ATTR, False))
+
+
+def _mark_event_scroll_consumed(event) -> None:
+    try:
+        setattr(event, _SCROLL_CONSUMED_ATTR, True)
+    except Exception:
+        pass
+
+
+def _wheel_delta(event) -> float:
+    try:
+        delta = float(getattr(event, "delta", 0) or 0)
+    except (TypeError, ValueError):
+        delta = 0.0
     if delta:
         return delta
-    button_num = int(getattr(event, "num", 0) or 0)
+
+    try:
+        button_num = int(getattr(event, "num", 0) or 0)
+    except (TypeError, ValueError):
+        button_num = 0
     if button_num == 4:
-        return 1
+        return 1.0
     if button_num == 5:
+        return -1.0
+    return 0.0
+
+
+def _wheel_direction(event) -> int:
+    delta = _wheel_delta(event)
+    if delta > 0:
+        return 1
+    if delta < 0:
         return -1
     return 0
 
@@ -95,31 +126,75 @@ def _scroll_widget_can_consume(widget, event, horizontal: bool = False) -> bool:
     first, last = _scroll_view(widget, horizontal=horizontal)
     if first <= 0.0 and last >= 1.0:
         return False
-    delta = _wheel_delta(event)
-    if delta > 0:
-        return first > 0.001
-    if delta < 0:
-        return last < 0.999
+    direction = _wheel_direction(event)
+    if direction > 0:
+        return first > _SCROLL_START_EPSILON
+    if direction < 0:
+        return last < _SCROLL_END_EPSILON
     return False
+
+
+def _scroll_units(event) -> int:
+    delta = _wheel_delta(event)
+    if not delta:
+        return 0
+
+    if sys.platform.startswith("win"):
+        units = -int(delta / 6)
+    else:
+        units = -int(delta)
+    if units == 0:
+        return -1 if delta > 0 else 1
+    return units
+
+
+def _scroll_widget(widget, event, horizontal: bool = False) -> bool:
+    if not _scroll_widget_can_consume(widget, event, horizontal=horizontal):
+        return False
+
+    units = _scroll_units(event)
+    if not units:
+        return False
+
+    method_name = "xview" if horizontal else "yview"
+    method = getattr(widget, method_name, None)
+    if not callable(method):
+        return False
+    try:
+        method("scroll", units, "units")
+        return True
+    except Exception:
+        return False
+
+
+def _scroll_chain_index(chain, target) -> int:
+    for index, candidate in enumerate(chain):
+        if candidate is target:
+            return index
+    raise ValueError
 
 
 def _patch_nested_scrollable_frame_mousewheel() -> None:
     scrollable_cls = ctk.CTkScrollableFrame
     if getattr(scrollable_cls, "_api_switcher_nested_scroll_guard", False):
         return
-    original_mouse_wheel_all = scrollable_cls._mouse_wheel_all
 
     def guarded_mouse_wheel_all(self, event):
+        if _event_scroll_consumed(event):
+            return None
+
         chain = _event_scroll_chain(event)
         try:
-            parent_index = chain.index(self._parent_canvas)
+            parent_index = _scroll_chain_index(chain, self._parent_canvas)
         except ValueError:
             return None
         horizontal = bool(getattr(self, "_shift_pressed", False))
         for child_scroll in chain[:parent_index]:
             if _scroll_widget_can_consume(child_scroll, event, horizontal=horizontal):
                 return None
-        return original_mouse_wheel_all(self, event)
+        if _scroll_widget(self._parent_canvas, event, horizontal=horizontal):
+            _mark_event_scroll_consumed(event)
+        return None
 
     scrollable_cls._mouse_wheel_all = guarded_mouse_wheel_all
     scrollable_cls._api_switcher_nested_scroll_guard = True
