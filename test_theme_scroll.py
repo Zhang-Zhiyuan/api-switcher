@@ -85,6 +85,13 @@ def test_scroll_widget_uses_minimum_units_for_small_windows_delta():
     assert scrollable.calls == [("y", ("scroll", -1, "units"))]
 
 
+def test_scroll_units_use_slightly_higher_windows_sensitivity(monkeypatch):
+    monkeypatch.setattr(theme.sys, "platform", "win32")
+
+    assert theme._scroll_units(SimpleNamespace(delta=120, num=0)) == -24
+    assert theme._scroll_units(SimpleNamespace(delta=-120, num=0)) == 24
+
+
 def test_scroll_widget_supports_horizontal_direction():
     event = SimpleNamespace(delta=-0.5, num=0)
     scrollable = _Scrollable(y=(0.0, 1.0), x=(0.2, 0.8))

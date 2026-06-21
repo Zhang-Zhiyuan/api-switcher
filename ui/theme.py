@@ -11,6 +11,7 @@ _FONT_CACHE: dict[tuple[int, int, str, str], ctk.CTkFont] = {}
 _SCROLL_START_EPSILON = 0.001
 _SCROLL_END_EPSILON = 0.999
 _SCROLL_CONSUMED_ATTR = "_api_switcher_scroll_consumed"
+_WINDOWS_SCROLL_DELTA_DIVISOR = 5
 
 COLORS = {
     "app_bg": "#101216",
@@ -140,7 +141,7 @@ def _scroll_units(event) -> int:
         return 0
 
     if sys.platform.startswith("win"):
-        units = -int(delta / 6)
+        units = -int(delta / _WINDOWS_SCROLL_DELTA_DIVISOR)
     else:
         units = -int(delta)
     if units == 0:
