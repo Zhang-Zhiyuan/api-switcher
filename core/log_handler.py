@@ -2,16 +2,18 @@
 自定义日志处理器，用于在 GUI 中显示日志
 """
 import logging
-from queue import Queue
+import threading
+from collections import deque
+from queue import Empty, Full, Queue
 from typing import Optional
 
 
 class GUILogHandler(logging.Handler):
     """将日志消息发送到队列，供 GUI 线程消费"""
 
-    def __init__(self, log_queue: Queue):
+    def __init__(self, manager: "LogManager"):
         super().__init__()
-        self.log_queue = log_queue
+        self.manager = manager
 
         # 设置日志格式
         formatter = logging.Formatter(
@@ -27,7 +29,7 @@ class GUILogHandler(logging.Handler):
             msg = self.format(record)
 
             # 添加到队列（包含级别信息用于着色）
-            self.log_queue.put({
+            self.manager.publish({
                 'message': msg,
                 'level': record.levelname,
                 'levelno': record.levelno
@@ -39,10 +41,15 @@ class GUILogHandler(logging.Handler):
 class LogManager:
     """日志管理器，管理日志队列和处理器"""
 
+    MAX_HISTORY = 5000
+    MAX_QUEUE = 2000
+
     def __init__(self):
-        self.log_queue: Queue = Queue()
+        self.log_queue: Queue = Queue(maxsize=self.MAX_QUEUE)
         self.gui_handler: Optional[GUILogHandler] = None
         self._is_initialized = False
+        self._history = deque(maxlen=self.MAX_HISTORY)
+        self._lock = threading.RLock()
 
     def initialize(self):
         """初始化日志系统"""
@@ -50,7 +57,7 @@ class LogManager:
             return
 
         # 创建 GUI 日志处理器
-        self.gui_handler = GUILogHandler(self.log_queue)
+        self.gui_handler = GUILogHandler(self)
         self.gui_handler.setLevel(logging.DEBUG)
 
         # 添加到根日志记录器
@@ -62,6 +69,42 @@ class LogManager:
     def get_log_queue(self) -> Queue:
         """获取日志队列"""
         return self.log_queue
+
+    def publish(self, entry: dict) -> None:
+        """Store a log entry and notify UI consumers without unbounded growth."""
+        item = dict(entry)
+        with self._lock:
+            self._history.append(item)
+
+        try:
+            self.log_queue.put_nowait(item)
+        except Full:
+            try:
+                self.log_queue.get_nowait()
+            except Empty:
+                pass
+            try:
+                self.log_queue.put_nowait(item)
+            except Full:
+                pass
+
+    def get_recent_entries(self, limit: int | None = None) -> list[dict]:
+        """Return a snapshot of recent in-memory log entries."""
+        with self._lock:
+            entries = list(self._history)
+        if limit is None or limit <= 0 or limit >= len(entries):
+            return entries
+        return entries[-limit:]
+
+    def clear_history(self) -> None:
+        """Clear in-memory logs and any queued-but-not-rendered entries."""
+        with self._lock:
+            self._history.clear()
+        while True:
+            try:
+                self.log_queue.get_nowait()
+            except Empty:
+                break
 
     def shutdown(self):
         """关闭日志系统"""

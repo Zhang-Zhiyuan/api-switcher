@@ -28,6 +28,8 @@ def _format_auto_continue_diagnostics(provider: str, limit: int) -> str:
 class AutoContinueLogsDialog(ctk.CTkToplevel):
     """Recent auto-continue decision and recovery logs."""
 
+    MAX_RENDERED_ROWS = 220
+
     def __init__(self, master, provider: str):
         super().__init__(master)
         self.provider = provider
@@ -41,6 +43,7 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
 
         self._events: list[AutoContinueLogEvent] = []
         self._filtered_events: list[AutoContinueLogEvent] = []
+        self._rendered_events: list[AutoContinueLogEvent] = []
         self._selected_index: int | None = None
         self._row_widgets: list[ctk.CTkFrame] = []
         self._diagnostics_text = ""
@@ -232,13 +235,14 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         self._update_stats()
         self._apply_filter()
         self._status_label.configure(
-            text=f"{self.provider} 日志已刷新，当前显示 {len(self._filtered_events)} 条",
+            text=f"{self.provider} 日志已刷新，当前筛选 {len(self._filtered_events)} 条",
             text_color=COLORS["muted"],
         )
 
     def _apply_refresh_error(self, error: str):
         self._events = []
         self._filtered_events = []
+        self._rendered_events = []
         self._diagnostics_text = f"读取失败: {error}"
         self._render_events()
         self._set_detail(f"读取失败: {error}")
@@ -267,8 +271,14 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
             self._select_event(self._selected_index)
         else:
             self._set_detail("没有匹配的自动续跑日志。")
+        rendered_count = min(len(self._filtered_events), self.MAX_RENDERED_ROWS)
+        render_note = (
+            f"，列表渲染最近 {rendered_count} 条"
+            if len(self._filtered_events) > rendered_count
+            else ""
+        )
         self._status_label.configure(
-            text=f"{self.provider} 当前显示 {len(self._filtered_events)} / {len(self._events)} 条",
+            text=f"{self.provider} 当前筛选 {len(self._filtered_events)} / {len(self._events)} 条{render_note}",
             text_color=COLORS["muted"] if self._filtered_events or not self._events else COLORS["warning"],
         )
 
@@ -306,6 +316,7 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         for child in self._list_frame.winfo_children():
             child.destroy()
         self._row_widgets = []
+        self._rendered_events = self._filtered_events[:self.MAX_RENDERED_ROWS]
 
         if not self._filtered_events:
             ctk.CTkLabel(
@@ -316,7 +327,7 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
             ).pack(anchor="w", padx=6, pady=8)
             return
 
-        for index, event in enumerate(self._filtered_events):
+        for index, event in enumerate(self._rendered_events):
             row = ctk.CTkFrame(
                 self._list_frame,
                 corner_radius=8,

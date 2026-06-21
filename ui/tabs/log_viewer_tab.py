@@ -47,6 +47,8 @@ class LogViewerTab(ctk.CTkScrollableFrame):
     """日志查看器 Tab"""
 
     LOG_BATCH_LIMIT = 250
+    MAX_STORED_ENTRIES = 5000
+    MAX_RENDERED_LINES = 1200
     ACTIVE_POLL_MS = 80
     IDLE_POLL_MS = 450
 
@@ -65,7 +67,10 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._auto_scroll = True
         self._filter_level = 'DEBUG'  # 显示所有级别
         self._poll_after_id = None
+        self._log_entries: list[dict] = []
+        self._visible_line_count = 0
         self._build_ui()
+        self._reload_log_cache()
         self._start_log_polling()
 
     def destroy(self):
@@ -151,13 +156,22 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         )
         self._stats_label.pack(side="right")
 
+        self._render_status_label = ctk.CTkLabel(
+            self,
+            text="",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+        )
+        self._render_status_label.pack(fill="x", padx=14, pady=(0, 6))
+
         # 日志显示区域
         log_frame = ctk.CTkFrame(self, fg_color=COLORS["surface"], corner_radius=8)
         log_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
         self._log_text = ctk.CTkTextbox(
             log_frame,
-            wrap="word",
+            wrap="none",
             activate_scrollbars=True,
             **textbox_style(monospace=True),
         )
@@ -172,6 +186,11 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             level: 0
             for level in LOG_LEVELS
         }
+        self._update_stats()
+
+    def _reload_log_cache(self):
+        self._log_entries = log_manager.get_recent_entries(self.MAX_STORED_ENTRIES)
+        self._render_log_entries()
 
     def _start_log_polling(self):
         """开始轮询日志队列"""
@@ -228,9 +247,13 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._append_log_entries([log_entry])
 
     def _append_log_entries(self, log_entries: list[dict]):
-        visible_entries, count_delta = _prepare_log_entries(log_entries, self._filter_level)
-        for level, count in count_delta.items():
-            self._log_counts[level] += count
+        if log_entries:
+            self._log_entries.extend(dict(entry) for entry in log_entries if isinstance(entry, dict))
+            if len(self._log_entries) > self.MAX_STORED_ENTRIES:
+                self._log_entries = self._log_entries[-self.MAX_STORED_ENTRIES:]
+
+        visible_entries, _count_delta = _prepare_log_entries(log_entries, self._filter_level)
+        self._recount_logs()
 
         if not visible_entries:
             return
@@ -241,14 +264,66 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             self._log_text.insert("end", message + "\n")
             end_index = self._log_text.index("end-1c")
             self._log_text.tag_add(level, start_index, end_index)
+            self._visible_line_count += 1
+        self._trim_rendered_lines()
         self._log_text.configure(state="disabled")
 
         if self._auto_scroll:
             self._log_text.see("end")
+        self._update_render_status()
+
+    def _recount_logs(self):
+        _visible, counts = _prepare_log_entries(self._log_entries, "DEBUG")
+        self._log_counts = counts
+
+    def _render_log_entries(self):
+        visible_entries, counts = _prepare_log_entries(self._log_entries, self._filter_level)
+        self._log_counts = counts
+        render_entries = visible_entries[-self.MAX_RENDERED_LINES:]
+
+        self._log_text.configure(state="normal")
+        self._log_text.delete("1.0", "end")
+        self._visible_line_count = 0
+        for level, message in render_entries:
+            start_index = self._log_text.index("end-1c")
+            self._log_text.insert("end", message + "\n")
+            end_index = self._log_text.index("end-1c")
+            self._log_text.tag_add(level, start_index, end_index)
+            self._visible_line_count += 1
+        self._log_text.configure(state="disabled")
+
+        if self._auto_scroll:
+            self._log_text.see("end")
+        self._update_stats()
+        self._update_render_status(total_visible=len(visible_entries))
+
+    def _trim_rendered_lines(self):
+        overflow = self._visible_line_count - self.MAX_RENDERED_LINES
+        if overflow <= 0:
+            return
+        self._log_text.delete("1.0", f"{overflow + 1}.0")
+        self._visible_line_count = self.MAX_RENDERED_LINES
+
+    def _update_render_status(self, total_visible: int | None = None):
+        if not hasattr(self, "_render_status_label"):
+            return
+        if total_visible is None:
+            filtered_total = len(_prepare_log_entries(self._log_entries, self._filter_level)[0])
+        else:
+            filtered_total = total_visible
+        rendered = min(filtered_total, self.MAX_RENDERED_LINES)
+        suffix = f"，仅渲染最近 {rendered} 条" if filtered_total > rendered else ""
+        self._render_status_label.configure(
+            text=(
+                f"内存保留最近 {len(self._log_entries)} / {self.MAX_STORED_ENTRIES} 条；"
+                f"当前筛选 {filtered_total} 条{suffix}"
+            )
+        )
 
     def _on_level_change(self, value: str):
         """日志级别过滤改变"""
         self._filter_level = value
+        self._render_log_entries()
         show_toast(self.winfo_toplevel(), f"日志级别已设置为: {value}")
 
     def _toggle_auto_scroll(self):
@@ -270,10 +345,15 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._log_text.delete("1.0", "end")
         self._log_text.configure(state="disabled")
 
+        log_manager.clear_history()
+        self._log_entries = []
+        self._visible_line_count = 0
+
         # 重置计数
         for key in self._log_counts:
             self._log_counts[key] = 0
         self._update_stats()
+        self._update_render_status(total_visible=0)
 
         show_toast(self.winfo_toplevel(), "日志已清空")
 
@@ -297,8 +377,9 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             if not filepath:
                 return
 
-            # 获取日志内容
-            content = self._log_text.get("1.0", "end-1c")
+            # 导出当前筛选范围的完整缓存，而不是只导出已渲染片段。
+            visible_entries, _counts = _prepare_log_entries(self._log_entries, self._filter_level)
+            content = "\n".join(message for _level, message in visible_entries)
 
             # 写入文件
             with open(filepath, 'w', encoding='utf-8') as f:
