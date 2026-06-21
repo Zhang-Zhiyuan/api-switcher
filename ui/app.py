@@ -658,7 +658,7 @@ class App(ctk.CTk):
     def _on_tab_changed(self):
         label = self._tabview.get()
         self._suspend_inactive_tab_work(label)
-        self._schedule_tab_load(label)
+        self._schedule_tab_load(label, delay_ms=1)
         self._resume_active_tab_work(label)
 
     def _suspend_inactive_tab_work(self, active_label: str) -> None:

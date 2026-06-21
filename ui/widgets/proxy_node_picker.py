@@ -2,7 +2,7 @@ import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style
+from ui.theme import COLORS, button_style, combo_style, font, input_style
 
 
 remote_proxy = LazyModule("core.remote_proxy")
@@ -16,8 +16,8 @@ class ProxyNodePicker(ctk.CTkFrame):
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     MAX_VISIBLE_ROWS = 18
     VISIBLE_ROWS_STEP = 18
-    RENDER_BATCH_SIZE = 3
-    RENDER_BATCH_DELAY_MS = 12
+    RENDER_BATCH_SIZE = 1
+    RENDER_BATCH_DELAY_MS = 20
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -483,7 +483,8 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         row = ctk.CTkFrame(
             self._list_frame,
-            **card_frame_kwargs(COLORS["primary"] if selected else COLORS["border_soft"]),
+            fg_color=COLORS["surface_alt"] if selected else COLORS["field_bg"],
+            corner_radius=6,
         )
         row.pack(fill="x", padx=5, pady=(4, 0))
         row.grid_columnconfigure(2, weight=1)
@@ -519,9 +520,9 @@ class ProxyNodePicker(ctk.CTkFrame):
             font=font(12, "bold"),
             anchor="w",
             justify="left",
+            wraplength=680,
         )
         title_label.grid(row=0, column=2, sticky="ew", pady=(6, 0))
-        bind_wraplength(row, title_label, padding=250, min_width=180, max_width=760)
 
         meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
         if remote_proxy.proxy_node_quality_measured(quality):
@@ -543,9 +544,9 @@ class ProxyNodePicker(ctk.CTkFrame):
             font=font(11),
             anchor="w",
             justify="left",
+            wraplength=680,
         )
         meta_label.grid(row=1, column=2, sticky="ew", pady=(0, 6))
-        bind_wraplength(row, meta_label, padding=250, min_width=180, max_width=760)
 
         ctk.CTkLabel(
             row,

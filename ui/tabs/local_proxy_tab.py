@@ -22,6 +22,8 @@ startup_manager = LazyModule("core.startup_manager")
 class LocalProxyTab(ctk.CTkScrollableFrame):
     """Tab for managing the Windows local AI proxy."""
 
+    STARTUP_REFRESH_DELAY_MS = 2500
+
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
@@ -1347,7 +1349,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _schedule_startup_refresh(self):
         self._cancel_startup_refresh()
-        self._startup_refresh_after_id = self.after(800, self._run_startup_refresh)
+        self._startup_refresh_after_id = self.after(self.STARTUP_REFRESH_DELAY_MS, self._run_startup_refresh)
 
     def _run_startup_refresh(self):
         self._startup_refresh_after_id = None

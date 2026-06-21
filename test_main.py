@@ -228,6 +228,28 @@ def test_background_work_targets_fall_back_to_tab_itself():
     assert list(app_module.App._iter_background_work_targets(app, tab)) == [tab]
 
 
+def test_tab_change_schedules_load_without_extra_delay():
+    calls = []
+
+    class TabView:
+        def get(self):
+            return "Win11 代理"
+
+    app = object.__new__(app_module.App)
+    app._tabview = TabView()
+    app._suspend_inactive_tab_work = lambda label: calls.append(("suspend", label))
+    app._schedule_tab_load = lambda label, delay_ms=25: calls.append(("load", label, delay_ms))
+    app._resume_active_tab_work = lambda label: calls.append(("resume", label))
+
+    app_module.App._on_tab_changed(app)
+
+    assert calls == [
+        ("suspend", "Win11 代理"),
+        ("load", "Win11 代理", 1),
+        ("resume", "Win11 代理"),
+    ]
+
+
 def test_shutdown_clears_pending_ui_callbacks(monkeypatch):
     import core
 

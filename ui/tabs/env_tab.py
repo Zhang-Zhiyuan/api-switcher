@@ -24,6 +24,10 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._server_status_label = None
         self._local_env_control = None
         self._remote_env_control = None
+        self._remote_env_host = None
+        self._remote_env_after_id = None
+        self._last_import_sources = None
+        self._last_import_sources_error = ""
         self._source_refresh_generation = 0
         self._server_refresh_generation = 0
         self._server_profiles_by_name = {}
@@ -96,8 +100,35 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._server_status_label.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         bind_wraplength(target_grid, self._server_status_label, padding=20)
 
+        self._remote_env_host = ctk.CTkFrame(self, fg_color="transparent")
+        self._remote_env_host.pack(fill="x", padx=14, pady=(0, 12))
+        remote_placeholder = ctk.CTkFrame(self._remote_env_host, **card_frame_kwargs())
+        remote_placeholder.pack(fill="x")
+        ctk.CTkLabel(
+            remote_placeholder,
+            text="SSH 环境变量区域正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=12)
+        self._remote_env_after_id = self.after(160, self._build_remote_env_control)
+
+        self.after(20, self.refresh)
+
+    def _env_controls(self):
+        return tuple(control for control in (self._local_env_control, self._remote_env_control) if control)
+
+    def _build_remote_env_control(self):
+        self._remote_env_after_id = None
+        if self._remote_env_control or not self._remote_env_host:
+            return
+        try:
+            for child in self._remote_env_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
         self._remote_env_control = PersistentEnvControl(
-            self,
+            self._remote_env_host,
             title="SSH 登录用户（默认 HF_TOKEN）",
             status_text="选择上方 SSH 服务器后，写入对应登录用户 HOME；变量名默认 HF_TOKEN，不修改系统级 /etc/environment。",
             write_label="写入 SSH 用户",
@@ -107,9 +138,20 @@ class EnvTab(ctk.CTkScrollableFrame):
             on_refresh_sources=lambda _control: self._refresh_import_sources(),
             auto_refresh_sources=False,
         )
-        self._remote_env_control.pack(fill="x", padx=14, pady=(0, 12))
+        self._remote_env_control.pack(fill="x")
+        if self._last_import_sources is not None:
+            self._remote_env_control.set_sources(self._last_import_sources)
+            if self._last_import_sources_error:
+                self._remote_env_control.set_status(self._last_import_sources_error, "error")
 
-        self.after(20, self.refresh)
+    def destroy(self):
+        if self._remote_env_after_id:
+            try:
+                self.after_cancel(self._remote_env_after_id)
+            except Exception:
+                pass
+            self._remote_env_after_id = None
+        super().destroy()
 
     def refresh(self):
         self._refresh_import_sources()
@@ -118,9 +160,8 @@ class EnvTab(ctk.CTkScrollableFrame):
     def _refresh_import_sources(self):
         self._source_refresh_generation += 1
         generation = self._source_refresh_generation
-        for control in (self._local_env_control, self._remote_env_control):
-            if control:
-                control.set_sources_loading()
+        for control in self._env_controls():
+            control.set_sources_loading()
 
         def worker():
             try:
@@ -136,14 +177,16 @@ class EnvTab(ctk.CTkScrollableFrame):
                         return
                     if not payload["ok"]:
                         message = f"刷新导入来源失败: {payload['error']}"
-                        for control in (self._local_env_control, self._remote_env_control):
-                            if control:
-                                control.set_sources([])
-                                control.set_status(message, "error")
+                        self._last_import_sources = []
+                        self._last_import_sources_error = message
+                        for control in self._env_controls():
+                            control.set_sources([])
+                            control.set_status(message, "error")
                         return
-                    for control in (self._local_env_control, self._remote_env_control):
-                        if control:
-                            control.set_sources(payload["sources"])
+                    self._last_import_sources = list(payload["sources"])
+                    self._last_import_sources_error = ""
+                    for control in self._env_controls():
+                        control.set_sources(self._last_import_sources)
                 except Exception:
                     return
 

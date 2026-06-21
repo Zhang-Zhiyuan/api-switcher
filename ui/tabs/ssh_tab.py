@@ -34,8 +34,9 @@ def _format_server_batch_item(server_name: str, result) -> str:
 class SSHTab(ctk.CTkScrollableFrame):
     """Tab for managing SSH servers and syncing configs."""
 
-    SERVER_RENDER_BATCH_SIZE = 2
-    SERVER_RENDER_BATCH_DELAY_MS = 8
+    SERVER_RENDER_BATCH_SIZE = 1
+    SERVER_RENDER_BATCH_DELAY_MS = 20
+    PROXY_STARTUP_REFRESH_DELAY_MS = 2500
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -524,7 +525,6 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._install_deployment_sections_placeholder()
         self._initial_refresh_after_id = self.after(20, self.refresh)
-        self._deployment_sections_after_id = self.after(420, self._build_deployment_sections)
 
     def _install_deployment_sections_placeholder(self):
         self._deployment_sections_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -533,11 +533,18 @@ class SSHTab(ctk.CTkScrollableFrame):
         placeholder.pack(fill="x", padx=14, pady=(4, 12))
         ctk.CTkLabel(
             placeholder,
-            text="远端代理与自动续跑正在准备...",
+            text="远端代理与自动续跑",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
-        ).pack(fill="x", padx=14, pady=12)
+        ).pack(fill="x", padx=14, pady=(12, 8))
+        ctk.CTkButton(
+            placeholder,
+            text="加载",
+            width=132,
+            command=self._build_deployment_sections,
+            **button_style("secondary", compact=True),
+        ).pack(anchor="w", padx=14, pady=(0, 12))
 
     def _build_deployment_sections(self):
         self._deployment_sections_after_id = None
@@ -2079,7 +2086,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _schedule_proxy_startup_refresh(self):
         self._cancel_proxy_startup_refresh()
-        self._proxy_startup_refresh_after_id = self.after(800, self._run_proxy_startup_refresh)
+        self._proxy_startup_refresh_after_id = self.after(self.PROXY_STARTUP_REFRESH_DELAY_MS, self._run_proxy_startup_refresh)
 
     def _run_proxy_startup_refresh(self):
         self._proxy_startup_refresh_after_id = None
