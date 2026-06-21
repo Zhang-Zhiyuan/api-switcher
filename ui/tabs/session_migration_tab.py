@@ -44,8 +44,10 @@ def _session_record_summary(records, selected_keys: set[str]) -> dict:
 class SessionMigrationTab(ctk.CTkScrollableFrame):
     """Tab for exporting and importing Claude Code / Codex local sessions."""
 
-    RENDER_BATCH_SIZE = 2
-    RENDER_BATCH_DELAY_MS = 8
+    RENDER_BATCH_SIZE = 6
+    RENDER_BATCH_DELAY_MS = 4
+    MAX_VISIBLE_RECORDS = 60
+    VISIBLE_RECORDS_STEP = 60
 
     FILTER_OPTIONS = {
         "全部": "all",
@@ -71,6 +73,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._record_render_generation = 0
         self._record_render_after_id = None
         self._deferred_render_pending = False
+        self._visible_limit = self.MAX_VISIBLE_RECORDS
         self._build_ui()
 
     def destroy(self):
@@ -237,6 +240,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         if not self._cards_frame:
             return
         self._refresh_location_options()
+        self._visible_limit = self.MAX_VISIBLE_RECORDS
         self._refresh_generation += 1
         generation = self._refresh_generation
         self._cancel_record_render()
@@ -293,13 +297,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         records = list(self._records)
         summary = _session_record_summary(records, self._selected_keys)
         self._selected_keys.intersection_update(summary["visible_keys"])
-        if self._stats_label:
-            self._stats_label.configure(
-                text=(
-                    f"会话 {len(records)}  |  已选 {summary['selected_count']}  |  "
-                    f"主文件 {session_migration.format_size(summary['total_size'])}"
-                )
-            )
+        self._update_stats_label(records)
 
         if not records:
             source_label = self._endpoint_label(self._current_source_ssh_name()).strip()
@@ -312,7 +310,21 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             ).pack(fill="x", pady=(12, 4))
             return
 
-        self._render_record_batch(records, generation, 0)
+        visible_limit = max(self.MAX_VISIBLE_RECORDS, int(self._visible_limit or self.MAX_VISIBLE_RECORDS))
+        visible_records = records[:visible_limit]
+        self._render_record_batch(visible_records, generation, 0, total_count=len(records))
+
+    def _update_stats_label(self, records=None):
+        if not self._stats_label:
+            return
+        records = list(self._records if records is None else records)
+        summary = _session_record_summary(records, self._selected_keys)
+        self._stats_label.configure(
+            text=(
+                f"会话 {len(records)}  |  已选 {summary['selected_count']}  |  "
+                f"主文件 {session_migration.format_size(summary['total_size'])}"
+            )
+        )
 
     def _cancel_record_render(self):
         if not self._record_render_after_id:
@@ -334,7 +346,13 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._deferred_render_pending = False
         self._render_records()
 
-    def _render_record_batch(self, records: list[session_migration.SessionRecord], generation: int, start: int):
+    def _render_record_batch(
+        self,
+        records: list[session_migration.SessionRecord],
+        generation: int,
+        start: int,
+        total_count: int | None = None,
+    ):
         if generation != self._record_render_generation or not self._cards_frame:
             return
         if not is_active_tab(self):
@@ -346,14 +364,43 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             self._add_record_card(record)
         if end >= len(records):
             self._record_render_after_id = None
+            total = len(records) if total_count is None else int(total_count)
+            remaining = max(0, total - len(records))
+            if remaining:
+                self._add_show_more_footer(remaining)
             return
         try:
             self._record_render_after_id = self.after(
                 self.RENDER_BATCH_DELAY_MS,
-                lambda: self._render_record_batch(records, generation, end),
+                lambda: self._render_record_batch(records, generation, end, total_count=total_count),
             )
         except Exception:
             self._record_render_after_id = None
+
+    def _add_show_more_footer(self, remaining: int):
+        footer = ctk.CTkFrame(self._cards_frame, **card_frame_kwargs())
+        footer.pack(fill="x", pady=(4, 10))
+        ctk.CTkLabel(
+            footer,
+            text=f"还有 {remaining} 个会话未显示",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+        ).pack(side="left", padx=14, pady=12)
+        ctk.CTkButton(
+            footer,
+            text="显示更多",
+            width=92,
+            command=self._show_more_records,
+            **button_style("secondary", compact=True),
+        ).pack(side="right", padx=14, pady=10)
+
+    def _show_more_records(self):
+        self._visible_limit = max(
+            self.MAX_VISIBLE_RECORDS,
+            int(self._visible_limit or self.MAX_VISIBLE_RECORDS) + self.VISIBLE_RECORDS_STEP,
+        )
+        self._render_records()
 
     def _add_record_card(self, record: session_migration.SessionRecord):
         card = ctk.CTkFrame(self._cards_frame, **card_frame_kwargs())
@@ -420,10 +467,12 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     def _on_filter_change(self, label: str):
         self._provider_filter = self.FILTER_OPTIONS.get(label, "all")
+        self._visible_limit = self.MAX_VISIBLE_RECORDS
         self.refresh()
 
     def _on_source_location_change(self, _label: str):
         self._selected_keys.clear()
+        self._visible_limit = self.MAX_VISIBLE_RECORDS
         self.refresh()
 
     def _toggle_selected(self, key: str, selected: bool):
@@ -431,7 +480,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             self._selected_keys.add(key)
         else:
             self._selected_keys.discard(key)
-        self._render_records()
+        self._update_stats_label()
 
     def _select_visible(self):
         self._selected_keys.update(record.key for record in self._records)
