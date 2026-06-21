@@ -21,7 +21,7 @@ from core.ssh_manager import ssh_manager
 PACKAGE_FORMAT = "api-switcher-session-migration"
 PACKAGE_VERSION = 1
 PACKAGE_EXTENSION = ".asxsession"
-MAX_SCAN_LINES = 2000
+MAX_SCAN_LINES = 200
 MAX_REMOTE_SESSION_FILES = 5000
 MAX_REMOTE_PARSE_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024

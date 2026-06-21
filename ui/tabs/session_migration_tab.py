@@ -44,10 +44,10 @@ def _session_record_summary(records, selected_keys: set[str]) -> dict:
 class SessionMigrationTab(ctk.CTkScrollableFrame):
     """Tab for exporting and importing Claude Code / Codex local sessions."""
 
-    RENDER_BATCH_SIZE = 6
+    RENDER_BATCH_SIZE = 4
     RENDER_BATCH_DELAY_MS = 4
-    MAX_VISIBLE_RECORDS = 60
-    VISIBLE_RECORDS_STEP = 60
+    MAX_VISIBLE_RECORDS = 10
+    VISIBLE_RECORDS_STEP = 20
 
     FILTER_OPTIONS = {
         "全部": "all",
@@ -453,17 +453,16 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         if record.summary and record.summary != record.title:
             info_lines.append(f"摘要: {record.summary}")
 
-        for line in info_lines:
-            label = ctk.CTkLabel(
-                info_frame,
-                text=line,
-                text_color=COLORS["muted"],
-                font=font(12),
-                anchor="w",
-                justify="left",
-            )
-            label.pack(fill="x")
-            bind_wraplength(info_frame, label, padding=4)
+        info_label = ctk.CTkLabel(
+            info_frame,
+            text="\n".join(info_lines),
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        info_label.pack(fill="x")
+        bind_wraplength(info_frame, info_label, padding=4)
 
     def _on_filter_change(self, label: str):
         self._provider_filter = self.FILTER_OPTIONS.get(label, "all")
