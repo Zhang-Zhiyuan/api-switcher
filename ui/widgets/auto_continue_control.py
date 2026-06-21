@@ -100,6 +100,14 @@ class AutoContinueControl(ctk.CTkFrame):
         )
         self._toggle_btn.pack(side="left", padx=(0, 5))
 
+        ctk.CTkButton(
+            controls,
+            text="修复",
+            width=58,
+            command=self._repair,
+            **button_style("warning", compact=True),
+        ).pack(side="left", padx=(0, 5))
+
         # Settings button
         ctk.CTkButton(
             controls,
@@ -583,6 +591,15 @@ class AutoContinueControl(ctk.CTkFrame):
             self.refresh()
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"操作失败: {e}", is_error=True)
+
+    def _repair(self):
+        try:
+            auto_continue_manager.repair(self.provider)
+            show_toast(self.winfo_toplevel(), f"{self.provider} Hook 已按当前设置修复")
+            self.refresh()
+        except Exception as e:
+            show_toast(self.winfo_toplevel(), f"修复失败: {e}", is_error=True)
+            self.refresh()
 
     def _show_settings(self):
         """Show settings dialog."""
