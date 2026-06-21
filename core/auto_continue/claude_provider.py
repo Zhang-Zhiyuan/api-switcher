@@ -7,6 +7,8 @@ from core.auto_continue.base import AutoContinueProvider
 from core.auto_continue.permission_rules import (
     apply_managed_permission_rules,
     ask_rules_from_payload,
+    conflicting_permission_rules,
+    missing_allow_rules,
     permission_rules_from_auto_settings,
     rules_from_payload,
     rules_payload,
@@ -58,6 +60,54 @@ def _iter_claude_hook_commands(
 
 def _claude_event_has_command(settings: dict, event_name: str, marker: str) -> bool:
     return any(marker in command for command in _iter_claude_hook_commands(settings, (event_name,)))
+
+
+def _permission_auto_approve_issues(
+    auto_settings: AutoContinueSettings | None,
+    claude_settings: dict | None,
+) -> list[str]:
+    if not auto_settings or not auto_settings.auto_approve_permission_requests:
+        return []
+
+    if not isinstance(claude_settings, dict):
+        return ["Claude settings.json 无法读取，权限自动确认状态未知"]
+
+    permissions = claude_settings.get("permissions")
+    permissions = permissions if isinstance(permissions, dict) else {}
+    issues: list[str] = []
+
+    if permissions.get("defaultMode") != "dontAsk":
+        issues.append("Claude 权限模式不是 dontAsk，权限自动确认需修复")
+    if claude_settings.get("skipDangerousModePermissionPrompt") is True:
+        issues.append("skipDangerousModePermissionPrompt 仍为 true，权限自动确认需修复")
+
+    desired_rules = permission_rules_from_auto_settings(auto_settings)
+    missing_rules = missing_allow_rules(desired_rules, permissions.get("allow", []))
+    ask_conflicts = conflicting_permission_rules(desired_rules, permissions.get("ask", []))
+    deny_conflicts = conflicting_permission_rules(desired_rules, permissions.get("deny", []))
+
+    if missing_rules:
+        issues.append("权限 allow 未预授权: " + ", ".join(missing_rules[:5]))
+    if ask_conflicts:
+        issues.append("permissions.ask 仍会强制询问: " + ", ".join(ask_conflicts[:5]))
+    if deny_conflicts:
+        issues.append("permissions.deny 会阻止自动执行: " + ", ".join(deny_conflicts[:5]))
+
+    auto_approves_everything = any(
+        str(tool or "").strip() == "*"
+        for tool in auto_settings.auto_approve_tools
+    )
+    if auto_approves_everything:
+        deny_conflict_keys = {rule.casefold() for rule in deny_conflicts}
+        broad_deny_rules = [
+            rule
+            for rule in rules_from_payload(permissions.get("deny", []))
+            if rule.casefold() not in deny_conflict_keys
+        ]
+        if broad_deny_rules:
+            issues.append("permissions.deny 会阻止通配自动执行: " + ", ".join(broad_deny_rules[:5]))
+
+    return issues
 
 
 def _backup_claude_settings_file(path: Path, reason: str) -> Path | None:
@@ -459,6 +509,12 @@ Only stop when you encounter a genuine blocker that requires user input or decis
         status = super().get_status()
         status.guidance_installed = self.is_guidance_installed()
         status.error_recovery_installed = self.is_error_recovery_installed()
+        settings = self.load_settings()
+        if settings and settings.auto_approve_permission_requests:
+            claude_settings = _read_claude_settings_json(self.get_claude_settings_path())
+            issues = _permission_auto_approve_issues(settings, claude_settings)
+            if issues:
+                status.last_error = "；".join(issues[:5])
         return status
 
     def install_error_recovery(self) -> None:

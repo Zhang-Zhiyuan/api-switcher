@@ -3424,6 +3424,49 @@ def test_local_claude_permission_only_status_does_not_require_stop(tmp_path, mon
     assert not provider.is_hook_registered()
 
 
+def test_local_claude_status_reports_permission_mode_drift(tmp_path, monkeypatch):
+    from core.auto_continue.claude_provider import ClaudeProvider
+    from models.auto_continue import AutoContinueSettings
+
+    settings = AutoContinueSettings(
+        enabled=False,
+        git_auto_snapshot=False,
+        git_snapshot_on_start=False,
+        auto_approve_permission_requests=True,
+    )
+    provider = ClaudeProvider()
+    monkeypatch.setattr(provider, "get_config_dir", lambda: tmp_path)
+    provider.save_settings(settings)
+    provider.get_hook_script_path().parent.mkdir(parents=True, exist_ok=True)
+    provider.get_hook_script_path().write_text("", encoding="utf-8")
+    provider.get_claude_settings_path().write_text(json.dumps({
+        "permissions": {
+            "defaultMode": "bypassPermissions",
+            "allow": ["Bash"],
+            "ask": ["Edit"],
+        },
+        "skipDangerousModePermissionPrompt": True,
+        "hooks": {
+            "PreToolUse": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}],
+            "PermissionRequest": [{"hooks": [{"command": "powershell.exe -File auto_continue_stop.ps1"}]}],
+        },
+    }), encoding="utf-8")
+
+    status = provider.get_status()
+
+    assert status.hook_registered
+    assert status.last_error
+    assert "dontAsk" in status.last_error
+    assert "skipDangerousModePermissionPrompt" in status.last_error
+    assert "Edit" in status.last_error
+
+    provider.register_hook(settings=settings)
+    status = provider.get_status()
+
+    assert status.hook_registered
+    assert status.last_error is None
+
+
 def test_local_claude_error_recovery_hook_is_deduped(tmp_path, monkeypatch):
     from core.auto_continue.claude_provider import ClaudeProvider
 

@@ -162,6 +162,8 @@ def format_auto_continue_diagnostics(provider_name: str, limit: int = 100) -> st
         f"Events: {len(events)} | block_stop={block_count} | allow_stop={allow_count} | API恢复={recovery_count}",
         "",
     ]
+    if getattr(status, "last_error", None):
+        lines.insert(7, f"诊断: {status.last_error}")
     if not events:
         lines.append("No auto-continue log events found.")
     else:

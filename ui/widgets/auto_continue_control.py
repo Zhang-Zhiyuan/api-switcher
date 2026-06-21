@@ -405,7 +405,10 @@ class AutoContinueControl(ctk.CTkFrame):
             # Update status label. This describes the hook installation state;
             # the Stop auto-continue state is shown separately to avoid implying
             # that Git/API recovery are paused when only Stop continuation is off.
-            if status.hook_registered:
+            status_issue = str(getattr(status, "last_error", "") or "").strip()
+            if status_issue:
+                self._status_label.configure(text="需修复", text_color=COLORS["warning"])
+            elif status.hook_registered:
                 self._status_label.configure(text="Hook 运行中", text_color=COLORS["success"])
             elif status.hook_script_exists:
                 self._status_label.configure(text="脚本已安装", text_color=COLORS["warning"])
@@ -466,6 +469,8 @@ class AutoContinueControl(ctk.CTkFrame):
             if self.provider.lower() == "claude":
                 info_lines.append(f"Guidance: {'✓' if status.guidance_installed else '✗'}")
             info_lines.append(f"错误恢复 Hook: {'✓ 已安装' if status.error_recovery_installed else '✗ 未安装'}")
+            if status_issue:
+                info_lines.append(f"诊断: {status_issue}")
 
             if settings:
                 info_lines.append(
