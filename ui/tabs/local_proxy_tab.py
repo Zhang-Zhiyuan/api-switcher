@@ -688,6 +688,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._cancel_initial_refresh()
         self._cancel_saved_subscription_refresh()
 
+    def _iter_background_work_targets(self):
+        yield self
+        if self._subscription_picker:
+            yield self._subscription_picker
+
     def _resume_background_work(self):
         if not is_active_tab(self):
             return

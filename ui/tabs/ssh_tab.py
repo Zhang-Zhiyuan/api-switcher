@@ -1233,6 +1233,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._deferred_server_render_pending = True
             self._cancel_server_render()
 
+    def _iter_background_work_targets(self):
+        yield self
+        if self._proxy_subscription_picker:
+            yield self._proxy_subscription_picker
+
     def _resume_background_work(self):
         if not is_active_tab(self):
             return

@@ -680,7 +680,7 @@ class App(ctk.CTk):
         self._call_background_work_hook(tab, "_resume_background_work", active_label)
 
     def _call_background_work_hook(self, tab, hook_name: str, label: str) -> None:
-        for widget in self._iter_widget_tree(tab):
+        for widget in self._iter_background_work_targets(tab):
             hook = getattr(widget, hook_name, None)
             if not callable(hook):
                 continue
@@ -688,6 +688,29 @@ class App(ctk.CTk):
                 hook()
             except Exception as exc:
                 logger.debug("Failed to call %s for %s: %s", hook_name, label, exc)
+
+    def _iter_background_work_targets(self, tab):
+        provider = getattr(tab, "_iter_background_work_targets", None)
+        if callable(provider):
+            try:
+                targets = list(provider())
+            except Exception as exc:
+                logger.debug("Failed to enumerate background work targets: %s", exc)
+                targets = []
+            if targets:
+                seen = set()
+                for target in targets:
+                    marker = id(target)
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    try:
+                        if target is not None and target.winfo_exists():
+                            yield target
+                    except Exception:
+                        continue
+                return
+        yield tab
 
     def _iter_widget_tree(self, widget):
         stack = [widget]

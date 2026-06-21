@@ -194,6 +194,40 @@ def test_run_on_ui_thread_queues_worker_callbacks_until_ui_pump():
     assert after_calls[0][1].__func__ is app_module.App._drain_ui_callback_queue
 
 
+def test_background_work_targets_use_tab_declared_targets():
+    class Target:
+        def __init__(self, alive=True):
+            self.alive = alive
+
+        def winfo_exists(self):
+            return self.alive
+
+    target = Target()
+    duplicate = target
+    dead = Target(alive=False)
+
+    class Tab(Target):
+        def _iter_background_work_targets(self):
+            return [self, target, duplicate, dead, None]
+
+    app = object.__new__(app_module.App)
+    tab = Tab()
+
+    targets = list(app_module.App._iter_background_work_targets(app, tab))
+
+    assert targets == [tab, target]
+
+
+def test_background_work_targets_fall_back_to_tab_itself():
+    class Tab:
+        pass
+
+    app = object.__new__(app_module.App)
+    tab = Tab()
+
+    assert list(app_module.App._iter_background_work_targets(app, tab)) == [tab]
+
+
 def test_shutdown_clears_pending_ui_callbacks(monkeypatch):
     import core
 
