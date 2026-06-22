@@ -14,6 +14,8 @@ _SCROLL_END_EPSILON = 0.999
 _SCROLL_CONSUMED_ATTR = "_api_switcher_scroll_consumed"
 _SCROLL_ACTIVITY_ATTR = "_api_switcher_last_scroll_at"
 _WINDOWS_SCROLL_DELTA_DIVISOR = 5
+_WINDOWS_SCROLL_MIN_WHEEL_UNITS = 24
+_WINDOWS_SCROLL_NOTCH_DELTA = 120
 
 COLORS = {
     "app_bg": "#101216",
@@ -170,7 +172,10 @@ def _scroll_units(event) -> int:
         return 0
 
     if sys.platform.startswith("win"):
-        units = -int(delta / _WINDOWS_SCROLL_DELTA_DIVISOR)
+        magnitude = max(1, int(abs(delta) / _WINDOWS_SCROLL_DELTA_DIVISOR))
+        if abs(delta) >= (_WINDOWS_SCROLL_NOTCH_DELTA / 2):
+            magnitude = max(magnitude, _WINDOWS_SCROLL_MIN_WHEEL_UNITS)
+        units = -magnitude if delta > 0 else magnitude
     else:
         units = -int(delta)
     if units == 0:

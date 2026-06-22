@@ -178,6 +178,29 @@ def test_proxy_node_picker_set_enabled_updates_visible_controls_without_rerender
     assert calls["enabled"] == [False]
 
 
+def test_proxy_node_picker_select_by_key_skips_rerender_when_unchanged():
+    picker = object.__new__(ProxyNodePicker)
+    picker._nodes = [{"key": "first"}, {"key": "second"}]
+    picker._selected_key = "first"
+    picker._node_key = lambda item: item["key"]
+    calls = {"render": 0}
+
+    def render_nodes():
+        calls["render"] += 1
+
+    picker._render_nodes = render_nodes
+
+    assert picker.select_by_key("first")
+    assert calls["render"] == 0
+
+    assert picker.select_by_key("second")
+    assert picker._selected_key == "second"
+    assert calls["render"] == 1
+
+    assert not picker.select_by_key("missing")
+    assert calls["render"] == 1
+
+
 def test_proxy_node_picker_suspend_cancels_pending_render_work():
     picker = object.__new__(ProxyNodePicker)
     picker._render_after_id = "render"

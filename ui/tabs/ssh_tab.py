@@ -556,6 +556,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_deployment_sections_pending = True
             return
+        if recent_user_scroll(self):
+            self._schedule_after_once("_deployment_sections_after_id", 180, self._build_deployment_sections)
+            return
         self._deferred_deployment_sections_pending = False
         deployment_parent = self._deployment_sections_frame or self
         try:
@@ -928,6 +931,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_proxy_subscription_picker_pending = True
             return
+        if recent_user_scroll(self):
+            self._schedule_after_once("_proxy_subscription_picker_after_id", 180, self._build_proxy_subscription_picker)
+            return
         self._deferred_proxy_subscription_picker_pending = False
         try:
             for child in self._proxy_subscription_picker_host.winfo_children():
@@ -965,6 +971,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         if not is_active_tab(self):
             self._deferred_remote_auto_section_pending = True
+            return
+        if recent_user_scroll(self):
+            self._schedule_after_once("_remote_auto_section_after_id", 180, self._build_remote_auto_section)
             return
         self._deferred_remote_auto_section_pending = False
         parent = self._remote_auto_section_host or self._deployment_sections_frame
@@ -1332,6 +1341,9 @@ class SSHTab(ctk.CTkScrollableFrame):
     def refresh(self):
         self._initial_refresh_after_id = None
         if not self._cards_frame:
+            return
+        if recent_user_scroll(self):
+            self._schedule_after_once("_initial_refresh_after_id", 180, self.refresh)
             return
         self._server_refresh_generation += 1
         generation = self._server_refresh_generation

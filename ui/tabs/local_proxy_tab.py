@@ -734,6 +734,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_initial_refresh_pending = True
             return
+        if recent_user_scroll(self):
+            self._schedule_after_once("_initial_refresh_after_id", 180, self.refresh)
+            return
         self._load_proxy_preferences_ui()
         self._cancel_saved_subscription_refresh()
         self._saved_subscription_after_id = self.after(220, self._load_saved_subscription_ui)

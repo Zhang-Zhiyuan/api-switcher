@@ -90,6 +90,10 @@ def test_scroll_units_use_slightly_higher_windows_sensitivity(monkeypatch):
 
     assert theme._scroll_units(SimpleNamespace(delta=120, num=0)) == -24
     assert theme._scroll_units(SimpleNamespace(delta=-120, num=0)) == 24
+    assert theme._scroll_units(SimpleNamespace(delta=60, num=0)) == -24
+    assert theme._scroll_units(SimpleNamespace(delta=-60, num=0)) == 24
+    assert theme._scroll_units(SimpleNamespace(delta=5, num=0)) == -1
+    assert theme._scroll_units(SimpleNamespace(delta=-5, num=0)) == 1
 
 
 def test_scroll_widget_supports_horizontal_direction():

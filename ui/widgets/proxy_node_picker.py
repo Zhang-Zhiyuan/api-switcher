@@ -283,6 +283,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             return False
         for item in self._nodes:
             if self._node_key(item) == key:
+                if self._selected_key == key:
+                    return True
                 self._selected_key = key
                 self._render_nodes()
                 return True
