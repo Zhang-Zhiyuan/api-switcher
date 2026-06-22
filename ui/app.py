@@ -6,7 +6,7 @@ import threading
 import time
 
 import customtkinter as ctk
-from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font, recent_user_scroll
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
@@ -17,11 +17,16 @@ CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 DEFAULT_TAB_LABEL = "Claude Code"
 DEFAULT_TAB_PRELOAD_MODE = "priority"
-DEFAULT_TAB_WARMUP_MODE = "0"
+DEFAULT_TAB_WARMUP_MODE = "priority"
 TAB_WARMUP_START_MS = 2600
 TAB_WARMUP_STEP_MS = 750
+TAB_WARMUP_SCROLL_IDLE_MS = 1000
+TAB_WARMUP_INTERACTION_IDLE_MS = 700
+TAB_WARMUP_RETRY_MS = 320
 UI_CALLBACK_IDLE_POLL_MS = 16
 UI_CALLBACK_BUSY_POLL_MS = 1
+UI_CALLBACK_BATCH_LIMIT = 16
+UI_CALLBACK_TIME_BUDGET_MS = 18
 QUICK_SWITCH_INITIAL_LOAD_MS = 2200
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
@@ -116,6 +121,7 @@ class App(ctk.CTk):
         self._pending_tab_load_after_ids = {}
         self._tab_class_loading = set()
         self._tab_load_generations = {}
+        self._last_user_interaction_at = 0.0
         self._quick_switch_load_generation = 0
         self._quick_switch_load_after_id = None
         self._quick_switch_loading = False
@@ -138,6 +144,8 @@ class App(ctk.CTk):
 
         # Handle window close event (minimize to tray instead of exit)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self.bind_all("<ButtonPress>", self._mark_user_interaction, add="+")
+        self.bind_all("<KeyPress>", self._mark_user_interaction, add="+")
 
         shell = ctk.CTkFrame(self, fg_color="transparent")
         shell.pack(fill="both", expand=True, padx=20, pady=(18, 14))
@@ -525,6 +533,10 @@ class App(ctk.CTk):
             "会话迁移": 3,
             "Codex CLI": 4,
             ENV_TAB_LABEL: 5,
+            "通用设置": 6,
+            "使用统计": 7,
+            "备份管理": 8,
+            "日志查看器": 9,
         }
         priority_labels = set(priority)
         queue_items = [
@@ -554,6 +566,13 @@ class App(ctk.CTk):
 
     def _warm_next_lazy_tab(self):
         if self._exit_requested:
+            return
+        if (
+            recent_user_scroll(self, idle_ms=TAB_WARMUP_SCROLL_IDLE_MS)
+            or self._recent_user_interaction(idle_ms=TAB_WARMUP_INTERACTION_IDLE_MS)
+            or self._ui_callback_queue_has_pending()
+        ):
+            self._schedule_next_tab_warmup(TAB_WARMUP_RETRY_MS)
             return
         while self._tab_warmup_queue:
             label = self._tab_warmup_queue.pop(0)
@@ -657,10 +676,26 @@ class App(ctk.CTk):
         threading.Thread(target=worker, name=f"tab-class-load-{label}", daemon=True).start()
 
     def _on_tab_changed(self):
+        self._mark_user_interaction()
         label = self._tabview.get()
         self._suspend_inactive_tab_work(label)
         self._schedule_tab_load(label, delay_ms=1)
         self._resume_active_tab_work(label)
+
+    def _mark_user_interaction(self, _event=None) -> None:
+        try:
+            self._last_user_interaction_at = time.perf_counter()
+        except Exception:
+            pass
+
+    def _recent_user_interaction(self, idle_ms: int = 700) -> bool:
+        try:
+            last_interaction = float(self.__dict__.get("_last_user_interaction_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if last_interaction <= 0.0:
+            return False
+        return (time.perf_counter() - last_interaction) * 1000 < max(1, int(idle_ms))
 
     def _suspend_inactive_tab_work(self, active_label: str) -> None:
         for label, attr, _module_name, _class_name, _eager in TAB_SPECS:
@@ -1200,7 +1235,8 @@ class App(ctk.CTk):
             self._clear_ui_callback_queue()
             return
         processed = 0
-        while processed < 80:
+        started_at = time.perf_counter()
+        while processed < UI_CALLBACK_BATCH_LIMIT:
             try:
                 callback = callbacks.get_nowait()
             except queue.Empty:
@@ -1211,9 +1247,20 @@ class App(ctk.CTk):
                     callback()
             except Exception as e:
                 logger.debug("UI callback failed: %s", e, exc_info=True)
+            if (time.perf_counter() - started_at) * 1000 >= UI_CALLBACK_TIME_BUDGET_MS:
+                break
         self._schedule_ui_callback_pump(
-            delay_ms=UI_CALLBACK_BUSY_POLL_MS if processed >= 80 else UI_CALLBACK_IDLE_POLL_MS
+            delay_ms=UI_CALLBACK_BUSY_POLL_MS if self._ui_callback_queue_has_pending() else UI_CALLBACK_IDLE_POLL_MS
         )
+
+    def _ui_callback_queue_has_pending(self) -> bool:
+        callbacks = getattr(self, "_ui_callback_queue", None)
+        if callbacks is None:
+            return False
+        try:
+            return not callbacks.empty()
+        except Exception:
+            return False
 
     def _clear_ui_callback_queue(self):
         callbacks = getattr(self, "_ui_callback_queue", None)

@@ -47,7 +47,7 @@ def test_primary_tabs_are_lazy_loaded_and_priority_preloaded_after_startup():
     specs = {label: eager for label, _attr, _module_name, _class_name, eager in app_module.TAB_SPECS}
 
     assert app_module.DEFAULT_TAB_PRELOAD_MODE == "priority"
-    assert app_module.DEFAULT_TAB_WARMUP_MODE == "0"
+    assert app_module.DEFAULT_TAB_WARMUP_MODE == "priority"
     assert app_module.QUICK_SWITCH_INITIAL_LOAD_MS >= 2000
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
@@ -77,6 +77,35 @@ def test_lazy_tab_warmup_prioritizes_heavy_tabs_after_current_tab():
     assert "Claude Code" not in app._tab_warmup_queue
     assert "Codex CLI" in app._tab_warmup_queue
     assert scheduled == [0]
+
+
+def test_lazy_tab_warmup_defers_when_ui_queue_is_busy(monkeypatch):
+    scheduled = []
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._ui_callback_queue_has_pending = lambda: True
+    app._schedule_next_tab_warmup = lambda delay_ms=0: scheduled.append(delay_ms)
+
+    monkeypatch.setattr(app_module, "recent_user_scroll", lambda *_args, **_kwargs: False)
+
+    app_module.App._warm_next_lazy_tab(app)
+
+    assert scheduled == [app_module.TAB_WARMUP_RETRY_MS]
+
+
+def test_lazy_tab_warmup_defers_after_recent_user_interaction(monkeypatch):
+    scheduled = []
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._last_user_interaction_at = time.perf_counter()
+    app._ui_callback_queue_has_pending = lambda: False
+    app._schedule_next_tab_warmup = lambda delay_ms=0: scheduled.append(delay_ms)
+
+    monkeypatch.setattr(app_module, "recent_user_scroll", lambda *_args, **_kwargs: False)
+
+    app_module.App._warm_next_lazy_tab(app)
+
+    assert scheduled == [app_module.TAB_WARMUP_RETRY_MS]
 
 
 def test_tray_startup_runs_off_ui_thread():
@@ -193,6 +222,26 @@ def test_run_on_ui_thread_queues_worker_callbacks_until_ui_pump():
     assert after_calls[0][0] == app_module.UI_CALLBACK_IDLE_POLL_MS
     assert after_calls[0][1].__self__ is app
     assert after_calls[0][1].__func__ is app_module.App._drain_ui_callback_queue
+
+
+def test_ui_callback_pump_uses_batch_limit_for_backlog():
+    callbacks = []
+    after_calls = []
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._ui_callback_queue = queue.Queue()
+    app._ui_callback_after_id = None
+    app.winfo_exists = lambda: True
+    app.after = lambda delay, callback: after_calls.append((delay, callback)) or "after-id"
+
+    for index in range(app_module.UI_CALLBACK_BATCH_LIMIT + 3):
+        app._ui_callback_queue.put(lambda index=index: callbacks.append(index))
+
+    app_module.App._drain_ui_callback_queue(app)
+
+    assert len(callbacks) == app_module.UI_CALLBACK_BATCH_LIMIT
+    assert after_calls[0][0] == app_module.UI_CALLBACK_BUSY_POLL_MS
 
 
 def test_background_work_targets_use_tab_declared_targets():
