@@ -245,17 +245,19 @@ class EnvTab(ctk.CTkScrollableFrame):
         super().destroy()
 
     def _suspend_background_work(self):
-        if self._local_env_after_id:
+        local_after_id = getattr(self, "_local_env_after_id", None)
+        if local_after_id:
             self._deferred_local_env_pending = True
             try:
-                self.after_cancel(self._local_env_after_id)
+                self.after_cancel(local_after_id)
             except Exception:
                 pass
             self._local_env_after_id = None
-        if self._remote_env_after_id:
+        remote_after_id = getattr(self, "_remote_env_after_id", None)
+        if remote_after_id:
             self._deferred_remote_env_pending = True
             try:
-                self.after_cancel(self._remote_env_after_id)
+                self.after_cancel(remote_after_id)
             except Exception:
                 pass
             self._remote_env_after_id = None

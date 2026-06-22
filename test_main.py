@@ -405,6 +405,22 @@ def test_env_tab_resumes_deferred_remote_env_control():
     assert tab._deferred_remote_env_pending is False
 
 
+def test_env_tab_suspend_tolerates_partial_initialization():
+    from ui.tabs import env_tab
+
+    cancelled = []
+    tab = object.__new__(env_tab.EnvTab)
+    tab._remote_env_after_id = "remote-after"
+    tab._deferred_remote_env_pending = False
+    tab.after_cancel = lambda after_id: cancelled.append(after_id)
+
+    env_tab.EnvTab._suspend_background_work(tab)
+
+    assert cancelled == ["remote-after"]
+    assert tab._remote_env_after_id is None
+    assert tab._deferred_remote_env_pending is True
+
+
 def test_tab_change_schedules_load_without_extra_delay():
     calls = []
 
