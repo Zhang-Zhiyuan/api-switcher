@@ -18,6 +18,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     VISIBLE_ROWS_STEP = 12
     RENDER_BATCH_SIZE = 1
     RENDER_BATCH_DELAY_MS = 95
+    SCROLL_IDLE_RENDER_MS = 520
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -383,7 +384,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._render_plan_pending = False
             self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
             return
-        if recent_user_scroll(self):
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_RENDER_MS):
             try:
                 self._render_batch_after_id = self.after(
                     self.RENDER_BATCH_DELAY_MS,
