@@ -189,7 +189,7 @@ def test_run_on_ui_thread_queues_worker_callbacks_until_ui_pump():
 
     assert callbacks == ["done"]
     assert len(after_calls) == 1
-    assert after_calls[0][0] == 35
+    assert after_calls[0][0] == app_module.UI_CALLBACK_IDLE_POLL_MS
     assert after_calls[0][1].__self__ is app
     assert after_calls[0][1].__func__ is app_module.App._drain_ui_callback_queue
 

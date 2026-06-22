@@ -20,6 +20,8 @@ DEFAULT_TAB_PRELOAD_MODE = "priority"
 DEFAULT_TAB_WARMUP_MODE = "0"
 TAB_WARMUP_START_MS = 2600
 TAB_WARMUP_STEP_MS = 750
+UI_CALLBACK_IDLE_POLL_MS = 16
+UI_CALLBACK_BUSY_POLL_MS = 1
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
@@ -293,7 +295,7 @@ class App(ctk.CTk):
             font=font(11),
         )
         self._status.pack(anchor="w", padx=10, pady=6)
-        self._schedule_ui_callback_pump(delay_ms=50)
+        self._schedule_ui_callback_pump(delay_ms=UI_CALLBACK_IDLE_POLL_MS)
 
         self.claude_switch.configure(values=["正在加载..."], state="disabled")
         self.codex_switch.configure(values=["正在加载..."], state="disabled")
@@ -1208,7 +1210,9 @@ class App(ctk.CTk):
                     callback()
             except Exception as e:
                 logger.debug("UI callback failed: %s", e, exc_info=True)
-        self._schedule_ui_callback_pump(delay_ms=1 if processed >= 80 else 35)
+        self._schedule_ui_callback_pump(
+            delay_ms=UI_CALLBACK_BUSY_POLL_MS if processed >= 80 else UI_CALLBACK_IDLE_POLL_MS
+        )
 
     def _clear_ui_callback_queue(self):
         callbacks = getattr(self, "_ui_callback_queue", None)
