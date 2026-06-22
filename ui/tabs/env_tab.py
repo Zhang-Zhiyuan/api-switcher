@@ -3,7 +3,8 @@ import customtkinter as ctk
 
 from core import persistent_env
 from core.lazy_imports import LazyModule
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
+from ui.tabs.tab_visibility import is_active_tab
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.persistent_env_control import PersistentEnvControl
 from ui.widgets.toast import show_toast
@@ -11,6 +12,9 @@ from ui.widgets.toast import show_toast
 
 profile_manager = LazyModule("core.profile_manager")
 ssh_manager = LazyModule("core.ssh_manager")
+
+REMOTE_ENV_BUILD_SCROLL_IDLE_MS = 850
+REMOTE_ENV_BUILD_RETRY_MS = 260
 
 
 class EnvTab(ctk.CTkScrollableFrame):
@@ -26,7 +30,9 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._remote_env_control = None
         self._remote_env_host = None
         self._remote_env_after_id = None
+        self._deferred_remote_env_pending = False
         self._initial_refresh_after_id = None
+        self._destroyed = False
         self._last_import_sources = None
         self._last_import_sources_error = ""
         self._source_refresh_generation = 0
@@ -119,10 +125,25 @@ class EnvTab(ctk.CTkScrollableFrame):
     def _env_controls(self):
         return tuple(control for control in (self._local_env_control, self._remote_env_control) if control)
 
+    def _schedule_remote_env_control(self, delay_ms: int = REMOTE_ENV_BUILD_RETRY_MS):
+        if self._remote_env_after_id or self._destroyed or self._remote_env_control:
+            return
+        try:
+            self._remote_env_after_id = self.after(max(1, int(delay_ms)), self._build_remote_env_control)
+        except Exception:
+            self._remote_env_after_id = None
+
     def _build_remote_env_control(self):
         self._remote_env_after_id = None
-        if self._remote_env_control or not self._remote_env_host:
+        if self._destroyed or self._remote_env_control or not self._remote_env_host:
             return
+        if not is_active_tab(self):
+            self._deferred_remote_env_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=REMOTE_ENV_BUILD_SCROLL_IDLE_MS):
+            self._schedule_remote_env_control()
+            return
+        self._deferred_remote_env_pending = False
         try:
             for child in self._remote_env_host.winfo_children():
                 child.destroy()
@@ -146,6 +167,7 @@ class EnvTab(ctk.CTkScrollableFrame):
                 self._remote_env_control.set_status(self._last_import_sources_error, "error")
 
     def destroy(self):
+        self._destroyed = True
         if self._initial_refresh_after_id:
             try:
                 self.after_cancel(self._initial_refresh_after_id)
@@ -159,6 +181,21 @@ class EnvTab(ctk.CTkScrollableFrame):
                 pass
             self._remote_env_after_id = None
         super().destroy()
+
+    def _suspend_background_work(self):
+        if not self._remote_env_after_id:
+            return
+        self._deferred_remote_env_pending = True
+        try:
+            self.after_cancel(self._remote_env_after_id)
+        except Exception:
+            pass
+        self._remote_env_after_id = None
+
+    def _resume_background_work(self):
+        if self._deferred_remote_env_pending and not self._remote_env_control:
+            self._deferred_remote_env_pending = False
+            self._schedule_remote_env_control()
 
     def _run_initial_refresh(self):
         self._initial_refresh_after_id = None

@@ -7,7 +7,7 @@ from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
-from ui.theme import COLORS, bind_wraplength, button_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, font, recent_user_scroll
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -17,6 +17,8 @@ ClaudeProfile = LazyAttribute("models.profile", "ClaudeProfile")
 
 CARD_RENDER_BATCH_SIZE = 2
 CARD_RENDER_BATCH_DELAY_MS = 8
+DEFERRED_CONTROL_SCROLL_IDLE_MS = 850
+DEFERRED_CONTROL_RETRY_MS = 260
 
 
 class ClaudeTab(ctk.CTkScrollableFrame):
@@ -38,6 +40,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._auto_continue_control = None
         self._auto_continue_host = None
         self._auto_continue_after_id = None
+        self._deferred_auto_continue_pending = False
         self._initial_refresh_after_id = None
         self._build_ui()
 
@@ -208,10 +211,25 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._cancel_refresh_finish()
         super().destroy()
 
+    def _schedule_auto_continue_control(self, delay_ms: int = DEFERRED_CONTROL_RETRY_MS):
+        if self._auto_continue_after_id or self._destroyed or self._auto_continue_control:
+            return
+        try:
+            self._auto_continue_after_id = self.after(max(1, int(delay_ms)), self._build_auto_continue_control)
+        except Exception:
+            self._auto_continue_after_id = None
+
     def _build_auto_continue_control(self):
         self._auto_continue_after_id = None
         if self._destroyed or self._auto_continue_control or not self._auto_continue_host:
             return
+        if not is_active_tab(self):
+            self._deferred_auto_continue_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=DEFERRED_CONTROL_SCROLL_IDLE_MS):
+            self._schedule_auto_continue_control()
+            return
+        self._deferred_auto_continue_pending = False
         try:
             for child in self._auto_continue_host.winfo_children():
                 child.destroy()
@@ -240,11 +258,21 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._profile_render_after_ids.clear()
 
     def _suspend_background_work(self):
+        if self._auto_continue_after_id:
+            self._deferred_auto_continue_pending = True
+            try:
+                self.after_cancel(self._auto_continue_after_id)
+            except Exception:
+                pass
+            self._auto_continue_after_id = None
         if self._profile_render_after_id or self._profile_render_after_ids:
             self._deferred_render_pending = True
             self._cancel_profile_render()
 
     def _resume_background_work(self):
+        if self._deferred_auto_continue_pending and not self._auto_continue_control:
+            self._deferred_auto_continue_pending = False
+            self._schedule_auto_continue_control()
         if not self._deferred_render_pending:
             return
         self._deferred_render_pending = False

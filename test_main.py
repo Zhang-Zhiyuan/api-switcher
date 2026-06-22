@@ -326,6 +326,85 @@ def test_background_work_targets_fall_back_to_tab_itself():
     assert list(app_module.App._iter_background_work_targets(app, tab)) == [tab]
 
 
+def test_claude_and_codex_defer_auto_continue_control_until_active(monkeypatch):
+    from ui.tabs import claude_tab, codex_tab
+
+    for module, tab_class in ((claude_tab, claude_tab.ClaudeTab), (codex_tab, codex_tab.CodexTab)):
+        tab = object.__new__(tab_class)
+        tab._auto_continue_after_id = None
+        tab._auto_continue_control = None
+        tab._auto_continue_host = object()
+        tab._deferred_auto_continue_pending = False
+        tab._destroyed = False
+
+        monkeypatch.setattr(module, "is_active_tab", lambda _tab: False)
+
+        tab_class._build_auto_continue_control(tab)
+
+        assert tab._auto_continue_after_id is None
+        assert tab._deferred_auto_continue_pending is True
+
+
+def test_claude_and_codex_resume_deferred_auto_continue_control():
+    from ui.tabs import claude_tab, codex_tab
+
+    for module, tab_class in ((claude_tab, claude_tab.ClaudeTab), (codex_tab, codex_tab.CodexTab)):
+        calls = []
+        tab = object.__new__(tab_class)
+        tab._auto_continue_after_id = None
+        tab._auto_continue_control = None
+        tab._auto_continue_host = object()
+        tab._deferred_auto_continue_pending = True
+        tab._profile_render_after_id = None
+        tab._profile_render_after_ids = set()
+        tab._deferred_render_pending = False
+        tab._destroyed = False
+        tab.after = lambda delay, callback: calls.append((delay, callback)) or "after-id"
+
+        tab_class._resume_background_work(tab)
+
+        assert calls and calls[0][0] == module.DEFERRED_CONTROL_RETRY_MS
+        assert tab._auto_continue_after_id == "after-id"
+        assert tab._deferred_auto_continue_pending is False
+
+
+def test_env_tab_defers_remote_env_control_until_active(monkeypatch):
+    from ui.tabs import env_tab
+
+    tab = object.__new__(env_tab.EnvTab)
+    tab._remote_env_after_id = None
+    tab._remote_env_control = None
+    tab._remote_env_host = object()
+    tab._deferred_remote_env_pending = False
+    tab._destroyed = False
+
+    monkeypatch.setattr(env_tab, "is_active_tab", lambda _tab: False)
+
+    env_tab.EnvTab._build_remote_env_control(tab)
+
+    assert tab._remote_env_after_id is None
+    assert tab._deferred_remote_env_pending is True
+
+
+def test_env_tab_resumes_deferred_remote_env_control():
+    from ui.tabs import env_tab
+
+    calls = []
+    tab = object.__new__(env_tab.EnvTab)
+    tab._remote_env_after_id = None
+    tab._remote_env_control = None
+    tab._remote_env_host = object()
+    tab._deferred_remote_env_pending = True
+    tab._destroyed = False
+    tab.after = lambda delay, callback: calls.append((delay, callback)) or "after-id"
+
+    env_tab.EnvTab._resume_background_work(tab)
+
+    assert calls and calls[0][0] == env_tab.REMOTE_ENV_BUILD_RETRY_MS
+    assert tab._remote_env_after_id == "after-id"
+    assert tab._deferred_remote_env_pending is False
+
+
 def test_tab_change_schedules_load_without_extra_delay():
     calls = []
 
