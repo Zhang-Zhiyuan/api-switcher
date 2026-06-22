@@ -48,14 +48,41 @@ def test_primary_tabs_are_lazy_loaded_and_priority_preloaded_after_startup():
 
     assert app_module.DEFAULT_TAB_PRELOAD_MODE == "priority"
     assert app_module.DEFAULT_TAB_WARMUP_MODE == "priority"
+    assert app_module.TAB_CLASS_PRELOAD_START_MS >= 3000
     assert app_module.QUICK_SWITCH_INITIAL_LOAD_MS >= 2000
+    assert app_module.TAB_WARMUP_INTERACTION_IDLE_MS >= 1500
     assert specs["Claude Code"] is False
     assert specs["Codex CLI"] is False
     assert all(eager is False for eager in specs.values())
     assert hasattr(app_module.App, "_load_quick_switch_profiles_delayed")
     assert hasattr(app_module.App, "_run_quick_switch_profile_load")
+    assert hasattr(app_module.App, "_schedule_lazy_tab_preload")
     assert hasattr(app_module.App, "_start_lazy_tab_warmup")
     assert hasattr(app_module.App, "_warm_next_lazy_tab")
+
+
+def test_lazy_tab_preload_waits_for_user_idle(monkeypatch):
+    after_callbacks = []
+    preload_calls = []
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._lazy_tab_preload_started = False
+    app._lazy_tab_preload_after_id = None
+    app._recent_user_interaction = lambda idle_ms=0: True
+    app._ui_callback_queue_has_pending = lambda: False
+    app._preload_lazy_tab_classes = lambda priority_only=False: preload_calls.append(priority_only)
+    app.after = lambda delay, callback: after_callbacks.append((delay, callback)) or f"after-{len(after_callbacks)}"
+
+    monkeypatch.setattr(app_module, "recent_user_scroll", lambda *_args, **_kwargs: False)
+
+    app_module.App._schedule_lazy_tab_preload(app, "priority", delay_ms=5)
+    assert after_callbacks[0][0] == 5
+
+    after_callbacks[0][1]()
+
+    assert preload_calls == []
+    assert after_callbacks[1][0] == app_module.TAB_CLASS_PRELOAD_RETRY_MS
 
 
 def test_lazy_tab_warmup_prioritizes_heavy_tabs_after_current_tab():

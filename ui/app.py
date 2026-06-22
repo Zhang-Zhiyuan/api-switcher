@@ -18,10 +18,12 @@ CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
 DEFAULT_TAB_LABEL = "Claude Code"
 DEFAULT_TAB_PRELOAD_MODE = "priority"
 DEFAULT_TAB_WARMUP_MODE = "priority"
+TAB_CLASS_PRELOAD_START_MS = 4200
+TAB_CLASS_PRELOAD_RETRY_MS = 700
 TAB_WARMUP_START_MS = 2600
 TAB_WARMUP_STEP_MS = 750
 TAB_WARMUP_SCROLL_IDLE_MS = 1000
-TAB_WARMUP_INTERACTION_IDLE_MS = 700
+TAB_WARMUP_INTERACTION_IDLE_MS = 1800
 TAB_WARMUP_RETRY_MS = 320
 UI_CALLBACK_IDLE_POLL_MS = 16
 UI_CALLBACK_BUSY_POLL_MS = 1
@@ -114,6 +116,7 @@ class App(ctk.CTk):
         self._tab_class_cache = {}
         self._tab_class_cache_lock = threading.RLock()
         self._lazy_tab_preload_started = False
+        self._lazy_tab_preload_after_id = None
         self._lazy_tab_warmup_started = False
         self._pending_tab_warmup_after_id = None
         self._tab_warmup_queue = []
@@ -315,7 +318,7 @@ class App(ctk.CTk):
         self.after(900, self._auto_start_local_proxy)
         preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", DEFAULT_TAB_PRELOAD_MODE).strip().lower()
         if preload_mode != "0":
-            self.after(1400, lambda mode=preload_mode: self._preload_lazy_tab_classes(priority_only=mode != "1"))
+            self._schedule_lazy_tab_preload(preload_mode, delay_ms=TAB_CLASS_PRELOAD_START_MS)
         warmup_mode = os.environ.get("API_SWITCHER_WARM_TABS", DEFAULT_TAB_WARMUP_MODE).strip().lower()
         if warmup_mode != "0":
             self.after(
@@ -487,6 +490,28 @@ class App(ctk.CTk):
         with self._tab_class_cache_lock:
             return self._tab_class_cache.setdefault(label, tab_class)
 
+    def _schedule_lazy_tab_preload(self, mode: str, delay_ms: int = TAB_CLASS_PRELOAD_RETRY_MS):
+        if self._exit_requested or self._lazy_tab_preload_started or self._lazy_tab_preload_after_id:
+            return
+
+        def run_when_idle():
+            self._lazy_tab_preload_after_id = None
+            if self._exit_requested or self._lazy_tab_preload_started:
+                return
+            if (
+                recent_user_scroll(self, idle_ms=TAB_WARMUP_SCROLL_IDLE_MS)
+                or self._recent_user_interaction(idle_ms=TAB_WARMUP_INTERACTION_IDLE_MS)
+                or self._ui_callback_queue_has_pending()
+            ):
+                self._schedule_lazy_tab_preload(mode, delay_ms=TAB_CLASS_PRELOAD_RETRY_MS)
+                return
+            self._preload_lazy_tab_classes(priority_only=mode != "1")
+
+        try:
+            self._lazy_tab_preload_after_id = self.after(max(1, int(delay_ms)), run_when_idle)
+        except Exception:
+            self._lazy_tab_preload_after_id = None
+
     def _preload_lazy_tab_classes(self, priority_only: bool = False):
         if self._exit_requested or self._lazy_tab_preload_started:
             return
@@ -509,6 +534,14 @@ class App(ctk.CTk):
             for _order, label, module_name, class_name in specs:
                 if self._exit_requested:
                     return
+                while (
+                    not self._exit_requested
+                    and (
+                        self._recent_user_interaction(idle_ms=TAB_WARMUP_INTERACTION_IDLE_MS)
+                        or self._ui_callback_queue_has_pending()
+                    )
+                ):
+                    time.sleep(0.15)
                 with self._tab_class_cache_lock:
                     if label in self._tab_class_cache:
                         continue
@@ -1152,6 +1185,13 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self._pending_tab_load_after_ids.clear()
+        pending_preload_after_id = self.__dict__.get("_lazy_tab_preload_after_id")
+        if pending_preload_after_id:
+            try:
+                self.after_cancel(pending_preload_after_id)
+            except Exception:
+                pass
+        self._lazy_tab_preload_after_id = None
         pending_warmup_after_id = self.__dict__.get("_pending_tab_warmup_after_id")
         if pending_warmup_after_id:
             try:
