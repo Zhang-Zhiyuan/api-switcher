@@ -259,6 +259,50 @@ def test_session_migration_ignores_runtime_context_titles(tmp_path):
     assert by_provider["codex"].summary == "真正的 Codex 迁移需求"
 
 
+def test_session_listing_reuses_cache_until_files_change(tmp_path, monkeypatch):
+    claude_home = tmp_path / "claude"
+    codex_home = tmp_path / "codex"
+    claude_project = claude_home / "projects" / "c--Users-Test-Project"
+    claude_project.mkdir(parents=True)
+    claude_file = claude_project / "cached-session.jsonl"
+
+    def write_message(message: str) -> None:
+        claude_file.write_text(
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-01T00:00:00Z",
+                "sessionId": "cached-session",
+                "cwd": "C:\\Users\\Test\\Project",
+                "message": {"content": message},
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    write_message("第一次会话")
+    session_migration.clear_local_session_cache()
+    original_parse = session_migration._parse_claude_session
+    calls = {"count": 0}
+
+    def counted_parse(*args, **kwargs):
+        calls["count"] += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(session_migration, "_parse_claude_session", counted_parse)
+
+    first = session_migration.list_sessions("claude", claude_home=claude_home, codex_home=codex_home)
+    second = session_migration.list_sessions("claude", claude_home=claude_home, codex_home=codex_home)
+
+    assert calls["count"] == 1
+    assert first[0].summary == "第一次会话"
+    assert second[0].summary == "第一次会话"
+
+    write_message("第二次会话，文件大小也变化")
+    third = session_migration.list_sessions("claude", claude_home=claude_home, codex_home=codex_home)
+
+    assert calls["count"] == 2
+    assert third[0].summary == "第二次会话，文件大小也变化"
+
+
 def test_session_export_skips_oversized_files(tmp_path, monkeypatch):
     claude_home = tmp_path / "claude"
     codex_home = tmp_path / "codex"

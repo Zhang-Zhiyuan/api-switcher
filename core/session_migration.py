@@ -6,6 +6,7 @@ import os
 import posixpath
 import shutil
 import stat
+import threading
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass
@@ -27,6 +28,8 @@ MAX_REMOTE_PARSE_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+_LOCAL_SESSION_CACHE_LOCK = threading.RLock()
+_LOCAL_SESSION_CACHE: dict[tuple[str, str, str], tuple[tuple, tuple[Any, ...]]] = {}
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,57 @@ def default_codex_home() -> Path:
     return Path.home() / ".codex"
 
 
+def clear_local_session_cache() -> None:
+    with _LOCAL_SESSION_CACHE_LOCK:
+        _LOCAL_SESSION_CACHE.clear()
+
+
+def _local_session_cache_key(provider: str, claude_home: Path, codex_home: Path) -> tuple[str, str, str]:
+    return (
+        str(provider or "all").lower(),
+        str(Path(claude_home).expanduser().resolve(strict=False)),
+        str(Path(codex_home).expanduser().resolve(strict=False)),
+    )
+
+
+def _session_file_signature(path: Path, root: Path, provider: str):
+    try:
+        if not path.is_file():
+            return None
+        info = path.stat()
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = path
+        return (provider, str(relative).replace("\\", "/"), int(info.st_size), int(info.st_mtime_ns))
+    except OSError:
+        return None
+
+
+def _local_session_signature(provider: str, claude_home: Path, codex_home: Path) -> tuple:
+    provider = str(provider or "all").lower()
+    parts = []
+    if provider in {"all", "claude"}:
+        projects_dir = Path(claude_home) / "projects"
+        if projects_dir.exists():
+            for path in sorted(projects_dir.glob("*/*.jsonl")):
+                signature = _session_file_signature(path, claude_home, "claude")
+                if signature is not None:
+                    parts.append(signature)
+    if provider in {"all", "codex"}:
+        codex_home = Path(codex_home)
+        index_signature = _session_file_signature(codex_home / "session_index.jsonl", codex_home, "codex-index")
+        if index_signature is not None:
+            parts.append(index_signature)
+        sessions_dir = codex_home / "sessions"
+        if sessions_dir.exists():
+            for path in sorted(sessions_dir.rglob("*.jsonl")):
+                signature = _session_file_signature(path, codex_home, "codex")
+                if signature is not None:
+                    parts.append(signature)
+    return tuple(parts)
+
+
 def list_sessions(
     provider: str = "all",
     claude_home: Path | None = None,
@@ -102,6 +156,12 @@ def list_sessions(
     provider = (provider or "all").lower()
     claude_home = claude_home or default_claude_home()
     codex_home = codex_home or default_codex_home()
+    cache_key = _local_session_cache_key(provider, claude_home, codex_home)
+    signature = _local_session_signature(provider, claude_home, codex_home)
+    with _LOCAL_SESSION_CACHE_LOCK:
+        cached = _LOCAL_SESSION_CACHE.get(cache_key)
+        if cached and cached[0] == signature:
+            return list(cached[1])
 
     records: list[SessionRecord] = []
     if provider in {"all", "claude"}:
@@ -109,7 +169,10 @@ def list_sessions(
     if provider in {"all", "codex"}:
         records.extend(_list_codex_sessions(codex_home))
 
-    return sorted(records, key=lambda item: item.updated_at or item.created_at, reverse=True)
+    records = sorted(records, key=lambda item: item.updated_at or item.created_at, reverse=True)
+    with _LOCAL_SESSION_CACHE_LOCK:
+        _LOCAL_SESSION_CACHE[cache_key] = (signature, tuple(records))
+    return list(records)
 
 
 def list_remote_sessions(ssh_name: str, provider: str = "all") -> list[SessionRecord]:
