@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from ui.tabs.browser_tab import (
+    BrowserTab,
     _browser_diagnosis_matches_filter,
     _browser_profiles_summary,
     _diagnosis_failure,
@@ -81,3 +82,19 @@ def test_diagnosis_failure_keeps_failed_profile_visible_as_issue():
     assert diagnosis["valid"] is False
     assert "boom" in diagnosis["validation_error"]
     assert _browser_diagnosis_matches_filter(diagnosis, "issues") is True
+
+
+def test_browser_tab_suspend_cancels_initial_refresh():
+    tab = object.__new__(BrowserTab)
+    tab._initial_refresh_after_id = "initial"
+    tab._profile_render_after_id = None
+    tab._deferred_refresh_pending = False
+    tab._deferred_render_pending = False
+    cancelled = []
+    tab.after_cancel = lambda after_id: cancelled.append(after_id)
+
+    BrowserTab._suspend_background_work(tab)
+
+    assert cancelled == ["initial"]
+    assert tab._initial_refresh_after_id is None
+    assert tab._deferred_refresh_pending is True

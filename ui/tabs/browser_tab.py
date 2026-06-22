@@ -4,7 +4,7 @@ import customtkinter as ctk
 
 from core.lazy_imports import LazyAttribute, LazyModule
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -12,6 +12,9 @@ from ui.widgets.toast import show_toast
 
 PROFILE_RENDER_BATCH_SIZE = 3
 PROFILE_RENDER_BATCH_DELAY_MS = 8
+INITIAL_REFRESH_DELAY_MS = 900
+SCROLL_IDLE_RENDER_MS = 850
+SCROLL_RETRY_RENDER_MS = 260
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -103,20 +106,25 @@ class BrowserTab(ctk.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
+        self._destroyed = False
         self._cards_frame = None
         self._filter_mode = "all"
         self._selected_names: set[str] = set()
         self._refresh_generation = 0
         self._profile_render_generation = 0
         self._profile_render_after_id = None
+        self._initial_refresh_after_id = None
         self._cached_profiles = ()
         self._cached_active = ""
         self._cached_diagnoses = {}
         self._has_profile_cache = False
+        self._deferred_refresh_pending = False
         self._deferred_render_pending = False
         self._build_ui()
 
     def destroy(self):
+        self._destroyed = True
+        self._cancel_initial_refresh()
         self._cancel_profile_render()
         super().destroy()
 
@@ -189,10 +197,36 @@ class BrowserTab(ctk.CTkScrollableFrame):
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="浏览器 Profile 诊断稍后开始...",
+            text_color=COLORS["muted"],
+            font=font(13),
+        ).pack(fill="x", pady=(22, 6))
 
-        self.after(20, self.refresh)
+        self._schedule_initial_refresh()
+
+    def _schedule_initial_refresh(self):
+        if self._initial_refresh_after_id or getattr(self, "_destroyed", False):
+            return
+        try:
+            self._initial_refresh_after_id = self.after(INITIAL_REFRESH_DELAY_MS, self.refresh)
+        except Exception:
+            self._initial_refresh_after_id = None
+            self.refresh()
 
     def refresh(self):
+        self._initial_refresh_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
+        if not is_active_tab(self):
+            self._deferred_refresh_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=SCROLL_IDLE_RENDER_MS):
+            self._deferred_refresh_pending = True
+            self._schedule_initial_refresh()
+            return
+        self._deferred_refresh_pending = False
         if not self._cards_frame:
             return
         self._refresh_generation += 1
@@ -267,12 +301,27 @@ class BrowserTab(ctk.CTkScrollableFrame):
             pass
         self._profile_render_after_id = None
 
+    def _cancel_initial_refresh(self):
+        if not self._initial_refresh_after_id:
+            return
+        try:
+            self.after_cancel(self._initial_refresh_after_id)
+        except Exception:
+            pass
+        self._initial_refresh_after_id = None
+
     def _suspend_background_work(self):
+        if self._initial_refresh_after_id:
+            self._deferred_refresh_pending = True
+            self._cancel_initial_refresh()
         if self._profile_render_after_id:
             self._deferred_render_pending = True
             self._cancel_profile_render()
 
     def _resume_background_work(self):
+        if self._deferred_refresh_pending:
+            self._deferred_refresh_pending = False
+            self._schedule_initial_refresh()
         if not self._deferred_render_pending:
             return
         self._deferred_render_pending = False
@@ -345,6 +394,15 @@ class BrowserTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_render_pending = True
             self._profile_render_after_id = None
+            return
+        if recent_user_scroll(self, idle_ms=SCROLL_IDLE_RENDER_MS):
+            try:
+                self._profile_render_after_id = self.after(
+                    SCROLL_RETRY_RENDER_MS,
+                    lambda: self._render_profile_batch(profiles, active, diagnoses, generation, start),
+                )
+            except Exception:
+                self._profile_render_after_id = None
             return
         end = min(start + PROFILE_RENDER_BATCH_SIZE, len(profiles))
         for p in profiles[start:end]:

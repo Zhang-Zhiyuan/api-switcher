@@ -46,6 +46,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     RENDER_BATCH_SIZE = 1
     RENDER_BATCH_DELAY_MS = 90
+    INITIAL_REFRESH_DELAY_MS = 900
+    SCROLL_IDLE_RENDER_MS = 850
+    SCROLL_RETRY_RENDER_MS = 260
     MAX_VISIBLE_RECORDS = 3
     VISIBLE_RECORDS_STEP = 12
 
@@ -73,7 +76,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._record_render_generation = 0
         self._record_render_after_id = None
         self._deferred_render_after_id = None
+        self._initial_refresh_after_id = None
         self._inactive_clear_after_id = None
+        self._deferred_refresh_pending = False
         self._deferred_render_pending = False
         self._visible_limit = self.MAX_VISIBLE_RECORDS
         self._build_ui()
@@ -82,6 +87,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._destroyed = True
         self._cancel_record_render()
         self._cancel_deferred_render()
+        self._cancel_initial_refresh()
         self._cancel_inactive_clear()
         super().destroy()
 
@@ -237,10 +243,36 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="会话列表稍后读取...",
+            text_color=COLORS["muted"],
+            font=font(13),
+        ).pack(fill="x", pady=(22, 6))
 
-        self.after(20, self.refresh)
+        self._schedule_initial_refresh()
+
+    def _schedule_initial_refresh(self):
+        if self._initial_refresh_after_id or getattr(self, "_destroyed", False):
+            return
+        try:
+            self._initial_refresh_after_id = self.after(self.INITIAL_REFRESH_DELAY_MS, self.refresh)
+        except Exception:
+            self._initial_refresh_after_id = None
+            self.refresh()
 
     def refresh(self):
+        self._initial_refresh_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
+        if not is_active_tab(self):
+            self._deferred_refresh_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_RENDER_MS):
+            self._deferred_refresh_pending = True
+            self._schedule_initial_refresh()
+            return
+        self._deferred_refresh_pending = False
         if not self._cards_frame:
             return
         self._cancel_inactive_clear()
@@ -374,6 +406,15 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             pass
         self._deferred_render_after_id = None
 
+    def _cancel_initial_refresh(self):
+        if not self._initial_refresh_after_id:
+            return
+        try:
+            self.after_cancel(self._initial_refresh_after_id)
+        except Exception:
+            pass
+        self._initial_refresh_after_id = None
+
     def _cancel_inactive_clear(self):
         if not self._inactive_clear_after_id:
             return
@@ -434,6 +475,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 self._render_records()
 
     def _suspend_background_work(self):
+        if self._initial_refresh_after_id:
+            self._deferred_refresh_pending = True
+            self._cancel_initial_refresh()
         if self._record_render_after_id:
             self._deferred_render_pending = True
             self._cancel_record_render()
@@ -441,6 +485,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     def _resume_background_work(self):
         self._cancel_inactive_clear()
+        if self._deferred_refresh_pending:
+            self._deferred_refresh_pending = False
+            self._schedule_initial_refresh()
         if not self._deferred_render_pending:
             return
         self._schedule_deferred_render()
@@ -458,7 +505,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             self._deferred_render_pending = True
             self._record_render_after_id = None
             return
-        if recent_user_scroll(self):
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_RENDER_MS):
             self._schedule_record_batch(records, generation, start, total_count=total_count)
             return
         end = min(start + self.RENDER_BATCH_SIZE, len(records))
