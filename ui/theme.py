@@ -332,17 +332,37 @@ def textbox_style(monospace: bool = False) -> dict:
 
 def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, max_width: int = 980) -> None:
     """Keep CTkLabel wraplength responsive to its container."""
+    state = {"after_id": None, "wraplength": None}
+
     def update(_event=None):
-        width = container.winfo_width()
-        if width <= 1:
-            width = max_width
-        label.configure(wraplength=max(min_width, min(max_width, width - padding)))
+        state["after_id"] = None
+        try:
+            if not label.winfo_exists():
+                return
+            width = container.winfo_width()
+            if width <= 1:
+                width = max_width
+            wraplength = max(min_width, min(max_width, width - padding))
+            if state.get("wraplength") == wraplength:
+                return
+            state["wraplength"] = wraplength
+            label.configure(wraplength=wraplength)
+        except Exception:
+            return
+
+    def schedule_update(_event=None):
+        if state.get("after_id"):
+            return
+        try:
+            state["after_id"] = container.after_idle(update)
+        except Exception:
+            update()
 
     try:
-        container.bind("<Configure>", update, add="+")
+        container.bind("<Configure>", schedule_update, add="+")
     except TypeError:
-        container.bind("<Configure>", update)
-    update()
+        container.bind("<Configure>", schedule_update)
+    schedule_update()
 
 
 _GEOMETRY_SIZE_RE = re.compile(r"^(\d+)x(\d+)")

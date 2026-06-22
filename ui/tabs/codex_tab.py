@@ -7,7 +7,7 @@ from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
-from ui.widgets.auto_continue_loader import preload_auto_continue_control_class, resolve_auto_continue_control_class
+from ui.widgets.auto_continue_loader import resolve_auto_continue_control_class
 from ui.theme import COLORS, bind_wraplength, button_style, font, recent_user_scroll
 
 
@@ -18,7 +18,6 @@ CodexProfile = LazyAttribute("models.profile", "CodexProfile")
 
 CARD_RENDER_BATCH_SIZE = 2
 CARD_RENDER_BATCH_DELAY_MS = 8
-AUTO_CONTINUE_INITIAL_BUILD_DELAY_MS = 1500
 DEFERRED_CONTROL_SCROLL_IDLE_MS = 850
 DEFERRED_CONTROL_RETRY_MS = 260
 
@@ -182,14 +181,7 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         self._auto_continue_host = ctk.CTkFrame(self, fg_color="transparent")
         self._auto_continue_host.pack(fill="x", padx=14, pady=(0, 10))
-        ctk.CTkLabel(
-            self._auto_continue_host,
-            text="自动续跑控制正在准备...",
-            text_color=COLORS["muted"],
-            font=font(12),
-        ).pack(fill="x", pady=(10, 12))
-        preload_auto_continue_control_class()
-        self._auto_continue_after_id = self.after(AUTO_CONTINUE_INITIAL_BUILD_DELAY_MS, self._build_auto_continue_control)
+        self._build_auto_continue_placeholder()
 
         self._initial_refresh_after_id = self.after(420, self._run_initial_refresh)
 
@@ -219,6 +211,33 @@ class CodexTab(ctk.CTkScrollableFrame):
             self._auto_continue_after_id = self.after(max(1, int(delay_ms)), self._build_auto_continue_control)
         except Exception:
             self._auto_continue_after_id = None
+
+    def _build_auto_continue_placeholder(self):
+        if self._destroyed or not self._auto_continue_host:
+            return
+        placeholder = ctk.CTkFrame(
+            self._auto_continue_host,
+            fg_color=COLORS["surface"],
+            border_width=1,
+            border_color=COLORS["border_soft"],
+            corner_radius=8,
+        )
+        placeholder.pack(fill="x")
+        row = ctk.CTkFrame(placeholder, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=10)
+        ctk.CTkLabel(
+            row,
+            text="自动续跑控制",
+            text_color=COLORS["text"],
+            font=font(12, "bold"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            row,
+            text="加载控制",
+            width=104,
+            command=self._build_auto_continue_control,
+            **button_style("secondary", compact=True),
+        ).pack(side="right")
 
     def _build_auto_continue_control(self):
         self._auto_continue_after_id = None

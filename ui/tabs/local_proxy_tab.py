@@ -1324,7 +1324,6 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     selected_key = str(state.get("selected_node_key") or "")
                     self._set_subscription_nodes(cached_result.nodes, preserve_key=selected_key)
                     self._select_subscription_node_by_key(selected_key)
-                    self._use_selected_subscription_node(show_message=False, persist_selection=False)
                     self._set_cache_status(
                         f"本机缓存: {len(cached_result.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}",
                         "success",
@@ -1349,6 +1348,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not node_key or not self._subscription_picker:
             return False
         return self._subscription_picker.select_by_key(node_key)
+
+    def _selected_subscription_item(self):
+        if not self._subscription_picker:
+            return None
+        try:
+            return self._subscription_picker.selected_item()
+        except Exception:
+            return None
 
     def _on_auto_refresh_toggle(self):
         enabled = bool(self._auto_refresh_var.get())
@@ -2026,9 +2033,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message)
 
     def _node_input(self) -> str:
-        if not self._node_text:
+        if self._node_text:
+            text = self._node_text.get("1.0", "end").strip()
+            if text:
+                return text
+        item = self._selected_subscription_item()
+        if not item:
             return ""
-        return self._node_text.get("1.0", "end").strip()
+        try:
+            return remote_proxy.format_proxy_node(item.node)
+        except Exception:
+            return ""
 
     def _load_node_file(self):
         path = filedialog.askopenfilename(

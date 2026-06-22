@@ -36,6 +36,10 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     SERVER_RENDER_BATCH_SIZE = 1
     SERVER_RENDER_BATCH_DELAY_MS = 280
+    INITIAL_REFRESH_DELAY_MS = 1150
+    PROXY_PICKER_BUILD_DELAY_MS = 900
+    PROXY_SAVED_SUBSCRIPTION_DELAY_MS = 1450
+    REMOTE_AUTO_SECTION_DELAY_MS = 1850
     PROXY_STARTUP_REFRESH_DELAY_MS = 2500
     SCROLL_IDLE_BUILD_MS = 850
     SCROLL_RETRY_BUILD_MS = 260
@@ -529,7 +533,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         self._install_deployment_sections_placeholder()
-        self._initial_refresh_after_id = self.after(360, self.refresh)
+        self._initial_refresh_after_id = self.after(self.INITIAL_REFRESH_DELAY_MS, self.refresh)
 
     def _install_deployment_sections_placeholder(self):
         self._deployment_sections_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -739,7 +743,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
             anchor="w",
         ).pack(fill="x", padx=10, pady=12)
-        self._proxy_subscription_picker_after_id = self.after(520, self._build_proxy_subscription_picker)
+        self._proxy_subscription_picker_after_id = self.after(
+            self.PROXY_PICKER_BUILD_DELAY_MS,
+            self._build_proxy_subscription_picker,
+        )
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_node_actions.grid(row=5, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
@@ -921,8 +928,14 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._install_remote_auto_section_placeholder(deployment_parent)
         self._update_proxy_target_label()
-        self._proxy_saved_subscription_after_id = self.after(780, self._load_saved_proxy_subscription_ui)
-        self._remote_auto_section_after_id = self.after(1100, self._build_remote_auto_section)
+        self._proxy_saved_subscription_after_id = self.after(
+            self.PROXY_SAVED_SUBSCRIPTION_DELAY_MS,
+            self._load_saved_proxy_subscription_ui,
+        )
+        self._remote_auto_section_after_id = self.after(
+            self.REMOTE_AUTO_SECTION_DELAY_MS,
+            self._build_remote_auto_section,
+        )
 
     def _build_proxy_subscription_picker(self):
         self._proxy_subscription_picker_after_id = None

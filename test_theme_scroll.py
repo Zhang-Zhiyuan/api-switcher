@@ -31,6 +31,35 @@ class _Scrollable:
         return self._x
 
 
+class _WrapContainer:
+    def __init__(self, width=640):
+        self.width = width
+        self.bindings = {}
+        self.idle_callbacks = []
+
+    def bind(self, event_name, callback, add=None):
+        self.bindings[event_name] = callback
+
+    def after_idle(self, callback):
+        self.idle_callbacks.append(callback)
+        return f"idle-{len(self.idle_callbacks)}"
+
+    def winfo_width(self):
+        return self.width
+
+
+class _WrapLabel:
+    def __init__(self):
+        self.exists = True
+        self.configures = []
+
+    def winfo_exists(self):
+        return self.exists
+
+    def configure(self, **kwargs):
+        self.configures.append(kwargs)
+
+
 def test_event_scroll_chain_collects_nested_scroll_canvases_once():
     outer_canvas = object()
     inner_canvas = object()
@@ -45,6 +74,28 @@ def test_event_scroll_chain_collects_nested_scroll_canvases_once():
 
     leaf.master = None
     assert theme._event_scroll_chain(event) is chain
+
+
+def test_bind_wraplength_coalesces_configure_updates_until_idle():
+    container = _WrapContainer(width=700)
+    label = _WrapLabel()
+
+    theme.bind_wraplength(container, label, padding=40, min_width=220, max_width=900)
+
+    assert len(container.idle_callbacks) == 1
+    assert label.configures == []
+
+    container.bindings["<Configure>"]()
+    container.bindings["<Configure>"]()
+    assert len(container.idle_callbacks) == 1
+
+    container.idle_callbacks.pop(0)()
+    assert label.configures == [{"wraplength": 660}]
+
+    container.width = 710
+    container.bindings["<Configure>"]()
+    container.idle_callbacks.pop(0)()
+    assert label.configures[-1] == {"wraplength": 670}
 
 
 def test_wheel_delta_handles_touchpad_and_malformed_events():
