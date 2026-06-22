@@ -969,18 +969,24 @@ def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
     first_output = json.loads(first.stdout)
     assert first_output["recover"] is True
     assert first_output["wait"] == 4
-    assert first_output["commands"][0] == "/compress"
+    assert first_output["commands"][0]["type"] == "slash_command"
+    assert first_output["commands"][0]["command"] == "compact"
 
     second = run_hook()
     assert second.returncode == 0, second.stderr
     second_output = json.loads(second.stdout)
     assert second_output["wait"] == 6
+    assert second_output["commands"][0]["command"] == "compact"
 
     third = run_hook()
     assert third.returncode == 0, third.stderr
-    assert third.stdout.strip() == ""
+    third_output = json.loads(third.stdout)
+    assert third_output["recover"] is True
+    assert third_output["wait"] == 6
+    assert third_output["commands"][0]["command"] == "compact"
     log_text = (state_dir / "error_recovery_log.jsonl").read_text(encoding="utf-8")
-    assert "max_recoveries_reached" in log_text
+    assert "max_recoveries_reached" not in log_text
+    assert "attempting_recovery" in log_text
 
 
 def test_remote_error_hook_retries_official_responses_disconnect_without_compress(tmp_path):
@@ -1827,7 +1833,9 @@ def test_local_codex_error_hook_outputs_clean_json_with_git_snapshot(tmp_path):
     )
 
     assert second.returncode == 0, second.stderr
-    assert second.stdout.strip() == ""
+    second_output = json.loads(second.stdout)
+    assert second_output["recover"] is True
+    assert second_output["commands"][0]["command"] == "compact"
     assert "AsHashtable" not in second.stderr
 
 
@@ -1903,10 +1911,15 @@ def test_local_codex_error_hook_uses_configured_backoff_for_disconnects(tmp_path
 
     third = run_hook()
     assert third.returncode == 0, third.stderr
-    assert third.stdout.strip() == ""
+    third_output = json.loads(third.stdout)
+    assert third_output["recover"] is True
+    assert third_output["wait"] == 10
+    assert third_output["commands"][0]["type"] == "slash_command"
+    assert third_output["commands"][0]["command"] == "compact"
 
     log_text = (tmp_path / "tmp" / "error_recovery_log.jsonl").read_text(encoding="utf-8")
-    assert "max_recoveries_reached" in log_text
+    assert "max_recoveries_reached" not in log_text
+    assert "attempting_recovery" in log_text
 
 
 def test_local_claude_error_hook_uses_configured_backoff_for_disconnects(tmp_path):

@@ -1028,7 +1028,16 @@ def error_recovery_output(is_claude, error_type, wait_seconds, compact_transport
                 "suppressOutput": True,
                 "userMessage": "对话内容过长，正在自动压缩并继续...",
             }
-        return {"recover": True, "commands": ["/compress", "继续"], "userMessage": "对话内容过长，正在自动压缩并继续..."}
+        return {
+            "decision": "recover",
+            "recover": True,
+            "commands": [
+                {"type": "slash_command", "command": "compact"},
+                {"type": "user_message", "message": "继续"},
+            ],
+            "suppressOutput": True,
+            "userMessage": "对话内容过长，正在自动压缩并继续；如果压缩失败会自动重试直到成功...",
+        }
 
     if error_type == "rate_limit":
         if is_claude:
@@ -1055,8 +1064,23 @@ def error_recovery_output(is_claude, error_type, wait_seconds, compact_transport
                 "suppressOutput": True,
                 "userMessage": f"服务暂时不可用，等待 {wait_seconds} 秒后重试...",
             }
-        commands = ["/compress", "继续"] if compact_transport else ["继续"]
-        return {"recover": True, "wait": wait_seconds, "commands": commands, "userMessage": f"服务暂时不可用，等待 {wait_seconds} 秒后重试..."}
+        if compact_transport:
+            commands = [
+                {"type": "slash_command", "command": "compact"},
+                {"type": "user_message", "message": "继续"},
+            ]
+            user_message = f"压缩任务连接中断，等待 {wait_seconds} 秒后重新压缩并继续；会自动重试直到成功..."
+        else:
+            commands = ["继续"]
+            user_message = f"服务暂时不可用，等待 {wait_seconds} 秒后重试..."
+        return {
+            "decision": "recover",
+            "recover": True,
+            "wait": wait_seconds,
+            "commands": commands,
+            "suppressOutput": True,
+            "userMessage": user_message,
+        }
 
     if error_type in {"auth", "permission", "quota"}:
         message = {
@@ -1082,6 +1106,9 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
     error_type = classify_api_error(error_code, error_message, http_status)
     if error_type in {"invalid", "unknown"}:
         return False
+
+    compact_transport = bool(re.search(r"remote compact task|backend-api/codex/responses/compact|responses/compact", str(error_message or ""), re.IGNORECASE))
+    compact_recovery = (not is_claude) and (error_type == "content_length" or compact_transport)
 
     os.makedirs(state_dir, exist_ok=True)
     state_path = os.path.join(state_dir, "error_recovery_state.json")
@@ -1113,7 +1140,7 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
         state = load_state(state_path)
         recovery_count = as_int(state.get(state_key), 0)
 
-        if recovery_count >= max_recoveries:
+        if not compact_recovery and recovery_count >= max_recoveries:
             write_jsonl(log_path, {
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "session_id": str(session_id),
@@ -1129,6 +1156,8 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
         recovery_count += 1
         state[state_key] = recovery_count
         save_state(state_path, state)
+        if compact_recovery and recovery_count > max_recoveries:
+            log(f"Compact recovery is retry-until-success; ignoring max_error_recoveries={max_recoveries}", "INFO")
     finally:
         try:
             if lock_fd is not None:
@@ -1170,7 +1199,6 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
     elif error_type in {"timeout", "overload", "network", "server"}:
         wait_seconds = backoff_seconds(recovery_count, retry_initial, retry_max)
 
-    compact_transport = bool(re.search(r"remote compact task|backend-api/codex/responses/compact|responses/compact", str(error_message or ""), re.IGNORECASE))
     output = error_recovery_output(is_claude, error_type, wait_seconds, compact_transport, error_message)
     if output:
         print(json.dumps(output, ensure_ascii=False))

@@ -1331,6 +1331,8 @@ try {{
     # 分类错误
     $errorType = Get-ErrorType -ErrorCode $errorCode -ErrorMessage $errorMessage -HttpStatus $httpStatus
     Write-Log "Error type: $errorType" "INFO"
+    $compactTransportPattern = "remote compact task|backend-api/codex/responses/compact|responses/compact"
+    $isCompactRecovery = ($errorType -eq "content_length") -or ($errorMessage -match $compactTransportPattern)
 
     # 检查恢复次数
     $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath
@@ -1350,7 +1352,7 @@ try {{
         $recoveryCount = if ($state.ContainsKey($recoveryKey)) {{ $state[$recoveryKey] }} else {{ 0 }}
         $maxRecoveries = Get-IntSetting -Settings $settings -Name "max_error_recoveries" -Default 3 -Min 0 -Max 10
 
-        if ($recoveryCount -ge $maxRecoveries) {{
+        if ((-not $isCompactRecovery) -and $recoveryCount -ge $maxRecoveries) {{
             Write-Log "Max recoveries reached for $errorType" "WARN"
 
             # 记录日志
@@ -1374,6 +1376,9 @@ try {{
             $recoveryCount++
             $state[$recoveryKey] = $recoveryCount
             Save-RecoveryState -Path $statePath -State $state | Out-Null
+            if ($isCompactRecovery -and $recoveryCount -gt $maxRecoveries) {{
+                Write-Log "Compact recovery is retry-until-success; ignoring max_error_recoveries=$maxRecoveries" "INFO"
+            }}
         }}
     }} finally {{
         Release-StateLock -LockStream $lockStream -LockPath $lockPath
@@ -1428,7 +1433,7 @@ try {{
                 }}
             )
             suppressOutput = $true
-            userMessage = "对话内容过长，正在自动压缩并继续..."
+            userMessage = "对话内容过长，正在自动压缩并继续；如果压缩失败会自动重试直到成功..."
         }} | ConvertTo-Json -Depth 10
         Write-Log "Recovery: compact + continue" "INFO"
 
@@ -1448,7 +1453,7 @@ try {{
         $backoffSeconds = Get-BackoffSeconds -Attempt $recoveryCount -InitialDelay $retryInitialDelay -MaxDelay $retryMaxDelay
         $commands = @("继续")
         $userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
-        if ($errorMessage -match "remote compact task|backend-api/codex/responses/compact|responses/compact") {{
+        if ($errorMessage -match $compactTransportPattern) {{
             $commands = @(
                 @{{
                     type = "slash_command"
@@ -1459,7 +1464,7 @@ try {{
                     message = "继续"
                 }}
             )
-            $userMessage = "压缩任务连接中断，等待 $backoffSeconds 秒后重新压缩并继续..."
+            $userMessage = "压缩任务连接中断，等待 $backoffSeconds 秒后重新压缩并继续；会自动重试直到成功..."
         }}
         $output = @{{
             decision = "recover"
