@@ -59,13 +59,25 @@ def test_local_quality_candidates_default_to_current_scope_when_nothing_checked(
     tab = object.__new__(LocalProxyTab)
     tab._subscription_picker = _PickerStub([first, second, third])
     tab._subscription_nodes = [first, second, third]
+    tab._latency_results = {}
+
+    assert tab._subscription_batch_nodes() == [first, second, third]
+    assert tab._quality_candidate_nodes([first, second, third]) == [first, second, third]
+
+
+def test_local_quality_candidates_filter_default_scope_by_existing_connectivity():
+    first = _node(1, "first")
+    second = _node(2, "second")
+    third = _node(3, "third")
+    tab = object.__new__(LocalProxyTab)
+    tab._subscription_picker = _PickerStub([first, second, third])
+    tab._subscription_nodes = [first, second, third]
     tab._latency_results = {
         remote_proxy.proxy_node_key(first.node): _latency(first, True),
         remote_proxy.proxy_node_key(second.node): _latency(second, False),
     }
 
-    assert tab._subscription_batch_nodes() == [first, second, third]
-    assert tab._quality_candidate_nodes([first, second, third]) == [first, second, third]
+    assert tab._quality_candidate_nodes([first, second, third]) == [first]
 
 
 def test_local_quality_candidates_filter_checked_scope_by_connectivity():
@@ -89,13 +101,25 @@ def test_ssh_quality_candidates_default_to_current_scope_when_nothing_checked():
     tab = object.__new__(SSHTab)
     tab._proxy_subscription_picker = _PickerStub([first, second, third])
     tab._proxy_subscription_nodes = [first, second, third]
+    tab._proxy_latency_results = {}
+
+    assert tab._proxy_subscription_batch_nodes() == [first, second, third]
+    assert tab._proxy_quality_candidate_nodes([first, second, third]) == [first, second, third]
+
+
+def test_ssh_quality_candidates_filter_default_scope_by_existing_connectivity():
+    first = _node(1, "first")
+    second = _node(2, "second")
+    third = _node(3, "third")
+    tab = object.__new__(SSHTab)
+    tab._proxy_subscription_picker = _PickerStub([first, second, third])
+    tab._proxy_subscription_nodes = [first, second, third]
     tab._proxy_latency_results = {
         remote_proxy.proxy_node_key(first.node): _latency(first, True),
         remote_proxy.proxy_node_key(second.node): _latency(second, False),
     }
 
-    assert tab._proxy_subscription_batch_nodes() == [first, second, third]
-    assert tab._proxy_quality_candidate_nodes([first, second, third]) == [first, second, third]
+    assert tab._proxy_quality_candidate_nodes([first, second, third]) == [first]
 
 
 def test_ssh_quality_candidates_filter_checked_scope_by_connectivity():

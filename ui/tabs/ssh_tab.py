@@ -809,7 +809,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_settings_button.pack(anchor="e")
         self._proxy_subscription_action_hint_label = ctk.CTkLabel(
             proxy_node_actions,
-            text="检测范围: -\n未勾选则用当前筛选\n质量源: -",
+            text="检测范围: -\n未勾选用当前筛选\n质量只测可连节点\n质量源: -",
             text_color=COLORS["muted_soft"],
             font=font(11),
             width=120,
@@ -2359,7 +2359,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         source = remote_proxy.quality_source_label_from_settings()
         color = COLORS["warning"] if source == "未启用检测源" else COLORS["muted_soft"]
         self._proxy_subscription_action_hint_label.configure(
-            text=f"检测范围: {scope}\n未勾选则用当前筛选\n质量源: {source}",
+            text=f"检测范围: {scope}\n未勾选用当前筛选\n质量只测可连节点\n质量源: {source}",
             text_color=color,
         )
 
@@ -2624,8 +2624,6 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _proxy_quality_candidate_nodes(self, nodes=None):
         base_nodes = list(nodes if nodes is not None else self._proxy_subscription_batch_nodes())
-        if not self._proxy_subscription_batch_has_checked_nodes():
-            return base_nodes
         candidates = []
         measured_any = False
         for item in base_nodes:
