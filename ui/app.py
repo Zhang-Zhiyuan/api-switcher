@@ -22,6 +22,7 @@ TAB_WARMUP_START_MS = 2600
 TAB_WARMUP_STEP_MS = 750
 UI_CALLBACK_IDLE_POLL_MS = 16
 UI_CALLBACK_BUSY_POLL_MS = 1
+QUICK_SWITCH_INITIAL_LOAD_MS = 2200
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
@@ -299,7 +300,7 @@ class App(ctk.CTk):
 
         self.claude_switch.configure(values=["正在加载..."], state="disabled")
         self.codex_switch.configure(values=["正在加载..."], state="disabled")
-        self.after(20, lambda: self._load_quick_switch_profiles(delay_ms=0))
+        self.after(QUICK_SWITCH_INITIAL_LOAD_MS, lambda: self._load_quick_switch_profiles(delay_ms=0))
         self.after(50, self._start_tray_icon)
         if not self._start_minimized_to_tray:
             self.after(90, self._schedule_initial_tab_load)
