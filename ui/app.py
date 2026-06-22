@@ -276,8 +276,6 @@ class App(ctk.CTk):
 
         for label, _attr, _module_name, _class_name, eager in TAB_SPECS:
             self._tab_frames[label] = self._tabview.add(label)
-            if not eager:
-                self._install_tab_placeholder(label)
 
         # Status bar
         footer = ctk.CTkFrame(

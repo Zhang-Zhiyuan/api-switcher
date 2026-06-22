@@ -46,7 +46,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     RENDER_BATCH_SIZE = 4
     RENDER_BATCH_DELAY_MS = 4
-    MAX_VISIBLE_RECORDS = 10
+    MAX_VISIBLE_RECORDS = 5
     VISIBLE_RECORDS_STEP = 20
 
     FILTER_OPTIONS = {
