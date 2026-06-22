@@ -13,6 +13,7 @@ from ui.widgets.toast import show_toast
 profile_manager = LazyModule("core.profile_manager")
 ssh_manager = LazyModule("core.ssh_manager")
 
+REMOTE_ENV_INITIAL_BUILD_DELAY_MS = 1600
 REMOTE_ENV_BUILD_SCROLL_IDLE_MS = 850
 REMOTE_ENV_BUILD_RETRY_MS = 260
 
@@ -118,7 +119,7 @@ class EnvTab(ctk.CTkScrollableFrame):
             font=font(12),
             anchor="w",
         ).pack(fill="x", padx=14, pady=12)
-        self._remote_env_after_id = self.after(640, self._build_remote_env_control)
+        self._remote_env_after_id = self.after(REMOTE_ENV_INITIAL_BUILD_DELAY_MS, self._build_remote_env_control)
 
         self._initial_refresh_after_id = self.after(360, self._run_initial_refresh)
 

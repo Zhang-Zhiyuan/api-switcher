@@ -7,6 +7,7 @@ from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.profile_card import ProfileCard
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
+from ui.widgets.auto_continue_loader import preload_auto_continue_control_class, resolve_auto_continue_control_class
 from ui.theme import COLORS, bind_wraplength, button_style, font, recent_user_scroll
 
 
@@ -17,6 +18,7 @@ CodexProfile = LazyAttribute("models.profile", "CodexProfile")
 
 CARD_RENDER_BATCH_SIZE = 2
 CARD_RENDER_BATCH_DELAY_MS = 8
+AUTO_CONTINUE_INITIAL_BUILD_DELAY_MS = 1500
 DEFERRED_CONTROL_SCROLL_IDLE_MS = 850
 DEFERRED_CONTROL_RETRY_MS = 260
 
@@ -186,7 +188,8 @@ class CodexTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(fill="x", pady=(10, 12))
-        self._auto_continue_after_id = self.after(820, self._build_auto_continue_control)
+        preload_auto_continue_control_class()
+        self._auto_continue_after_id = self.after(AUTO_CONTINUE_INITIAL_BUILD_DELAY_MS, self._build_auto_continue_control)
 
         self._initial_refresh_after_id = self.after(420, self._run_initial_refresh)
 
@@ -233,7 +236,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 child.destroy()
         except Exception:
             pass
-        from ui.widgets.auto_continue_control import AutoContinueControl
+        AutoContinueControl = resolve_auto_continue_control_class()
 
         self._auto_continue_control = AutoContinueControl(self._auto_continue_host, provider="codex")
         self._auto_continue_control.pack(fill="x")
