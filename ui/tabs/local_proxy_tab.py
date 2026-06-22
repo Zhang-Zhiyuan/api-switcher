@@ -457,7 +457,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_settings_button.pack(anchor="e")
         self._subscription_action_hint_label = ctk.CTkLabel(
             node_actions,
-            text="检测范围: -\n未勾选用当前筛选\n质量只测可连节点\n质量源: -",
+            text="检测范围: -\n未勾选用当前筛选\n有测速只测可连\n质量源: -",
             text_color=COLORS["muted_soft"],
             font=font(11),
             width=126,
@@ -1539,7 +1539,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         source = remote_proxy.quality_source_label_from_settings()
         color = COLORS["warning"] if source == "未启用检测源" else COLORS["muted_soft"]
         self._subscription_action_hint_label.configure(
-            text=f"检测范围: {scope}\n未勾选用当前筛选\n质量只测可连节点\n质量源: {source}",
+            text=f"检测范围: {scope}\n未勾选用当前筛选\n有测速只测可连\n质量源: {source}",
             text_color=color,
         )
 
@@ -1709,14 +1709,6 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if self._subscription_picker:
             return self._subscription_picker.batch_scope_label()
         return f"全部 {len(self._subscription_nodes)} 个节点"
-
-    def _subscription_batch_has_checked_nodes(self) -> bool:
-        if not self._subscription_picker:
-            return False
-        try:
-            return bool(self._subscription_picker.checked_items())
-        except Exception:
-            return False
 
     def _quality_candidate_nodes(self, nodes=None):
         base_nodes = list(nodes if nodes is not None else self._subscription_batch_nodes())
