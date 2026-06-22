@@ -27,8 +27,10 @@ TAB_WARMUP_INTERACTION_IDLE_MS = 1800
 TAB_WARMUP_RETRY_MS = 320
 UI_CALLBACK_IDLE_POLL_MS = 16
 UI_CALLBACK_BUSY_POLL_MS = 1
-UI_CALLBACK_BATCH_LIMIT = 16
-UI_CALLBACK_TIME_BUDGET_MS = 18
+UI_CALLBACK_BATCH_LIMIT = 8
+UI_CALLBACK_TIME_BUDGET_MS = 8
+UI_CALLBACK_SCROLL_IDLE_MS = 240
+UI_CALLBACK_SCROLL_RETRY_MS = 16
 QUICK_SWITCH_INITIAL_LOAD_MS = 2200
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
@@ -1273,6 +1275,13 @@ class App(ctk.CTk):
             return
         if self._exit_requested:
             self._clear_ui_callback_queue()
+            return
+        try:
+            scroll_active = recent_user_scroll(self, idle_ms=UI_CALLBACK_SCROLL_IDLE_MS)
+        except Exception:
+            scroll_active = False
+        if self._ui_callback_queue_has_pending() and scroll_active:
+            self._schedule_ui_callback_pump(delay_ms=UI_CALLBACK_SCROLL_RETRY_MS)
             return
         processed = 0
         started_at = time.perf_counter()

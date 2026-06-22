@@ -271,6 +271,27 @@ def test_ui_callback_pump_uses_batch_limit_for_backlog():
     assert after_calls[0][0] == app_module.UI_CALLBACK_BUSY_POLL_MS
 
 
+def test_ui_callback_pump_defers_during_recent_scroll(monkeypatch):
+    callbacks = []
+    after_calls = []
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._ui_callback_queue = queue.Queue()
+    app._ui_callback_after_id = None
+    app.winfo_exists = lambda: True
+    app.after = lambda delay, callback: after_calls.append((delay, callback)) or "after-id"
+    app._ui_callback_queue.put(lambda: callbacks.append("ran"))
+
+    monkeypatch.setattr(app_module, "recent_user_scroll", lambda *_args, **_kwargs: True)
+
+    app_module.App._drain_ui_callback_queue(app)
+
+    assert callbacks == []
+    assert after_calls[0][0] == app_module.UI_CALLBACK_SCROLL_RETRY_MS
+    assert app._ui_callback_queue.qsize() == 1
+
+
 def test_background_work_targets_use_tab_declared_targets():
     class Target:
         def __init__(self, alive=True):

@@ -218,6 +218,12 @@ def _patch_nested_scrollable_frame_mousewheel() -> None:
         if _event_scroll_consumed(event):
             return None
 
+        try:
+            if not self._parent_canvas.winfo_ismapped():
+                return None
+        except Exception:
+            return None
+
         _mark_scroll_activity(getattr(event, "widget", None))
         chain = _event_scroll_chain(event)
         try:
