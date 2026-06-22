@@ -797,8 +797,16 @@ def lookup_netcoffee_reputation(
                 risk_payload = _payload_dict(risk_data, "data", "result")
                 if not _payload_is_error(risk_data) and not (risk_payload is not risk_data and _payload_is_error(risk_payload)):
                     risk_ip = _first_text(risk_payload, "ip", "query", "address")
-                    if not risk_ip or risk_ip == ip or _payload_cidr_contains_ip(risk_payload, ip):
+                    if not risk_ip or risk_ip == ip:
                         _apply_netcoffee_payload(info, risk_payload, prefix="Net.Coffee iprisk", supplement=True)
+                    elif _payload_cidr_contains_ip(risk_payload, ip):
+                        _apply_netcoffee_payload(
+                            info,
+                            risk_payload,
+                            prefix="Net.Coffee iprisk 同网段",
+                            supplement=True,
+                            trust_only=True,
+                        )
                     elif _valid_ip(risk_ip):
                         info.signals.append(f"Net.Coffee iprisk 返回同网段外 IP: {risk_ip}")
     elif risk_result.error:
@@ -1767,6 +1775,7 @@ def _apply_netcoffee_payload(
     *,
     prefix: str,
     supplement: bool = False,
+    trust_only: bool = False,
 ) -> None:
     if not supplement:
         info.network_type = _netcoffee_network_type(payload)
@@ -1785,10 +1794,13 @@ def _apply_netcoffee_payload(
         info.confidence_score = max(info.confidence_score or 0, trust_score)
         info.signals.append(f"{prefix} trust_score={trust_score}")
 
-    threat = _netcoffee_threat_score(payload)
-    if threat is not None:
-        info.risk_score = max(info.risk_score or 0, threat)
-        info.signals.append(f"{prefix} threat={threat}")
+    if trust_only:
+        info.signals.append(f"{prefix} 与当前 IP 不完全一致，仅合并 trust_score")
+    else:
+        threat = _netcoffee_threat_score(payload)
+        if threat is not None:
+            info.risk_score = max(info.risk_score or 0, threat)
+            info.signals.append(f"{prefix} threat={threat}")
 
     if not supplement:
         active = _active_flag_names(info.flags)
@@ -1832,7 +1844,7 @@ def _netcoffee_flags(payload: dict[str, Any]) -> dict[str, bool]:
         "proxy": _optional_boolish(payload.get("is_proxy")),
         "tor": _optional_boolish(payload.get("is_tor")),
         "scraper": _optional_boolish(payload.get("is_crawler")),
-        "abuser": _optional_boolish(payload.get("is_abuser")),
+        "abuser": _netcoffee_abuser_risk(payload) is not None,
         "mobile": _optional_boolish(payload.get("is_mobile")),
     }
     flags = {key: value for key, value in flags.items() if value is not None}
@@ -1843,20 +1855,41 @@ def _netcoffee_flags(payload: dict[str, Any]) -> dict[str, bool]:
 
 def _netcoffee_threat_score(payload: dict[str, Any]) -> Optional[int]:
     scores = [
-        _abuser_score_to_percent(_first_value(payload, "abuser_score", "risk_score", "risk")),
+        _netcoffee_abuser_risk(payload),
     ]
     intelligence = payload.get("intelligence") if isinstance(payload.get("intelligence"), dict) else {}
-    scores.append(_abuser_score_to_percent(_first_value(intelligence, "rep_threat", "abuser_score_raw")))
+    scores.append(_abuser_score_to_percent(_first_value(payload, "risk_score", "risk")))
+    scores.append(_abuser_score_to_percent(_first_value(intelligence, "rep_threat")))
     raw_scores = [score for score in scores if score is not None]
     if any(_optional_boolish(payload.get(key)) is True for key in ("is_vpn", "is_proxy", "is_tor")):
         raw_scores.append(82)
-    if _optional_boolish(payload.get("is_abuser")) is True:
-        raw_scores.append(78)
     if _optional_boolish(payload.get("is_crawler")) is True:
         raw_scores.append(70)
     if _optional_boolish(payload.get("is_datacenter")) is True:
         raw_scores.append(55)
     return max(raw_scores) if raw_scores else None
+
+
+def _netcoffee_abuser_risk(payload: dict[str, Any]) -> Optional[int]:
+    intelligence = payload.get("intelligence") if isinstance(payload.get("intelligence"), dict) else {}
+    abuser_score = _first_value(payload, "abuser_score") or _first_value(intelligence, "abuser_score_raw")
+    score = _abuser_score_to_percent(abuser_score)
+    rep_threat = _abuser_score_to_percent(_first_value(payload, "rep_threat") or _first_value(intelligence, "rep_threat"))
+    level_text = " ".join(
+        str(value or "").lower()
+        for value in (
+            abuser_score,
+            _first_value(payload, "abuser_level"),
+            _first_value(intelligence, "abuser_level"),
+        )
+    )
+    if any(marker in level_text for marker in ("critical", "severe", "very high", "high")):
+        return max(88, score or 0, rep_threat or 0)
+    if "elevated" in level_text or (score is not None and score >= 20) or (rep_threat is not None and rep_threat >= 20):
+        return max(78, score or 0, rep_threat or 0)
+    if _optional_boolish(payload.get("is_abuser")) is True and score is None and rep_threat is None:
+        return 78
+    return None
 
 
 def _payload_cidr_contains_ip(payload: dict[str, Any], ip: str) -> bool:

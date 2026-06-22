@@ -1160,6 +1160,8 @@ def assess_proxy_node_quality(
         if use_cache:
             cached = _cached_proxy_node_quality_result(
                 node_key,
+                host,
+                region,
                 ip,
                 quality_signature,
                 cached_quality_results,
@@ -2678,39 +2680,71 @@ def proxy_quality_settings_signature(settings=None, enabled_services=None) -> st
 
 def _cached_proxy_node_quality_result(
     node_key: str,
+    host: str,
+    region: str,
     ip: str,
     quality_signature: str,
     cached_quality_results: dict[str, ProxyNodeQualityResult | dict] | None,
     cache_ttl_seconds: int,
 ) -> ProxyNodeQualityResult | None:
     cache = cached_quality_results if isinstance(cached_quality_results, dict) else load_proxy_subscription_qualities()
-    result = cache.get(node_key) if isinstance(cache, dict) else None
-    if not proxy_node_quality_measured(result):
-        return None
-    if not ip or proxy_node_quality_ip(result) != ip:
-        return None
-    if not quality_signature or proxy_node_quality_signature(result) != quality_signature:
-        return None
-    checked_at = proxy_node_quality_checked_at(result)
-    if not _quality_checked_at_fresh(checked_at, cache_ttl_seconds):
+    result = _find_cached_proxy_node_quality_result(cache, node_key, ip, quality_signature, cache_ttl_seconds)
+    if result is None:
         return None
     return ProxyNodeQualityResult(
         node_key=node_key,
         ok=True,
-        host=proxy_node_quality_host(result),
+        host=str(host or proxy_node_quality_host(result)),
         ip=ip,
-        region=proxy_node_quality_region(result),
+        region=str(region or proxy_node_quality_region(result)),
         ip_type=proxy_node_quality_ip_type(result),
         risk_score=proxy_node_quality_risk_score(result),
         risk_label=proxy_node_quality_risk_label(result),
         quality_score=proxy_node_quality_score(result),
         quality_label=proxy_node_quality_label(result),
         detail=_cache_hit_detail(proxy_node_quality_detail(result)),
-        checked_at=checked_at,
+        checked_at=proxy_node_quality_checked_at(result),
         sources=proxy_node_quality_sources(result),
         quality_signature=quality_signature,
         cached=True,
     )
+
+
+def _find_cached_proxy_node_quality_result(
+    cache: dict[str, ProxyNodeQualityResult | dict] | None,
+    node_key: str,
+    ip: str,
+    quality_signature: str,
+    cache_ttl_seconds: int,
+) -> ProxyNodeQualityResult | dict | None:
+    if not isinstance(cache, dict) or not ip or not quality_signature:
+        return None
+    direct = cache.get(node_key)
+    if _cached_quality_matches(direct, ip, quality_signature, cache_ttl_seconds):
+        return direct
+    candidates = [
+        result
+        for key, result in cache.items()
+        if key != node_key and _cached_quality_matches(result, ip, quality_signature, cache_ttl_seconds)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: proxy_node_quality_checked_at(item))
+
+
+def _cached_quality_matches(
+    result: ProxyNodeQualityResult | dict | None,
+    ip: str,
+    quality_signature: str,
+    cache_ttl_seconds: int,
+) -> bool:
+    if not proxy_node_quality_measured(result):
+        return False
+    if proxy_node_quality_ip(result) != ip:
+        return False
+    if proxy_node_quality_signature(result) != quality_signature:
+        return False
+    return _quality_checked_at_fresh(proxy_node_quality_checked_at(result), cache_ttl_seconds)
 
 
 def _quality_checked_at_fresh(checked_at: str, cache_ttl_seconds: int) -> bool:

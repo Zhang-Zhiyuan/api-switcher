@@ -524,6 +524,88 @@ def test_netcoffee_trust_score_classifies_ai_residential_quality():
     assert any("trust_score=100" in signal for signal in classification.signals)
 
 
+def test_netcoffee_same_cidr_iprisk_does_not_apply_sibling_abuse_flags():
+    ip = "1.1.1.1"
+    mapping = {
+        f"https://ip.net.coffee/api/ip/lookup/{ip}": {
+            "ip": ip,
+            "is_datacenter": True,
+            "isResidential": False,
+            "is_vpn": False,
+            "is_proxy": False,
+            "is_tor": False,
+            "is_abuser": False,
+            "company_type": "hosting",
+            "company_name": "Cloudflare, Inc.",
+            "asn": 13335,
+            "trust_score": 41,
+            "ai_verdict": {"label": "公共 DNS 任播", "confidence": 100},
+        },
+        f"https://ip.net.coffee/api/iprisk/{ip}": {
+            "ip": "1.1.1.2",
+            "cidr": "1.1.1.0/24",
+            "is_datacenter": True,
+            "is_abuser": True,
+            "abuser_score": "0.0234 (Elevated)",
+            "company_type": "hosting",
+            "trust_score": 41,
+        },
+    }
+
+    info = network_diagnostics.lookup_netcoffee_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.risk_score == 59
+    assert classification.ip_type == "IDC/云机房"
+    assert classification.risk_score == 59
+    assert not any("threat=78" in signal for signal in classification.signals)
+    assert any("仅合并 trust_score" in signal for signal in classification.signals)
+
+
+def test_netcoffee_low_abuser_score_does_not_force_high_risk():
+    ip = "8.8.8.8"
+    mapping = {
+        f"https://ip.net.coffee/api/ip/lookup/{ip}": {
+            "ip": ip,
+            "is_datacenter": True,
+            "isResidential": False,
+            "is_vpn": False,
+            "is_proxy": False,
+            "is_tor": False,
+            "is_abuser": False,
+            "company_type": "hosting",
+            "company_name": "Google LLC",
+            "asn": 15169,
+            "trust_score": 63,
+            "ai_verdict": {"label": "公共 DNS 任播", "confidence": 100},
+        },
+        f"https://ip.net.coffee/api/iprisk/{ip}": {
+            "ip": ip,
+            "is_datacenter": True,
+            "is_abuser": True,
+            "abuser_score": "0.0039 (Low)",
+            "company_type": "hosting",
+            "trust_score": 63,
+        },
+    }
+
+    info = network_diagnostics.lookup_netcoffee_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.flags["abuser"] is False
+    assert info.risk_score == 55
+    assert classification.ip_type == "IDC/云机房"
+    assert classification.risk_score == 55
+
+
 def test_detect_network_defaults_to_netcoffee_only():
     ip = "198.51.100.52"
     mapping = {

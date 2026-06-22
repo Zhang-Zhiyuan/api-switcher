@@ -491,6 +491,61 @@ def test_assess_proxy_node_quality_reuses_fresh_matching_cache(monkeypatch, tmp_
     assert "缓存命中" in result.detail
 
 
+def test_assess_proxy_node_quality_reuses_cache_by_same_ip_when_node_key_changes(monkeypatch, tmp_path):
+    old_node = remote_proxy.parse_proxy_node(
+        "{ name: AI代理缓存旧名, type: vless, server: old.example.com, port: 443 }"
+    )
+    new_node = remote_proxy.parse_proxy_node(
+        "{ name: AI代理缓存新名, type: vless, server: new.example.com, port: 443 }"
+    )
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_NETCOFFEE},
+        {},
+    )
+    signature = remote_proxy.proxy_quality_settings_signature(
+        settings,
+        [network_diagnostic_settings.SERVICE_NETCOFFEE],
+    )
+    old_key = remote_proxy.proxy_node_key(old_node)
+    new_key = remote_proxy.proxy_node_key(new_node)
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    remote_proxy.save_proxy_subscription_qualities({
+        old_key: remote_proxy.ProxyNodeQualityResult(
+            node_key=old_key,
+            ok=True,
+            host="old.example.com",
+            ip="198.51.100.83",
+            region="其他",
+            ip_type="家庭宽带/住宅 IP",
+            risk_score=5,
+            risk_label="极低",
+            quality_score=100,
+            quality_label="家宽高质",
+            detail="Net.Coffee trust_score=95",
+            checked_at=remote_proxy._now_iso(),
+            sources=(network_diagnostic_settings.SERVICE_NETCOFFEE,),
+            quality_signature=signature,
+        )
+    })
+
+    result = remote_proxy.assess_proxy_node_quality(
+        new_node,
+        http_get=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network should be skipped")),
+        resolver=lambda *_args, **_kwargs: [(None, None, None, "", ("198.51.100.83", 0))],
+        settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_NETCOFFEE],
+    )
+
+    assert result.ok is True
+    assert result.cached is True
+    assert result.node_key == new_key
+    assert result.host == "new.example.com"
+    assert result.ip == "198.51.100.83"
+    assert result.quality_score == 100
+
+
 def test_assess_proxy_node_quality_bypasses_cache_when_ip_changes(monkeypatch, tmp_path):
     node = remote_proxy.parse_proxy_node(
         "{ name: AI代理缓存IP变更, type: vless, server: changed.example.com, port: 443 }"
