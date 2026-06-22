@@ -37,6 +37,8 @@ class SSHTab(ctk.CTkScrollableFrame):
     SERVER_RENDER_BATCH_SIZE = 1
     SERVER_RENDER_BATCH_DELAY_MS = 280
     PROXY_STARTUP_REFRESH_DELAY_MS = 2500
+    SCROLL_IDLE_BUILD_MS = 850
+    SCROLL_RETRY_BUILD_MS = 260
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -556,8 +558,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_deployment_sections_pending = True
             return
-        if recent_user_scroll(self):
-            self._schedule_after_once("_deployment_sections_after_id", 180, self._build_deployment_sections)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._schedule_after_once("_deployment_sections_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_deployment_sections)
             return
         self._deferred_deployment_sections_pending = False
         deployment_parent = self._deployment_sections_frame or self
@@ -931,8 +933,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_proxy_subscription_picker_pending = True
             return
-        if recent_user_scroll(self):
-            self._schedule_after_once("_proxy_subscription_picker_after_id", 180, self._build_proxy_subscription_picker)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._schedule_after_once("_proxy_subscription_picker_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_proxy_subscription_picker)
             return
         self._deferred_proxy_subscription_picker_pending = False
         try:
@@ -972,8 +974,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_remote_auto_section_pending = True
             return
-        if recent_user_scroll(self):
-            self._schedule_after_once("_remote_auto_section_after_id", 180, self._build_remote_auto_section)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._schedule_after_once("_remote_auto_section_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_remote_auto_section)
             return
         self._deferred_remote_auto_section_pending = False
         parent = self._remote_auto_section_host or self._deployment_sections_frame
@@ -1272,19 +1274,19 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         if self._deferred_initial_refresh_pending:
             self._deferred_initial_refresh_pending = False
-            self._schedule_after_once("_initial_refresh_after_id", 20, self.refresh)
+            self._schedule_after_once("_initial_refresh_after_id", self.SCROLL_RETRY_BUILD_MS, self.refresh)
         if self._deferred_deployment_sections_pending and not self._deployment_sections_built:
             self._deferred_deployment_sections_pending = False
-            self._schedule_after_once("_deployment_sections_after_id", 80, self._build_deployment_sections)
+            self._schedule_after_once("_deployment_sections_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_deployment_sections)
         if self._deferred_proxy_subscription_picker_pending and not self._proxy_subscription_picker:
             self._deferred_proxy_subscription_picker_pending = False
-            self._schedule_after_once("_proxy_subscription_picker_after_id", 80, self._build_proxy_subscription_picker)
+            self._schedule_after_once("_proxy_subscription_picker_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_proxy_subscription_picker)
         if self._deferred_proxy_saved_subscription_pending and not self._proxy_saved_subscription_loaded:
             self._deferred_proxy_saved_subscription_pending = False
-            self._schedule_after_once("_proxy_saved_subscription_after_id", 120, self._load_saved_proxy_subscription_ui)
+            self._schedule_after_once("_proxy_saved_subscription_after_id", self.SCROLL_RETRY_BUILD_MS, self._load_saved_proxy_subscription_ui)
         if self._deferred_remote_auto_section_pending and not self._remote_auto_section_built:
             self._deferred_remote_auto_section_pending = False
-            self._schedule_after_once("_remote_auto_section_after_id", 180, self._build_remote_auto_section)
+            self._schedule_after_once("_remote_auto_section_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_remote_auto_section)
         if self._deferred_server_render_pending:
             self._schedule_server_resume_render()
 
@@ -1342,8 +1344,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._initial_refresh_after_id = None
         if not self._cards_frame:
             return
-        if recent_user_scroll(self):
-            self._schedule_after_once("_initial_refresh_after_id", 180, self.refresh)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._schedule_after_once("_initial_refresh_after_id", self.SCROLL_RETRY_BUILD_MS, self.refresh)
             return
         self._server_refresh_generation += 1
         generation = self._server_refresh_generation
@@ -1461,7 +1463,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._deferred_server_cards = (profile_items, generation, start)
             self._server_render_after_id = None
             return
-        if recent_user_scroll(self):
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
             try:
                 self._server_render_after_id = self.after(
                     self.SERVER_RENDER_BATCH_DELAY_MS,
@@ -2116,8 +2118,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._proxy_latency_server_count = 0
                     self._proxy_quality_results = payload["qualities"]
                     self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
-                    self._set_proxy_subscription_nodes(cached_result.nodes)
-                    self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or ""))
+                    selected_key = str(state.get("selected_node_key") or "")
+                    self._set_proxy_subscription_nodes(cached_result.nodes, preserve_key=selected_key)
+                    self._select_proxy_subscription_node_by_key(selected_key)
                     self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
                     self._set_proxy_cache_status(
                         f"本机缓存: {len(cached_result.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}",
@@ -2416,8 +2419,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._proxy_latency_server_count = 0
                 self._proxy_quality_results = remote_proxy.load_proxy_subscription_qualities()
                 self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
-                self._set_proxy_subscription_nodes(result.nodes)
-                if not self._select_proxy_subscription_node_by_key(str(state.get("selected_node_key") or "")):
+                selected_key = str(state.get("selected_node_key") or "")
+                self._set_proxy_subscription_nodes(result.nodes, preserve_key=selected_key)
+                if not self._select_proxy_subscription_node_by_key(selected_key):
                     self._use_selected_proxy_subscription_node(show_message=False)
                 else:
                     self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)

@@ -23,8 +23,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     """Tab for managing the Windows local AI proxy."""
 
     STARTUP_REFRESH_DELAY_MS = 2500
-    SCROLL_IDLE_BUILD_MS = 520
-    SCROLL_RETRY_BUILD_MS = 220
+    SCROLL_IDLE_BUILD_MS = 850
+    SCROLL_RETRY_BUILD_MS = 260
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -1321,8 +1321,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._latency_results = payload["latencies"]
                     self._quality_results = payload["qualities"]
                     self._prefer_quality_sort = bool(self._quality_results)
-                    self._set_subscription_nodes(cached_result.nodes)
-                    self._select_subscription_node_by_key(str(state.get("selected_node_key") or ""))
+                    selected_key = str(state.get("selected_node_key") or "")
+                    self._set_subscription_nodes(cached_result.nodes, preserve_key=selected_key)
+                    self._select_subscription_node_by_key(selected_key)
                     self._use_selected_subscription_node(show_message=False, persist_selection=False)
                     self._set_cache_status(
                         f"本机缓存: {len(cached_result.nodes)} 个节点；上次拉取 {state.get('last_fetched_at') or '-'}",
@@ -1597,8 +1598,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._latency_results = remote_proxy.load_proxy_subscription_latencies()
                 self._quality_results = remote_proxy.load_proxy_subscription_qualities()
                 self._prefer_quality_sort = bool(self._quality_results)
-                self._set_subscription_nodes(result.nodes)
-                if not self._select_subscription_node_by_key(str(state.get("selected_node_key") or "")):
+                selected_key = str(state.get("selected_node_key") or "")
+                self._set_subscription_nodes(result.nodes, preserve_key=selected_key)
+                if not self._select_subscription_node_by_key(selected_key):
                     self._use_selected_subscription_node(show_message=False)
                 else:
                     self._use_selected_subscription_node(show_message=False, persist_selection=False)
