@@ -5,7 +5,8 @@ from tkinter import filedialog
 
 from config import paths
 from core.lazy_imports import LazyModule
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
+from ui.tabs.tab_visibility import is_active_tab
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.toast import show_toast
 
@@ -19,6 +20,10 @@ providers = LazyModule("core.providers")
 startup_manager = LazyModule("core.startup_manager")
 vscode_parser = LazyModule("core.vscode_parser")
 switcher = LazyModule("core.switcher")
+
+OVERVIEW_TEXTBOX_BUILD_DELAY_MS = 900
+OVERVIEW_TEXTBOX_SCROLL_IDLE_MS = 850
+OVERVIEW_TEXTBOX_RETRY_MS = 260
 
 
 def _build_storage_info_text(info: dict) -> str:
@@ -147,6 +152,13 @@ class CommonTab(ctk.CTkScrollableFrame):
         super().__init__(master, **kwargs)
         self.configure(fg_color="transparent")
         self._refresh_generation = 0
+        self._destroyed = False
+        self._overview_text = None
+        self._overview_text_host = None
+        self._overview_placeholder_label = None
+        self._overview_text_after_id = None
+        self._overview_pending_text = ""
+        self._deferred_overview_text_pending = False
         self._build_ui()
 
     def _build_ui(self):
@@ -332,8 +344,63 @@ class CommonTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         ).pack(side="right")
 
-        self._overview_text = ctk.CTkTextbox(
+        self._overview_text_host = ctk.CTkFrame(
             overview_frame,
+            height=300,
+            fg_color=COLORS["app_bg"],
+            border_color=COLORS["border"],
+            border_width=1,
+            corner_radius=8,
+        )
+        self._overview_text_host.pack(fill="x", padx=14, pady=(0, 14))
+        self._overview_text_host.pack_propagate(False)
+        self._overview_placeholder_label = ctk.CTkLabel(
+            self._overview_text_host,
+            text="当前配置概览正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._overview_placeholder_label.pack(expand=True)
+        self._overview_text_after_id = self.after(OVERVIEW_TEXTBOX_BUILD_DELAY_MS, self._build_overview_textbox)
+
+        self.after(260, self.refresh)
+
+    def destroy(self):
+        self._destroyed = True
+        if self._overview_text_after_id:
+            try:
+                self.after_cancel(self._overview_text_after_id)
+            except Exception:
+                pass
+            self._overview_text_after_id = None
+        super().destroy()
+
+    def _schedule_overview_textbox(self, delay_ms: int = OVERVIEW_TEXTBOX_RETRY_MS):
+        if self._overview_text_after_id or self._destroyed or self._overview_text:
+            return
+        try:
+            self._overview_text_after_id = self.after(max(1, int(delay_ms)), self._build_overview_textbox)
+        except Exception:
+            self._overview_text_after_id = None
+
+    def _build_overview_textbox(self):
+        self._overview_text_after_id = None
+        if self._destroyed or self._overview_text or not self._overview_text_host:
+            return
+        if not is_active_tab(self):
+            self._deferred_overview_text_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=OVERVIEW_TEXTBOX_SCROLL_IDLE_MS):
+            self._schedule_overview_textbox()
+            return
+        self._deferred_overview_text_pending = False
+        try:
+            for child in self._overview_text_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._overview_text = ctk.CTkTextbox(
+            self._overview_text_host,
             height=300,
             fg_color=COLORS["app_bg"],
             border_color=COLORS["border"],
@@ -344,9 +411,22 @@ class CommonTab(ctk.CTkScrollableFrame):
             font=font(12, family="Consolas"),
             corner_radius=8,
         )
-        self._overview_text.pack(fill="x", padx=14, pady=(0, 14))
+        self._overview_text.pack(fill="both", expand=True)
+        self._set_overview_text(self._overview_pending_text or "正在读取当前配置...")
 
-        self.after(20, self.refresh)
+    def _suspend_background_work(self):
+        if self._overview_text_after_id:
+            self._deferred_overview_text_pending = True
+            try:
+                self.after_cancel(self._overview_text_after_id)
+            except Exception:
+                pass
+            self._overview_text_after_id = None
+
+    def _resume_background_work(self):
+        if self._deferred_overview_text_pending and not self._overview_text:
+            self._deferred_overview_text_pending = False
+            self._schedule_overview_textbox()
 
     def refresh(self):
         """Refresh current permission state and overview text."""
@@ -572,6 +652,20 @@ class CommonTab(ctk.CTkScrollableFrame):
         )
 
     def _set_overview_text(self, text: str):
+        self._overview_pending_text = text
+        if not self._overview_text:
+            if self._overview_placeholder_label:
+                try:
+                    if not text:
+                        placeholder = "当前配置概览正在准备..."
+                    elif text.startswith("正在") or text.startswith("刷新失败"):
+                        placeholder = text
+                    else:
+                        placeholder = "当前配置已读取，概览区域正在准备..."
+                    self._overview_placeholder_label.configure(text=placeholder)
+                except Exception:
+                    pass
+            return
         self._overview_text.configure(state="normal")
         self._overview_text.delete("1.0", "end")
         self._overview_text.insert("1.0", text)

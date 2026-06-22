@@ -13,7 +13,6 @@ from ui.widgets.toast import show_toast
 profile_manager = LazyModule("core.profile_manager")
 ssh_manager = LazyModule("core.ssh_manager")
 
-REMOTE_ENV_INITIAL_BUILD_DELAY_MS = 1600
 REMOTE_ENV_BUILD_SCROLL_IDLE_MS = 850
 REMOTE_ENV_BUILD_RETRY_MS = 260
 
@@ -28,6 +27,9 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._server_combo = None
         self._server_status_label = None
         self._local_env_control = None
+        self._local_env_host = None
+        self._local_env_after_id = None
+        self._deferred_local_env_pending = False
         self._remote_env_control = None
         self._remote_env_host = None
         self._remote_env_after_id = None
@@ -61,18 +63,14 @@ class EnvTab(ctk.CTkScrollableFrame):
         subtitle.pack(anchor="w", fill="x", pady=(2, 0))
         bind_wraplength(header, subtitle, padding=24, min_width=260, max_width=760)
 
-        self._local_env_control = PersistentEnvControl(
-            self,
-            title="本机 Windows 用户（默认 HF_TOKEN）",
-            status_text="变量名默认 HF_TOKEN，也可下拉选择 OpenAI、Google Drive、代理等变量；新打开的 PowerShell/CMD/终端会自动读取。",
-            write_label="写入本机用户",
-            delete_label="删除本机变量",
-            on_write=self._write_local_env,
-            on_delete=self._delete_local_env,
-            on_refresh_sources=lambda _control: self._refresh_import_sources(),
-            auto_refresh_sources=False,
+        self._local_env_host = ctk.CTkFrame(self, fg_color="transparent")
+        self._local_env_host.pack(fill="x", padx=14, pady=(0, 12))
+        self._install_env_placeholder(
+            self._local_env_host,
+            "本机环境变量区域按需加载",
+            "加载本机环境变量",
+            self._build_local_env_control,
         )
-        self._local_env_control.pack(fill="x", padx=14, pady=(0, 12))
 
         target_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         target_frame.pack(fill="x", padx=14, pady=(0, 10))
@@ -110,18 +108,34 @@ class EnvTab(ctk.CTkScrollableFrame):
 
         self._remote_env_host = ctk.CTkFrame(self, fg_color="transparent")
         self._remote_env_host.pack(fill="x", padx=14, pady=(0, 12))
-        remote_placeholder = ctk.CTkFrame(self._remote_env_host, **card_frame_kwargs())
-        remote_placeholder.pack(fill="x")
+        self._install_env_placeholder(
+            self._remote_env_host,
+            "SSH 环境变量区域按需加载",
+            "加载 SSH 环境变量",
+            self._build_remote_env_control,
+        )
+
+        self._initial_refresh_after_id = self.after(360, self._run_initial_refresh)
+
+    def _install_env_placeholder(self, host, text: str, button_text: str, command):
+        placeholder = ctk.CTkFrame(host, **card_frame_kwargs())
+        placeholder.pack(fill="x")
+        row = ctk.CTkFrame(placeholder, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=12)
         ctk.CTkLabel(
-            remote_placeholder,
-            text="SSH 环境变量区域正在准备...",
+            row,
+            text=text,
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
-        ).pack(fill="x", padx=14, pady=12)
-        self._remote_env_after_id = self.after(REMOTE_ENV_INITIAL_BUILD_DELAY_MS, self._build_remote_env_control)
-
-        self._initial_refresh_after_id = self.after(360, self._run_initial_refresh)
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            row,
+            text=button_text,
+            width=132,
+            command=command,
+            **button_style("secondary", compact=True),
+        ).pack(side="right", padx=(12, 0))
 
     def _env_controls(self):
         return tuple(control for control in (self._local_env_control, self._remote_env_control) if control)
@@ -133,6 +147,47 @@ class EnvTab(ctk.CTkScrollableFrame):
             self._remote_env_after_id = self.after(max(1, int(delay_ms)), self._build_remote_env_control)
         except Exception:
             self._remote_env_after_id = None
+
+    def _schedule_local_env_control(self, delay_ms: int = REMOTE_ENV_BUILD_RETRY_MS):
+        if self._local_env_after_id or self._destroyed or self._local_env_control:
+            return
+        try:
+            self._local_env_after_id = self.after(max(1, int(delay_ms)), self._build_local_env_control)
+        except Exception:
+            self._local_env_after_id = None
+
+    def _build_local_env_control(self):
+        self._local_env_after_id = None
+        if self._destroyed or self._local_env_control or not self._local_env_host:
+            return
+        if not is_active_tab(self):
+            self._deferred_local_env_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=REMOTE_ENV_BUILD_SCROLL_IDLE_MS):
+            self._schedule_local_env_control()
+            return
+        self._deferred_local_env_pending = False
+        try:
+            for child in self._local_env_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._local_env_control = PersistentEnvControl(
+            self._local_env_host,
+            title="本机 Windows 用户（默认 HF_TOKEN）",
+            status_text="变量名默认 HF_TOKEN，也可下拉选择 OpenAI、Google Drive、代理等变量；新打开的 PowerShell/CMD/终端会自动读取。",
+            write_label="写入本机用户",
+            delete_label="删除本机变量",
+            on_write=self._write_local_env,
+            on_delete=self._delete_local_env,
+            on_refresh_sources=lambda _control: self._refresh_import_sources(),
+            auto_refresh_sources=False,
+        )
+        self._local_env_control.pack(fill="x")
+        if self._last_import_sources is not None:
+            self._local_env_control.set_sources(self._last_import_sources)
+            if self._last_import_sources_error:
+                self._local_env_control.set_status(self._last_import_sources_error, "error")
 
     def _build_remote_env_control(self):
         self._remote_env_after_id = None
@@ -175,6 +230,12 @@ class EnvTab(ctk.CTkScrollableFrame):
             except Exception:
                 pass
             self._initial_refresh_after_id = None
+        if self._local_env_after_id:
+            try:
+                self.after_cancel(self._local_env_after_id)
+            except Exception:
+                pass
+            self._local_env_after_id = None
         if self._remote_env_after_id:
             try:
                 self.after_cancel(self._remote_env_after_id)
@@ -184,17 +245,26 @@ class EnvTab(ctk.CTkScrollableFrame):
         super().destroy()
 
     def _suspend_background_work(self):
-        if not self._remote_env_after_id:
-            return
-        self._deferred_remote_env_pending = True
-        try:
-            self.after_cancel(self._remote_env_after_id)
-        except Exception:
-            pass
-        self._remote_env_after_id = None
+        if self._local_env_after_id:
+            self._deferred_local_env_pending = True
+            try:
+                self.after_cancel(self._local_env_after_id)
+            except Exception:
+                pass
+            self._local_env_after_id = None
+        if self._remote_env_after_id:
+            self._deferred_remote_env_pending = True
+            try:
+                self.after_cancel(self._remote_env_after_id)
+            except Exception:
+                pass
+            self._remote_env_after_id = None
 
     def _resume_background_work(self):
-        if self._deferred_remote_env_pending and not self._remote_env_control:
+        if getattr(self, "_deferred_local_env_pending", False) and not getattr(self, "_local_env_control", None):
+            self._deferred_local_env_pending = False
+            self._schedule_local_env_control()
+        if getattr(self, "_deferred_remote_env_pending", False) and not getattr(self, "_remote_env_control", None):
             self._deferred_remote_env_pending = False
             self._schedule_remote_env_control()
 

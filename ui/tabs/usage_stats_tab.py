@@ -6,13 +6,17 @@ from typing import Optional
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, button_style, combo_style, font
+from ui.theme import COLORS, button_style, combo_style, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.toast import show_toast
 
 logger = logging.getLogger(__name__)
 usage_stats = LazyAttribute("core.usage_stats", "usage_stats")
 format_token_count = LazyAttribute("core.usage_stats", "format_token_count")
+
+DASHBOARD_SECTIONS_BUILD_DELAY_MS = 700
+DASHBOARD_SECTIONS_SCROLL_IDLE_MS = 850
+DASHBOARD_SECTIONS_RETRY_MS = 260
 
 
 def _summary_int(summary: dict, key: str) -> int:
@@ -42,8 +46,15 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self._current_dashboard_payload = None
         self._dashboard_render_generation = 0
         self._dashboard_render_after_ids = set()
+        self._dashboard_sections_after_id = None
+        self._dashboard_sections_pending = False
+        self._dashboard_sections_built = False
+        self._dashboard_sections_host = None
+        self.top_profiles_frame = None
+        self.recent_profiles_frame = None
+        self.trend_frame = None
         self._build_ui()
-        self.after(20, self.refresh)
+        self.after(320, self.refresh)
 
         # Auto-refresh every 30 seconds
         self._schedule_auto_refresh()
@@ -76,6 +87,9 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self._auto_refresh_after_id = None
 
     def _resume_background_work(self):
+        if self._dashboard_sections_pending and not self._dashboard_sections_built:
+            self._dashboard_sections_pending = False
+            self._schedule_dashboard_sections()
         if not self._deferred_dashboard:
             return
         profile_type, dashboard = self._deferred_dashboard
@@ -83,11 +97,24 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self._apply_dashboard(profile_type, dashboard)
 
     def _suspend_background_work(self):
+        if self._dashboard_sections_after_id:
+            self._dashboard_sections_pending = True
+            try:
+                self.after_cancel(self._dashboard_sections_after_id)
+            except Exception:
+                pass
+            self._dashboard_sections_after_id = None
         if self._dashboard_render_after_ids and self._current_dashboard_payload is not None:
             self._deferred_dashboard = self._current_dashboard_payload
         self._cancel_dashboard_render()
 
     def destroy(self):
+        if self._dashboard_sections_after_id:
+            try:
+                self.after_cancel(self._dashboard_sections_after_id)
+            except Exception:
+                pass
+            self._dashboard_sections_after_id = None
         self._cancel_auto_refresh()
         self._cancel_dashboard_render()
         super().destroy()
@@ -196,9 +223,50 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             summary_frame.grid_columnconfigure(i, weight=1)
             self.summary_cards[key] = card
 
+        self._dashboard_sections_host = ctk.CTkFrame(self, fg_color="transparent")
+        self._dashboard_sections_host.pack(fill="both", expand=True)
+        placeholder = ctk.CTkFrame(
+            self._dashboard_sections_host,
+            fg_color=COLORS["surface"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border_soft"],
+        )
+        placeholder.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(
+            placeholder,
+            text="统计明细正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        ).pack(fill="x", padx=15, pady=15)
+        self._schedule_dashboard_sections(DASHBOARD_SECTIONS_BUILD_DELAY_MS)
+
+    def _schedule_dashboard_sections(self, delay_ms: int = DASHBOARD_SECTIONS_RETRY_MS):
+        if self._dashboard_sections_after_id or self._dashboard_sections_built:
+            return
+        try:
+            self._dashboard_sections_after_id = self.after(max(1, int(delay_ms)), self._build_dashboard_sections)
+        except Exception:
+            self._dashboard_sections_after_id = None
+            self._build_dashboard_sections()
+
+    def _build_dashboard_sections(self):
+        self._dashboard_sections_after_id = None
+        if self._dashboard_sections_built or not self._dashboard_sections_host:
+            return
+        if not is_active_tab(self):
+            self._dashboard_sections_pending = True
+            return
+        if recent_user_scroll(self, idle_ms=DASHBOARD_SECTIONS_SCROLL_IDLE_MS):
+            self._schedule_dashboard_sections()
+            return
+        self._dashboard_sections_pending = False
+        for child in self._dashboard_sections_host.winfo_children():
+            child.destroy()
+
         # Top profiles section
         top_section = ctk.CTkFrame(
-            self,
+            self._dashboard_sections_host,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
@@ -218,7 +286,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         # Recent profiles section
         recent_section = ctk.CTkFrame(
-            self,
+            self._dashboard_sections_host,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
@@ -238,7 +306,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         # Daily trend section
         trend_section = ctk.CTkFrame(
-            self,
+            self._dashboard_sections_host,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
@@ -265,6 +333,9 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
 
         self.trend_frame = ctk.CTkFrame(trend_section, fg_color="transparent")
         self.trend_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        self._dashboard_sections_built = True
+        if self._current_dashboard_payload is not None:
+            self._apply_dashboard(*self._current_dashboard_payload)
 
     def _create_summary_card(self, parent, title: str, value: str):
         """Create a summary card."""
@@ -517,6 +588,10 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         )
 
         self.summary_cards["success_rate"].value_label.configure(text=_summary_success_rate_text(summary))
+
+        if not self._dashboard_sections_built:
+            self._schedule_dashboard_sections(1)
+            return
 
         self._schedule_dashboard_step(
             1,
