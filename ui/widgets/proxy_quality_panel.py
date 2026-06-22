@@ -18,9 +18,11 @@ network_diagnostics = LazyModule("core.network_diagnostics")
 
 
 KEYLESS_SERVICES = {
+    diagnostic_constants.SERVICE_NETCOFFEE,
     diagnostic_constants.SERVICE_PROXYCHECK,
     diagnostic_constants.SERVICE_IPAPI,
 }
+NO_KEY_SERVICES = {diagnostic_constants.SERVICE_NETCOFFEE}
 OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {diagnostic_constants.SERVICE_PING0}
 
 
@@ -73,7 +75,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             title_area,
-            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Ping0、ProxyCheck、ipapi.is、VPNAPI 评估 IP 质量",
+            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Net.Coffee、Ping0、ProxyCheck、ipapi.is、VPNAPI 评估 IP 质量",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -126,7 +128,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         ctk.CTkLabel(
             settings_title,
-            text="勾选检测源，按顺序轮换 Key 池",
+            text="勾选检测源；有 Key 池的源会按顺序轮换",
             text_color=COLORS["muted_soft"],
             font=font(11),
             anchor="w",
@@ -170,6 +172,11 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             button.pack(side="left", padx=(0, 6))
             self._settings_controls.append(button)
         service_rows = [
+            (
+                diagnostic_constants.SERVICE_NETCOFFEE,
+                "Net.Coffee AI",
+                "默认首选；免 Key；Trust Score、家宽/机房、VPN/Proxy/Tor、滥用信号",
+            ),
             (
                 diagnostic_constants.SERVICE_PING0,
                 "Ping0",
@@ -314,8 +321,12 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             command=lambda service=service: self._add_key_row(service, focus=True),
             **button_style("secondary", compact=True),
         )
-        add_button.grid(row=0, column=3, sticky="e")
-        self._settings_controls.append(add_button)
+        if service in NO_KEY_SERVICES:
+            add_button.configure(text="免 Key", state="disabled")
+            add_button.grid(row=0, column=3, sticky="e")
+        else:
+            add_button.grid(row=0, column=3, sticky="e")
+            self._settings_controls.append(add_button)
 
         key_frame = ctk.CTkFrame(card, fg_color="transparent")
         key_frame.pack(fill="x", padx=12, pady=(0, 10))
@@ -328,6 +339,8 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         bind_wraplength(top, desc, padding=320, min_width=180, max_width=620)
 
     def _add_key_row(self, service: str, value: str = "", focus: bool = False):
+        if service in NO_KEY_SERVICES:
+            return
         key_frame = self._service_key_frames.get(service)
         if key_frame is None:
             return
@@ -417,12 +430,14 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         settings = self._collect_detection_settings()
         if mode == "all":
             enabled = set(diagnostic_constants.VISIBLE_SERVICE_ORDER)
-        else:
+        elif mode == "keyless":
             enabled = {
-                diagnostic_constants.SERVICE_PING0,
+                diagnostic_constants.SERVICE_NETCOFFEE,
                 diagnostic_constants.SERVICE_PROXYCHECK,
                 diagnostic_constants.SERVICE_IPAPI,
             }
+        else:
+            enabled = {diagnostic_constants.SERVICE_NETCOFFEE}
             if mode == "recommended" and settings.keys_for(diagnostic_constants.SERVICE_VPNAPI):
                 enabled.add(diagnostic_constants.SERVICE_VPNAPI)
 
@@ -461,6 +476,8 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 count = len(service_settings.api_keys)
                 if not service_settings.enabled:
                     count_label.configure(text="关闭", text_color=COLORS["muted_soft"])
+                elif service in NO_KEY_SERVICES:
+                    count_label.configure(text="免 Key", text_color=COLORS["success"])
                 elif count:
                     count_label.configure(text=f"Key x{count}", text_color=COLORS["success"])
                 elif service in KEYLESS_SERVICES:
@@ -519,7 +536,9 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             if service_settings.enabled:
                 enabled_labels.append(label)
                 if not service_settings.api_keys:
-                    if service in KEYLESS_SERVICES:
+                    if service in NO_KEY_SERVICES:
+                        direct_labels.append(f"{label} 免 Key")
+                    elif service in KEYLESS_SERVICES:
                         direct_labels.append(label)
                     elif service == diagnostic_constants.SERVICE_PING0:
                         direct_labels.append("Ping0 免费 Geo")
@@ -618,7 +637,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             [
                 "当前页不会自动上传网络信息。",
                 "勾选的检测源才会被调用；开始检测前会自动保存当前设置。",
-                "每个检测源可以通过“添加 Key”保存多个 API Key。",
+                "支持 Key 的检测源可以通过“添加 Key”保存多个 API Key。",
                 "检测时会按顺序尝试 Key；遇到失败或限额会自动换下一个。",
             ],
         )

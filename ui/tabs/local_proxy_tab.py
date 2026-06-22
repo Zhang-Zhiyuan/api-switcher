@@ -1831,6 +1831,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
+                batch_results = payload["result"] or {}
+                cached_count = sum(1 for item in batch_results.values() if remote_proxy.proxy_node_quality_cached(item))
                 self._quality_results.update(payload["result"] or {})
                 self._prefer_quality_sort = True
                 save_error = ""
@@ -1858,7 +1860,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if best_key and not self._select_subscription_node_by_key(best_key):
                     best_key = str(payload.get("best_key") or "")
                 if not best_key or not self._select_subscription_node_by_key(best_key):
-                    message = f"质量检测完成: 本次 {len(payload['result'] or {})} 个；暂无可用质量结果。"
+                    message = f"质量检测完成: 本次 {len(batch_results)} 个"
+                    if cached_count:
+                        message += f"（缓存跳过 {cached_count} 个）"
+                    message += "；暂无可用质量结果。"
                     if save_error:
                         message += f" 质量结果缓存失败: {save_error}"
                     self._set_status(message, "warning")
@@ -1890,6 +1895,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     f"质量检测完成: 基于 {basis}，{scope_label} 家宽高质 {high_count}/{tested_count}；"
                     f"已选择【{region}】{label} 评分{score}。"
                 )
+                if cached_count:
+                    message += f" 缓存跳过 {cached_count} 个。"
                 if verify_message:
                     message += f" AI 复核: {remote_proxy._compact_probe_summary(verify_message)}"
                 elif verify_error:
@@ -1912,7 +1919,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if dialog is not None:
                 self._refresh_subscription_action_hint()
                 self._set_status("已打开代理质量检测；可配置检测源和 API Key 池。")
-                show_toast(top, "已打开代理质量检测，可选择 Ping0 / ProxyCheck / ipapi.is / VPNAPI")
+                show_toast(top, "已打开代理质量检测，可选择 Net.Coffee / Ping0 / ProxyCheck / ipapi.is / VPNAPI")
             else:
                 self._set_status("代理质量检测窗口打开失败。", "error")
                 show_toast(top, "代理质量检测窗口打开失败", is_error=True)
@@ -1977,6 +1984,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 basis = remote_proxy.proxy_node_quality_source_label(result)
                 detail = remote_proxy.proxy_node_quality_detail(result)
                 message = f"选中节点检测完成: 基于 {basis}，{label} 评分{score}"
+                if remote_proxy.proxy_node_quality_cached(result):
+                    message += "（缓存命中）"
                 if detail:
                     message += f"；{detail}"
                 if save_error:

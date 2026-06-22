@@ -307,6 +307,7 @@ def test_proxycheck_residential_classifies_home_broadband():
     }
 
     report = network_diagnostics.detect_network(
+        enabled_services=[network_diagnostics.SERVICE_PROXYCHECK],
         http_get=_fake_http_get(mapping),
         reverse_resolver=lambda _ip: "c-203-0-113-30.hsd1.ca.comcast.net",
     )
@@ -350,6 +351,7 @@ def test_proxycheck_hosting_classifies_data_center():
     }
 
     report = network_diagnostics.detect_network(
+        enabled_services=[network_diagnostics.SERVICE_PROXYCHECK],
         http_get=_fake_http_get(mapping),
         reverse_resolver=lambda _ip: "",
     )
@@ -469,6 +471,109 @@ def test_ipapi_isp_type_classifies_home_broadband():
     assert info.risk_score is None
     assert classification.ip_type == "家庭宽带/住宅 IP"
     assert classification.risk_score <= 30
+
+
+def test_netcoffee_trust_score_classifies_ai_residential_quality():
+    ip = "118.143.41.200"
+    mapping = {
+        f"https://ip.net.coffee/api/ip/lookup/{ip}": {
+            "ip": ip,
+            "is_datacenter": False,
+            "isResidential": True,
+            "is_vpn": False,
+            "is_proxy": False,
+            "is_tor": False,
+            "is_abuser": False,
+            "is_mobile": False,
+            "company_type": "isp",
+            "company_name": "HGC Global Communications Limited",
+            "asn": 9304,
+            "asOrganization": "HGC Global Communications Limited",
+            "trust_score": 100,
+            "abuser_score": "0.0006 (Low)",
+            "ai_verdict": {"label": "Clean residential", "confidence": 95},
+        },
+        f"https://ip.net.coffee/api/iprisk/{ip}": {
+            "ip": "118.143.41.194",
+            "cidr": "118.143.41.0/24",
+            "is_datacenter": False,
+            "isResidential": True,
+            "is_vpn": False,
+            "is_proxy": False,
+            "is_tor": False,
+            "is_abuser": False,
+            "company_type": "isp",
+            "trust_score": 100,
+        },
+    }
+
+    info = network_diagnostics.lookup_netcoffee_reputation(ip, 1.0, _fake_http_get(mapping))
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.ok is True
+    assert info.source == network_diagnostics.SERVICE_NETCOFFEE
+    assert info.network_type == "isp"
+    assert info.risk_score == 0
+    assert info.confidence_score == 100
+    assert info.asn == "AS9304"
+    assert classification.ip_type == "家庭宽带/住宅 IP"
+    assert classification.risk_score <= 16
+    assert any("trust_score=100" in signal for signal in classification.signals)
+
+
+def test_detect_network_defaults_to_netcoffee_only():
+    ip = "198.51.100.52"
+    mapping = {
+        "https://api.ipify.org?format=json": {"ip": ip},
+        "https://api6.ipify.org?format=json": network_diagnostics.HttpResult(
+            url="https://api6.ipify.org?format=json",
+            ok=False,
+            error="network unreachable",
+        ),
+        "https://api64.ipify.org?format=json": {"ip": ip},
+        f"https://ip.net.coffee/api/ip/lookup/{ip}": {
+            "ip": ip,
+            "is_datacenter": True,
+            "isResidential": False,
+            "is_vpn": False,
+            "is_proxy": False,
+            "is_tor": False,
+            "company_type": "hosting",
+            "company_name": "Example Cloud",
+            "asn": 64500,
+            "trust_score": 45,
+        },
+        f"https://ip.net.coffee/api/iprisk/{ip}": {
+            "ip": ip,
+            "is_datacenter": True,
+            "company_type": "hosting",
+            "trust_score": 45,
+        },
+        f"https://ipwho.is/{ip}": {
+            "success": True,
+            "country": "United States",
+            "connection": {"asn": 64500, "org": "Example Cloud", "isp": "Example Cloud"},
+        },
+    }
+    seen_urls = []
+
+    def fake(url, timeout):
+        seen_urls.append(url)
+        return _fake_http_get(mapping)(url, timeout)
+
+    report = network_diagnostics.detect_network(
+        http_get=fake,
+        reverse_resolver=lambda _ip: "",
+    )
+
+    diagnostic = report.diagnostics[0]
+    assert diagnostic.reputation[0].source == network_diagnostics.SERVICE_NETCOFFEE
+    assert diagnostic.classification.ip_type == "IDC/云机房"
+    assert any("ip.net.coffee" in url for url in seen_urls)
+    assert not any("proxycheck.io" in url or "api.ipapi.is" in url or "ping0.cc" in url for url in seen_urls)
 
 
 def test_proxycheck_v3_device_estimate_is_parsed_and_affects_risk():

@@ -100,6 +100,7 @@ _PROXY_SUBSCRIPTION_STATE_CACHE: dict | None = None
 _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 _PROXY_SUBSCRIPTION_NODES_CACHE: tuple[ProxySubscriptionNode, ...] | None = None
 _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE: tuple[str, int | None, int | None, str] | None = None
+PROXY_QUALITY_CACHE_TTL_SECONDS = 6 * 60 * 60
 _PROXY_SUBSCRIPTION_PROFILE_FIELDS = {
     "url",
     "saved_path",
@@ -256,6 +257,8 @@ class ProxyNodeQualityResult:
     detail: str = ""
     checked_at: str = ""
     sources: tuple[str, ...] = ()
+    quality_signature: str = ""
+    cached: bool = False
 
     def label(self) -> str:
         if not self.ok:
@@ -863,6 +866,8 @@ def save_proxy_subscription_qualities(qualities: dict[str, ProxyNodeQualityResul
             "detail": proxy_node_quality_detail(result),
             "checked_at": proxy_node_quality_checked_at(result) or _now_iso(),
             "sources": list(proxy_node_quality_sources(result)),
+            "quality_signature": proxy_node_quality_signature(result),
+            "cached": proxy_node_quality_cached(result),
         }
     return save_proxy_subscription_state(node_qualities=payload, node_qualities_updated_at=_now_iso())
 
@@ -919,6 +924,8 @@ def load_proxy_subscription_qualities(state: dict | None = None) -> dict[str, di
             "detail": str(value.get("detail") or "")[:220],
             "checked_at": str(value.get("checked_at") or "")[:40],
             "sources": list(network_diagnostic_settings.normalize_services(value.get("sources") or [])),
+            "quality_signature": str(value.get("quality_signature") or "")[:96],
+            "cached": bool(value.get("cached")),
         }
     return results
 
@@ -1118,11 +1125,16 @@ def assess_proxy_node_quality(
     resolver=None,
     settings=None,
     enabled_services=None,
+    use_cache: bool = True,
+    cached_quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
+    cache_ttl_seconds: int = PROXY_QUALITY_CACHE_TTL_SECONDS,
 ) -> ProxyNodeQualityResult:
     normalized = _normalize_proxy_node(node)
     node_key = proxy_node_key(normalized)
     host = str(normalized.get("server") or "")
     region = proxy_node_region(normalized)
+    services = []
+    quality_signature = ""
     try:
         ip = _resolve_proxy_node_ip(normalized, resolver=resolver)
     except Exception as exc:
@@ -1144,6 +1156,17 @@ def assess_proxy_node_quality(
             services = settings.enabled_services()
         else:
             services = []
+        quality_signature = proxy_quality_settings_signature(settings, services)
+        if use_cache:
+            cached = _cached_proxy_node_quality_result(
+                node_key,
+                ip,
+                quality_signature,
+                cached_quality_results,
+                cache_ttl_seconds,
+            )
+            if cached is not None:
+                return cached
         service_set = set(services)
         http_get = http_get or network_diagnostics._http_get
         if network_diagnostic_settings.SERVICE_PING0 in service_set:
@@ -1166,7 +1189,11 @@ def assess_proxy_node_quality(
             ipqs_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_IPQS),
             vpnapi_api_keys=_diagnostic_settings_keys(settings, network_diagnostic_settings.SERVICE_VPNAPI),
         )
-        geo = network_diagnostics.lookup_geo(ip, timeout, http_get)
+        reputation_ok = any(getattr(item, "ok", False) for item in reputation)
+        if reputation_ok or ping0.has_paid_quality:
+            geo = network_diagnostics.GeoInfo(ip=ip, ok=True)
+        else:
+            geo = network_diagnostics.lookup_geo(ip, timeout, http_get)
         classification = network_diagnostics.classify_ip(geo, ping0=ping0, reputation=reputation)
     except Exception as exc:
         return _proxy_node_quality_error_result(
@@ -1208,6 +1235,7 @@ def assess_proxy_node_quality(
         detail="；".join(detail_parts[:3])[:220],
         checked_at=_now_iso(),
         sources=tuple(services),
+        quality_signature=quality_signature,
     )
 
 
@@ -1240,6 +1268,13 @@ def assess_proxy_node_qualities(
         return {}
 
     settings = settings or network_diagnostic_settings.load_settings()
+    if enabled_services is not None:
+        services = network_diagnostic_settings.normalize_services(enabled_services)
+    elif hasattr(settings, "enabled_services"):
+        services = settings.enabled_services()
+    else:
+        services = []
+    cached_quality_results = load_proxy_subscription_qualities()
     worker_count = min(max(1, _int_or_default(max_workers, 8)), len(items))
     results: dict[str, ProxyNodeQualityResult] = {}
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -1251,7 +1286,9 @@ def assess_proxy_node_qualities(
                 http_get=http_get,
                 resolver=resolver,
                 settings=settings,
-                enabled_services=enabled_services,
+                enabled_services=services,
+                cached_quality_results=cached_quality_results,
+                cache_ttl_seconds=PROXY_QUALITY_CACHE_TTL_SECONDS,
             ): node
             for node in items
         }
@@ -1464,6 +1501,22 @@ def proxy_node_quality_sources(result: ProxyNodeQualityResult | dict | None) -> 
     if isinstance(result, dict):
         return tuple(network_diagnostic_settings.normalize_services(result.get("sources") or []))
     return ()
+
+
+def proxy_node_quality_signature(result: ProxyNodeQualityResult | dict | None) -> str:
+    if isinstance(result, ProxyNodeQualityResult):
+        return str(result.quality_signature or "")
+    if isinstance(result, dict):
+        return str(result.get("quality_signature") or "")
+    return ""
+
+
+def proxy_node_quality_cached(result: ProxyNodeQualityResult | dict | None) -> bool:
+    if isinstance(result, ProxyNodeQualityResult):
+        return bool(result.cached)
+    if isinstance(result, dict):
+        return bool(result.get("cached"))
+    return False
 
 
 def proxy_node_quality_source_label(result: ProxyNodeQualityResult | dict | None) -> str:
@@ -2601,6 +2654,86 @@ def _diagnostic_settings_keys(settings, service: str) -> list[str]:
         if isinstance(raw, (list, tuple, set)):
             return network_diagnostic_settings.parse_api_keys(list(raw))
     return []
+
+
+def proxy_quality_settings_signature(settings=None, enabled_services=None) -> str:
+    settings = settings or network_diagnostic_settings.load_settings()
+    if enabled_services is not None:
+        services = network_diagnostic_settings.normalize_services(enabled_services)
+    elif hasattr(settings, "enabled_services"):
+        services = settings.enabled_services()
+    else:
+        services = []
+    payload = []
+    for service in services:
+        key_hashes = [
+            hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:16]
+            for key in _diagnostic_settings_keys(settings, service)
+            if str(key or "").strip()
+        ]
+        payload.append({"service": service, "keys": key_hashes})
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cached_proxy_node_quality_result(
+    node_key: str,
+    ip: str,
+    quality_signature: str,
+    cached_quality_results: dict[str, ProxyNodeQualityResult | dict] | None,
+    cache_ttl_seconds: int,
+) -> ProxyNodeQualityResult | None:
+    cache = cached_quality_results if isinstance(cached_quality_results, dict) else load_proxy_subscription_qualities()
+    result = cache.get(node_key) if isinstance(cache, dict) else None
+    if not proxy_node_quality_measured(result):
+        return None
+    if not ip or proxy_node_quality_ip(result) != ip:
+        return None
+    if not quality_signature or proxy_node_quality_signature(result) != quality_signature:
+        return None
+    checked_at = proxy_node_quality_checked_at(result)
+    if not _quality_checked_at_fresh(checked_at, cache_ttl_seconds):
+        return None
+    return ProxyNodeQualityResult(
+        node_key=node_key,
+        ok=True,
+        host=proxy_node_quality_host(result),
+        ip=ip,
+        region=proxy_node_quality_region(result),
+        ip_type=proxy_node_quality_ip_type(result),
+        risk_score=proxy_node_quality_risk_score(result),
+        risk_label=proxy_node_quality_risk_label(result),
+        quality_score=proxy_node_quality_score(result),
+        quality_label=proxy_node_quality_label(result),
+        detail=_cache_hit_detail(proxy_node_quality_detail(result)),
+        checked_at=checked_at,
+        sources=proxy_node_quality_sources(result),
+        quality_signature=quality_signature,
+        cached=True,
+    )
+
+
+def _quality_checked_at_fresh(checked_at: str, cache_ttl_seconds: int) -> bool:
+    if not checked_at:
+        return False
+    try:
+        timestamp = datetime.fromisoformat(str(checked_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
+    return max(0.0, age) <= max(0, _int_or_default(cache_ttl_seconds, PROXY_QUALITY_CACHE_TTL_SECONDS))
+
+
+def _cache_hit_detail(detail: str) -> str:
+    text = str(detail or "").strip()
+    marker = "缓存命中，跳过重复评测"
+    if marker in text:
+        return text[:220]
+    if not text:
+        return marker
+    return f"{text}；{marker}"[:220]
 
 
 def _proxy_node_quality_error_result(

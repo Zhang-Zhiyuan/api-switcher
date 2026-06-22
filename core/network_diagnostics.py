@@ -18,6 +18,7 @@ from core.network_diagnostic_settings import (
     HIDDEN_SERVICES,
     SERVICE_IPAPI,
     SERVICE_IPQS,
+    SERVICE_NETCOFFEE,
     SERVICE_PING0,
     SERVICE_PROXYCHECK,
     SERVICE_VPNAPI,
@@ -43,6 +44,8 @@ PING0_FREE_GEO_ENDPOINTS = {
 PING0_DETAIL_URL = "https://ping0.cc/ip/{ip}"
 PING0_PING_URL = "https://ping0.cc/ping/{ip}"
 PING0_API_URL = "https://ping0.cc/apiloc/apikey({api_key})/ip({ip})"
+NETCOFFEE_LOOKUP_URL = "https://ip.net.coffee/api/ip/lookup/{ip}"
+NETCOFFEE_RISK_URL = "https://ip.net.coffee/api/iprisk/{ip}"
 PROXYCHECK_API_URL = "https://proxycheck.io/v3/{ip}"
 IPAPI_IS_URL = "https://api.ipapi.is"
 IPQS_API_URL = "https://ipqualityscore.com/api/json/ip/{api_key}/{ip}"
@@ -272,6 +275,7 @@ class ReputationInfo:
     @property
     def source_label(self) -> str:
         return {
+            "netcoffee": "Net.Coffee AI",
             "proxycheck": "ProxyCheck",
             "ipapi": "ipapi.is",
             "ipqs": "IPQualityScore",
@@ -431,6 +435,8 @@ def detect_network(
         "多个 API Key 会按顺序尝试；某个 Key 失败或限额后会自动使用下一个。",
         "多源分类会优先标记 VPN、Proxy、Tor、Relay 等匿名网络；家宽/商宽/蜂窝/机房以各服务返回的网络类型为准。",
     ]
+    if SERVICE_NETCOFFEE in services:
+        notices.append("Net.Coffee AI 为默认首选源；使用其 Trust Score、住宅/机房、VPN/Proxy/Tor 和滥用信号评估 AI 代理出口。")
     if SERVICE_PROXYCHECK in services:
         notices.append("ProxyCheck 可无 Key 调用；配置多个 Key 后会优先使用 Key 池。")
     if SERVICE_IPAPI in services:
@@ -683,6 +689,12 @@ def lookup_reputation(
     )
     results: list[ReputationInfo] = []
     tasks = []
+    if SERVICE_NETCOFFEE in services:
+        tasks.append((
+            SERVICE_NETCOFFEE,
+            lookup_netcoffee_reputation,
+            {},
+        ))
     if SERVICE_PROXYCHECK in services:
         tasks.append((
             SERVICE_PROXYCHECK,
@@ -734,6 +746,64 @@ def lookup_reputation(
                 )
     results.extend(by_service[service] for service, _func, _kwargs in tasks if service in by_service)
     return results
+
+
+def lookup_netcoffee_reputation(
+    ip: str,
+    timeout: float,
+    http_get: HttpGetter,
+) -> ReputationInfo:
+    """Look up Net.Coffee's AI-oriented IP quality score."""
+
+    safe_ip = urllib.parse.quote(ip, safe=":.")
+    result = http_get(NETCOFFEE_LOOKUP_URL.format(ip=safe_ip), timeout)
+    info = ReputationInfo(ip=ip, source="netcoffee", response_time=result.response_time)
+    if not result.ok:
+        info.error = _http_result_error_text(result, "Net.Coffee 请求失败")
+        return info
+
+    try:
+        data = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        info.error = f"Net.Coffee JSON 解析失败: {exc}"
+        return info
+
+    if not isinstance(data, dict):
+        info.error = "Net.Coffee 返回结构异常"
+        return info
+    payload = _payload_dict(data, "data", "result")
+    if _payload_is_error(data) or (payload is not data and _payload_is_error(payload)):
+        info.error = _payload_error_text(payload, _payload_error_text(data, "Net.Coffee 查询失败"))
+        return info
+    returned_ip = _first_text(payload, "ip", "query", "address")
+    if returned_ip and _valid_ip(returned_ip) and returned_ip != ip:
+        info.error = f"Net.Coffee 返回 IP 不匹配: {returned_ip}"
+        return info
+
+    info.ok = True
+    info.raw = payload
+    _apply_netcoffee_payload(info, payload, prefix="Net.Coffee")
+
+    risk_result = http_get(NETCOFFEE_RISK_URL.format(ip=safe_ip), timeout)
+    if risk_result.response_time is not None:
+        info.response_time = max(info.response_time or 0.0, risk_result.response_time)
+    if risk_result.ok:
+        try:
+            risk_data = json.loads(risk_result.text)
+        except json.JSONDecodeError as exc:
+            info.signals.append(f"Net.Coffee iprisk JSON 解析失败: {exc}")
+        else:
+            if isinstance(risk_data, dict):
+                risk_payload = _payload_dict(risk_data, "data", "result")
+                if not _payload_is_error(risk_data) and not (risk_payload is not risk_data and _payload_is_error(risk_payload)):
+                    risk_ip = _first_text(risk_payload, "ip", "query", "address")
+                    if not risk_ip or risk_ip == ip or _payload_cidr_contains_ip(risk_payload, ip):
+                        _apply_netcoffee_payload(info, risk_payload, prefix="Net.Coffee iprisk", supplement=True)
+                    elif _valid_ip(risk_ip):
+                        info.signals.append(f"Net.Coffee iprisk 返回同网段外 IP: {risk_ip}")
+    elif risk_result.error:
+        info.signals.append(f"Net.Coffee iprisk 未完成: {_http_result_error_text(risk_result, '请求失败')}")
+    return info
 
 
 def lookup_proxycheck_reputation(
@@ -1499,7 +1569,13 @@ def _enabled_services(
     if enabled_services is not None:
         return set(normalize_services(enabled_services))
 
-    services = {SERVICE_PING0, SERVICE_PROXYCHECK, SERVICE_IPAPI}
+    services = {SERVICE_NETCOFFEE}
+    if ping0_keys:
+        services.add(SERVICE_PING0)
+    if proxycheck_keys:
+        services.add(SERVICE_PROXYCHECK)
+    if ipapi_keys:
+        services.add(SERVICE_IPAPI)
     if ipqs_keys:
         services.add(SERVICE_IPQS)
     if vpnapi_keys:
@@ -1683,6 +1759,114 @@ def _proxycheck_device_estimates(record: dict[str, Any]) -> tuple[Optional[int],
         or _first_value(record, "device_subnet_count", "subnet_count")
     )
     return address_count, subnet_count
+
+
+def _apply_netcoffee_payload(
+    info: ReputationInfo,
+    payload: dict[str, Any],
+    *,
+    prefix: str,
+    supplement: bool = False,
+) -> None:
+    if not supplement:
+        info.network_type = _netcoffee_network_type(payload)
+        info.provider = _first_text(payload, "isp", "company_name", "asOrganization", "asname", "org")
+        info.organization = _first_text(payload, "company_name", "asOrganization", "asname", "org")
+        info.asn = _normalize_asn(_first_value(payload, "asn", "as"))
+        info.flags = _netcoffee_flags(payload)
+
+    trust_score = _bounded_score(_first_value(payload, "trust_score", "trustScore", "score"))
+    if trust_score is not None:
+        risk_from_trust = 100 - trust_score
+        if info.risk_score is None:
+            info.risk_score = risk_from_trust
+        else:
+            info.risk_score = max(info.risk_score, risk_from_trust)
+        info.confidence_score = max(info.confidence_score or 0, trust_score)
+        info.signals.append(f"{prefix} trust_score={trust_score}")
+
+    threat = _netcoffee_threat_score(payload)
+    if threat is not None:
+        info.risk_score = max(info.risk_score or 0, threat)
+        info.signals.append(f"{prefix} threat={threat}")
+
+    if not supplement:
+        active = _active_flag_names(info.flags)
+        if active:
+            info.signals.append(f"{prefix} flags: " + ", ".join(active))
+        if info.network_type:
+            type_parts = [f"network.type={info.network_type}"]
+            company_type = _first_text(payload, "company_type")
+            asn_kind = _first_text(payload, "asn_kind")
+            if company_type and company_type != info.network_type:
+                type_parts.append(f"company.type={company_type}")
+            if asn_kind and asn_kind != company_type:
+                type_parts.append(f"asn.kind={asn_kind}")
+            info.signals.append(prefix + " " + " ".join(type_parts))
+        verdict = payload.get("ai_verdict") if isinstance(payload.get("ai_verdict"), dict) else {}
+        verdict_label = _first_text(verdict, "label")
+        if verdict_label:
+            confidence = _bounded_score(_first_value(verdict, "confidence"))
+            confidence_text = f" confidence={confidence}" if confidence is not None else ""
+            info.signals.append(f"{prefix} verdict={verdict_label}{confidence_text}")
+
+
+def _netcoffee_network_type(payload: dict[str, Any]) -> str:
+    for key in ("company_type", "asn_kind", "network_type", "type"):
+        network_type = _first_text(payload, key)
+        if network_type and _network_type_category(network_type):
+            return network_type
+    if _optional_boolish(_first_value(payload, "isResidential", "is_residential", "residential")) is True:
+        return "residential"
+    if _optional_boolish(payload.get("is_mobile")) is True:
+        return "mobile"
+    if _optional_boolish(payload.get("is_datacenter")) is True:
+        return "hosting"
+    return ""
+
+
+def _netcoffee_flags(payload: dict[str, Any]) -> dict[str, bool]:
+    flags = {
+        "hosting": _optional_boolish(payload.get("is_datacenter")),
+        "vpn": _optional_boolish(payload.get("is_vpn")),
+        "proxy": _optional_boolish(payload.get("is_proxy")),
+        "tor": _optional_boolish(payload.get("is_tor")),
+        "scraper": _optional_boolish(payload.get("is_crawler")),
+        "abuser": _optional_boolish(payload.get("is_abuser")),
+        "mobile": _optional_boolish(payload.get("is_mobile")),
+    }
+    flags = {key: value for key, value in flags.items() if value is not None}
+    if _network_type_category(_netcoffee_network_type(payload)) == "hosting":
+        flags.setdefault("hosting", True)
+    return flags
+
+
+def _netcoffee_threat_score(payload: dict[str, Any]) -> Optional[int]:
+    scores = [
+        _abuser_score_to_percent(_first_value(payload, "abuser_score", "risk_score", "risk")),
+    ]
+    intelligence = payload.get("intelligence") if isinstance(payload.get("intelligence"), dict) else {}
+    scores.append(_abuser_score_to_percent(_first_value(intelligence, "rep_threat", "abuser_score_raw")))
+    raw_scores = [score for score in scores if score is not None]
+    if any(_optional_boolish(payload.get(key)) is True for key in ("is_vpn", "is_proxy", "is_tor")):
+        raw_scores.append(82)
+    if _optional_boolish(payload.get("is_abuser")) is True:
+        raw_scores.append(78)
+    if _optional_boolish(payload.get("is_crawler")) is True:
+        raw_scores.append(70)
+    if _optional_boolish(payload.get("is_datacenter")) is True:
+        raw_scores.append(55)
+    return max(raw_scores) if raw_scores else None
+
+
+def _payload_cidr_contains_ip(payload: dict[str, Any], ip: str) -> bool:
+    cidr = _first_text(payload, "cidr", "network", "range_cidr")
+    if not cidr:
+        return False
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
 
 
 def _ipapi_network_type(payload: dict[str, Any], company: dict[str, Any], asn_data: dict[str, Any]) -> str:
@@ -2005,6 +2189,13 @@ def _optional_int(value: Any) -> Optional[int]:
             return int(float(str(value).strip()))
         except (TypeError, ValueError):
             return None
+
+
+def _bounded_score(value: Any) -> Optional[int]:
+    parsed = _optional_int(value)
+    if parsed is None:
+        return None
+    return max(0, min(100, parsed))
 
 
 def _valid_ip(value: str) -> bool:

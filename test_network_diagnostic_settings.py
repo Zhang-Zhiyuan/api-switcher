@@ -40,7 +40,8 @@ API Key
 
 
 def test_normalize_services_accepts_common_aliases():
-    assert network_diagnostic_settings.normalize_services(["proxycheck.io", "ipapi.is", "IPQualityScore", "VPN API", "unknown"]) == [
+    assert network_diagnostic_settings.normalize_services(["ip.net.coffee", "proxycheck.io", "ipapi.is", "IPQualityScore", "VPN API", "unknown"]) == [
+        network_diagnostic_settings.SERVICE_NETCOFFEE,
         network_diagnostic_settings.SERVICE_PROXYCHECK,
         network_diagnostic_settings.SERVICE_IPAPI,
         network_diagnostic_settings.SERVICE_IPQS,

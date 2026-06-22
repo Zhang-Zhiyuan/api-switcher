@@ -441,6 +441,135 @@ def test_assess_proxy_node_quality_classifies_proxycheck_residential():
     assert remote_proxy.proxy_node_quality_for_ai_proxy_ok(result) is True
 
 
+def test_assess_proxy_node_quality_reuses_fresh_matching_cache(monkeypatch, tmp_path):
+    node = remote_proxy.parse_proxy_node(
+        "{ name: AI代理缓存, type: vless, server: cached.example.com, port: 443 }"
+    )
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_NETCOFFEE},
+        {},
+    )
+    signature = remote_proxy.proxy_quality_settings_signature(
+        settings,
+        [network_diagnostic_settings.SERVICE_NETCOFFEE],
+    )
+    node_key = remote_proxy.proxy_node_key(node)
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    remote_proxy.save_proxy_subscription_qualities({
+        node_key: remote_proxy.ProxyNodeQualityResult(
+            node_key=node_key,
+            ok=True,
+            host="cached.example.com",
+            ip="198.51.100.80",
+            region="其他",
+            ip_type="家庭宽带/住宅 IP",
+            risk_score=6,
+            risk_label="极低",
+            quality_score=100,
+            quality_label="家宽高质",
+            detail="Net.Coffee trust_score=94",
+            checked_at=remote_proxy._now_iso(),
+            sources=(network_diagnostic_settings.SERVICE_NETCOFFEE,),
+            quality_signature=signature,
+        )
+    })
+
+    result = remote_proxy.assess_proxy_node_quality(
+        node,
+        http_get=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network should be skipped")),
+        resolver=lambda *_args, **_kwargs: [(None, None, None, "", ("198.51.100.80", 0))],
+        settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_NETCOFFEE],
+    )
+
+    assert result.ok is True
+    assert result.cached is True
+    assert result.quality_score == 100
+    assert result.quality_signature == signature
+    assert "缓存命中" in result.detail
+
+
+def test_assess_proxy_node_quality_bypasses_cache_when_ip_changes(monkeypatch, tmp_path):
+    node = remote_proxy.parse_proxy_node(
+        "{ name: AI代理缓存IP变更, type: vless, server: changed.example.com, port: 443 }"
+    )
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_NETCOFFEE},
+        {},
+    )
+    signature = remote_proxy.proxy_quality_settings_signature(
+        settings,
+        [network_diagnostic_settings.SERVICE_NETCOFFEE],
+    )
+    node_key = remote_proxy.proxy_node_key(node)
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    remote_proxy.save_proxy_subscription_qualities({
+        node_key: remote_proxy.ProxyNodeQualityResult(
+            node_key=node_key,
+            ok=True,
+            host="changed.example.com",
+            ip="198.51.100.81",
+            ip_type="家庭宽带/住宅 IP",
+            quality_score=100,
+            quality_label="家宽高质",
+            checked_at=remote_proxy._now_iso(),
+            sources=(network_diagnostic_settings.SERVICE_NETCOFFEE,),
+            quality_signature=signature,
+        )
+    })
+
+    new_ip = "198.51.100.82"
+    seen_urls = []
+
+    def http_get(url, _timeout):
+        seen_urls.append(url)
+        if "ip.net.coffee/api/ip/lookup" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps({
+                    "ip": new_ip,
+                    "is_datacenter": False,
+                    "isResidential": True,
+                    "is_vpn": False,
+                    "is_proxy": False,
+                    "is_tor": False,
+                    "company_type": "isp",
+                    "trust_score": 95,
+                }),
+            )
+        if "ip.net.coffee/api/iprisk" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps({"ip": new_ip, "trust_score": 95, "company_type": "isp"}),
+            )
+        if "ipwho.is" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps({"success": True, "connection": {"org": "Example Fiber", "isp": "Example Fiber"}}),
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    result = remote_proxy.assess_proxy_node_quality(
+        node,
+        http_get=http_get,
+        resolver=lambda *_args, **_kwargs: [(None, None, None, "", (new_ip, 0))],
+        settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_NETCOFFEE],
+    )
+
+    assert result.ok is True
+    assert result.cached is False
+    assert result.ip == new_ip
+    assert any("ip.net.coffee" in url for url in seen_urls)
+
+
 def test_assess_proxy_node_quality_rejects_residential_business_conflict_for_ai_proxy():
     node = remote_proxy.parse_proxy_node(
         "{ name: AI代理冲突, type: vless, server: mixed.example.com, port: 443 }"
