@@ -45,8 +45,11 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._cards_frame = None
         self._server_refresh_generation = 0
         self._server_render_after_id = None
+        self._server_resume_render_after_id = None
         self._server_refresh_finish_after_id = None
         self._deferred_server_render_pending = False
+        self._deferred_server_payload = None
+        self._deferred_server_cards = None
         self._deferred_initial_refresh_pending = False
         self._initial_refresh_after_id = None
         self._server_profiles_loaded = False
@@ -1167,6 +1170,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_refresh_generation += 1
         self._cancel_initial_after_callbacks()
         self._cancel_server_render()
+        self._cancel_server_resume_render()
         self._cancel_server_refresh_finish()
         self._cancel_proxy_startup_refresh()
         self._cancel_proxy_periodic_update()
@@ -1220,6 +1224,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             pass
         self._server_render_after_id = None
 
+    def _cancel_server_resume_render(self):
+        if not self._server_resume_render_after_id:
+            return
+        try:
+            self.after_cancel(self._server_resume_render_after_id)
+        except Exception:
+            pass
+        self._server_resume_render_after_id = None
+
     def _suspend_background_work(self):
         if self._initial_refresh_after_id:
             self._deferred_initial_refresh_pending = True
@@ -1264,8 +1277,39 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._deferred_remote_auto_section_pending = False
             self._schedule_after_once("_remote_auto_section_after_id", 180, self._build_remote_auto_section)
         if self._deferred_server_render_pending:
+            self._schedule_server_resume_render()
+
+    def _schedule_server_resume_render(self):
+        if self._server_resume_render_after_id or not self._is_alive():
+            return
+
+        def run():
+            self._server_resume_render_after_id = None
+            if not self._is_alive():
+                return
+            if not is_active_tab(self):
+                self._deferred_server_render_pending = True
+                return
             self._deferred_server_render_pending = False
-            self.refresh()
+            cards = self._deferred_server_cards
+            payload = self._deferred_server_payload
+            self._deferred_server_cards = None
+            self._deferred_server_payload = None
+            if cards:
+                profile_items, generation, start = cards
+                if generation == self._server_refresh_generation:
+                    self._render_server_cards_batch(profile_items, generation, start)
+                    return
+            if payload:
+                payload_data, generation = payload
+                if generation == self._server_refresh_generation:
+                    self._render_server_refresh_payload(payload_data, generation)
+
+        try:
+            self._server_resume_render_after_id = self.after(1, run)
+        except Exception:
+            self._server_resume_render_after_id = None
+            run()
 
     def _schedule_after_once(self, attr: str, delay_ms: int, callback):
         if getattr(self, attr, None):
@@ -1292,6 +1336,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_refresh_generation += 1
         generation = self._server_refresh_generation
         self._cancel_server_render()
+        self._cancel_server_resume_render()
+        self._deferred_server_payload = None
+        self._deferred_server_cards = None
 
         for w in self._cards_frame.winfo_children():
             w.destroy()
@@ -1346,6 +1393,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         if not is_active_tab(self):
             self._deferred_server_render_pending = True
+            self._deferred_server_payload = (payload, generation)
+            self._deferred_server_cards = None
             return
         for w in self._cards_frame.winfo_children():
             w.destroy()
@@ -1397,6 +1446,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         if not is_active_tab(self):
             self._deferred_server_render_pending = True
+            self._deferred_server_cards = (profile_items, generation, start)
             self._server_render_after_id = None
             return
         batch_size = self.SERVER_RENDER_BATCH_SIZE

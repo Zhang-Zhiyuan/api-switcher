@@ -44,10 +44,10 @@ def _session_record_summary(records, selected_keys: set[str]) -> dict:
 class SessionMigrationTab(ctk.CTkScrollableFrame):
     """Tab for exporting and importing Claude Code / Codex local sessions."""
 
-    RENDER_BATCH_SIZE = 4
-    RENDER_BATCH_DELAY_MS = 4
-    MAX_VISIBLE_RECORDS = 5
-    VISIBLE_RECORDS_STEP = 20
+    RENDER_BATCH_SIZE = 1
+    RENDER_BATCH_DELAY_MS = 90
+    MAX_VISIBLE_RECORDS = 3
+    VISIBLE_RECORDS_STEP = 12
 
     FILTER_OPTIONS = {
         "全部": "all",
@@ -72,6 +72,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._refresh_generation = 0
         self._record_render_generation = 0
         self._record_render_after_id = None
+        self._deferred_render_after_id = None
+        self._inactive_clear_after_id = None
         self._deferred_render_pending = False
         self._visible_limit = self.MAX_VISIBLE_RECORDS
         self._build_ui()
@@ -79,6 +81,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def destroy(self):
         self._destroyed = True
         self._cancel_record_render()
+        self._cancel_deferred_render()
+        self._cancel_inactive_clear()
         super().destroy()
 
     def _resolve_ui_dispatch(self):
@@ -239,11 +243,13 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
     def refresh(self):
         if not self._cards_frame:
             return
+        self._cancel_inactive_clear()
         self._refresh_location_options()
         self._visible_limit = self.MAX_VISIBLE_RECORDS
         self._refresh_generation += 1
         generation = self._refresh_generation
         self._cancel_record_render()
+        self._cancel_deferred_render()
         provider_filter = self._provider_filter
         source_ssh_name = self._current_source_ssh_name()
         source_label = self._endpoint_label(source_ssh_name)
@@ -312,7 +318,31 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
         visible_limit = max(self.MAX_VISIBLE_RECORDS, int(self._visible_limit or self.MAX_VISIBLE_RECORDS))
         visible_records = records[:visible_limit]
-        self._render_record_batch(visible_records, generation, 0, total_count=len(records))
+        self._schedule_record_batch(visible_records, generation, 0, total_count=len(records), delay_ms=45)
+
+    def _schedule_record_batch(
+        self,
+        records: list[session_migration.SessionRecord],
+        generation: int,
+        start: int,
+        total_count: int | None = None,
+        delay_ms: int | None = None,
+    ):
+        if self._record_render_after_id:
+            return
+
+        def run():
+            self._record_render_after_id = None
+            self._render_record_batch(records, generation, start, total_count=total_count)
+
+        try:
+            self._record_render_after_id = self.after(
+                self.RENDER_BATCH_DELAY_MS if delay_ms is None else max(1, int(delay_ms)),
+                run,
+            )
+        except Exception:
+            self._record_render_after_id = None
+            self._render_record_batch(records, generation, start, total_count=total_count)
 
     def _update_stats_label(self, records=None):
         if not self._stats_label:
@@ -335,16 +365,85 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             pass
         self._record_render_after_id = None
 
+    def _cancel_deferred_render(self):
+        if not self._deferred_render_after_id:
+            return
+        try:
+            self.after_cancel(self._deferred_render_after_id)
+        except Exception:
+            pass
+        self._deferred_render_after_id = None
+
+    def _cancel_inactive_clear(self):
+        if not self._inactive_clear_after_id:
+            return
+        try:
+            self.after_cancel(self._inactive_clear_after_id)
+        except Exception:
+            pass
+        self._inactive_clear_after_id = None
+
+    def _schedule_inactive_clear(self, delay_ms: int = 160):
+        if self._inactive_clear_after_id or getattr(self, "_destroyed", False):
+            return
+
+        def run():
+            self._inactive_clear_after_id = None
+            if getattr(self, "_destroyed", False) or is_active_tab(self):
+                return
+            frame = self._cards_frame
+            if frame is None:
+                return
+            children = list(frame.winfo_children())
+            if not children:
+                return
+            for child in children:
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+            if self._records:
+                self._deferred_render_pending = True
+
+        try:
+            self._inactive_clear_after_id = self.after(max(1, int(delay_ms)), run)
+        except Exception:
+            self._inactive_clear_after_id = None
+
+    def _schedule_deferred_render(self, delay_ms: int = 1):
+        if self._deferred_render_after_id or getattr(self, "_destroyed", False):
+            return
+        self._cancel_inactive_clear()
+
+        def run():
+            self._deferred_render_after_id = None
+            if getattr(self, "_destroyed", False):
+                return
+            if not is_active_tab(self):
+                self._deferred_render_pending = True
+                return
+            self._deferred_render_pending = False
+            self._render_records()
+
+        try:
+            self._deferred_render_after_id = self.after(max(1, int(delay_ms)), run)
+        except Exception:
+            self._deferred_render_after_id = None
+            if not getattr(self, "_destroyed", False):
+                self._deferred_render_pending = False
+                self._render_records()
+
     def _suspend_background_work(self):
         if self._record_render_after_id:
             self._deferred_render_pending = True
             self._cancel_record_render()
+        self._schedule_inactive_clear()
 
     def _resume_background_work(self):
+        self._cancel_inactive_clear()
         if not self._deferred_render_pending:
             return
-        self._deferred_render_pending = False
-        self._render_records()
+        self._schedule_deferred_render()
 
     def _render_record_batch(
         self,
@@ -369,13 +468,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             if remaining:
                 self._add_show_more_footer(remaining)
             return
-        try:
-            self._record_render_after_id = self.after(
-                self.RENDER_BATCH_DELAY_MS,
-                lambda: self._render_record_batch(records, generation, end, total_count=total_count),
-            )
-        except Exception:
-            self._record_render_after_id = None
+        self._schedule_record_batch(records, generation, end, total_count=total_count)
 
     def _add_show_more_footer(self, remaining: int):
         footer = ctk.CTkFrame(self._cards_frame, **card_frame_kwargs())
@@ -435,9 +528,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             font=font(15, "bold"),
             anchor="w",
             justify="left",
+            wraplength=780,
         )
         title_label.pack(side="left", fill="x", expand=True)
-        bind_wraplength(top, title_label, padding=110, min_width=260, max_width=980)
 
         info_frame = ctk.CTkFrame(card, fg_color="transparent")
         info_frame.pack(fill="x", padx=14, pady=(0, 10))
@@ -460,9 +553,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             font=font(12),
             anchor="w",
             justify="left",
+            wraplength=900,
         )
         info_label.pack(fill="x")
-        bind_wraplength(info_frame, info_label, padding=4)
 
     def _on_filter_change(self, label: str):
         self._provider_filter = self.FILTER_OPTIONS.get(label, "all")
