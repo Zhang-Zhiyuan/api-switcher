@@ -12,7 +12,7 @@ import customtkinter as ctk
 from core.lazy_imports import LazyModule
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, recent_user_scroll
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 
@@ -457,6 +457,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_render_pending = True
             self._record_render_after_id = None
+            return
+        if recent_user_scroll(self):
+            self._schedule_record_batch(records, generation, start, total_count=total_count)
             return
         end = min(start + self.RENDER_BATCH_SIZE, len(records))
         for record in records[start:end]:

@@ -8,7 +8,7 @@ from core.lazy_imports import LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITES
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.toast import show_toast
 
@@ -580,6 +580,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_subscription_picker_pending = True
             return
+        if recent_user_scroll(self):
+            self._subscription_picker_after_id = self.after(180, self._build_subscription_picker)
+            return
         self._deferred_subscription_picker_pending = False
         if self._subscription_picker or not self._subscription_picker_host:
             return
@@ -604,6 +607,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._node_text_after_id = None
         if not is_active_tab(self):
             self._deferred_node_text_pending = True
+            return
+        if recent_user_scroll(self):
+            self._node_text_after_id = self.after(180, self._build_node_text)
             return
         self._deferred_node_text_pending = False
         if self._node_text or not self._node_text_host:

@@ -9,7 +9,7 @@ from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 
 
@@ -1448,6 +1448,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._deferred_server_render_pending = True
             self._deferred_server_cards = (profile_items, generation, start)
             self._server_render_after_id = None
+            return
+        if recent_user_scroll(self):
+            try:
+                self._server_render_after_id = self.after(
+                    self.SERVER_RENDER_BATCH_DELAY_MS,
+                    lambda: self._render_server_cards_batch(profile_items, generation, start),
+                )
+            except Exception:
+                self._server_render_after_id = None
             return
         batch_size = self.SERVER_RENDER_BATCH_SIZE
         end = min(len(profile_items), start + batch_size)

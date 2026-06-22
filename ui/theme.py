@@ -1,5 +1,6 @@
 import re
 import sys
+import time
 import tkinter
 import customtkinter as ctk
 from typing import Optional
@@ -11,7 +12,8 @@ _FONT_CACHE: dict[tuple[int, int, str, str], ctk.CTkFont] = {}
 _SCROLL_START_EPSILON = 0.001
 _SCROLL_END_EPSILON = 0.999
 _SCROLL_CONSUMED_ATTR = "_api_switcher_scroll_consumed"
-_WINDOWS_SCROLL_DELTA_DIVISOR = 10
+_SCROLL_ACTIVITY_ATTR = "_api_switcher_last_scroll_at"
+_WINDOWS_SCROLL_DELTA_DIVISOR = 5
 
 COLORS = {
     "app_bg": "#101216",
@@ -81,6 +83,33 @@ def _mark_event_scroll_consumed(event) -> None:
         setattr(event, _SCROLL_CONSUMED_ATTR, True)
     except Exception:
         pass
+
+
+def _mark_scroll_activity(widget) -> None:
+    if widget is None:
+        return
+    try:
+        target = widget.winfo_toplevel()
+    except Exception:
+        target = widget
+    try:
+        setattr(target, _SCROLL_ACTIVITY_ATTR, time.perf_counter())
+    except Exception:
+        pass
+
+
+def recent_user_scroll(widget, idle_ms: int = 140) -> bool:
+    try:
+        target = widget.winfo_toplevel()
+    except Exception:
+        target = widget
+    try:
+        last_scroll = float(getattr(target, _SCROLL_ACTIVITY_ATTR, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if last_scroll <= 0.0:
+        return False
+    return (time.perf_counter() - last_scroll) * 1000 < max(1, int(idle_ms))
 
 
 def _wheel_delta(event) -> float:
@@ -184,6 +213,7 @@ def _patch_nested_scrollable_frame_mousewheel() -> None:
         if _event_scroll_consumed(event):
             return None
 
+        _mark_scroll_activity(getattr(event, "widget", None))
         chain = _event_scroll_chain(event)
         try:
             parent_index = _scroll_chain_index(chain, self._parent_canvas)

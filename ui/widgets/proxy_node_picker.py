@@ -2,7 +2,7 @@ import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, button_style, combo_style, font, input_style
+from ui.theme import COLORS, button_style, combo_style, font, input_style, recent_user_scroll
 
 
 remote_proxy = LazyModule("core.remote_proxy")
@@ -380,6 +380,15 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._render_deferred = True
             self._render_plan_pending = False
             self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
+            return
+        if recent_user_scroll(self):
+            try:
+                self._render_batch_after_id = self.after(
+                    self.RENDER_BATCH_DELAY_MS,
+                    lambda: self._render_plan_batch(generation, render_plan, start_index),
+                )
+            except Exception:
+                self._render_batch_after_id = None
             return
         batch_size = self.RENDER_BATCH_SIZE
         end_index = min(len(render_plan), start_index + batch_size)
