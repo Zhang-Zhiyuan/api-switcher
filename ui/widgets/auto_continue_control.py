@@ -498,7 +498,12 @@ class AutoContinueControl(ctk.CTkFrame):
                     f"API恢复 {'ON' if settings.git_snapshot_on_recovery else 'OFF'}"
                 )
                 if settings.error_recovery_enabled:
-                    info_lines.append(f"最大恢复次数: {settings.max_error_recoveries}")
+                    recovery_hint = (
+                        f"最大恢复次数: {settings.max_error_recoveries}"
+                    )
+                    if self.provider.lower() == "codex":
+                        recovery_hint += "（压缩失败持续重试）"
+                    info_lines.append(recovery_hint)
                     info_lines.append(
                         "断联重试间隔: "
                         f"{settings.error_retry_initial_delay_seconds}-"

@@ -989,6 +989,64 @@ def test_remote_error_hook_recovers_codex_disconnect_with_backoff(tmp_path):
     assert "attempting_recovery" in log_text
 
 
+def test_remote_error_hook_treats_compact_error_code_as_retry_until_success(tmp_path):
+    import subprocess
+
+    from core import remote_auto_continue
+    from models.auto_continue import AutoContinueSettings
+
+    script = remote_auto_continue._generate_remote_hook_script(
+        "/home/test/.codex/auto_continue_settings.json",
+        "/home/test/.codex/tmp",
+    )
+    body = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    body_path = _remote_hook_python_path(tmp_path, body)
+
+    settings_path = tmp_path / "settings.json"
+    input_path = tmp_path / "input.json"
+    state_dir = tmp_path / "state"
+    settings = AutoContinueSettings(
+        enabled=False,
+        error_recovery_enabled=True,
+        max_error_recoveries=0,
+        error_retry_initial_delay_seconds=3,
+        error_retry_max_delay_seconds=4,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    input_path.write_text(
+        json.dumps({
+            "session_id": "remote-codex-compact-code-only",
+            "error_code": "backend-api/codex/responses/compact",
+            "error_message": "temporary service unavailable",
+            "status": 503,
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(body_path), str(settings_path), str(state_dir), str(input_path)],
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["recover"] is True
+    assert output["wait"] == 3
+    assert output["commands"][0]["type"] == "slash_command"
+    assert output["commands"][0]["command"] == "compact"
+    log_text = (state_dir / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" not in log_text
+
+
 def test_remote_error_hook_retries_official_responses_disconnect_without_compress(tmp_path):
     import subprocess
 
@@ -1920,6 +1978,61 @@ def test_local_codex_error_hook_uses_configured_backoff_for_disconnects(tmp_path
     log_text = (tmp_path / "tmp" / "error_recovery_log.jsonl").read_text(encoding="utf-8")
     assert "max_recoveries_reached" not in log_text
     assert "attempting_recovery" in log_text
+
+
+def test_local_codex_error_hook_treats_compact_error_code_as_retry_until_success(tmp_path):
+    import subprocess
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is not available")
+
+    from core.auto_continue.error_recovery_script import generate_codex_error_recovery_script
+    from models.auto_continue import AutoContinueSettings
+
+    settings_path = tmp_path / "auto_continue_settings.json"
+    script_path = tmp_path / "error_recovery.ps1"
+    settings = AutoContinueSettings(
+        error_recovery_enabled=True,
+        max_error_recoveries=0,
+        error_retry_initial_delay_seconds=3,
+        error_retry_max_delay_seconds=4,
+        git_auto_snapshot=False,
+        git_snapshot_on_recovery=False,
+    )
+    settings_path.write_text(json.dumps(settings.to_dict(), ensure_ascii=False), encoding="utf-8")
+    script_path.write_text(
+        generate_codex_error_recovery_script(str(settings_path).replace("\\", "\\\\")),
+        encoding="utf-8-sig",
+    )
+
+    payload = {
+        "session_id": "local-codex-compact-code-only",
+        "error_code": "backend-api/codex/responses/compact",
+        "error_message": "temporary service unavailable",
+        "status": 503,
+    }
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        input=json.dumps(payload),
+        cwd=tmp_path,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["recover"] is True
+    assert output["wait"] == 3
+    assert output["commands"][0]["type"] == "slash_command"
+    assert output["commands"][0]["command"] == "compact"
+    log_text = (tmp_path / "tmp" / "error_recovery_log.jsonl").read_text(encoding="utf-8")
+    assert "max_recoveries_reached" not in log_text
 
 
 def test_local_claude_error_hook_uses_configured_backoff_for_disconnects(tmp_path):

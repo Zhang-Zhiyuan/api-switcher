@@ -1332,7 +1332,8 @@ try {{
     $errorType = Get-ErrorType -ErrorCode $errorCode -ErrorMessage $errorMessage -HttpStatus $httpStatus
     Write-Log "Error type: $errorType" "INFO"
     $compactTransportPattern = "remote compact task|backend-api/codex/responses/compact|responses/compact"
-    $isCompactRecovery = ($errorType -eq "content_length") -or ($errorMessage -match $compactTransportPattern)
+    $compactRecoveryText = "$errorCode $errorMessage"
+    $isCompactRecovery = ($errorType -eq "content_length") -or ($compactRecoveryText -match $compactTransportPattern)
 
     # 检查恢复次数
     $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath
@@ -1453,7 +1454,7 @@ try {{
         $backoffSeconds = Get-BackoffSeconds -Attempt $recoveryCount -InitialDelay $retryInitialDelay -MaxDelay $retryMaxDelay
         $commands = @("继续")
         $userMessage = "服务暂时不可用，等待 $backoffSeconds 秒后重试..."
-        if ($errorMessage -match $compactTransportPattern) {{
+        if ($compactRecoveryText -match $compactTransportPattern) {{
             $commands = @(
                 @{{
                     type = "slash_command"

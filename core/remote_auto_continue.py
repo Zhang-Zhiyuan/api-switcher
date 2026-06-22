@@ -1107,7 +1107,8 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
     if error_type in {"invalid", "unknown"}:
         return False
 
-    compact_transport = bool(re.search(r"remote compact task|backend-api/codex/responses/compact|responses/compact", str(error_message or ""), re.IGNORECASE))
+    compact_source = f"{error_code or ''} {error_message or ''}"
+    compact_transport = bool(re.search(r"remote compact task|backend-api/codex/responses/compact|responses/compact", compact_source, re.IGNORECASE))
     compact_recovery = (not is_claude) and (error_type == "content_length" or compact_transport)
 
     os.makedirs(state_dir, exist_ok=True)

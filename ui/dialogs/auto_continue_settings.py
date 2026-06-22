@@ -203,7 +203,9 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         )
         self._add_note(
             scroll,
-            "支持：内容超长自动压缩、429 按 Retry-After 等待、断联/超时/服务繁忙指数退避、认证/权限/配额友好提示。",
+            "支持：内容超长自动压缩、429 按 Retry-After 等待、断联/超时/服务繁忙指数退避、"
+            "认证/权限/配额友好提示。Codex 自动压缩失败会按退避间隔持续重试直到成功，"
+            "不受最大恢复次数限制。",
         )
 
         self._add_section(scroll, "Git 快照", "自动创建本地 Git 快照，方便恢复到手动任务、续跑或错误恢复前后的状态。")
