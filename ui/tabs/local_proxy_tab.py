@@ -23,6 +23,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     """Tab for managing the Windows local AI proxy."""
 
     STARTUP_REFRESH_DELAY_MS = 2500
+    SCROLL_IDLE_BUILD_MS = 520
+    SCROLL_RETRY_BUILD_MS = 220
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -580,8 +582,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_subscription_picker_pending = True
             return
-        if recent_user_scroll(self):
-            self._subscription_picker_after_id = self.after(180, self._build_subscription_picker)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._subscription_picker_after_id = self.after(self.SCROLL_RETRY_BUILD_MS, self._build_subscription_picker)
             return
         self._deferred_subscription_picker_pending = False
         if self._subscription_picker or not self._subscription_picker_host:
@@ -608,8 +610,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_node_text_pending = True
             return
-        if recent_user_scroll(self):
-            self._node_text_after_id = self.after(180, self._build_node_text)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._node_text_after_id = self.after(self.SCROLL_RETRY_BUILD_MS, self._build_node_text)
             return
         self._deferred_node_text_pending = False
         if self._node_text or not self._node_text_host:
@@ -708,17 +710,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
         if self._deferred_subscription_picker_pending and not self._subscription_picker:
             self._deferred_subscription_picker_pending = False
-            self._schedule_after_once("_subscription_picker_after_id", 20, self._build_subscription_picker)
+            self._schedule_after_once("_subscription_picker_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_subscription_picker)
         if self._deferred_node_text_pending and not self._node_text:
             self._deferred_node_text_pending = False
-            self._schedule_after_once("_node_text_after_id", 40, self._build_node_text)
+            self._schedule_after_once("_node_text_after_id", self.SCROLL_RETRY_BUILD_MS, self._build_node_text)
         if self._deferred_initial_refresh_pending:
             self._deferred_initial_refresh_pending = False
             self._deferred_saved_subscription_pending = False
-            self._schedule_after_once("_initial_refresh_after_id", 80, self.refresh)
+            self._schedule_after_once("_initial_refresh_after_id", self.SCROLL_RETRY_BUILD_MS, self.refresh)
         elif self._deferred_saved_subscription_pending:
             self._deferred_saved_subscription_pending = False
-            self._schedule_after_once("_saved_subscription_after_id", 120, self._load_saved_subscription_ui)
+            self._schedule_after_once("_saved_subscription_after_id", self.SCROLL_RETRY_BUILD_MS, self._load_saved_subscription_ui)
 
     def _schedule_after_once(self, attr: str, delay_ms: int, callback):
         if getattr(self, attr, None):
@@ -734,8 +736,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not is_active_tab(self):
             self._deferred_initial_refresh_pending = True
             return
-        if recent_user_scroll(self):
-            self._schedule_after_once("_initial_refresh_after_id", 180, self.refresh)
+        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+            self._schedule_after_once("_initial_refresh_after_id", self.SCROLL_RETRY_BUILD_MS, self.refresh)
             return
         self._load_proxy_preferences_ui()
         self._cancel_saved_subscription_refresh()
