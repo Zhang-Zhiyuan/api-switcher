@@ -35,7 +35,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     """Tab for managing SSH servers and syncing configs."""
 
     SERVER_RENDER_BATCH_SIZE = 1
-    SERVER_RENDER_BATCH_DELAY_MS = 20
+    SERVER_RENDER_BATCH_DELAY_MS = 280
     PROXY_STARTUP_REFRESH_DELAY_MS = 2500
 
     def __init__(self, master, **kwargs):
@@ -527,7 +527,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
         self._install_deployment_sections_placeholder()
-        self._initial_refresh_after_id = self.after(20, self.refresh)
+        self._initial_refresh_after_id = self.after(360, self.refresh)
 
     def _install_deployment_sections_placeholder(self):
         self._deployment_sections_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -734,7 +734,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
             anchor="w",
         ).pack(fill="x", padx=10, pady=12)
-        self._proxy_subscription_picker_after_id = self.after(120, self._build_proxy_subscription_picker)
+        self._proxy_subscription_picker_after_id = self.after(520, self._build_proxy_subscription_picker)
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_node_actions.grid(row=5, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
@@ -916,8 +916,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._install_remote_auto_section_placeholder(deployment_parent)
         self._update_proxy_target_label()
-        self._proxy_saved_subscription_after_id = self.after(50, self._load_saved_proxy_subscription_ui)
-        self._remote_auto_section_after_id = self.after(520, self._build_remote_auto_section)
+        self._proxy_saved_subscription_after_id = self.after(780, self._load_saved_proxy_subscription_ui)
+        self._remote_auto_section_after_id = self.after(1100, self._build_remote_auto_section)
 
     def _build_proxy_subscription_picker(self):
         self._proxy_subscription_picker_after_id = None
@@ -2304,7 +2304,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         options = {}
         for item in self._proxy_subscription_nodes:
-            options[remote_proxy.proxy_node_key(item.node)] = item
+            options[remote_proxy.proxy_subscription_node_key(item)] = item
         self._proxy_subscription_options = options
 
         if not self._proxy_subscription_picker:
@@ -2471,7 +2471,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
                 result = payload["result"]
-                node_key = remote_proxy.proxy_node_key(item.node)
+                node_key = remote_proxy.proxy_subscription_node_key(item)
                 self._proxy_quality_results[node_key] = result
                 self._proxy_prefer_quality_sort = True
                 save_error = ""
@@ -2541,7 +2541,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 1
                 for item in scope_nodes
                 if remote_proxy.proxy_node_latency_ok(
-                    self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
+                    self._proxy_latency_results.get(remote_proxy.proxy_subscription_node_key(item))
                 )
             )
             if not fastest:
@@ -2552,7 +2552,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 show_toast(self.winfo_toplevel(), message, is_error=True)
                 return
 
-            fastest_key = remote_proxy.proxy_node_key(fastest.node)
+            fastest_key = remote_proxy.proxy_subscription_node_key(fastest)
             self._select_proxy_subscription_node_by_key(fastest_key)
             self._use_selected_proxy_subscription_node(show_message=False)
             latency = remote_proxy.proxy_node_latency_label(self._proxy_latency_results.get(fastest_key))
@@ -2602,7 +2602,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         candidates = []
         measured_any = False
         for item in base_nodes:
-            result = self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
+            result = self._proxy_latency_results.get(remote_proxy.proxy_subscription_node_key(item))
             if result is not None:
                 measured_any = True
             if remote_proxy.proxy_node_latency_ok(result):
@@ -2725,14 +2725,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                     1
                     for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_measured(
-                        self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
+                        self._proxy_quality_results.get(remote_proxy.proxy_subscription_node_key(item))
                     )
                 )
                 high_count = sum(
                     1
                     for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
-                        self._proxy_quality_results.get(remote_proxy.proxy_node_key(item.node))
+                        self._proxy_quality_results.get(remote_proxy.proxy_subscription_node_key(item))
                     )
                 )
                 verify_result = payload.get("verify_result") or {}
@@ -2824,7 +2824,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _aggregate_proxy_latency_results(self, server_results: dict, server_count: int, nodes=None) -> dict:
         aggregate = {}
         for item in (nodes if nodes is not None else self._proxy_subscription_nodes):
-            key = remote_proxy.proxy_node_key(item.node)
+            key = remote_proxy.proxy_subscription_node_key(item)
             latencies = []
             details = []
             attempts = 0
@@ -2861,7 +2861,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         fastest = None
         fastest_latency = None
         for item in (nodes if nodes is not None else self._proxy_subscription_nodes):
-            result = self._proxy_latency_results.get(remote_proxy.proxy_node_key(item.node))
+            result = self._proxy_latency_results.get(remote_proxy.proxy_subscription_node_key(item))
             latency = remote_proxy.proxy_node_latency_ms(result)
             if latency is None or not remote_proxy.proxy_node_latency_ok(result):
                 continue

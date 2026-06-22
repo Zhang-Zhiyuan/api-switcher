@@ -394,7 +394,7 @@ def install_local_ai_proxy_verified(
 
     ranked = []
     for item in remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
-        key = remote_proxy.proxy_node_key(item.node)
+        key = remote_proxy.proxy_subscription_node_key(item)
         if key == requested_key:
             continue
         result = latencies.get(key)
@@ -523,7 +523,7 @@ def reload_local_ai_proxy_verified(
 
     ranked = []
     for item in remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
-        key = remote_proxy.proxy_node_key(item.node)
+        key = remote_proxy.proxy_subscription_node_key(item)
         if key == requested_key:
             continue
         result = latencies.get(key)
@@ -580,7 +580,7 @@ def refresh_running_local_ai_proxy_from_subscription(nodes) -> str:
         ranked = [
             item
             for item in remote_proxy.sort_proxy_subscription_nodes(candidates, latencies)
-            if remote_proxy.proxy_node_latency_ok(latencies.get(remote_proxy.proxy_node_key(item.node)))
+            if remote_proxy.proxy_node_latency_ok(latencies.get(remote_proxy.proxy_subscription_node_key(item)))
         ]
         if not ranked:
             return "订阅已刷新，但没有测到可连节点，已保留当前运行节点"

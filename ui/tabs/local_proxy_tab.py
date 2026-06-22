@@ -573,9 +573,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
-        self._subscription_picker_after_id = self.after(120, self._build_subscription_picker)
-        self._node_text_after_id = self.after(180, self._build_node_text)
-        self._initial_refresh_after_id = self.after(260, self.refresh)
+        self._subscription_picker_after_id = self.after(1800, self._build_subscription_picker)
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None
@@ -599,6 +597,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_picker.set_enabled(False)
         if self._subscription_nodes:
             self._set_subscription_nodes(self._subscription_nodes, preserve_key=self._selected_subscription_node_key())
+        if not self._node_text and not self._node_text_after_id:
+            self._node_text_after_id = self.after(360, self._build_node_text)
 
     def _build_node_text(self):
         self._node_text_after_id = None
@@ -619,6 +619,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **textbox_style(monospace=True),
         )
         self._node_text.pack(fill="both", expand=True)
+        if not self._initial_refresh_after_id and not self._saved_subscription_loaded:
+            self._initial_refresh_after_id = self.after(420, self.refresh)
 
     def destroy(self):
         self._destroyed = True
@@ -1494,7 +1496,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         options = {}
         for item in self._subscription_nodes:
-            options[remote_proxy.proxy_node_key(item.node)] = item
+            options[remote_proxy.proxy_subscription_node_key(item)] = item
         self._subscription_options = options
 
         if not self._subscription_picker:
@@ -1658,7 +1660,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     1
                     for item in scope_nodes
                     if remote_proxy.proxy_node_latency_ok(
-                        self._latency_results.get(remote_proxy.proxy_node_key(item.node))
+                        self._latency_results.get(remote_proxy.proxy_subscription_node_key(item))
                     )
                 )
                 if not fastest:
@@ -1669,7 +1671,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
 
-                fastest_key = remote_proxy.proxy_node_key(fastest.node)
+                fastest_key = remote_proxy.proxy_subscription_node_key(fastest)
                 self._select_subscription_node_by_key(fastest_key)
                 self._use_selected_subscription_node(show_message=False)
                 latency = remote_proxy.proxy_node_latency_label(self._latency_results.get(fastest_key))
@@ -1710,7 +1712,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         candidates = []
         measured_any = False
         for item in base_nodes:
-            result = self._latency_results.get(remote_proxy.proxy_node_key(item.node))
+            result = self._latency_results.get(remote_proxy.proxy_subscription_node_key(item))
             if result is not None:
                 measured_any = True
             if remote_proxy.proxy_node_latency_ok(result):
@@ -1829,14 +1831,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     1
                     for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_measured(
-                        self._quality_results.get(remote_proxy.proxy_node_key(item.node))
+                        self._quality_results.get(remote_proxy.proxy_subscription_node_key(item))
                     )
                 )
                 high_count = sum(
                     1
                     for item in candidate_nodes
                     if remote_proxy.proxy_node_quality_for_ai_proxy_ok(
-                        self._quality_results.get(remote_proxy.proxy_node_key(item.node))
+                        self._quality_results.get(remote_proxy.proxy_subscription_node_key(item))
                     )
                 )
                 best_key = str(payload.get("verified_key") or payload.get("best_key") or "")
@@ -1948,7 +1950,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
                 result = payload["result"]
-                node_key = remote_proxy.proxy_node_key(item.node)
+                node_key = remote_proxy.proxy_subscription_node_key(item)
                 self._quality_results[node_key] = result
                 self._prefer_quality_sort = True
                 save_error = ""
@@ -1978,7 +1980,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         fastest = None
         fastest_latency = None
         for item in (nodes if nodes is not None else self._subscription_nodes):
-            result = self._latency_results.get(remote_proxy.proxy_node_key(item.node))
+            result = self._latency_results.get(remote_proxy.proxy_subscription_node_key(item))
             latency = remote_proxy.proxy_node_latency_ms(result)
             if latency is None or not remote_proxy.proxy_node_latency_ok(result):
                 continue

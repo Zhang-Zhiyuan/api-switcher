@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
@@ -220,6 +220,8 @@ class ProxySubscriptionNode:
     index: int
     node: dict
     source: str = ""
+    node_key: str = field(default="", compare=False, repr=False)
+    region: str = field(default="", compare=False, repr=False)
 
     def display_name(self) -> str:
         return f"{self.index}. {describe_proxy_node(self.node)}"
@@ -331,7 +333,13 @@ def parse_proxy_subscription_content(text: str) -> tuple[ProxySubscriptionNode, 
     if not unique_nodes:
         raise ValueError("订阅内容里没有识别到可用的 Clash/mihomo 节点")
     return tuple(
-        ProxySubscriptionNode(index=index, node=node, source="subscription")
+        ProxySubscriptionNode(
+            index=index,
+            node=node,
+            source="subscription",
+            node_key=proxy_node_key(node),
+            region=proxy_node_region(node),
+        )
         for index, node in enumerate(unique_nodes, 1)
     )
 
@@ -921,6 +929,16 @@ def proxy_node_key(node: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def proxy_subscription_node_key(item: ProxySubscriptionNode) -> str:
+    cached = str(getattr(item, "node_key", "") or "")
+    return cached or proxy_node_key(item.node)
+
+
+def proxy_subscription_node_region(item: ProxySubscriptionNode) -> str:
+    cached = str(getattr(item, "region", "") or "")
+    return cached or proxy_node_region(item.node)
+
+
 def describe_proxy_node(node: dict) -> str:
     normalized = _normalize_proxy_node(node)
     return (
@@ -965,8 +983,8 @@ def sort_proxy_subscription_nodes(
     qualities = quality_results or {}
 
     def sort_key(item: ProxySubscriptionNode):
-        node_key = proxy_node_key(item.node)
-        region = proxy_node_region(item.node)
+        node_key = proxy_subscription_node_key(item)
+        region = proxy_subscription_node_region(item)
         region_index = PROXY_REGION_ORDER.index(region) if region in PROXY_REGION_ORDER else len(PROXY_REGION_ORDER)
         quality_result = qualities.get(node_key)
         quality_score = proxy_node_quality_score(quality_result)
@@ -1002,10 +1020,10 @@ def best_proxy_subscription_node_for_ai_proxy(
         prefer_quality=True,
     )
     for item in ranked:
-        if proxy_node_quality_for_ai_proxy_ok(quality_results.get(proxy_node_key(item.node))):
+        if proxy_node_quality_for_ai_proxy_ok(quality_results.get(proxy_subscription_node_key(item))):
             return item
     for item in ranked:
-        if proxy_node_quality_measured(quality_results.get(proxy_node_key(item.node))):
+        if proxy_node_quality_measured(quality_results.get(proxy_subscription_node_key(item))):
             return item
     return None
 
@@ -1656,7 +1674,7 @@ def install_ai_proxy_verified(
 
     ranked = []
     for item in ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
-        key = proxy_node_key(item.node)
+        key = proxy_subscription_node_key(item)
         if key == requested_key:
             continue
         result = latencies.get(key)
@@ -1784,7 +1802,7 @@ def reload_ai_proxy_verified(
 
     ranked = []
     for item in ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
-        key = proxy_node_key(item.node)
+        key = proxy_subscription_node_key(item)
         if key == requested_key:
             continue
         result = latencies.get(key)
@@ -1843,7 +1861,7 @@ def refresh_running_ai_proxy_from_subscription(
         ranked = [
             item
             for item in sort_proxy_subscription_nodes(candidates, latencies)
-            if proxy_node_latency_ok(latencies.get(proxy_node_key(item.node)))
+            if proxy_node_latency_ok(latencies.get(proxy_subscription_node_key(item)))
         ]
         if not ranked:
             return f"{ssh_name}: 订阅已刷新，但没有测到可连节点，已保留当前运行节点"
@@ -4207,7 +4225,7 @@ def _find_matching_subscription_node(nodes, current_node: dict | None):
     current_key = proxy_node_key(current)
     for item in nodes or []:
         try:
-            if proxy_node_key(item.node) == current_key:
+            if proxy_subscription_node_key(item) == current_key:
                 return item
         except Exception:
             continue

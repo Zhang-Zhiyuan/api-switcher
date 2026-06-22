@@ -14,10 +14,10 @@ class ProxyNodePicker(ctk.CTkFrame):
     FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速")
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
-    MAX_VISIBLE_ROWS = 18
-    VISIBLE_ROWS_STEP = 18
+    MAX_VISIBLE_ROWS = 10
+    VISIBLE_ROWS_STEP = 12
     RENDER_BATCH_SIZE = 1
-    RENDER_BATCH_DELAY_MS = 20
+    RENDER_BATCH_DELAY_MS = 95
 
     def __init__(self, master, on_select=None, on_scope_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -364,7 +364,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._emit_scope_change()
         try:
             self._render_batch_after_id = self.after(
-                1,
+                45,
                 lambda: self._render_plan_batch(generation, render_plan, 0),
             )
         except Exception:
@@ -854,11 +854,11 @@ class ProxyNodePicker(ctk.CTkFrame):
     def _build_item_metadata(self, item) -> dict:
         node = item.node
         try:
-            node_key = remote_proxy.proxy_node_key(node)
+            node_key = remote_proxy.proxy_subscription_node_key(item)
         except Exception:
             node_key = f"invalid:{item.index}:{id(item)}"
         try:
-            region = remote_proxy.proxy_node_region(node)
+            region = remote_proxy.proxy_subscription_node_region(item)
         except Exception:
             region = "其他"
         latency = self._latency_results.get(node_key)

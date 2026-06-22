@@ -26,6 +26,7 @@ class EnvTab(ctk.CTkScrollableFrame):
         self._remote_env_control = None
         self._remote_env_host = None
         self._remote_env_after_id = None
+        self._initial_refresh_after_id = None
         self._last_import_sources = None
         self._last_import_sources_error = ""
         self._source_refresh_generation = 0
@@ -111,9 +112,9 @@ class EnvTab(ctk.CTkScrollableFrame):
             font=font(12),
             anchor="w",
         ).pack(fill="x", padx=14, pady=12)
-        self._remote_env_after_id = self.after(160, self._build_remote_env_control)
+        self._remote_env_after_id = self.after(640, self._build_remote_env_control)
 
-        self.after(20, self.refresh)
+        self._initial_refresh_after_id = self.after(360, self._run_initial_refresh)
 
     def _env_controls(self):
         return tuple(control for control in (self._local_env_control, self._remote_env_control) if control)
@@ -145,6 +146,12 @@ class EnvTab(ctk.CTkScrollableFrame):
                 self._remote_env_control.set_status(self._last_import_sources_error, "error")
 
     def destroy(self):
+        if self._initial_refresh_after_id:
+            try:
+                self.after_cancel(self._initial_refresh_after_id)
+            except Exception:
+                pass
+            self._initial_refresh_after_id = None
         if self._remote_env_after_id:
             try:
                 self.after_cancel(self._remote_env_after_id)
@@ -152,6 +159,10 @@ class EnvTab(ctk.CTkScrollableFrame):
                 pass
             self._remote_env_after_id = None
         super().destroy()
+
+    def _run_initial_refresh(self):
+        self._initial_refresh_after_id = None
+        self.refresh()
 
     def refresh(self):
         self._refresh_import_sources()
