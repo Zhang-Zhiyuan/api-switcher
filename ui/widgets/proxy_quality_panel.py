@@ -159,13 +159,13 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         ).pack(side="left", padx=(0, 6))
         for text, mode in (
             ("AI 推荐", "recommended"),
-            ("基础源", "keyless"),
+            ("免 Key 多源", "keyless"),
             ("全量", "all"),
         ):
             button = ctk.CTkButton(
                 preset_bar,
                 text=text,
-                width=74,
+                width=92 if mode == "keyless" else 74,
                 command=lambda mode=mode: self._apply_service_preset(mode),
                 **button_style("secondary", compact=True),
             )
@@ -218,7 +218,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         status_card.pack(fill="x", padx=14, pady=(0, 10))
         self._status_label = ctk.CTkLabel(
             status_card,
-            text="未检测。点击后会先测速，再只对可连通 IP 调用 Ping0 和信誉检测接口。",
+            text="未检测。点击后会先测速，再只对可连通 IP 调用已启用的质量源。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -477,7 +477,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 if not service_settings.enabled:
                     count_label.configure(text="关闭", text_color=COLORS["muted_soft"])
                 elif service in NO_KEY_SERVICES:
-                    count_label.configure(text="免 Key", text_color=COLORS["success"])
+                    count_label.configure(text="默认免 Key", text_color=COLORS["success"])
                 elif count:
                     count_label.configure(text=f"Key x{count}", text_color=COLORS["success"])
                 elif service in KEYLESS_SERVICES:
@@ -547,7 +547,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             if service_settings.api_keys:
                 key_counts.append(f"{label} {len(service_settings.api_keys)} 个 Key")
         enabled_text = "、".join(enabled_labels) if enabled_labels else "未启用检测源"
-        parts = [f"已启用: {enabled_text}"]
+        parts = [f"当前方案: {self._settings_mode_label(settings)}", f"已启用: {enabled_text}"]
         if key_counts:
             parts.append("Key 池: " + "；".join(key_counts))
         if direct_labels:
@@ -555,6 +555,25 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         if missing_key_labels:
             parts.append("缺 Key: " + "、".join(missing_key_labels))
         return "  |  ".join(parts)
+
+    def _settings_mode_label(self, settings) -> str:
+        enabled = set(settings.enabled_services()) if hasattr(settings, "enabled_services") else set()
+        visible = set(diagnostic_constants.VISIBLE_SERVICE_ORDER)
+        ai_recommended = {diagnostic_constants.SERVICE_NETCOFFEE}
+        keyless = {
+            diagnostic_constants.SERVICE_NETCOFFEE,
+            diagnostic_constants.SERVICE_PROXYCHECK,
+            diagnostic_constants.SERVICE_IPAPI,
+        }
+        if enabled == ai_recommended:
+            return "AI 推荐（最快，默认）"
+        if enabled == keyless:
+            return "基础源（免 Key 多源校验）"
+        if enabled == visible:
+            return "全量检测"
+        if not enabled:
+            return "未启用"
+        return "自定义"
 
     def refresh(self):
         if self._last_report:

@@ -400,7 +400,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button = ctk.CTkButton(
             node_actions,
             text="测速范围",
-            width=104,
+            width=118,
             command=self._measure_subscription_latencies,
             state="disabled",
             **button_style("secondary", compact=True),
@@ -408,8 +408,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button.pack(anchor="e", pady=(0, 6))
         self._quality_button = ctk.CTkButton(
             node_actions,
-            text="质量+复核",
-            width=104,
+            text="质量选优+复核",
+            width=118,
             command=self._measure_subscription_qualities,
             state="disabled",
             **button_style("secondary", compact=True),
@@ -425,7 +425,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._use_node_button = ctk.CTkButton(
             node_actions,
             text="使用当前",
-            width=104,
+            width=118,
             command=self._use_selected_subscription_node,
             state="disabled",
             **button_style("accent", compact=True),
@@ -433,8 +433,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._use_node_button.pack(anchor="e")
         self._ping0_button = ctk.CTkButton(
             node_actions,
-            text="测当前",
-            width=104,
+            text="测当前质量",
+            width=118,
             command=self._measure_selected_subscription_quality,
             state="disabled",
             **button_style("secondary", compact=True),
@@ -449,21 +449,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).pack(anchor="e", pady=(8, 4))
         self._quality_settings_button = ctk.CTkButton(
             node_actions,
-            text="质量源",
-            width=104,
+            text="质量源/Key",
+            width=118,
             command=self._open_proxy_quality_dialog,
             **button_style("primary", compact=True),
         )
         self._quality_settings_button.pack(anchor="e")
         self._subscription_action_hint_label = ctk.CTkLabel(
             node_actions,
-            text="范围: -\n源: -",
+            text="检测范围: -\n未勾选则用当前筛选\n质量源: -",
             text_color=COLORS["muted_soft"],
             font=font(11),
-            width=112,
+            width=126,
             anchor="e",
             justify="right",
-            wraplength=112,
+            wraplength=126,
         )
         self._subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
         self._selected_label = ctk.CTkLabel(
@@ -1539,7 +1539,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         source = remote_proxy.quality_source_label_from_settings()
         color = COLORS["warning"] if source == "未启用检测源" else COLORS["muted_soft"]
         self._subscription_action_hint_label.configure(
-            text=f"范围: {scope}\n未勾选=此范围\n源: {source}",
+            text=f"检测范围: {scope}\n未勾选则用当前筛选\n质量源: {source}",
             text_color=color,
         )
 

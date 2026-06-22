@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import gzip
+import hashlib
 import ipaddress
 import io
 import json
@@ -55,7 +56,7 @@ _LOCAL_PROXY_PREFS_CACHE: dict | None = None
 _LOCAL_PROXY_PREFS_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 _LOCAL_PROXY_STATE_LOCK = threading.RLock()
 _LOCAL_PROXY_STATE_CACHE: dict | None = None
-_LOCAL_PROXY_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
+_LOCAL_PROXY_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -713,18 +714,19 @@ def _cache_local_proxy_preferences(
     _LOCAL_PROXY_PREFS_CACHE_SIGNATURE = signature or _local_proxy_preferences_signature()
 
 
-def _local_proxy_state_signature() -> tuple[str, int | None, int | None]:
+def _local_proxy_state_signature() -> tuple[str, int | None, int | None, str]:
     path_key = str(LOCAL_PROXY_STATE_PATH.resolve(strict=False))
     try:
         stat = LOCAL_PROXY_STATE_PATH.stat()
-        return (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+        digest = hashlib.sha256(LOCAL_PROXY_STATE_PATH.read_bytes()).hexdigest()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size), digest)
     except OSError:
-        return (path_key, None, None)
+        return (path_key, None, None, "")
 
 
 def _cache_local_proxy_state(
     state: dict,
-    signature: tuple[str, int | None, int | None] | None = None,
+    signature: tuple[str, int | None, int | None, str] | None = None,
 ) -> None:
     global _LOCAL_PROXY_STATE_CACHE, _LOCAL_PROXY_STATE_CACHE_SIGNATURE
     _LOCAL_PROXY_STATE_CACHE = copy.deepcopy(state)

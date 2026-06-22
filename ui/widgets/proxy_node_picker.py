@@ -33,6 +33,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             "measured": 0,
             "quality": 0,
             "high_quality": 0,
+            "cached_quality": 0,
         }
         self._selected_key = ""
         self._checked_keys = set()
@@ -486,8 +487,6 @@ class ProxyNodePicker(ctk.CTkFrame):
         latency_color = self._latency_color(latency)
         quality = meta.get("quality")
         quality_label = str(meta.get("quality_label") or "")
-        quality_score = int(meta.get("quality_score") or 0)
-        quality_ip = str(meta.get("quality_ip") or "")
         region = str(meta.get("region") or "其他")
         node_type = str(node.get("type") or "").upper()
         server = str(node.get("server") or "")
@@ -538,13 +537,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
         if remote_proxy.proxy_node_quality_measured(quality):
-            quality_part = f"{quality_label} {quality_score}"
-            if quality_ip:
-                quality_part += f" {quality_ip}"
-            source_label = str(meta.get("quality_source_label") or "")
-            if source_label and source_label != "未标明检测源":
-                quality_part += f" 基于{source_label}"
-            meta_parts.append(quality_part)
+            meta_parts.append(self._quality_summary_text(meta))
         elif quality:
             meta_parts.append(quality_label)
         if latency_detail:
@@ -571,10 +564,10 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         ctk.CTkLabel(
             row,
-            text=quality_label if quality else "未测质量",
+            text=self._quality_badge_text(meta),
             text_color=self._quality_color(quality),
             font=font(11, "bold"),
-            width=76,
+            width=92,
             anchor="e",
         ).grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 8))
 
@@ -681,6 +674,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         measured_count = int(self._summary_counts.get("measured") or 0)
         quality_count = int(self._summary_counts.get("quality") or 0)
         high_quality_count = int(self._summary_counts.get("high_quality") or 0)
+        cached_quality_count = int(self._summary_counts.get("cached_quality") or 0)
         checked_count = len(self._checked_keys)
         suffix = ""
         if visible_count is not None and match_count > visible_count:
@@ -691,6 +685,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             text=(
                 f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"
                 f"质量 {quality_count}；高质 {high_quality_count}；"
+                f"缓存 {cached_quality_count}；"
                 f"勾选 {checked_count}；匹配 {match_count} 个{suffix}"
             )
         )
@@ -843,6 +838,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             "measured": 0,
             "quality": 0,
             "high_quality": 0,
+            "cached_quality": 0,
         }
         for item in self._nodes:
             meta = self._build_item_metadata(item)
@@ -855,6 +851,8 @@ class ProxyNodePicker(ctk.CTkFrame):
                 counts["quality"] += 1
             if meta.get("quality_ai_ok"):
                 counts["high_quality"] += 1
+            if meta.get("quality_cached"):
+                counts["cached_quality"] += 1
         self._summary_counts = counts
         self._metadata_version += 1
         self._invalidate_filter_cache()
@@ -886,6 +884,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         quality_risk = remote_proxy.proxy_node_quality_risk_score(quality)
         quality_measured = remote_proxy.proxy_node_quality_measured(quality)
         quality_ai_ok = remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality)
+        quality_cached = remote_proxy.proxy_node_quality_cached(quality)
         static_parts = [
             str(item.index),
             str(node.get("name") or ""),
@@ -901,6 +900,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             quality_detail,
             quality_ip_type,
             quality_ip,
+            "缓存" if quality_cached else "",
         ]
         meta = {
             "key": node_key,
@@ -920,6 +920,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             "quality_source_label": quality_source_label,
             "quality_measured": quality_measured,
             "quality_ai_ok": quality_ai_ok,
+            "quality_cached": quality_cached,
             "quality_score": quality_score,
             "quality_risk": quality_risk,
             "quality_label_text": quality_label.casefold(),
@@ -927,6 +928,44 @@ class ProxyNodePicker(ctk.CTkFrame):
         }
         self._node_meta[id(item)] = meta
         return meta
+
+    def _quality_summary_text(self, meta: dict) -> str:
+        label = str(meta.get("quality_label") or "质量已测")
+        score = int(meta.get("quality_score") or 0)
+        risk = meta.get("quality_risk")
+        ip = str(meta.get("quality_ip") or "")
+        source = str(meta.get("quality_source_label") or "")
+        parts = [f"{label} {score}"]
+        if risk is not None:
+            parts.append(f"风险{risk}%")
+        if ip:
+            parts.append(ip)
+        if source and source != "未标明检测源":
+            parts.append(f"基于{source}")
+        if meta.get("quality_cached"):
+            parts.append("缓存")
+        detail = self._compact_quality_detail(str(meta.get("quality_detail") or ""))
+        if detail:
+            parts.append(detail)
+        return " ".join(parts)
+
+    def _quality_badge_text(self, meta: dict) -> str:
+        quality = meta.get("quality")
+        if not quality:
+            return "未测质量"
+        label = str(meta.get("quality_label") or "质量")
+        if not meta.get("quality_measured"):
+            return label
+        score = int(meta.get("quality_score") or 0)
+        return f"{label} {score}"
+
+    def _compact_quality_detail(self, detail: str) -> str:
+        text = " ".join(str(detail or "").replace("；", " ").split())
+        if not text:
+            return ""
+        if "缓存命中" in text:
+            text = text.replace("缓存命中，跳过重复评测", "").strip()
+        return text[:70] + ("..." if len(text) > 70 else "")
 
     def _latency_color(self, result) -> str:
         if remote_proxy.proxy_node_latency_ok(result):
