@@ -18,6 +18,23 @@ from ui.widgets.toast import show_toast
 
 logger = logging.getLogger(__name__)
 
+SESSION_MIGRATION_WIDE_MIN_WIDTH = 1000
+SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH = 620
+
+
+def _session_migration_layout(width: int) -> tuple[str, int]:
+    """Return the responsive mode and header action column count."""
+
+    try:
+        available_width = max(1, int(width))
+    except (TypeError, ValueError):
+        available_width = 1
+    if available_width >= SESSION_MIGRATION_WIDE_MIN_WIDTH:
+        return "wide", 5
+    if available_width >= SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH:
+        return "compact", 3
+    return "compact", 2
+
 
 profile_manager = LazyModule("core.profile_manager")
 session_migration = LazyModule("core.session_migration")
@@ -81,6 +98,16 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._deferred_refresh_pending = False
         self._deferred_render_pending = False
         self._visible_limit = self.MAX_VISIBLE_RECORDS
+        self._responsive_layout_after_id = None
+        self._responsive_layout_state = None
+        self._header = None
+        self._title_area = None
+        self._header_actions = None
+        self._header_action_buttons = []
+        self._filter_bar = None
+        self._filter_groups = []
+        self._select_visible_button = None
+        self._clear_selection_button = None
         self._build_ui()
 
     def destroy(self):
@@ -89,6 +116,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._cancel_deferred_render()
         self._cancel_initial_refresh()
         self._cancel_inactive_clear()
+        self._cancel_responsive_layout()
         super().destroy()
 
     def _resolve_ui_dispatch(self):
@@ -111,19 +139,19 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             logger.exception("Failed to schedule session migration UI callback")
 
     def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header = ctk.CTkFrame(self, fg_color="transparent")
+        self._header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header.grid_columnconfigure(0, weight=1)
 
-        title_area = ctk.CTkFrame(header, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        self._title_area = ctk.CTkFrame(self._header, fg_color="transparent")
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="会话迁移",
             text_color=COLORS["text"],
             font=font(18, "bold"),
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="读取本机或 SSH 服务器上的 Claude Code / Codex CLI 历史会话，导出迁移包并导入到本机或其他 SSH 服务器。",
             text_color=COLORS["muted"],
             font=font(12),
@@ -131,104 +159,122 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         subtitle.pack(anchor="w", fill="x", pady=(2, 0))
-        bind_wraplength(title_area, subtitle, padding=12, min_width=260, max_width=620)
+        bind_wraplength(self._title_area, subtitle, padding=12, min_width=260, max_width=620)
 
-        actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.pack(side="right", padx=(12, 0))
-        ctk.CTkButton(
-            actions,
+        self._header_actions = ctk.CTkFrame(self._header, fg_color="transparent")
+        import_project_button = ctk.CTkButton(
+            self._header_actions,
             text="导入到目标项目",
             width=128,
             command=self._import_package_to_project,
             **button_style("primary"),
-        ).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            actions,
+        )
+        import_package_button = ctk.CTkButton(
+            self._header_actions,
             text="导入迁移包",
             width=112,
             command=self._import_package,
             **button_style("accent"),
-        ).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            actions,
+        )
+        export_button = ctk.CTkButton(
+            self._header_actions,
             text="导出选中",
             width=104,
             command=self._export_selected,
             **button_style("success"),
-        ).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            actions,
+        )
+        transfer_button = ctk.CTkButton(
+            self._header_actions,
             text="迁移到目标",
             width=112,
             command=self._transfer_selected_to_target,
             **button_style("primary"),
-        ).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            actions,
+        )
+        refresh_button = ctk.CTkButton(
+            self._header_actions,
             text="刷新",
             width=82,
             command=self.refresh,
             **button_style("secondary"),
-        ).pack(side="left")
+        )
+        self._header_action_buttons = [
+            import_project_button,
+            import_package_button,
+            export_button,
+            transfer_button,
+            refresh_button,
+        ]
 
-        filter_bar = ctk.CTkFrame(
+        self._filter_bar = ctk.CTkFrame(
             self,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        filter_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self._filter_bar.pack(fill="x", padx=14, pady=(0, 8))
         location_values = list(self._location_options.keys())
-        ctk.CTkLabel(filter_bar, text="读取位置", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        source_group = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        source_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(source_group, text="读取位置", text_color=COLORS["muted"], font=font(12)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
         self._source_location_combo = ctk.CTkComboBox(
-            filter_bar,
+            source_group,
             values=location_values,
             width=150,
             command=self._on_source_location_change,
             **combo_style(),
         )
         self._source_location_combo.set(location_values[0])
-        self._source_location_combo.pack(side="left", padx=(8, 0), pady=9)
+        self._source_location_combo.grid(row=0, column=1, sticky="ew")
 
-        ctk.CTkLabel(filter_bar, text="导入目标", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        target_group = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        target_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(target_group, text="导入目标", text_color=COLORS["muted"], font=font(12)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
         self._target_location_combo = ctk.CTkComboBox(
-            filter_bar,
+            target_group,
             values=location_values,
             width=150,
             **combo_style(),
         )
         self._target_location_combo.set(location_values[0])
-        self._target_location_combo.pack(side="left", padx=(8, 0), pady=9)
+        self._target_location_combo.grid(row=0, column=1, sticky="ew")
 
-        ctk.CTkLabel(filter_bar, text="会话类型", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
+        type_group = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        type_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(type_group, text="会话类型", text_color=COLORS["muted"], font=font(12)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
         self._filter_combo = ctk.CTkComboBox(
-            filter_bar,
+            type_group,
             values=list(self.FILTER_OPTIONS.keys()),
             width=120,
             command=self._on_filter_change,
             **combo_style(),
         )
         self._filter_combo.set("全部")
-        self._filter_combo.pack(side="left", padx=(8, 0), pady=9)
+        self._filter_combo.grid(row=0, column=1, sticky="ew")
+        self._filter_groups = [source_group, target_group, type_group]
 
-        ctk.CTkButton(
-            filter_bar,
+        self._select_visible_button = ctk.CTkButton(
+            self._filter_bar,
             text="全选当前",
             width=92,
             command=self._select_visible,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(12, 0), pady=9)
-        ctk.CTkButton(
-            filter_bar,
+        )
+        self._clear_selection_button = ctk.CTkButton(
+            self._filter_bar,
             text="清空选择",
             width=92,
             command=self._clear_selection,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(8, 0), pady=9)
+        )
 
-        self._stats_label = ctk.CTkLabel(filter_bar, text="", text_color=COLORS["muted"], font=font(12))
-        self._stats_label.pack(side="right", padx=(12, 12))
+        self._stats_label = ctk.CTkLabel(self._filter_bar, text="", text_color=COLORS["muted"], font=font(12))
 
         warning = ctk.CTkLabel(
             self,
@@ -250,6 +296,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             font=font(13),
         ).pack(fill="x", pady=(22, 6))
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._schedule_initial_refresh()
 
     def _schedule_initial_refresh(self):

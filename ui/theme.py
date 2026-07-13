@@ -1,8 +1,11 @@
+import ctypes
+import math
 import re
 import sys
 import time
 import tkinter
 import customtkinter as ctk
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -16,6 +19,7 @@ _SCROLL_ACTIVITY_ATTR = "_api_switcher_last_scroll_at"
 _WINDOWS_SCROLL_DELTA_DIVISOR = 5
 _WINDOWS_SCROLL_MIN_WHEEL_UNITS = 24
 _WINDOWS_SCROLL_NOTCH_DELTA = 120
+WINDOW_EDGE_MARGIN = 16
 
 COLORS = {
     "app_bg": "#101216",
@@ -340,9 +344,18 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
             if not label.winfo_exists():
                 return
             width = container.winfo_width()
+            try:
+                scaling = float(container._get_widget_scaling())
+            except (AttributeError, TypeError, ValueError):
+                scaling = 1.0
+            if scaling > 0:
+                width = round(width / scaling)
             if width <= 1:
-                width = max_width
-            wraplength = max(min_width, min(max_width, width - padding))
+                wraplength = max(1, min(max_width, max(min_width, 1)))
+            else:
+                # Once a real width is available it must win over min_width;
+                # otherwise the label itself can force a narrow container wider.
+                wraplength = max(1, min(max_width, width - padding))
             if state.get("wraplength") == wraplength:
                 return
             state["wraplength"] = wraplength
@@ -368,61 +381,246 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
 _GEOMETRY_SIZE_RE = re.compile(r"^(\d+)x(\d+)")
 
 
+@dataclass(frozen=True)
+class WindowLayout:
+    """A window layout expressed in logical size and physical position units."""
+
+    width: int
+    height: int
+    min_width: int
+    min_height: int
+    x: int
+    y: int
+
+
+def calculate_window_layout(
+    preferred_size: tuple[int, int],
+    minimum_size: tuple[int, int],
+    screen_bounds: tuple[int, int, int, int],
+    *,
+    scaling: float = 1.0,
+    master_bounds: tuple[int, int, int, int] | None = None,
+    margin: int = WINDOW_EDGE_MARGIN,
+) -> WindowLayout:
+    """Fit a logical window size inside physical screen bounds.
+
+    CustomTkinter scales geometry width/height but leaves x/y coordinates in
+    physical pixels. Keeping those unit systems explicit prevents high-DPI
+    windows from being scaled twice while they are centred.
+    """
+
+    try:
+        scale = max(float(scaling), 0.1)
+    except (TypeError, ValueError):
+        scale = 1.0
+
+    screen_x, screen_y, screen_width, screen_height = (int(value) for value in screen_bounds)
+    screen_width = max(screen_width, 1)
+    screen_height = max(screen_height, 1)
+    physical_margin = max(0, round(max(0, int(margin)) * scale))
+    max_horizontal_margin = max((screen_width - 1) // 2, 0)
+    max_vertical_margin = max((screen_height - 1) // 2, 0)
+    margin_x = min(physical_margin, max_horizontal_margin)
+    margin_y = min(physical_margin, max_vertical_margin)
+
+    safe_x = screen_x + margin_x
+    safe_y = screen_y + margin_y
+    safe_width = max(screen_width - margin_x * 2, 1)
+    safe_height = max(screen_height - margin_y * 2, 1)
+    available_width = max(1, math.floor(safe_width / scale))
+    available_height = max(1, math.floor(safe_height / scale))
+
+    preferred_width = max(1, int(preferred_size[0]))
+    preferred_height = max(1, int(preferred_size[1]))
+    requested_min_width = max(1, int(minimum_size[0]))
+    requested_min_height = max(1, int(minimum_size[1]))
+    width = min(max(preferred_width, requested_min_width), available_width)
+    height = min(max(preferred_height, requested_min_height), available_height)
+    min_width = min(requested_min_width, width)
+    min_height = min(requested_min_height, height)
+
+    physical_width = min(max(1, round(width * scale)), safe_width)
+    physical_height = min(max(1, round(height * scale)), safe_height)
+
+    if master_bounds is not None:
+        master_x, master_y, master_width, master_height = (int(value) for value in master_bounds)
+        x = master_x + (max(master_width, 1) - physical_width) // 2
+        y = master_y + (max(master_height, 1) - physical_height) // 2
+    else:
+        x = safe_x + (safe_width - physical_width) // 2
+        y = safe_y + (safe_height - physical_height) // 2
+
+    max_x = safe_x + max(safe_width - physical_width, 0)
+    max_y = safe_y + max(safe_height - physical_height, 0)
+    x = min(max(x, safe_x), max_x)
+    y = min(max(y, safe_y), max_y)
+    return WindowLayout(width, height, min_width, min_height, x, y)
+
+
 def _configured_window_size(window, configured_geometry: str) -> tuple[int, int]:
-    width = window.winfo_width()
-    height = window.winfo_height()
+    try:
+        # CTk keeps the requested logical size here even while a new toplevel
+        # is still withdrawn and Tk reports its temporary 200x200 geometry.
+        width = int(window._current_width)
+        height = int(window._current_height)
+    except (AttributeError, TypeError, ValueError):
+        width = height = 0
 
-    if width <= 1 or height <= 1:
-        match = _GEOMETRY_SIZE_RE.match(configured_geometry)
-        if match:
-            width = int(match.group(1))
-            height = int(match.group(2))
+    match = _GEOMETRY_SIZE_RE.match(configured_geometry)
+    if (width <= 1 or height <= 1) and match:
+        width = int(match.group(1))
+        height = int(match.group(2))
+    elif width <= 1 or height <= 1:
+        scaling = _window_scaling(window)
+        width = round(window.winfo_width() / scaling)
+        height = round(window.winfo_height() / scaling)
 
+    scaling = _window_scaling(window)
     if width <= 1:
-        width = window.winfo_reqwidth()
+        width = round(window.winfo_reqwidth() / scaling)
     if height <= 1:
-        height = window.winfo_reqheight()
+        height = round(window.winfo_reqheight() / scaling)
 
     return max(width, 1), max(height, 1)
 
 
-def _screen_bounds(window) -> tuple[int, int, int, int]:
+def _window_scaling(window) -> float:
     try:
-        return (
+        return max(float(window._get_window_scaling()), 0.1)
+    except (AttributeError, TypeError, ValueError):
+        return 1.0
+
+
+def _window_minimum_size(window, fallback: tuple[int, int]) -> tuple[int, int]:
+    try:
+        width = int(window._min_width)
+        height = int(window._min_height)
+        return max(width, 1), max(height, 1)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    try:
+        scaling = _window_scaling(window)
+        width, height = tkinter.Wm.minsize(window)
+        return max(1, round(width / scaling)), max(1, round(height / scaling))
+    except Exception:
+        return max(1, int(fallback[0])), max(1, int(fallback[1]))
+
+
+def _windows_work_area(window) -> tuple[int, int, int, int] | None:
+    if not sys.platform.startswith("win"):
+        return None
+
+    try:
+        from ctypes import wintypes
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+        hwnd = user32.GetAncestor(window.winfo_id(), 2) or window.winfo_id()
+        monitor = user32.MonitorFromWindow(hwnd, 2)
+        info = MonitorInfo(cbSize=ctypes.sizeof(MonitorInfo))
+        if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            rect = info.rcWork
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            if width > 0 and height > 0:
+                return rect.left, rect.top, width, height
+    except Exception:
+        return None
+    return None
+
+
+def _screen_bounds(window) -> tuple[int, int, int, int]:
+    work_area = _windows_work_area(window)
+    if work_area is not None:
+        return work_area
+    try:
+        bounds = (
             window.winfo_vrootx(),
             window.winfo_vrooty(),
             window.winfo_vrootwidth(),
             window.winfo_vrootheight(),
         )
+        if bounds[2] > 1 and bounds[3] > 1:
+            return bounds
     except Exception:
-        return (0, 0, window.winfo_screenwidth(), window.winfo_screenheight())
+        pass
+    return (0, 0, window.winfo_screenwidth(), window.winfo_screenheight())
 
 
-def center_window(window, master=None) -> None:
+def fit_window_to_screen(
+    window,
+    master=None,
+    *,
+    preferred_size: tuple[int, int] | None = None,
+    minimum_size: tuple[int, int] | None = None,
+    margin: int = WINDOW_EDGE_MARGIN,
+    activate: bool = False,
+    make_transient: bool = False,
+) -> WindowLayout:
+    """Resize and position a Tk/CustomTkinter window inside its monitor."""
+
     configured_geometry = window.geometry()
-    window.update_idletasks()
-    width, height = _configured_window_size(window, configured_geometry)
+    configured_size = _configured_window_size(window, configured_geometry)
+    preferred = preferred_size or configured_size
+    minimum = minimum_size or _window_minimum_size(window, preferred)
+    scaling = _window_scaling(window)
 
-    if master is not None and master.winfo_exists() and master.winfo_width() > 1:
-        x = master.winfo_rootx() + (master.winfo_width() - width) // 2
-        y = master.winfo_rooty() + (master.winfo_height() - height) // 2
-    else:
-        screen_x, screen_y, screen_width, screen_height = _screen_bounds(window)
-        x = screen_x + (screen_width - width) // 2
-        y = screen_y + (screen_height - height) // 2
+    master_bounds = None
+    try:
+        if master is not None and master.winfo_exists() and master.winfo_width() > 1:
+            master_bounds = (
+                master.winfo_rootx(),
+                master.winfo_rooty(),
+                master.winfo_width(),
+                master.winfo_height(),
+            )
+    except Exception:
+        master_bounds = None
 
-    screen_x, screen_y, screen_width, screen_height = _screen_bounds(window)
-    max_x = screen_x + max(screen_width - width, 0)
-    max_y = screen_y + max(screen_height - height, 0)
-    x = min(max(x, screen_x), max_x)
-    y = min(max(y, screen_y), max_y)
+    layout = calculate_window_layout(
+        preferred,
+        minimum,
+        _screen_bounds(master or window),
+        scaling=scaling,
+        master_bounds=master_bounds,
+        margin=margin,
+    )
+    window.minsize(layout.min_width, layout.min_height)
+    window.geometry(f"{layout.width}x{layout.height}+{layout.x}+{layout.y}")
 
-    if master is not None and master.winfo_exists():
+    if make_transient and master is not None:
         try:
-            window.transient(master)
+            if master.winfo_exists():
+                window.transient(master)
         except Exception:
             pass
 
-    window.geometry(f"{width}x{height}+{x}+{y}")
-    window.lift()
-    window.focus_force()
+    if activate:
+        window.lift()
+        window.focus_force()
+    return layout
+
+
+def center_window(window, master=None) -> None:
+    window.update_idletasks()
+    fit_window_to_screen(
+        window,
+        master,
+        activate=True,
+        make_transient=True,
+    )

@@ -6,7 +6,8 @@ import threading
 import time
 
 import customtkinter as ctk
-from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font, recent_user_scroll
+from ui.theme import COLORS, bind_wraplength, button_style, combo_style, fit_window_to_screen, font, recent_user_scroll
+from ui.widgets.adaptive_tab_bar import AdaptiveTabBar
 
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
@@ -32,6 +33,8 @@ UI_CALLBACK_TIME_BUDGET_MS = 5
 UI_CALLBACK_SCROLL_IDLE_MS = 240
 UI_CALLBACK_SCROLL_RETRY_MS = 16
 QUICK_SWITCH_INITIAL_LOAD_MS = 2200
+MAIN_LAYOUT_WIDE_MIN_WIDTH = 1020
+MAIN_LAYOUT_COMPACT_MIN_WIDTH = 620
 TAB_SPECS = [
     ("Claude Code", "_claude_tab", "ui.tabs.claude_tab", "ClaudeTab", False),
     ("Codex CLI", "_codex_tab", "ui.tabs.codex_tab", "CodexTab", False),
@@ -45,6 +48,16 @@ TAB_SPECS = [
     ("备份管理", "_backup_tab", "ui.tabs.backup_tab", "BackupTab", False),
     ("日志查看器", "_log_viewer_tab", "ui.tabs.log_viewer_tab", "LogViewerTab", False),
 ]
+
+
+def main_layout_mode(width: int) -> str:
+    """Choose the main header layout from the available logical width."""
+
+    if width >= MAIN_LAYOUT_WIDE_MIN_WIDTH:
+        return "wide"
+    if width >= MAIN_LAYOUT_COMPACT_MIN_WIDTH:
+        return "compact"
+    return "narrow"
 
 
 class _LazyTrayManager:
@@ -103,7 +116,12 @@ class App(ctk.CTk):
 
         self.title("API 配置切换器")
         self.geometry("1120x760")
-        self.minsize(980, 620)
+        self.minsize(480, 460)
+        fit_window_to_screen(
+            self,
+            preferred_size=(1120, 760),
+            minimum_size=(480, 460),
+        )
         self.configure(fg_color=COLORS["app_bg"])
         self._exit_requested = False
         self._ui_thread_id = threading.get_ident()
@@ -132,6 +150,8 @@ class App(ctk.CTk):
         self._quick_switch_loading = False
         self._quick_switch_reload_pending = False
         self._switch_preview_generation = 0
+        self._main_layout_after_id = None
+        self._main_layout_mode = None
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             setattr(self, attr, None)
@@ -152,12 +172,12 @@ class App(ctk.CTk):
         self.bind_all("<ButtonPress>", self._mark_user_interaction, add="+")
         self.bind_all("<KeyPress>", self._mark_user_interaction, add="+")
 
-        shell = ctk.CTkFrame(self, fg_color="transparent")
-        shell.pack(fill="both", expand=True, padx=20, pady=(18, 14))
+        self._shell = ctk.CTkFrame(self, fg_color="transparent")
+        self._shell.pack(fill="both", expand=True, padx=20, pady=(18, 14))
 
         # Top bar
-        topbar = ctk.CTkFrame(shell, fg_color="transparent")
-        topbar.pack(fill="x", pady=(0, 14))
+        topbar = ctk.CTkFrame(self._shell, fg_color="transparent")
+        topbar.pack(fill="x", pady=(0, 12))
 
         title_area = ctk.CTkFrame(topbar, fg_color="transparent")
         title_area.pack(fill="x")
@@ -180,38 +200,40 @@ class App(ctk.CTk):
         subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
         bind_wraplength(title_area, subtitle_label, padding=12, min_width=260, max_width=620)
 
-        action_panel = ctk.CTkFrame(
+        self._action_panel = ctk.CTkFrame(
             topbar,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        action_panel.pack(fill="x", pady=(10, 0))
+        self._action_panel.pack(fill="x", pady=(10, 0))
+        self._action_panel.grid_columnconfigure(0, weight=1)
 
         # Quick switch menu
-        switch_frame = ctk.CTkFrame(action_panel, fg_color="transparent")
-        switch_frame.pack(side="left", padx=(12, 8), pady=9)
+        self._switch_frame = ctk.CTkFrame(self._action_panel, fg_color="transparent")
+        self._switch_frame.grid(row=0, column=0, sticky="w", padx=(12, 8), pady=9)
 
-        ctk.CTkLabel(
-            switch_frame,
+        self._switch_title = ctk.CTkLabel(
+            self._switch_frame,
             text=QUICK_SWITCH_TITLE,
             text_color=COLORS["muted"],
             font=font(11, "bold"),
-        ).pack(side="left", padx=(0, 10))
+        )
+        self._switch_title.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 10))
 
         # Claude quick switch
-        claude_switch_group = ctk.CTkFrame(switch_frame, fg_color="transparent")
-        claude_switch_group.pack(side="left", padx=(0, 10))
+        self._claude_switch_group = ctk.CTkFrame(self._switch_frame, fg_color="transparent")
+        self._claude_switch_group.grid(row=0, column=1, sticky="w", padx=(0, 10))
         ctk.CTkLabel(
-            claude_switch_group,
+            self._claude_switch_group,
             text=CLAUDE_QUICK_SWITCH_LABEL,
             text_color=COLORS["muted_soft"],
             font=font(10),
             anchor="w",
         ).pack(anchor="w", pady=(0, 2))
         self.claude_switch = ctk.CTkComboBox(
-            claude_switch_group,
+            self._claude_switch_group,
             width=172,
             command=self._quick_switch_claude,
             **combo_style(),
@@ -220,17 +242,17 @@ class App(ctk.CTk):
         self.claude_switch.set("Claude API")
 
         # Codex quick switch
-        codex_switch_group = ctk.CTkFrame(switch_frame, fg_color="transparent")
-        codex_switch_group.pack(side="left")
+        self._codex_switch_group = ctk.CTkFrame(self._switch_frame, fg_color="transparent")
+        self._codex_switch_group.grid(row=0, column=2, sticky="w")
         ctk.CTkLabel(
-            codex_switch_group,
+            self._codex_switch_group,
             text=CODEX_QUICK_SWITCH_LABEL,
             text_color=COLORS["muted_soft"],
             font=font(10),
             anchor="w",
         ).pack(anchor="w", pady=(0, 2))
         self.codex_switch = ctk.CTkComboBox(
-            codex_switch_group,
+            self._codex_switch_group,
             width=172,
             command=self._quick_switch_codex,
             **combo_style(),
@@ -239,43 +261,59 @@ class App(ctk.CTk):
         self.codex_switch.set("Codex API")
 
         # 按钮区域
-        button_group = ctk.CTkFrame(action_panel, fg_color="transparent")
-        button_group.pack(side="right", padx=(0, 12), pady=9)
-        ctk.CTkButton(
-            button_group,
+        self._button_group = ctk.CTkFrame(self._action_panel, fg_color="transparent")
+        self._button_group.grid(row=0, column=1, sticky="e", padx=(0, 12), pady=9)
+        self._global_action_buttons = []
+        env_button = ctk.CTkButton(
+            self._button_group,
             text=ENV_TAB_BUTTON_TEXT,
             width=108,
             command=self._show_env_tab,
             **button_style("primary"),
-        ).pack(side="left", padx=(8, 0))
+        )
+        self._global_action_buttons.append(env_button)
 
-        ctk.CTkButton(
-            button_group,
+        health_button = ctk.CTkButton(
+            self._button_group,
             text="健康检查",
             width=96,
             command=self._show_health_check,
             **button_style("accent"),
-        ).pack(side="left", padx=(8, 0))
+        )
+        self._global_action_buttons.append(health_button)
 
-        ctk.CTkButton(
-            button_group,
+        rollback_button = ctk.CTkButton(
+            self._button_group,
             text="回滚上次",
             width=96,
             command=self._restore_latest_backup,
             **button_style("warning"),
-        ).pack(side="left", padx=(8, 0))
+        )
+        self._global_action_buttons.append(rollback_button)
 
-        ctk.CTkButton(
-            button_group,
+        refresh_button = ctk.CTkButton(
+            self._button_group,
             text="刷新全部",
             width=96,
             command=self.refresh_all,
             **button_style("secondary"),
-        ).pack(side="left", padx=(8, 0))
+        )
+        self._global_action_buttons.append(refresh_button)
+        for index, button in enumerate(self._global_action_buttons):
+            button.grid(row=0, column=index, sticky="ew", padx=(8 if index else 0, 0))
+
+        # The stock CTkTabview header is a single non-scrollable row. A
+        # wrapping selector keeps every destination reachable at any width.
+        self._tab_navigation = AdaptiveTabBar(
+            self._shell,
+            [label for label, *_spec in TAB_SPECS],
+            command=self._select_tab_from_navigation,
+        )
+        self._tab_navigation.pack(fill="x", pady=(0, 4))
 
         # Tab view
         self._tabview = ctk.CTkTabview(
-            shell,
+            self._shell,
             corner_radius=8,
             border_width=1,
             fg_color=COLORS["surface"],
@@ -292,10 +330,12 @@ class App(ctk.CTk):
 
         for label, _attr, _module_name, _class_name, eager in TAB_SPECS:
             self._tab_frames[label] = self._tabview.add(label)
+        self._hide_native_tab_header()
+        self._tab_navigation.set(self._tabview.get() or DEFAULT_TAB_LABEL)
 
         # Status bar
         footer = ctk.CTkFrame(
-            shell,
+            self._shell,
             fg_color=COLORS["surface"],
             corner_radius=6,
             border_width=1,
@@ -309,6 +349,8 @@ class App(ctk.CTk):
             font=font(11),
         )
         self._status.pack(anchor="w", padx=10, pady=6)
+        self.bind("<Configure>", self._schedule_main_layout, add="+")
+        self.after_idle(self._apply_main_layout)
         self._schedule_ui_callback_pump(delay_ms=UI_CALLBACK_IDLE_POLL_MS)
 
         self.claude_switch.configure(values=["正在加载..."], state="disabled")
@@ -327,6 +369,101 @@ class App(ctk.CTk):
                 TAB_WARMUP_START_MS,
                 lambda mode=warmup_mode: self._start_lazy_tab_warmup(priority_only=mode not in {"1", "all"}),
             )
+
+    def _logical_main_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        if scaling > 0:
+            width = round(width / scaling)
+        return max(1, width)
+
+    def _schedule_main_layout(self, event=None) -> None:
+        if event is not None and getattr(event, "widget", self) is not self:
+            return
+        if self._main_layout_after_id is not None:
+            return
+        try:
+            self._main_layout_after_id = self.after_idle(self._apply_main_layout)
+        except Exception:
+            self._main_layout_after_id = None
+
+    def _apply_main_layout(self) -> None:
+        self._main_layout_after_id = None
+        mode = main_layout_mode(self._logical_main_width())
+        if mode == self._main_layout_mode:
+            return
+        self._main_layout_mode = mode
+
+        for column in range(4):
+            self._button_group.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+            self._switch_frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if mode == "wide":
+            self._shell.pack_configure(padx=20, pady=(18, 14))
+            self._action_panel.grid_columnconfigure(0, weight=1)
+            self._action_panel.grid_columnconfigure(1, weight=0)
+            self._switch_frame.grid_configure(row=0, column=0, columnspan=1, sticky="w", padx=(12, 8), pady=9)
+            self._button_group.grid_configure(row=0, column=1, columnspan=1, sticky="e", padx=(0, 12), pady=9)
+            self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
+            self._claude_switch_group.grid_configure(row=0, column=1, sticky="w", padx=(0, 10))
+            self._codex_switch_group.grid_configure(row=0, column=2, sticky="w", padx=0)
+            action_columns = 4
+        else:
+            shell_padding = 12 if mode == "compact" else 8
+            self._shell.pack_configure(padx=shell_padding, pady=(12, 10))
+            self._action_panel.grid_columnconfigure(0, weight=1)
+            self._action_panel.grid_columnconfigure(1, weight=1)
+            self._switch_frame.grid_configure(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(9, 4))
+            self._button_group.grid_configure(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(3, 9))
+            if mode == "compact":
+                self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
+                self._claude_switch_group.grid_configure(row=0, column=1, sticky="w", padx=(0, 10))
+                self._codex_switch_group.grid_configure(row=0, column=2, sticky="w", padx=0)
+                action_columns = 4
+            else:
+                self._switch_frame.grid_columnconfigure(0, weight=1)
+                self._switch_frame.grid_columnconfigure(1, weight=1)
+                self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=2, sticky="w", padx=0, pady=(0, 3))
+                self._claude_switch_group.grid_configure(row=1, column=0, sticky="w", padx=(0, 6))
+                self._codex_switch_group.grid_configure(row=1, column=1, sticky="w", padx=0)
+                action_columns = 2
+
+        for column in range(action_columns):
+            self._button_group.grid_columnconfigure(column, weight=1, uniform="global-actions")
+        for index, button in enumerate(self._global_action_buttons):
+            button.grid_configure(
+                row=index // action_columns,
+                column=index % action_columns,
+                sticky="ew",
+                padx=(0 if index % action_columns == 0 else 6, 0),
+                pady=(0 if index < action_columns else 5, 0),
+            )
+
+    def _hide_native_tab_header(self) -> None:
+        segmented_button = getattr(self._tabview, "_segmented_button", None)
+        if segmented_button is not None:
+            segmented_button.grid_remove()
+        # Collapse the three rows reserved by CTkTabview for its stock header.
+        for row in range(3):
+            self._tabview.grid_rowconfigure(row, minsize=0, weight=0)
+
+    def _select_tab_from_navigation(self, label: str) -> None:
+        if label not in self._tab_frames:
+            return
+        if self._tabview.get() != label:
+            self._tabview.set(label)
+        self._on_tab_changed()
+
+    def _select_tab(self, label: str) -> None:
+        if label not in self._tab_frames:
+            return
+        self._tab_navigation.set(label)
+        if self._tabview.get() != label:
+            self._tabview.set(label)
+        self._on_tab_changed()
 
     def _install_tab_placeholder(self, label: str):
         frame = self._tab_frames.get(label)
@@ -430,7 +567,7 @@ class App(ctk.CTk):
             actions,
             text="回到首页",
             width=96,
-            command=lambda: self._tabview.set("Claude Code"),
+            command=lambda: self._select_tab("Claude Code"),
             **button_style("secondary"),
         ).pack(side="left", padx=(8, 0))
         self._set_app_status(f"{label} 加载失败，可点击重试加载")
@@ -713,6 +850,9 @@ class App(ctk.CTk):
     def _on_tab_changed(self):
         self._mark_user_interaction()
         label = self._tabview.get()
+        navigation = self.__dict__.get("_tab_navigation")
+        if navigation is not None:
+            navigation.set(label)
         self._suspend_inactive_tab_work(label)
         self._schedule_tab_load(label, delay_ms=1)
         self._resume_active_tab_work(label)
@@ -1342,7 +1482,7 @@ class App(ctk.CTk):
             logger.debug("Failed to schedule UI callback: %s", e)
 
     def _show_env_tab(self):
-        self._tabview.set(ENV_TAB_LABEL)
+        self._select_tab(ENV_TAB_LABEL)
         tab = self._loaded_tab("_env_tab")
         if tab:
             self.after(30, tab.refresh)
