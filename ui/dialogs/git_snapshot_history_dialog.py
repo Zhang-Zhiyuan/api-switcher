@@ -17,6 +17,13 @@ def _git_manager_for_path(path: Path):
     return GitManager(path)
 
 
+def _git_history_layout(width: int) -> tuple[bool, int]:
+    available = max(1, int(width))
+    stacked = available < 820
+    action_columns = 5 if available >= 760 else (3 if available >= 560 else 2)
+    return stacked, action_columns
+
+
 class GitSnapshotHistoryDialog(ctk.CTkToplevel):
     """Inspect automatic Git snapshots and roll back to a selected commit."""
 
@@ -225,8 +232,7 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
 
     def _apply_responsive_layout(self) -> None:
         width = self._logical_width()
-        stacked = width < 820
-        action_columns = 5 if width >= 760 else (3 if width >= 560 else 2)
+        stacked, action_columns = _git_history_layout(width)
         state = (stacked, action_columns)
         if state == self._responsive_state:
             return

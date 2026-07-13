@@ -170,11 +170,23 @@ def run_splash_process() -> int:
 
         scale = min(width / SPLASH_PREFERRED_SIZE[0], height / SPLASH_PREFERRED_SIZE[1])
         horizontal_pad = max(6, round(28 * scale))
-        title_y = max(16, round(44 * height / SPLASH_PREFERRED_SIZE[1]))
-        status_y = max(title_y + 18, round(78 * height / SPLASH_PREFERRED_SIZE[1]))
-        track_top = max(status_y + 18, round(122 * height / SPLASH_PREFERRED_SIZE[1]))
-        track_bottom = min(height - 18, max(track_top + 3, round(128 * height / SPLASH_PREFERRED_SIZE[1])))
-        footer_y = min(height - 5, max(track_bottom + 10, round(148 * height / SPLASH_PREFERRED_SIZE[1])))
+        title_y = min(max(height - 1, 1), max(1, round(44 * height / SPLASH_PREFERRED_SIZE[1])))
+        status_y = min(
+            max(height - 1, 1),
+            max(title_y + max(2, round(18 * scale)), round(78 * height / SPLASH_PREFERRED_SIZE[1])),
+        )
+        track_top = min(
+            max(height - 2, 0),
+            max(status_y + max(2, round(8 * scale)), round(122 * height / SPLASH_PREFERRED_SIZE[1])),
+        )
+        track_bottom = min(
+            height,
+            max(track_top + 1, round(128 * height / SPLASH_PREFERRED_SIZE[1])),
+        )
+        footer_y = min(
+            max(height - 1, 1),
+            max(track_bottom + 1, round(148 * height / SPLASH_PREFERRED_SIZE[1])),
+        )
         title_font_size = max(9, round(17 * scale))
         status_font_size = max(7, round(10 * scale))
         footer_font_size = max(7, round(9 * scale))

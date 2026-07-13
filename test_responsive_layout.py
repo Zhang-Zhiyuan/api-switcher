@@ -5,6 +5,8 @@ from ui.app import MAIN_LAYOUT_COMPACT_MIN_WIDTH, MAIN_LAYOUT_WIDE_MIN_WIDTH, ma
 from ui.widgets.adaptive_tab_bar import adaptive_tab_columns
 from ui.widgets.toast import _toast_wraplength
 from ui.startup_splash import _splash_layout
+from ui.dialogs.auto_continue_logs_dialog import _auto_continue_logs_layout
+from ui.dialogs.git_snapshot_history_dialog import _git_history_layout
 
 
 def test_window_layout_preserves_preferred_size_on_large_screen():
@@ -132,3 +134,13 @@ def test_toast_wraplength_respects_physical_screen_and_dpi():
 def test_splash_layout_keeps_normal_size_and_fits_tiny_screen():
     assert _splash_layout(1920, 1080) == (380, 168, 770, 456)
     assert _splash_layout(320, 180) == (288, 148, 16, 16)
+
+
+def test_large_two_pane_dialogs_stack_and_wrap_actions_on_narrow_screens():
+    assert _git_history_layout(900) == (False, 5)
+    assert _git_history_layout(720) == (True, 3)
+    assert _git_history_layout(480) == (True, 2)
+
+    assert _auto_continue_logs_layout(900) == (False, 5, False)
+    assert _auto_continue_logs_layout(720) == (True, 5, True)
+    assert _auto_continue_logs_layout(480) == (True, 3, True)

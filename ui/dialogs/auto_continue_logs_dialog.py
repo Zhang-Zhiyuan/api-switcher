@@ -25,6 +25,14 @@ def _format_auto_continue_diagnostics(provider: str, limit: int) -> str:
     return format_auto_continue_diagnostics(provider, limit)
 
 
+def _auto_continue_logs_layout(width: int) -> tuple[bool, int, bool]:
+    available = max(1, int(width))
+    stacked = available < 820
+    stat_columns = 5 if available >= 540 else (3 if available >= 400 else 2)
+    header_stacked = available < 760
+    return stacked, stat_columns, header_stacked
+
+
 class AutoContinueLogsDialog(ctk.CTkToplevel):
     """Recent auto-continue decision and recovery logs."""
 
@@ -205,9 +213,9 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
 
     def _apply_responsive_layout(self) -> None:
         width = self._logical_width()
-        stacked = width < 820
-        stat_columns = 5 if width >= 820 else (3 if width >= 560 else 2)
-        header_stacked = width < 760
+        # Five compact summary cards still fit at 560 logical pixels and
+        # keeping them on one row leaves useful height for event details.
+        stacked, stat_columns, header_stacked = _auto_continue_logs_layout(width)
         state = (stacked, stat_columns, header_stacked)
         if state == self._responsive_state:
             return
