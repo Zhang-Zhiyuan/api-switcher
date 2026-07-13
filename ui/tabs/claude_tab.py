@@ -20,6 +20,13 @@ CARD_RENDER_BATCH_SIZE = 2
 CARD_RENDER_BATCH_DELAY_MS = 8
 DEFERRED_CONTROL_SCROLL_IDLE_MS = 850
 DEFERRED_CONTROL_RETRY_MS = 260
+PROFILE_TAB_STACK_MAX_WIDTH = 560
+
+
+def _profile_tab_stacked(width: int) -> bool:
+    """Return whether profile header actions need their own row."""
+
+    return int(width) <= PROFILE_TAB_STACK_MAX_WIDTH
 
 
 class ClaudeTab(ctk.CTkScrollableFrame):
@@ -43,6 +50,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._auto_continue_after_id = None
         self._deferred_auto_continue_pending = False
         self._initial_refresh_after_id = None
+        self._responsive_after_id = None
+        self._responsive_state = None
         self._build_ui()
 
     def _build_ui(self):
@@ -80,18 +89,18 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._runtime_label.pack(anchor="w", fill="x", pady=(4, 0))
         bind_wraplength(title_area, self._runtime_label, padding=24, min_width=240, max_width=760)
 
-        api_header = ctk.CTkFrame(self, fg_color="transparent")
-        api_header.pack(fill="x", padx=14, pady=(4, 8))
-        api_title = ctk.CTkFrame(api_header, fg_color="transparent")
-        api_title.pack(side="left", fill="x", expand=True)
+        self._api_header = ctk.CTkFrame(self, fg_color="transparent")
+        self._api_header.pack(fill="x", padx=14, pady=(4, 8))
+        self._api_title = ctk.CTkFrame(self._api_header, fg_color="transparent")
+        self._api_title.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
-            api_title,
+            self._api_title,
             text="第三方 API 配置",
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(anchor="w")
         api_subtitle = ctk.CTkLabel(
-            api_title,
+            self._api_title,
             text="写入 Claude settings/config，用于切换 Anthropic-compatible API、模型和权限",
             text_color=COLORS["muted"],
             font=font(12),
@@ -99,38 +108,44 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         api_subtitle.pack(anchor="w", fill="x", pady=(2, 0))
-        bind_wraplength(api_title, api_subtitle, padding=24, min_width=240, max_width=720)
-        ctk.CTkButton(
-            api_header,
-            text="+ 新建 API 配置",
-            width=126,
-            command=self._create_profile,
-            **button_style("primary"),
-        ).pack(side="right")
-        ctk.CTkButton(
-            api_header,
+        bind_wraplength(self._api_title, api_subtitle, padding=24, min_width=240, max_width=720)
+        self._api_actions = ctk.CTkFrame(self._api_header, fg_color="transparent")
+        self._api_actions.pack(side="right")
+        for column in range(2):
+            self._api_actions.grid_columnconfigure(column, weight=1, uniform="claude_api_actions")
+        self._api_import_button = ctk.CTkButton(
+            self._api_actions,
             text="导入当前 API",
             width=126,
             command=self._import_current,
             **button_style("secondary"),
-        ).pack(side="right", padx=(0, 8))
+        )
+        self._api_import_button.grid(row=0, column=0, sticky="ew")
+        self._api_create_button = ctk.CTkButton(
+            self._api_actions,
+            text="+ 新建 API 配置",
+            width=126,
+            command=self._create_profile,
+            **button_style("primary"),
+        )
+        self._api_create_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         # Cards container
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 10))
 
-        account_header = ctk.CTkFrame(self, fg_color="transparent")
-        account_header.pack(fill="x", padx=14, pady=(8, 8))
-        account_title = ctk.CTkFrame(account_header, fg_color="transparent")
-        account_title.pack(side="left", fill="x", expand=True)
+        self._account_header = ctk.CTkFrame(self, fg_color="transparent")
+        self._account_header.pack(fill="x", padx=14, pady=(8, 8))
+        self._account_title = ctk.CTkFrame(self._account_header, fg_color="transparent")
+        self._account_title.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
-            account_title,
+            self._account_title,
             text="官方账号",
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(anchor="w")
         account_subtitle = ctk.CTkLabel(
-            account_title,
+            self._account_title,
             text="保存本机 Claude Code 登录凭据快照；切换后新开的终端会话生效",
             text_color=COLORS["muted"],
             font=font(12),
@@ -138,9 +153,9 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         account_subtitle.pack(anchor="w", fill="x", pady=(2, 0))
-        bind_wraplength(account_title, account_subtitle, padding=24, min_width=240, max_width=720)
+        bind_wraplength(self._account_title, account_subtitle, padding=24, min_width=240, max_width=720)
         self._account_runtime_label = ctk.CTkLabel(
-            account_title,
+            self._account_title,
             text="",
             text_color=COLORS["muted"],
             font=font(12),
@@ -148,14 +163,17 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         self._account_runtime_label.pack(anchor="w", fill="x", pady=(4, 0))
-        bind_wraplength(account_title, self._account_runtime_label, padding=24, min_width=240, max_width=720)
-        ctk.CTkButton(
-            account_header,
+        bind_wraplength(self._account_title, self._account_runtime_label, padding=24, min_width=240, max_width=720)
+        self._account_actions = ctk.CTkFrame(self._account_header, fg_color="transparent")
+        self._account_actions.pack(side="right")
+        self._account_import_button = ctk.CTkButton(
+            self._account_actions,
             text="导入当前账号",
             width=126,
             command=self._import_current_account,
             **button_style("secondary"),
-        ).pack(side="right")
+        )
+        self._account_import_button.pack(fill="x")
 
         self._account_cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._account_cards_frame.pack(fill="x", padx=14, pady=(0, 10))
@@ -185,11 +203,60 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._auto_continue_host.pack(fill="x", padx=14, pady=(0, 10))
         self._build_auto_continue_placeholder()
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._initial_refresh_after_id = self.after(420, self._run_initial_refresh)
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._destroyed or self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            if not self._destroyed:
+                self._apply_responsive_layout()
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked = _profile_tab_stacked(self._logical_layout_width())
+        if stacked == self._responsive_state:
+            return
+        self._responsive_state = stacked
+
+        for title, actions in (
+            (self._api_title, self._api_actions),
+            (self._account_title, self._account_actions),
+        ):
+            title.pack_forget()
+            actions.pack_forget()
+            if stacked:
+                title.pack(fill="x")
+                actions.pack(fill="x", pady=(8, 0))
+            else:
+                title.pack(side="left", fill="x", expand=True)
+                actions.pack(side="right")
 
     def destroy(self):
         self._destroyed = True
         self._refresh_generation += 1
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         if self._initial_refresh_after_id:
             try:
                 self.after_cancel(self._initial_refresh_after_id)

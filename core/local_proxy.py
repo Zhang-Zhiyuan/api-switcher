@@ -424,15 +424,20 @@ def install_local_ai_proxy_verified(
             )
         tried.append(f"{node_summary} {latency_label}: {remote_proxy._probe_summary_counts(candidate_probe)}")
 
+    restore_error = ""
     try:
         install_local_ai_proxy(remote_proxy.format_proxy_node(requested_node))
-    except Exception:
-        pass
+    except Exception as exc:
+        restore_error = str(exc).splitlines()[0][:240] or type(exc).__name__
     tried_summary = "；".join(tried[:3])
     suffix = f"；尝试摘要: {tried_summary}" if tried_summary else ""
+    if restore_error:
+        restore_status = f"，但恢复原节点失败: {restore_error}；请重新检查代理状态"
+    else:
+        restore_status = "，已恢复原节点"
     return (
         f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
-        f"自动尝试 {attempts} 个高质量候选仍未 3/3 可达，已恢复原节点{suffix}"
+        f"自动尝试 {attempts} 个高质量候选仍未 3/3 可达{restore_status}{suffix}"
     )
 
 

@@ -44,6 +44,66 @@ def test_backup_allocator_reserves_unique_directory(tmp_path, monkeypatch):
     assert allocated.exists()
 
 
+def test_create_backup_copy_failure_never_exposes_partial_legacy_backup(tmp_path, monkeypatch):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    backups_dir = tmp_path / "backups"
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(
+        backup_manager,
+        "BACKUP_FILES",
+        {"first.json": first, "second.json": second},
+    )
+    original_copy = backup_manager.shutil.copy2
+    calls = {"count": 0}
+
+    def fail_second_copy(source, target):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("forced copy failure")
+        return original_copy(source, target)
+
+    monkeypatch.setattr(backup_manager.shutil, "copy2", fail_second_copy)
+
+    try:
+        backup_manager.create_backup("must remain invisible")
+    except OSError as exc:
+        assert "forced copy failure" in str(exc)
+    else:
+        raise AssertionError("create_backup should surface a failed copy")
+
+    assert backup_manager.list_backups() == []
+    assert list(backups_dir.iterdir()) == []
+
+
+def test_list_backups_ignores_incomplete_pending_directory(tmp_path, monkeypatch):
+    backups_dir = tmp_path / "backups"
+    pending = backups_dir / ".pending-interrupted"
+    pending.mkdir(parents=True)
+    (pending / "config.json").write_text("partial", encoding="utf-8")
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    backup_manager.clear_backup_list_cache()
+
+    assert backup_manager.list_backups() == []
+
+    entry = BackupEntry(
+        timestamp="incomplete",
+        directory=pending,
+        description="partial",
+        files=["config.json"],
+    )
+    try:
+        backup_manager.restore_backup(entry)
+    except ValueError as exc:
+        assert "尚未创建完成" in str(exc)
+    else:
+        raise AssertionError("pending backup directories must not be restorable")
+
+
 def test_list_backups_cache_reuses_meta_reads_and_detects_external_change(tmp_path, monkeypatch):
     backups_dir = tmp_path / "backups"
     backup_dir = backups_dir / "2026-01-01T00-00-00"
@@ -155,3 +215,127 @@ def test_restore_backup_rejects_unmanaged_directory_before_safety_backup(tmp_pat
 
     assert source.read_text(encoding="utf-8") == "current"
     assert safety_backups == []
+
+
+def test_restore_backup_removes_files_absent_from_snapshot(tmp_path, monkeypatch):
+    source = tmp_path / "config.json"
+    backups_dir = tmp_path / "backups"
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(backup_manager, "BACKUP_FILES", {"config.json": source})
+
+    entry = backup_manager.create_backup("before config existed")
+    source.write_text("created later", encoding="utf-8")
+
+    restored = backup_manager.restore_backup(entry)
+
+    assert restored == ["config.json"]
+    assert not source.exists()
+    safety = backup_manager.get_latest_backup()
+    assert safety is not None
+    assert safety.description == "回滚前自动备份"
+    assert (safety.directory / "config.json").read_text(encoding="utf-8") == "created later"
+
+
+def test_restore_backup_rejects_declared_file_missing_from_backup(tmp_path, monkeypatch):
+    source = tmp_path / "config.json"
+    source.write_text("current", encoding="utf-8")
+    backups_dir = tmp_path / "backups"
+    backup_dir = backups_dir / "broken"
+    backup_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(backup_manager, "BACKUP_FILES", {"config.json": source})
+
+    entry = BackupEntry(
+        timestamp="2026-01-01T00:00:00",
+        directory=backup_dir,
+        description="broken",
+        files=["config.json"],
+    )
+
+    try:
+        backup_manager.restore_backup(entry)
+    except ValueError as exc:
+        assert "缺失或损坏" in str(exc)
+    else:
+        raise AssertionError("restore_backup should reject an incomplete backup")
+
+    assert source.read_text(encoding="utf-8") == "current"
+    assert not any(path.name != "broken" for path in backups_dir.iterdir())
+
+
+def test_restore_legacy_backup_does_not_delete_new_managed_file(tmp_path, monkeypatch):
+    source = tmp_path / "new_config.json"
+    source.write_text("current config", encoding="utf-8")
+    backups_dir = tmp_path / "backups"
+    backup_dir = backups_dir / "legacy"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / backup_manager.BACKUP_META_FILE).write_text(
+        json.dumps({
+            "timestamp": "2025-01-01T00:00:00",
+            "directory": str(backup_dir),
+            "description": "before profiles were managed",
+            "files": [],
+        }),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(backup_manager, "BACKUP_FILES", {"new_config.json": source})
+
+    [entry] = backup_manager.list_backups()
+    restored = backup_manager.restore_backup(entry)
+
+    assert restored == []
+    assert source.read_text(encoding="utf-8") == "current config"
+
+
+def test_v2_restore_ignores_stray_file_not_declared_in_snapshot(tmp_path, monkeypatch):
+    source = tmp_path / "config.json"
+    backups_dir = tmp_path / "backups"
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(backup_manager, "BACKUP_FILES", {"config.json": source})
+
+    entry = backup_manager.create_backup("absent")
+    source.write_text("current", encoding="utf-8")
+    (entry.directory / "config.json").write_text("stray", encoding="utf-8")
+
+    restored = backup_manager.restore_backup(entry)
+
+    assert restored == ["config.json"]
+    assert not source.exists()
+
+
+def test_restore_failure_rolls_back_all_targets_to_current_state(tmp_path, monkeypatch):
+    first = tmp_path / "a.json"
+    second = tmp_path / "b.json"
+    first.write_text("old-a", encoding="utf-8")
+    second.write_text("old-b", encoding="utf-8")
+    backups_dir = tmp_path / "backups"
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", backups_dir)
+    monkeypatch.setattr(backup_manager, "BACKUP_FILES", {"a.json": first, "b.json": second})
+
+    entry = backup_manager.create_backup("old")
+    first.write_text("current-a", encoding="utf-8")
+    second.write_text("current-b", encoding="utf-8")
+    original_write = backup_manager.atomic_write_bytes
+    calls = {"count": 0}
+
+    def fail_second_write(path, content):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("forced second write failure")
+        return original_write(path, content)
+
+    monkeypatch.setattr(backup_manager, "atomic_write_bytes", fail_second_write)
+
+    try:
+        backup_manager.restore_backup(entry)
+    except OSError as exc:
+        assert "forced second write failure" in str(exc)
+    else:
+        raise AssertionError("restore should surface the injected write failure")
+
+    assert first.read_text(encoding="utf-8") == "current-a"
+    assert second.read_text(encoding="utf-8") == "current-b"

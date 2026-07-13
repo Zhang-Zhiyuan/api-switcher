@@ -9,6 +9,71 @@ from collections import defaultdict, Counter
 from dataclasses import dataclass
 
 
+SUCCESSFUL_RECOVERY_ACTIONS = {
+    "recovered",
+    "recovery_succeeded",
+    "recovery_success",
+    "success",
+    "successfully_recovered",
+}
+RECOVERY_DISPATCH_ACTIONS = {"attempting_recovery"}
+NON_RECOVERY_STRATEGIES = {"abort", "none", "notify_user"}
+NON_RECOVERABLE_ERROR_TYPES = {
+    "auth",
+    "authentication_error",
+    "invalid",
+    "invalid_request",
+    "permission",
+    "permission_denied",
+    "quota",
+    "quota_exceeded",
+    "unknown",
+}
+
+
+def _explicit_recovery_outcome(entry: Dict[str, Any]) -> Optional[bool]:
+    """Return an explicitly logged outcome, if a newer log format provides one."""
+    for key in ("recovery_success", "recovery_succeeded"):
+        if key not in entry:
+            continue
+        value = entry[key]
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes"}:
+                return True
+            if normalized in {"0", "false", "no"}:
+                return False
+    return None
+
+
+def _entry_reports_successful_recovery(entry: Dict[str, Any], action: Any = "") -> bool:
+    """Count recovery outcomes using both current and forward-compatible logs.
+
+    Current production hooks write ``attempting_recovery`` after accepting an
+    error and immediately before emitting the recovery command.  They do not
+    write a later success event, so that action is the durable indication that
+    recovery was dispatched.  Explicit outcome fields take precedence when a
+    newer producer supplies them.
+    """
+    explicit_outcome = _explicit_recovery_outcome(entry)
+    if explicit_outcome is not None:
+        return explicit_outcome
+
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action in SUCCESSFUL_RECOVERY_ACTIONS:
+        return True
+    if normalized_action not in RECOVERY_DISPATCH_ACTIONS:
+        return False
+
+    strategy = str(entry.get("recovery_strategy") or "").strip().lower()
+    if strategy in NON_RECOVERY_STRATEGIES:
+        return False
+    error_type = str(entry.get("error_type") or "").strip().lower()
+    return error_type not in NON_RECOVERABLE_ERROR_TYPES
+
+
 @dataclass
 class ErrorStats:
     """错误统计信息"""
@@ -33,14 +98,16 @@ class ErrorStats:
 class ErrorRecoveryAnalyzer:
     """错误恢复分析器"""
 
-    def __init__(self, log_path: Path):
+    def __init__(self, log_path: Path, additional_log_paths: Optional[List[Path]] = None):
         """
         初始化分析器
 
         Args:
             log_path: 错误恢复日志文件路径 (error_recovery_log.jsonl)
         """
-        self.log_path = log_path
+        self.log_path = Path(log_path)
+        paths = [self.log_path, *(Path(path) for path in (additional_log_paths or []))]
+        self.log_paths = tuple(dict.fromkeys(paths))
 
     def analyze(self, days: int = 7) -> ErrorStats:
         """
@@ -52,7 +119,7 @@ class ErrorRecoveryAnalyzer:
         Returns:
             ErrorStats: 统计信息
         """
-        if not self.log_path.exists():
+        if not any(path.exists() for path in self.log_paths):
             return ErrorStats()
 
         # 读取日志
@@ -79,9 +146,12 @@ class ErrorRecoveryAnalyzer:
             error_types[error_type] += 1
             session_errors[session_id] += 1
 
-            if action == "attempting_recovery":
+            if _entry_reports_successful_recovery(entry, action):
                 successful_recoveries += 1
-                recovery_counts.append(recovery_count)
+                try:
+                    recovery_counts.append(float(recovery_count))
+                except (TypeError, ValueError):
+                    pass
 
         stats.errors_by_type = dict(error_types)
         stats.errors_by_session = dict(session_errors)
@@ -95,40 +165,117 @@ class ErrorRecoveryAnalyzer:
 
         return stats
 
+    @staticmethod
+    def _local_naive_timestamp(value: Any) -> Optional[datetime]:
+        """Normalize ISO timestamps to local naive time for safe comparisons."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        timestamp = datetime.fromisoformat(text)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone().replace(tzinfo=None)
+        return timestamp
+
     def _read_log_entries(self, days: int) -> List[Dict[str, Any]]:
         """读取日志条目"""
         cutoff_date = datetime.now() - timedelta(days=days)
-        entries = []
+        indexed_entries = []
+        seen_entry_occurrences = set()
+        sequence = 0
 
-        try:
-            with open(self.log_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
+        for log_path in self.log_paths:
+            source_signature_counts = defaultdict(int)
+            try:
+                handle = open(log_path, 'r', encoding='utf-8')
+            except (OSError, IOError):
+                continue
 
-                    try:
-                        entry = json.loads(line)
+            try:
+                with handle as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
 
-                        # 检查时间戳
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+
+                        try:
+                            signature = json.dumps(
+                                entry,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                        except (TypeError, ValueError):
+                            signature = line
+                        occurrence = source_signature_counts[signature]
+                        source_signature_counts[signature] += 1
+                        occurrence_key = (signature, occurrence)
+                        if occurrence_key in seen_entry_occurrences:
+                            continue
+                        seen_entry_occurrences.add(occurrence_key)
+
+                        timestamp = None
                         timestamp_str = entry.get("timestamp")
                         if timestamp_str:
                             try:
-                                # 处理多种时间戳格式
-                                timestamp_str = timestamp_str.replace('Z', '+00:00')
-                                timestamp = datetime.fromisoformat(timestamp_str)
-                                if timestamp < cutoff_date:
-                                    continue
-                            except (ValueError, AttributeError):
-                                # 时间戳格式错误，仍然包含该条目
-                                pass
+                                timestamp = self._local_naive_timestamp(timestamp_str)
+                            except (ValueError, TypeError, OverflowError):
+                                # Keep malformed historical entries visible.
+                                timestamp = None
+                            if timestamp is not None and timestamp < cutoff_date:
+                                continue
 
+                        indexed_entries.append((timestamp, sequence, entry))
+                        sequence += 1
+            except (OSError, IOError):
+                continue
+
+        # Legacy and current log files may overlap in time. Sort valid ISO
+        # timestamps while preserving source/file order for malformed entries.
+        indexed_entries.sort(key=lambda item: (item[0] or datetime.min, item[1]))
+        return [entry for _timestamp, _sequence, entry in indexed_entries]
+
+    def _all_log_entries(self) -> List[Dict[str, Any]]:
+        """Read all valid entries from current and legacy log locations."""
+        entries = []
+        seen_entry_occurrences = set()
+        for log_path in self.log_paths:
+            source_signature_counts = defaultdict(int)
+            try:
+                with open(log_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+                        signature = json.dumps(
+                            entry,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        occurrence = source_signature_counts[signature]
+                        source_signature_counts[signature] += 1
+                        occurrence_key = (signature, occurrence)
+                        if occurrence_key in seen_entry_occurrences:
+                            continue
+                        seen_entry_occurrences.add(occurrence_key)
                         entries.append(entry)
-                    except json.JSONDecodeError:
-                        continue
-        except Exception:
-            pass
-
+            except (OSError, IOError):
+                continue
         return entries
 
     def get_error_timeline(self, days: int = 7) -> Dict[str, List[Dict[str, Any]]]:
@@ -166,28 +313,13 @@ class ErrorRecoveryAnalyzer:
         Returns:
             该会话的所有错误记录
         """
-        if not self.log_path.exists():
+        if not any(path.exists() for path in self.log_paths):
             return []
-
-        session_entries = []
-
-        try:
-            with open(self.log_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        entry = json.loads(line)
-                        if entry.get("session_id") == session_id:
-                            session_entries.append(entry)
-                    except json.JSONDecodeError:
-                        continue
-        except Exception:
-            pass
-
-        return session_entries
+        return [
+            entry
+            for entry in self._all_log_entries()
+            if entry.get("session_id") == session_id
+        ]
 
     def export_report(self, output_path: Path, days: int = 7) -> None:
         """
@@ -286,6 +418,15 @@ def _get_provider_recovery_log_path(provider: str) -> Path:
     return legacy_log_path
 
 
+def _get_provider_recovery_log_paths(provider: str) -> tuple[Path, ...]:
+    """Return the preferred path first and retain the legacy source as history."""
+    primary = _get_provider_recovery_log_path(provider)
+    config_dir = primary.parent.parent if primary.parent.name == "tmp" else primary.parent
+    current = config_dir / "tmp" / "error_recovery_log.jsonl"
+    legacy = config_dir / "error_recovery_log.jsonl"
+    return tuple(dict.fromkeys((primary, current, legacy)))
+
+
 def get_analyzer(provider: str) -> ErrorRecoveryAnalyzer:
     """
     获取指定 Provider 的分析器
@@ -296,4 +437,5 @@ def get_analyzer(provider: str) -> ErrorRecoveryAnalyzer:
     Returns:
         ErrorRecoveryAnalyzer
     """
-    return ErrorRecoveryAnalyzer(_get_provider_recovery_log_path(provider))
+    paths = _get_provider_recovery_log_paths(provider)
+    return ErrorRecoveryAnalyzer(paths[0], list(paths[1:]))

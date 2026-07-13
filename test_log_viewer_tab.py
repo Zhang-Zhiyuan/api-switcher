@@ -51,3 +51,17 @@ def test_log_manager_bounds_history_and_queue():
 
     assert manager.get_recent_entries() == []
     assert manager.get_log_queue().qsize() == 0
+
+
+def test_log_manager_initial_snapshot_consumes_duplicate_queue_backlog():
+    manager = LogManager()
+    manager.publish({"level": "INFO", "levelno": 20, "message": "startup"})
+
+    initial = manager.consume_recent_entries()
+
+    assert [entry["message"] for entry in initial] == ["startup"]
+    assert manager.get_log_queue().qsize() == 0
+
+    manager.publish({"level": "INFO", "levelno": 20, "message": "live"})
+
+    assert manager.get_log_queue().get_nowait()["message"] == "live"

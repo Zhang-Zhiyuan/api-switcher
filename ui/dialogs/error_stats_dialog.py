@@ -2,11 +2,16 @@
 错误统计对话框
 """
 import customtkinter as ctk
+import logging
 import threading
 from pathlib import Path
 from datetime import datetime
 
 from ui.theme import COLORS, button_style, card_frame_kwargs, center_window, combo_style, font, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
+
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorStatsDialog(ctk.CTkToplevel):
@@ -16,6 +21,8 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         super().__init__(parent)
 
         self.provider = provider
+        self._load_generation = 0
+        self._ui_dispatch = getattr(parent, "_run_on_ui_thread", None)
         self.title(f"{provider} 错误统计")
         self.geometry("900x700")
         self.resizable(True, True)
@@ -30,6 +37,10 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         self._create_widgets()
         center_window(self, parent)
         self._load_stats()
+
+    def destroy(self):
+        self._load_generation += 1
+        super().destroy()
 
     def _create_widgets(self):
         """创建界面组件"""
@@ -158,6 +169,12 @@ class ErrorStatsDialog(ctk.CTkToplevel):
 
     def _load_stats(self):
         """加载统计数据"""
+        try:
+            days = int(self.days_var.get())
+        except (TypeError, ValueError):
+            days = 7
+        self._load_generation += 1
+        generation = self._load_generation
         self.status_label.configure(text="正在加载统计数据...")
         self.detail_text.configure(state="normal")
         self.detail_text.delete("1.0", "end")
@@ -165,33 +182,42 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         self.detail_text.configure(state="disabled")
 
         # 在后台线程加载
-        thread = threading.Thread(target=self._load_stats_thread, daemon=True)
+        thread = threading.Thread(
+            target=self._load_stats_thread,
+            args=(days, generation),
+            name=f"{self.provider}-error-stats-load",
+            daemon=True,
+        )
         thread.start()
 
-    def _load_stats_thread(self):
+    def _load_stats_thread(self, days: int, generation: int):
         """后台线程加载统计数据"""
         try:
             from core.auto_continue.error_analyzer import get_analyzer
 
-            days = int(self.days_var.get())
             analyzer = get_analyzer(self.provider)
             stats = analyzer.analyze(days)
-            self.stats = stats
 
-            # 在主线程更新 UI
-            self._safe_after(lambda: self._display_stats(stats))
+            def apply_stats():
+                if generation != self._load_generation:
+                    return
+                self.stats = stats
+                self._display_stats(stats)
+
+            self._safe_after(apply_stats)
 
         except Exception as e:
             error_message = str(e)
-            self._safe_after(lambda: self._display_error(error_message))
+
+            def apply_error():
+                if generation == self._load_generation:
+                    self._display_error(error_message)
+
+            self._safe_after(apply_error)
 
     def _safe_after(self, callback) -> None:
         """Schedule UI work from a background thread if the dialog still exists."""
-        try:
-            if self.winfo_exists():
-                self.after(0, callback)
-        except Exception:
-            pass
+        run_on_ui_thread(self, callback, logger, "error statistics refresh")
 
     def _display_stats(self, stats):
         """显示统计数据"""

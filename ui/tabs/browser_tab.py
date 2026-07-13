@@ -17,6 +17,13 @@ SCROLL_IDLE_RENDER_MS = 850
 SCROLL_RETRY_RENDER_MS = 260
 
 
+def _browser_tab_layout(width: int) -> tuple[bool, int, int]:
+    """Return header stacking, quick-action columns and bulk-action columns."""
+
+    available = max(1, int(width))
+    return available < 760, (4 if available >= 760 else 2), (5 if available >= 760 else (3 if available >= 520 else 2))
+
+
 profile_manager = LazyModule("core.profile_manager")
 browser_data_manager = LazyAttribute("core.browser_data_manager", "browser_data_manager")
 browser_launcher = LazyAttribute("core.browser_launcher", "browser_launcher")
@@ -120,12 +127,31 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._has_profile_cache = False
         self._deferred_refresh_pending = False
         self._deferred_render_pending = False
+        self._responsive_after_id = None
+        self._responsive_state = None
+        self._header = None
+        self._title_area = None
+        self._action_bar = None
+        self._header_action_buttons = []
+        self._quick_bar = None
+        self._quick_label = None
+        self._quick_buttons = []
+        self._filter_bar = None
+        self._filter_label = None
+        self._bulk_bar = None
+        self._bulk_buttons = []
         self._build_ui()
 
     def destroy(self):
         self._destroyed = True
         self._cancel_initial_refresh()
         self._cancel_profile_render()
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         super().destroy()
 
     def _toast(self, message: str, is_error: bool = False):
@@ -133,67 +159,75 @@ class BrowserTab(ctk.CTkScrollableFrame):
         show_toast(self.winfo_toplevel(), message, is_error=is_error)
 
     def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header = ctk.CTkFrame(self, fg_color="transparent")
+        self._header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header.grid_columnconfigure(0, weight=1)
 
-        title_area = ctk.CTkFrame(header, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(title_area, text="浏览器 Profile", text_color=COLORS["text"], font=font(18, "bold")).pack(anchor="w")
-        ctk.CTkLabel(
-            title_area,
+        self._title_area = ctk.CTkFrame(self._header, fg_color="transparent")
+        ctk.CTkLabel(self._title_area, text="浏览器 Profile", text_color=COLORS["text"], font=font(18, "bold")).pack(anchor="w")
+        subtitle = ctk.CTkLabel(
+            self._title_area,
             text="管理 Chrome / Edge 多账号 Profile，并按 Profile 清理 ChatGPT / Claude 站点数据",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(anchor="w", pady=(2, 0))
+            anchor="w",
+            justify="left",
+        )
+        subtitle.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(self._title_area, subtitle, padding=8, min_width=240, max_width=720)
 
-        action_bar = ctk.CTkFrame(header, fg_color="transparent")
-        action_bar.pack(side="right", padx=(12, 0))
-        ctk.CTkButton(action_bar, text="+ 新建 Profile", width=126, command=self._create_profile, **button_style("primary")).pack(side="left")
-        ctk.CTkButton(action_bar, text="刷新全部诊断", width=122, command=self.refresh, **button_style("secondary")).pack(side="left", padx=(8, 0))
+        self._action_bar = ctk.CTkFrame(self._header, fg_color="transparent")
+        self._header_action_buttons = [
+            ctk.CTkButton(self._action_bar, text="+ 新建 Profile", width=126, command=self._create_profile, **button_style("primary")),
+            ctk.CTkButton(self._action_bar, text="刷新全部诊断", width=122, command=self.refresh, **button_style("secondary")),
+        ]
 
-        quick_bar = ctk.CTkFrame(
+        self._quick_bar = ctk.CTkFrame(
             self,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        quick_bar.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(quick_bar, text="快速创建", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(12, 0), pady=9)
-        ctk.CTkButton(quick_bar, text="Chrome-ChatGPT", width=132, command=lambda: self._quick_create("chrome", "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(8, 0), pady=9)
-        ctk.CTkButton(quick_bar, text="Chrome-Claude", width=126, command=lambda: self._quick_create("chrome", "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(8, 0), pady=9)
-        ctk.CTkButton(quick_bar, text="Edge-ChatGPT", width=120, command=lambda: self._quick_create("edge", "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(8, 0), pady=9)
-        ctk.CTkButton(quick_bar, text="Edge-Claude", width=114, command=lambda: self._quick_create("edge", "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(8, 12), pady=9)
+        self._quick_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self._quick_label = ctk.CTkLabel(self._quick_bar, text="快速创建", text_color=COLORS["muted"], font=font(12))
+        self._quick_buttons = [
+            ctk.CTkButton(self._quick_bar, text="Chrome-ChatGPT", width=132, command=lambda: self._quick_create("chrome", "chatgpt"), **button_style("primary", compact=True)),
+            ctk.CTkButton(self._quick_bar, text="Chrome-Claude", width=126, command=lambda: self._quick_create("chrome", "claude"), **button_style("accent", compact=True)),
+            ctk.CTkButton(self._quick_bar, text="Edge-ChatGPT", width=120, command=lambda: self._quick_create("edge", "chatgpt"), **button_style("primary", compact=True)),
+            ctk.CTkButton(self._quick_bar, text="Edge-Claude", width=114, command=lambda: self._quick_create("edge", "claude"), **button_style("accent", compact=True)),
+        ]
 
-        filter_bar = ctk.CTkFrame(self, fg_color="transparent")
-        filter_bar.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(filter_bar, text="筛选", text_color=COLORS["muted"], font=font(12)).pack(side="left")
+        self._filter_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self._filter_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self._filter_bar.grid_columnconfigure(1, weight=0)
+        self._filter_label = ctk.CTkLabel(self._filter_bar, text="筛选", text_color=COLORS["muted"], font=font(12))
         self._filter_combo = ctk.CTkComboBox(
-            filter_bar,
+            self._filter_bar,
             values=list(self.FILTER_OPTIONS.keys()),
             width=160,
             command=self._on_filter_change,
             **combo_style(),
         )
         self._filter_combo.set("全部")
-        self._filter_combo.pack(side="left", padx=(8, 0))
 
-        self._stats_label = ctk.CTkLabel(filter_bar, text="", text_color=COLORS["muted"], font=font(12))
-        self._stats_label.pack(side="right")
+        self._stats_label = ctk.CTkLabel(self._filter_bar, text="", text_color=COLORS["muted"], font=font(12))
 
-        bulk_bar = ctk.CTkFrame(
+        self._bulk_bar = ctk.CTkFrame(
             self,
             fg_color=COLORS["surface"],
             corner_radius=8,
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        bulk_bar.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkButton(bulk_bar, text="全选当前", width=96, command=self._select_visible, **button_style("secondary", compact=True)).pack(side="left", padx=(12, 0), pady=9)
-        ctk.CTkButton(bulk_bar, text="清空选择", width=96, command=self._clear_selection, **button_style("secondary", compact=True)).pack(side="left", padx=(8, 0), pady=9)
-        ctk.CTkButton(bulk_bar, text="批量清理 GPT", width=108, command=lambda: self._bulk_clear_sites("chatgpt"), **button_style("warning", compact=True)).pack(side="left", padx=(12, 0), pady=9)
-        ctk.CTkButton(bulk_bar, text="批量清理 Claude", width=122, command=lambda: self._bulk_clear_sites("claude"), **button_style("warning", compact=True)).pack(side="left", padx=(8, 0), pady=9)
-        ctk.CTkButton(bulk_bar, text="批量清理两者", width=122, command=lambda: self._bulk_clear_sites("both"), **button_style("warning", compact=True)).pack(side="left", padx=(8, 12), pady=9)
+        self._bulk_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self._bulk_buttons = [
+            ctk.CTkButton(self._bulk_bar, text="全选当前", width=96, command=self._select_visible, **button_style("secondary", compact=True)),
+            ctk.CTkButton(self._bulk_bar, text="清空选择", width=96, command=self._clear_selection, **button_style("secondary", compact=True)),
+            ctk.CTkButton(self._bulk_bar, text="批量清理 GPT", width=108, command=lambda: self._bulk_clear_sites("chatgpt"), **button_style("warning", compact=True)),
+            ctk.CTkButton(self._bulk_bar, text="批量清理 Claude", width=122, command=lambda: self._bulk_clear_sites("claude"), **button_style("warning", compact=True)),
+            ctk.CTkButton(self._bulk_bar, text="批量清理两者", width=122, command=lambda: self._bulk_clear_sites("both"), **button_style("warning", compact=True)),
+        ]
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -204,7 +238,90 @@ class BrowserTab(ctk.CTkScrollableFrame):
             font=font(13),
         ).pack(fill="x", pady=(22, 6))
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._schedule_initial_refresh()
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._destroyed or self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            if not self._destroyed:
+                self._apply_responsive_layout()
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_layout_width()
+        stacked, quick_columns, bulk_columns = _browser_tab_layout(width)
+        state = (stacked, quick_columns, bulk_columns)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        self._title_area.grid(row=0, column=0, sticky="ew")
+        if stacked:
+            self._action_bar.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        else:
+            self._action_bar.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        for column in range(2):
+            self._action_bar.grid_columnconfigure(column, weight=1, uniform="browser-header-actions")
+        for index, button in enumerate(self._header_action_buttons):
+            button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
+
+        for column in range(5):
+            self._quick_bar.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+            self._bulk_bar.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        if stacked:
+            self._quick_label.grid(row=0, column=0, columnspan=quick_columns, sticky="w", padx=12, pady=(9, 3))
+            for column in range(quick_columns):
+                self._quick_bar.grid_columnconfigure(column, weight=1, uniform="browser-quick")
+            for index, button in enumerate(self._quick_buttons):
+                button.grid(
+                    row=1 + index // quick_columns,
+                    column=index % quick_columns,
+                    sticky="ew",
+                    padx=(12 if index % quick_columns == 0 else 6, 12 if index % quick_columns == quick_columns - 1 else 0),
+                    pady=(0, 7),
+                )
+        else:
+            self._quick_label.grid(row=0, column=0, sticky="w", padx=(12, 0), pady=9)
+            for index, button in enumerate(self._quick_buttons, start=1):
+                self._quick_bar.grid_columnconfigure(index, weight=1, uniform="browser-quick")
+                button.grid(row=0, column=index, sticky="ew", padx=(8, 12 if index == len(self._quick_buttons) else 0), pady=9)
+
+        for column in range(bulk_columns):
+            self._bulk_bar.grid_columnconfigure(column, weight=1, uniform="browser-bulk")
+        for index, button in enumerate(self._bulk_buttons):
+            button.grid(
+                row=index // bulk_columns,
+                column=index % bulk_columns,
+                sticky="ew",
+                padx=(12 if index % bulk_columns == 0 else 6, 12 if index % bulk_columns == bulk_columns - 1 else 0),
+                pady=(9 if index < bulk_columns else 0, 9),
+            )
+
+        self._filter_label.grid(row=0, column=0, sticky="w")
+        self._filter_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._filter_bar.grid_columnconfigure(2, weight=0)
+        if width < 520:
+            self._stats_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        else:
+            self._filter_bar.grid_columnconfigure(2, weight=1)
+            self._stats_label.grid(row=0, column=2, sticky="e")
 
     def _schedule_initial_refresh(self):
         if self._initial_refresh_after_id or getattr(self, "_destroyed", False):
@@ -570,6 +687,8 @@ class BrowserTab(ctk.CTkScrollableFrame):
         def do_bulk_clear():
             profiles = {p.name: p for p in profile_manager.list_browser_profiles()}
             success = 0
+            shared_cleared = 0
+            shared_preserved = 0
             failures: list[str] = []
             for name in sorted(self._selected_names):
                 profile = profiles.get(name)
@@ -577,7 +696,10 @@ class BrowserTab(ctk.CTkScrollableFrame):
                     failures.append(f"{name}: Profile 不存在")
                     continue
                 try:
-                    browser_data_manager.clear_site_data(profile, scope)
+                    if browser_data_manager.clear_site_data(profile, scope):
+                        shared_cleared += 1
+                    else:
+                        shared_preserved += 1
                     success += 1
                 except Exception as e:
                     failures.append(f"{name}: {e}")
@@ -589,17 +711,38 @@ class BrowserTab(ctk.CTkScrollableFrame):
                     title="批量清理结果",
                     success_count=success,
                     failure_items=failures,
-                    success_label=f"目标站点: {label}",
+                    success_label=(
+                        f"目标站点: {label}；共享存储已清 {shared_cleared} 个，"
+                        f"外部/非托管 Profile 保留 {shared_preserved} 个"
+                    ),
                 )
             else:
-                self._toast(f"已清理 {success} 个 Profile 的 {label} 站点数据")
+                self._toast(
+                    f"已清理 {success} 个 Profile 的 {label} 站点数据；"
+                    f"共享存储已清 {shared_cleared} 个，保留 {shared_preserved} 个"
+                )
 
             self.refresh()
 
+        profiles_by_name = {p.name: p for p in profile_manager.list_browser_profiles()}
+        preserved_count = sum(
+            1
+            for name in self._selected_names
+            if name in profiles_by_name and not browser_data_manager.can_clear_shared_storage(profiles_by_name[name])[0]
+        )
+        storage_note = (
+            f"\n其中 {preserved_count} 个外部/非托管 Profile 只清 Cookies 与按域 IndexedDB，"
+            "会保留 Local/Session Storage、Service Worker 和缓存。"
+            if preserved_count
+            else "\n所选 Profile 的共享 Local/Session Storage、Service Worker 和缓存也会被清理。"
+        )
         ConfirmDialog(
             self.winfo_toplevel(),
             title="批量清理站点数据",
-            message=f"将清理所选 {len(self._selected_names)} 个 Profile 中 {label} 的站点数据和登录态。\n请先关闭相关浏览器后继续。",
+            message=(
+                f"将清理所选 {len(self._selected_names)} 个 Profile 中 {label} 的站点数据和登录态。"
+                f"{storage_note}\n请先关闭相关浏览器后继续。"
+            ),
             on_confirm=do_bulk_clear,
         )
 
@@ -667,17 +810,33 @@ class BrowserTab(ctk.CTkScrollableFrame):
     def _clear_sites(self, profile, scope: str):
         def do_clear():
             try:
-                browser_data_manager.clear_site_data(profile, scope)
+                shared_cleared = browser_data_manager.clear_site_data(profile, scope)
                 label = {"chatgpt": "ChatGPT", "claude": "Claude", "both": "ChatGPT 与 Claude"}[scope]
-                self._toast(f"已清理 {label} 站点数据")
+                suffix = "共享存储已清" if shared_cleared else "外部/非托管 Profile 的共享存储已保留"
+                self._toast(f"已清理 {label} 站点数据；{suffix}")
             except Exception as e:
                 self._toast(f"清理失败: {e}", is_error=True)
 
         label = {"chatgpt": "ChatGPT", "claude": "Claude", "both": "ChatGPT 与 Claude"}[scope]
+        clear_shared, shared_reason = browser_data_manager.can_clear_shared_storage(profile)
+        if clear_shared:
+            storage_note = (
+                "Chromium 的 Local Storage、Session Storage、Service Worker 和缓存是共享存储，"
+                "会同时清空该 Profile 内其他站点的这些数据。"
+            )
+        else:
+            storage_note = (
+                "该 Profile 不会整库清理共享 Local/Session Storage、Service Worker 或缓存；"
+                f"只清 Cookies 与按域 IndexedDB（{shared_reason}）。"
+            )
         ConfirmDialog(
             self.winfo_toplevel(),
             title="清理站点数据",
-            message=f"将清理该 Profile 中 {label} 的站点数据和登录态。\n请先关闭浏览器后继续。",
+            message=(
+                f"将清理该 Profile 中 {label} 的 Cookies、IndexedDB 和登录态。\n"
+                f"{storage_note}\n"
+                "请先关闭浏览器后继续。"
+            ),
             on_confirm=do_clear,
         )
 

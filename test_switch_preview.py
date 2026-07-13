@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from config import paths
-from core import auth_parser, backup_manager, parser, profile_manager, security, switch_preview, toml_parser, vscode_parser
+from core import auth_parser, backup_manager, parser, profile_manager, security, switch_preview, switcher, toml_parser, vscode_parser
 from models.profile import ClaudeAccountProfile, CodexAccountProfile, CodexProfile
 
 
@@ -99,3 +99,46 @@ def test_static_health_collects_saved_profile_issues(isolated_preview):
     checks = switch_preview.collect_static_health_checks("codex")
 
     assert any(check.status == "error" and "Bad Relay" in check.item for check in checks)
+
+
+def test_direct_switch_rejects_invalid_target_before_backup_or_write(isolated_preview, monkeypatch):
+    security.set_secret("codex:bad-direct:api_key", "sk-test")
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="Bad Direct",
+            api_key_ref="codex:bad-direct:api_key",
+            model="",
+            model_provider="custom",
+            custom_base_url="not-a-url",
+        )
+    )
+    backup_calls: list[str] = []
+    monkeypatch.setattr(backup_manager, "create_backup", lambda description="": backup_calls.append(description))
+
+    with pytest.raises(ValueError, match="配置健康检查未通过"):
+        switcher.switch_codex_profile("Bad Direct")
+
+    assert backup_calls == []
+    assert not toml_parser.CODEX_CONFIG.exists()
+
+
+def test_openai_auth_provider_is_blocked_without_official_tokens(isolated_preview, monkeypatch):
+    profile_manager.save_codex_profile(
+        CodexProfile(
+            name="Needs Login",
+            model="gpt-test",
+            model_provider="custom",
+            custom_base_url="https://api.example.test/v1",
+            custom_requires_openai_auth=True,
+        )
+    )
+    backup_calls: list[str] = []
+    monkeypatch.setattr(backup_manager, "create_backup", lambda description="": backup_calls.append(description))
+
+    preview = switch_preview.build_codex_api_preview("Needs Login")
+
+    assert not preview.can_proceed
+    assert any(check.status == "error" and check.item == "OpenAI 认证" for check in preview.checks)
+    with pytest.raises(ValueError, match="OpenAI 认证"):
+        switcher.switch_codex_profile("Needs Login")
+    assert backup_calls == []

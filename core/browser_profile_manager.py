@@ -57,7 +57,10 @@ class BrowserProfileManager:
                 resolved = path.resolve()
             except FileNotFoundError:
                 resolved = path
-            if managed_root not in resolved.parents and resolved != managed_root:
+            # A managed profile must be a child of the shared root.  Allowing
+            # the root itself would let a single-profile reset delete every
+            # managed browser profile.
+            if managed_root not in resolved.parents:
                 return False, "托管 Profile 必须位于应用的 browser_profiles 目录下"
         return True, ""
 

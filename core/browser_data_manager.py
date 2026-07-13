@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -210,6 +211,8 @@ class BrowserDataManager:
 
     def can_full_reset(self, profile: BrowserProfile) -> tuple[bool, str]:
         """Check if full reset is allowed with comprehensive validation."""
+        if not profile.allow_full_reset:
+            return False, "Profile 未开启整目录清理授权"
         if profile.profile_mode != "managed":
             return False, "external profile 不允许整目录清理"
         if not profile.created_by_app:
@@ -223,14 +226,27 @@ class BrowserDataManager:
         managed_root = MANAGED_BROWSER_PROFILES_DIR.resolve()
         try:
             # Ensure profile_dir is within managed_root
-            if managed_root not in profile_dir.parents and profile_dir != managed_root:
+            if managed_root not in profile_dir.parents:
                 return False, "目标目录不在应用托管目录下"
         except Exception as e:
             return False, f"路径验证失败: {e}"
 
         return True, ""
 
-    def clear_site_data(self, profile: BrowserProfile, scope: str) -> None:
+    def can_clear_shared_storage(self, profile: BrowserProfile) -> tuple[bool, str]:
+        """Allow shared Chromium-store cleanup only for isolated app profiles."""
+        if profile.profile_mode != "managed" or not profile.created_by_app:
+            return False, "外部 Profile 不会整库清理共享存储"
+        try:
+            profile_dir = self._resolve_profile_dir(profile)
+            managed_root = MANAGED_BROWSER_PROFILES_DIR.resolve()
+            if managed_root not in profile_dir.parents:
+                return False, "Profile 不在应用托管目录下"
+        except Exception as exc:
+            return False, f"无法验证 Profile 目录: {exc}"
+        return True, ""
+
+    def clear_site_data(self, profile: BrowserProfile, scope: str) -> bool:
         """Clear site data with comprehensive validation and error handling."""
         # Validate scope
         if scope not in {"chatgpt", "claude", "both"}:
@@ -261,6 +277,8 @@ class BrowserDataManager:
         else:  # both
             domains = TARGET_DOMAINS
 
+        clear_shared_storage, shared_storage_reason = self.can_clear_shared_storage(profile)
+
         # Perform cleanup with error collection
         errors = []
 
@@ -270,20 +288,28 @@ class BrowserDataManager:
             logger.error(f"Failed to clear cookies: {e}")
             errors.append(f"清理 Cookies 失败: {e}")
 
-        try:
-            self._clear_network_cache(default_dir)
-        except Exception as e:
-            logger.error(f"Failed to clear network cache: {e}")
-            errors.append(f"清理网络缓存失败: {e}")
+        if clear_shared_storage:
+            try:
+                self._clear_network_cache(default_dir)
+            except Exception as e:
+                logger.error(f"Failed to clear network cache: {e}")
+                errors.append(f"清理网络缓存失败: {e}")
+        else:
+            logger.info("Skipped shared browser cache cleanup: %s", shared_storage_reason)
 
         try:
-            self._clear_storage_for_domains(default_dir, domains)
+            self._clear_storage_for_domains(
+                default_dir,
+                domains,
+                clear_shared_storage=clear_shared_storage,
+            )
         except Exception as e:
             logger.error(f"Failed to clear storage: {e}")
             errors.append(f"清理存储数据失败: {e}")
 
         if errors:
             raise RuntimeError("部分清理操作失败:\n" + "\n".join(errors))
+        return clear_shared_storage
 
     def _clear_cookies_db(self, default_dir: Path, domains: list[str]) -> None:
         """Clear cookies database with backup and validation."""
@@ -366,41 +392,74 @@ class BrowserDataManager:
                 logger.error(f"Failed to clear {cache_dir}: {e}")
                 raise
 
-    def _clear_storage_for_domains(self, default_dir: Path, domains: list[str]) -> None:
-        """Clear site-specific storage directories with validation."""
-        storage_paths = [
+    def _clear_storage_for_domains(
+        self,
+        default_dir: Path,
+        domains: list[str],
+        *,
+        clear_shared_storage: bool = False,
+    ) -> None:
+        """Clear Chromium storage without pretending shared LevelDB is per-origin.
+
+        Local/Session Storage and the Service Worker databases use opaque or
+        shared LevelDB files, so deleting children whose *filenames* contain a
+        domain does not remove the target origin.  Clear those shared stores
+        for this isolated profile.  Legacy Local Storage and IndexedDB keep
+        origin-bearing names and can still be filtered by domain.
+        """
+        shared_storage_paths = [
             Path("Local Storage/leveldb"),
             Path("Session Storage"),
-            Path("IndexedDB"),
             Path("Service Worker/CacheStorage"),
             Path("Service Worker/Database"),
         ]
 
-        for relative in storage_paths:
+        if clear_shared_storage:
+            for relative in shared_storage_paths:
+                target = default_dir / relative
+                if not target.exists():
+                    continue
+                if not target.is_dir():
+                    logger.warning(f"Storage path is not a directory: {target}")
+                    continue
+                try:
+                    shutil.rmtree(target, ignore_errors=False)
+                    logger.info(f"Cleared shared Chromium storage: {target}")
+                except Exception as e:
+                    logger.error(f"Error processing {target}: {e}")
+                    raise
+
+        origin_scoped_paths = [
+            Path("Local Storage"),
+            Path("IndexedDB"),
+        ]
+        for relative in origin_scoped_paths:
             target = default_dir / relative
             if not target.exists():
                 continue
-
             if not target.is_dir():
                 logger.warning(f"Storage path is not a directory: {target}")
                 continue
-
             try:
                 for child in list(target.iterdir()):
-                    name = child.name.lower()
-                    if any(domain in name for domain in domains):
-                        try:
-                            if child.is_dir():
-                                shutil.rmtree(child, ignore_errors=False)
-                            else:
-                                child.unlink(missing_ok=False)
-                            logger.debug(f"Cleared storage: {child}")
-                        except Exception as e:
-                            logger.error(f"Failed to clear {child}: {e}")
-                            raise
+                    if not self._storage_name_matches_domains(child.name, domains):
+                        continue
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child, ignore_errors=False)
+                    else:
+                        child.unlink(missing_ok=False)
+                    logger.debug(f"Cleared origin-scoped storage: {child}")
             except Exception as e:
                 logger.error(f"Error processing {target}: {e}")
                 raise
+
+    def _storage_name_matches_domains(self, name: str, domains: list[str]) -> bool:
+        normalized = str(name or "").lower()
+        for domain in domains:
+            value = str(domain or "").strip().lower()
+            if value and re.search(rf"(^|[^a-z0-9]){re.escape(value)}($|[^a-z0-9])", normalized):
+                return True
+        return False
 
     def full_reset(self, profile: BrowserProfile) -> None:
         """Completely reset profile directory with comprehensive safety checks."""
@@ -424,47 +483,55 @@ class BrowserDataManager:
 
         # Final safety check: ensure it's within managed directory
         managed_root = MANAGED_BROWSER_PROFILES_DIR.resolve()
-        if managed_root not in profile_dir.parents and profile_dir != managed_root:
+        if managed_root not in profile_dir.parents:
             raise RuntimeError("安全检查失败: 目标目录不在托管目录下")
 
-        # Perform reset with backup
-        backup_dir = profile_dir.with_name(profile_dir.name + ".backup")
+        # Move the original aside atomically before creating the empty profile.
+        # A unique sibling avoids deleting a stale backup or another managed
+        # profile that happens to use a backup-like name.
+        backup_dir = temp_path_for(profile_dir).with_suffix(".reset_backup")
+        moved_original = False
         try:
-            # Create backup
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir)
-            shutil.copytree(profile_dir, backup_dir)
-            logger.info(f"Created backup: {backup_dir}")
+            if backup_dir.exists() or backup_dir.is_symlink():
+                raise FileExistsError(f"临时备份路径已存在: {backup_dir}")
+            profile_dir.rename(backup_dir)
+            moved_original = True
+            logger.info(f"Moved profile to reset backup: {backup_dir}")
 
-            # Remove original
-            shutil.rmtree(profile_dir)
-            logger.info(f"Removed profile directory: {profile_dir}")
-
-            # Recreate empty directory
-            profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_dir.mkdir(parents=False, exist_ok=False)
             logger.info(f"Recreated profile directory: {profile_dir}")
-
-            # Remove backup on success
-            shutil.rmtree(backup_dir)
-            logger.info("Removed backup after successful reset")
-
         except Exception as e:
             logger.error(f"Full reset failed: {e}")
-            # Attempt to restore from backup
-            if backup_dir.exists() and not profile_dir.exists():
+            rollback_error = None
+            if moved_original:
                 try:
-                    shutil.copytree(backup_dir, profile_dir)
-                    logger.info("Restored profile from backup")
+                    if profile_dir.exists() or profile_dir.is_symlink():
+                        if profile_dir.is_symlink() or profile_dir.is_file():
+                            profile_dir.unlink(missing_ok=True)
+                        else:
+                            shutil.rmtree(profile_dir)
+                    backup_dir.rename(profile_dir)
+                    logger.info("Restored profile directory after reset failure")
                 except Exception as restore_error:
                     logger.error(f"Failed to restore backup: {restore_error}")
+                    rollback_error = restore_error
+            if rollback_error is not None:
+                raise RuntimeError(
+                    f"整目录清理失败，且原目录自动恢复失败；保留备份: {backup_dir} ({rollback_error})"
+                ) from e
             raise RuntimeError(f"整目录清理失败: {e}") from e
-        finally:
-            # Clean up backup if it still exists
-            if backup_dir.exists():
-                try:
-                    shutil.rmtree(backup_dir)
-                except Exception:
-                    pass
+
+        # The empty profile is now committed.  If deleting the old tree fails,
+        # preserve what remains for an explicit retry instead of destroying the
+        # last recovery copy in a finally block.
+        try:
+            shutil.rmtree(backup_dir)
+            logger.info("Removed reset backup after successful reset")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to remove reset backup {backup_dir}: {cleanup_error}")
+            raise RuntimeError(
+                f"整目录已清空，但临时备份清理失败；残留位置: {backup_dir} ({cleanup_error})"
+            ) from cleanup_error
 
 
 browser_data_manager = BrowserDataManager()

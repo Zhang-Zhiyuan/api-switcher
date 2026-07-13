@@ -8,6 +8,13 @@ from ui.theme import COLORS, button_style, combo_style, font, input_style, recen
 remote_proxy = LazyModule("core.remote_proxy")
 
 
+def _proxy_node_picker_layout(width: int) -> tuple[int, bool]:
+    """Return filter columns and whether scope actions need a second row."""
+
+    available = max(1, int(width))
+    return (4 if available >= 560 else (2 if available >= 360 else 1)), available < 420
+
+
 class ProxyNodePicker(ctk.CTkFrame):
     """Searchable, scrollable picker for large proxy subscriptions."""
 
@@ -59,6 +66,11 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._summary_label = None
         self._list_frame = None
         self._visible_group_headers = []
+        self._responsive_after_id = None
+        self._responsive_state = None
+        self._filter_bar = None
+        self._filter_groups = []
+        self._scope_bar = None
         self._build_ui()
 
     def _build_ui(self):
@@ -74,71 +86,68 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._search_entry.grid(row=0, column=0, columnspan=4, sticky="ew")
         self._search_entry.bind("<KeyRelease>", lambda _event: self._request_render_nodes(120, reset_limit=True))
 
-        filter_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
-        filter_bar.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self._filter_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
+        self._filter_bar.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
 
-        ctk.CTkLabel(
-            filter_bar,
-            text="连通",
-            text_color=COLORS["muted_soft"],
-            font=font(11),
-        ).pack(side="left", padx=(0, 4))
+        connectivity_group = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        connectivity_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(connectivity_group, text="连通", text_color=COLORS["muted_soft"], font=font(11)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
         self._filter_combo = ctk.CTkComboBox(
-            filter_bar,
+            connectivity_group,
             values=list(self.FILTER_OPTIONS),
             width=88,
             command=lambda _value: self._request_render_nodes(20, reset_limit=True),
             **combo_style(),
         )
         self._filter_combo.set("全部")
-        self._filter_combo.pack(side="left", padx=(0, 8))
+        self._filter_combo.grid(row=0, column=1, sticky="ew")
 
-        ctk.CTkLabel(
-            filter_bar,
-            text="地区",
-            text_color=COLORS["muted_soft"],
-            font=font(11),
-        ).pack(side="left", padx=(0, 4))
+        region_group = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        region_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(region_group, text="地区", text_color=COLORS["muted_soft"], font=font(11)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
         self._region_combo = ctk.CTkComboBox(
-            filter_bar,
+            region_group,
             values=[self.REGION_ALL],
             width=106,
             command=lambda _value: self._request_render_nodes(20, reset_limit=True),
             **combo_style(),
         )
         self._region_combo.set(self.REGION_ALL)
-        self._region_combo.pack(side="left", padx=(0, 8))
+        self._region_combo.grid(row=0, column=1, sticky="ew")
 
-        ctk.CTkLabel(
-            filter_bar,
-            text="质量",
-            text_color=COLORS["muted_soft"],
-            font=font(11),
-        ).pack(side="left", padx=(0, 4))
+        quality_group = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        quality_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(quality_group, text="质量", text_color=COLORS["muted_soft"], font=font(11)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
         self._quality_combo = ctk.CTkComboBox(
-            filter_bar,
+            quality_group,
             values=list(self.QUALITY_OPTIONS),
             width=110,
             command=lambda _value: self._request_render_nodes(20, reset_limit=True),
             **combo_style(),
         )
         self._quality_combo.set("全部质量")
-        self._quality_combo.pack(side="left", padx=(0, 8))
+        self._quality_combo.grid(row=0, column=1, sticky="ew")
         self._filter_reset_button = ctk.CTkButton(
-            filter_bar,
+            self._filter_bar,
             text="重置",
             width=58,
             command=self._reset_filters,
             **button_style("secondary", compact=True),
         )
-        self._filter_reset_button.pack(side="left")
+        self._filter_groups = [connectivity_group, region_group, quality_group]
 
-        scope_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
-        scope_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        scope_bar.grid_columnconfigure(0, weight=1)
+        self._scope_bar = ctk.CTkFrame(toolbar, fg_color="transparent")
+        self._scope_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self._scope_bar.grid_columnconfigure(0, weight=1)
 
         self._scope_label = ctk.CTkLabel(
-            scope_bar,
+            self._scope_bar,
             text="批量范围: 全部 0 个节点",
             text_color=COLORS["muted_soft"],
             font=font(11, "bold"),
@@ -147,7 +156,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._scope_label.grid(row=0, column=0, sticky="ew")
 
         match_button = ctk.CTkButton(
-            scope_bar,
+            self._scope_bar,
             text="全选匹配",
             width=84,
             command=lambda: self._set_matching_checked(True),
@@ -155,7 +164,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         )
         match_button.grid(row=0, column=1, sticky="e", padx=(8, 6))
         clear_button = ctk.CTkButton(
-            scope_bar,
+            self._scope_bar,
             text="清空匹配",
             width=84,
             command=lambda: self._set_matching_checked(False),
@@ -184,6 +193,71 @@ class ProxyNodePicker(ctk.CTkFrame):
             scrollbar_button_hover_color=COLORS["secondary_hover"],
         )
         self._list_frame.pack(fill="x")
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_layout_width()
+        filter_columns, scope_stacked = _proxy_node_picker_layout(width)
+        state = (filter_columns, scope_stacked)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        for column in range(4):
+            self._filter_bar.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        for column in range(filter_columns):
+            self._filter_bar.grid_columnconfigure(column, weight=1, uniform="proxy-picker-filters")
+        filter_items = [*self._filter_groups, self._filter_reset_button]
+        for index, widget in enumerate(filter_items):
+            widget.grid(
+                row=index // filter_columns,
+                column=index % filter_columns,
+                sticky="ew",
+                padx=(0 if index % filter_columns == 0 else 6, 0),
+                pady=(0 if index < filter_columns else 5, 0),
+            )
+
+        match_button, clear_button = self._batch_buttons
+        if scope_stacked:
+            self._scope_bar.grid_columnconfigure(0, weight=1)
+            self._scope_bar.grid_columnconfigure(1, weight=1)
+            self._scope_bar.grid_columnconfigure(2, weight=0)
+            self._scope_label.grid(row=0, column=0, columnspan=2, sticky="ew")
+            match_button.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(5, 0))
+            clear_button.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(5, 0))
+        else:
+            self._scope_bar.grid_columnconfigure(0, weight=1)
+            self._scope_bar.grid_columnconfigure(1, weight=0)
+            self._scope_bar.grid_columnconfigure(2, weight=0)
+            self._scope_label.grid(row=0, column=0, columnspan=1, sticky="ew")
+            match_button.grid(row=0, column=1, sticky="e", padx=(8, 6), pady=0)
+            clear_button.grid(row=0, column=2, sticky="e", pady=0)
 
     def set_nodes(self, nodes, latency_results=None, selected_key: str = "", quality_results=None):
         self._nodes = list(nodes or [])
@@ -207,6 +281,12 @@ class ProxyNodePicker(ctk.CTkFrame):
     def destroy(self):
         self._cancel_pending_render()
         self._cancel_incremental_render()
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         self._render_deferred = False
         super().destroy()
 

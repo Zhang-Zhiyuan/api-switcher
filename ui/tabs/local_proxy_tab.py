@@ -19,6 +19,20 @@ remote_proxy = LazyModule("core.remote_proxy")
 startup_manager = LazyModule("core.startup_manager")
 
 
+def _local_proxy_tab_layout(width: int) -> tuple[bool, int, int, int, bool]:
+    """Return outer stacking and inner column counts for the proxy form."""
+
+    available = max(1, int(width))
+    stacked = available < 760
+    return (
+        stacked,
+        2 if stacked else 4,
+        2 if available < 620 else 4,
+        2 if available < 620 else 4,
+        available < 520,
+    )
+
+
 class LocalProxyTab(ctk.CTkScrollableFrame):
     """Tab for managing the Windows local AI proxy."""
 
@@ -87,6 +101,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_results = {}
         self._prefer_quality_sort = False
         self._busy = False
+        self._responsive_after_id = None
+        self._responsive_state = None
         self._saved_subscription_loaded = False
         self._saved_subscription_load_generation = 0
         self._preferences_load_generation = 0
@@ -115,6 +131,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         policy_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         policy_frame.pack(fill="x", padx=14, pady=(0, 12))
         policy = ctk.CTkFrame(policy_frame, fg_color="transparent")
+        self._policy_grid = policy
         policy.pack(fill="x", padx=14, pady=14)
         policy.grid_columnconfigure(1, weight=1)
         policy.grid_columnconfigure(2, weight=1)
@@ -128,11 +145,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).grid(row=0, column=0, columnspan=4, sticky="ew")
 
         startup_box = ctk.CTkFrame(policy, fg_color="transparent")
+        self._startup_box = startup_box
         startup_box.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         startup_box.grid_columnconfigure(0, weight=1)
         startup_box.grid_columnconfigure(1, weight=1)
         startup_box.grid_columnconfigure(2, weight=1)
-        ctk.CTkCheckBox(
+        start_on_login_check = ctk.CTkCheckBox(
             startup_box,
             text="开机自动启动本机代理",
             variable=self._start_on_login_var,
@@ -141,8 +159,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             checkbox_height=18,
             text_color=COLORS["text"],
             font=font(12),
-        ).grid(row=0, column=0, sticky="w", padx=(0, 16))
-        ctk.CTkCheckBox(
+        )
+        start_on_login_check.grid(row=0, column=0, sticky="w", padx=(0, 16))
+        keep_running_check = ctk.CTkCheckBox(
             startup_box,
             text="退出程序后继续运行",
             variable=self._keep_running_on_exit_var,
@@ -151,8 +170,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             checkbox_height=18,
             text_color=COLORS["text"],
             font=font(12),
-        ).grid(row=0, column=1, sticky="w", padx=(0, 16))
-        ctk.CTkCheckBox(
+        )
+        keep_running_check.grid(row=0, column=1, sticky="w", padx=(0, 16))
+        proxy_non_cn_check = ctk.CTkCheckBox(
             startup_box,
             text="代理大陆境外 IP",
             variable=self._proxy_non_cn_var,
@@ -161,7 +181,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             checkbox_height=18,
             text_color=COLORS["text"],
             font=font(12),
-        ).grid(row=0, column=2, sticky="w")
+        )
+        proxy_non_cn_check.grid(row=0, column=2, sticky="w")
         self._apply_routing_button = ctk.CTkButton(
             startup_box,
             text="应用规则",
@@ -170,23 +191,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._apply_routing_button.grid(row=0, column=3, sticky="e")
+        self._startup_items = [
+            start_on_login_check,
+            keep_running_check,
+            proxy_non_cn_check,
+            self._apply_routing_button,
+        ]
 
-        ctk.CTkLabel(
+        self._builtin_sites_label = ctk.CTkLabel(
             policy,
             text="内置站点",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=2, column=0, sticky="nw", pady=(12, 0))
+        )
+        self._builtin_sites_label.grid(row=2, column=0, sticky="nw", pady=(12, 0))
         builtin_box = ctk.CTkFrame(policy, fg_color="transparent")
+        self._builtin_box = builtin_box
         builtin_box.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
         builtin_box.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self._builtin_site_vars = {}
+        self._builtin_site_checks = []
         for index, site in enumerate(LOCAL_PROXY_BUILTIN_SITES):
             site_id = str(site["id"])
             var = ctk.BooleanVar(value=False)
             self._builtin_site_vars[site_id] = var
-            ctk.CTkCheckBox(
+            checkbox = ctk.CTkCheckBox(
                 builtin_box,
                 text=str(site["label"]),
                 variable=var,
@@ -195,16 +225,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 checkbox_height=16,
                 text_color=COLORS["text"],
                 font=font(12),
-            ).grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 14), pady=(0, 8))
+            )
+            checkbox.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 14), pady=(0, 8))
+            self._builtin_site_checks.append(checkbox)
 
-        ctk.CTkLabel(
+        self._custom_target_label = ctk.CTkLabel(
             policy,
             text="自定义",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        )
+        self._custom_target_label.grid(row=3, column=0, sticky="w", pady=(6, 0))
         custom_box = ctk.CTkFrame(policy, fg_color="transparent")
+        self._custom_box = custom_box
         custom_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         custom_box.grid_columnconfigure(0, weight=1)
         self._custom_target_entry = ctk.CTkEntry(
@@ -213,13 +247,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **input_style(),
         )
         self._custom_target_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ctk.CTkButton(
+        self._custom_add_button = ctk.CTkButton(
             custom_box,
             text="新增",
             width=72,
             command=self._add_custom_target,
             **button_style("accent", compact=True),
-        ).grid(row=0, column=1, sticky="e")
+        )
+        self._custom_add_button.grid(row=0, column=1, sticky="e")
 
         self._custom_target_frame = ctk.CTkFrame(policy, fg_color="transparent")
         self._custom_target_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
@@ -238,24 +273,27 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         node_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         node_frame.pack(fill="x", padx=14, pady=(0, 12))
         controls = ctk.CTkFrame(node_frame, fg_color="transparent")
+        self._controls_grid = controls
         controls.pack(fill="x", padx=14, pady=14)
         controls.grid_columnconfigure(1, weight=1)
         controls.grid_columnconfigure(2, weight=1)
 
-        ctk.CTkLabel(
+        self._subscription_heading = ctk.CTkLabel(
             controls,
             text="1 订阅来源",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
-        ).grid(row=0, column=0, columnspan=4, sticky="ew")
-        ctk.CTkLabel(
+        )
+        self._subscription_heading.grid(row=0, column=0, columnspan=4, sticky="ew")
+        self._subscription_profile_label_widget = ctk.CTkLabel(
             controls,
             text="订阅配置",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        )
+        self._subscription_profile_label_widget.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._subscription_profile_combo = ctk.CTkComboBox(
             controls,
             values=["新订阅"],
@@ -270,6 +308,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._subscription_name_entry.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(8, 0))
         profile_actions = ctk.CTkFrame(controls, fg_color="transparent")
+        self._profile_actions = profile_actions
         profile_actions.grid(row=1, column=3, sticky="e", pady=(8, 0))
         self._subscription_profile_save_button = ctk.CTkButton(
             profile_actions,
@@ -287,13 +326,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._subscription_profile_delete_button.pack(side="left")
-        ctk.CTkLabel(
+        self._subscription_link_label = ctk.CTkLabel(
             controls,
             text="订阅链接",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        )
+        self._subscription_link_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
         self._subscription_entry = ctk.CTkEntry(
             controls,
             placeholder_text="粘贴 Clash/mihomo 订阅链接；只保存在本机缓存",
@@ -301,6 +341,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._subscription_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         sub_actions = ctk.CTkFrame(controls, fg_color="transparent")
+        self._subscription_actions = sub_actions
         sub_actions.grid(row=2, column=3, sticky="e", pady=(8, 0))
         self._fetch_button = ctk.CTkButton(
             sub_actions,
@@ -309,7 +350,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             command=self._fetch_subscription,
             **button_style("secondary", compact=True),
         )
-        self._fetch_button.pack(side="left", padx=(0, 6))
+        self._fetch_button.grid(row=0, column=0, sticky="ew")
         self._auto_refresh_check = ctk.CTkCheckBox(
             sub_actions,
             text="启动时刷新",
@@ -321,7 +362,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         )
-        self._auto_refresh_check.pack(side="left")
+        self._auto_refresh_check.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self._periodic_update_check = ctk.CTkCheckBox(
             sub_actions,
             text="定时热更新",
@@ -333,20 +374,29 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         )
-        self._periodic_update_check.pack(side="left", padx=(8, 0))
+        self._periodic_update_check.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        interval_group = ctk.CTkFrame(sub_actions, fg_color="transparent")
+        interval_group.grid_columnconfigure(0, weight=1)
         self._periodic_update_entry = ctk.CTkEntry(
-            sub_actions,
+            interval_group,
             width=48,
             placeholder_text="60",
             **input_style(),
         )
-        self._periodic_update_entry.pack(side="left", padx=(6, 0))
+        self._periodic_update_entry.grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(
-            sub_actions,
+            interval_group,
             text="分钟",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left", padx=(4, 0))
+        ).grid(row=0, column=1, sticky="w", padx=(4, 0))
+        interval_group.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        self._subscription_action_items = [
+            self._fetch_button,
+            self._auto_refresh_check,
+            self._periodic_update_check,
+            interval_group,
+        ]
         self._cache_label = ctk.CTkLabel(
             controls,
             text="本机缓存: 未加载",
@@ -358,20 +408,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._cache_label.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         bind_wraplength(controls, self._cache_label, padding=20)
 
-        ctk.CTkLabel(
+        self._node_selection_heading = ctk.CTkLabel(
             controls,
             text="2 节点选择",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
-        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-        ctk.CTkLabel(
+        )
+        self._node_selection_heading.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        self._subscription_nodes_label = ctk.CTkLabel(
             controls,
             text="订阅节点",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        )
+        self._subscription_nodes_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
         self._subscription_picker_host = ctk.CTkFrame(
             controls,
             height=360,
@@ -389,6 +441,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(12),
         ).pack(expand=True)
         node_actions = ctk.CTkFrame(controls, fg_color="transparent")
+        self._node_actions = node_actions
         node_actions.grid(row=5, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
             node_actions,
@@ -477,20 +530,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._selected_label.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         bind_wraplength(controls, self._selected_label, padding=20)
 
-        ctk.CTkLabel(
+        self._proxy_start_heading = ctk.CTkLabel(
             controls,
             text="3 启动本机代理",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
-        ).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-        ctk.CTkLabel(
+        )
+        self._proxy_start_heading.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        self._pending_node_label = ctk.CTkLabel(
             controls,
             text="待启动节点",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=8, column=0, sticky="nw", pady=(8, 0))
+        )
+        self._pending_node_label.grid(row=8, column=0, sticky="nw", pady=(8, 0))
         self._node_text_host = ctk.CTkFrame(
             controls,
             height=96,
@@ -509,6 +564,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).pack(expand=True)
 
         actions = ctk.CTkFrame(controls, fg_color="transparent")
+        self._proxy_actions = actions
         actions.grid(row=8, column=3, sticky="ne", pady=(8, 0))
         ctk.CTkLabel(
             actions,
@@ -575,7 +631,173 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._subscription_picker_after_id = self.after(1800, self._build_subscription_picker)
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    @staticmethod
+    def _reset_grid_columns(frame, count: int) -> None:
+        for column in range(count):
+            frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+    def _apply_responsive_layout(self) -> None:
+        state = _local_proxy_tab_layout(self._logical_layout_width())
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+        stacked, startup_columns, builtin_columns, subscription_action_columns, custom_stacked = state
+
+        policy = self._policy_grid
+        self._reset_grid_columns(policy, 4)
+        if stacked:
+            policy.grid_columnconfigure(0, weight=1)
+        else:
+            policy.grid_columnconfigure(1, weight=1)
+            policy.grid_columnconfigure(2, weight=1)
+
+        startup_box = self._startup_box
+        self._reset_grid_columns(startup_box, 4)
+        for column in range(startup_columns):
+            startup_box.grid_columnconfigure(column, weight=1, uniform="proxy-startup")
+        for index, widget in enumerate(self._startup_items):
+            widget.grid(
+                row=index // startup_columns,
+                column=index % startup_columns,
+                sticky="ew" if stacked else ("e" if index == len(self._startup_items) - 1 else "w"),
+                padx=(0, 8) if index % startup_columns < startup_columns - 1 else 0,
+                pady=(0, 6) if index < len(self._startup_items) - startup_columns else 0,
+            )
+
+        builtin_box = self._builtin_box
+        self._reset_grid_columns(builtin_box, 4)
+        for column in range(builtin_columns):
+            builtin_box.grid_columnconfigure(column, weight=1, uniform="proxy-builtins")
+        for index, widget in enumerate(self._builtin_site_checks):
+            widget.grid(
+                row=index // builtin_columns,
+                column=index % builtin_columns,
+                sticky="w",
+                padx=(0, 14),
+                pady=(0, 8),
+            )
+
+        custom_box = self._custom_box
+        self._reset_grid_columns(custom_box, 2)
+        custom_box.grid_columnconfigure(0, weight=1)
+        self._custom_target_entry.grid(
+            row=0,
+            column=0,
+            columnspan=2 if custom_stacked else 1,
+            sticky="ew",
+            padx=0 if custom_stacked else (0, 8),
+        )
+        self._custom_add_button.grid(
+            row=1 if custom_stacked else 0,
+            column=0 if custom_stacked else 1,
+            columnspan=2 if custom_stacked else 1,
+            sticky="ew" if custom_stacked else "e",
+            pady=(6, 0) if custom_stacked else 0,
+        )
+
+        if stacked:
+            self._builtin_sites_label.grid(row=2, column=0, columnspan=4, sticky="w", pady=(12, 0))
+            builtin_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
+            self._custom_target_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            custom_box.grid(row=5, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._custom_target_frame.grid(row=6, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
+            self._routing_status_label.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        else:
+            self._builtin_sites_label.grid(row=2, column=0, columnspan=1, sticky="nw", pady=(12, 0))
+            builtin_box.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            self._custom_target_label.grid(row=3, column=0, columnspan=1, sticky="w", pady=(6, 0))
+            custom_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._custom_target_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            self._routing_status_label.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+
+        controls = self._controls_grid
+        self._reset_grid_columns(controls, 4)
+        if stacked:
+            controls.grid_columnconfigure(0, weight=1)
+        else:
+            controls.grid_columnconfigure(1, weight=1)
+            controls.grid_columnconfigure(2, weight=1)
+
+        subscription_actions = self._subscription_actions
+        self._reset_grid_columns(subscription_actions, 4)
+        for column in range(subscription_action_columns):
+            subscription_actions.grid_columnconfigure(column, weight=1, uniform="proxy-sub-actions")
+        for index, widget in enumerate(self._subscription_action_items):
+            widget.grid(
+                row=index // subscription_action_columns,
+                column=index % subscription_action_columns,
+                sticky="ew",
+                padx=(0 if index % subscription_action_columns == 0 else 8, 0),
+                pady=(0 if index < subscription_action_columns else 6, 0),
+            )
+
+        if stacked:
+            self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_profile_combo.grid(row=2, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._subscription_name_entry.grid(row=3, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._profile_actions.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            self._subscription_link_label.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_entry.grid(row=6, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            subscription_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+            self._cache_label.grid(row=8, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._node_selection_heading.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._subscription_nodes_label.grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_picker_host.grid(row=11, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._node_actions.grid(row=12, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._selected_label.grid(row=13, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._proxy_start_heading.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._pending_node_label.grid(row=15, column=0, columnspan=4, sticky="nw", pady=(8, 0))
+            self._node_text_host.grid(row=16, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._proxy_actions.grid(row=17, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._status_label.grid(row=18, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        else:
+            self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_profile_combo.grid(row=1, column=1, columnspan=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._subscription_name_entry.grid(row=1, column=2, columnspan=1, sticky="ew", padx=(0, 8), pady=(8, 0))
+            self._profile_actions.grid(row=1, column=3, columnspan=1, sticky="e", pady=(8, 0))
+            self._subscription_link_label.grid(row=2, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            subscription_actions.grid(row=2, column=3, columnspan=1, sticky="e", pady=(8, 0))
+            self._cache_label.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._node_selection_heading.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._subscription_nodes_label.grid(row=5, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_picker_host.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._node_actions.grid(row=5, column=3, columnspan=1, sticky="e", pady=(8, 0))
+            self._selected_label.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._proxy_start_heading.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._pending_node_label.grid(row=8, column=0, columnspan=1, sticky="nw", pady=(8, 0))
+            self._node_text_host.grid(row=8, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._proxy_actions.grid(row=8, column=3, columnspan=1, sticky="ne", pady=(8, 0))
+            self._status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None
@@ -632,6 +854,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def destroy(self):
         self._destroyed = True
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         self._cancel_deferred_widget_builds()
         self._cancel_initial_refresh()
         self._cancel_saved_subscription_refresh()

@@ -24,6 +24,9 @@ class SSHEditorDialog(ctk.CTkToplevel):
         self._field_rows = {}
         self._key_row = None
         self._test_busy = False
+        self._field_layouts = {}
+        self._responsive_after_id = None
+        self._responsive_stacked = None
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -68,25 +71,32 @@ class SSHEditorDialog(ctk.CTkToplevel):
         key_row = ctk.CTkFrame(scroll, fg_color="transparent")
         self._key_row = key_row
         key_row.pack(fill="x", pady=5)
-        ctk.CTkLabel(
+        key_label = ctk.CTkLabel(
             key_row,
             text="私钥路径",
             width=128,
             anchor="w",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left")
-        self._key_entry = ctk.CTkEntry(key_row, width=296, **input_style())
+        )
+        key_label.pack(side="left")
+        self._key_entry = ctk.CTkEntry(key_row, width=180, **input_style())
         if profile and profile.private_key_path:
             self._key_entry.insert(0, profile.private_key_path)
         self._key_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        ctk.CTkButton(
+        key_browse = ctk.CTkButton(
             key_row,
             text="浏览",
             width=58,
             command=self._browse_key,
             **button_style("secondary", compact=True),
-        ).pack(side="left")
+        )
+        key_browse.pack(side="left")
+        self._field_layouts["private_key_path"] = {
+            "label": key_label,
+            "field": self._key_entry,
+            "buttons": [key_browse],
+        }
 
         # Key passphrase
         self._add_field(scroll, "私钥密码", "key_passphrase", "", "masked")
@@ -160,6 +170,8 @@ class SSHEditorDialog(ctk.CTkToplevel):
             **button_style("primary"),
         ).pack(side="right")
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
         self._on_auth_type_change(self._get_value("auth_type"))
 
@@ -167,21 +179,22 @@ class SSHEditorDialog(ctk.CTkToplevel):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
         self._field_rows[key] = row
-        ctk.CTkLabel(
+        label_widget = ctk.CTkLabel(
             row,
             text=label,
             width=128,
             anchor="w",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left")
+        )
+        label_widget.pack(side="left")
 
         if field_type == "entry":
-            widget = ctk.CTkEntry(row, width=360, **input_style())
+            widget = ctk.CTkEntry(row, width=180, **input_style())
             widget.insert(0, str(value))
             widget.pack(side="left", fill="x", expand=True)
         elif field_type == "masked":
-            widget = MaskedEntry(row, width=360)
+            widget = MaskedEntry(row, width=180)
             if value:
                 widget.set(str(value))
             widget.pack(side="left", fill="x", expand=True)
@@ -189,13 +202,68 @@ class SSHEditorDialog(ctk.CTkToplevel):
             widget = ctk.CTkComboBox(
                 row,
                 values=value,
-                width=360,
+                width=180,
                 **combo_style(),
             )
             widget.pack(side="left", fill="x", expand=True)
 
         self._fields[key] = (widget, field_type)
+        self._field_layouts[key] = {
+            "label": label_widget,
+            "field": widget,
+            "buttons": [],
+        }
         return widget
+
+    def _logical_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked = self._logical_width() < 620
+        if stacked == self._responsive_stacked:
+            return
+        self._responsive_stacked = stacked
+        for layout in self._field_layouts.values():
+            label = layout["label"]
+            field = layout["field"]
+            buttons = list(layout["buttons"])
+            for widget in (label, field, *buttons):
+                widget.pack_forget()
+            if stacked:
+                label.configure(width=0)
+                label.pack(side="top", fill="x", anchor="w")
+                field.pack(side="top", fill="x", expand=True, pady=(3, 0))
+                for index, button in enumerate(buttons):
+                    button.pack(side="left", fill="x", expand=True, pady=(5, 0), padx=(0 if index == 0 else 5, 0))
+            else:
+                label.configure(width=128)
+                label.pack(side="left")
+                field.pack(side="left", fill="x", expand=True, padx=(0, 5) if buttons else 0)
+                for index, button in enumerate(buttons):
+                    button.pack(side="left", padx=(0, 5) if index < len(buttons) - 1 else 0)
+        self._auth_hint.pack_configure(padx=(0, 0) if stacked else (128, 0))
 
     def _pack_after(self, row, after_row) -> None:
         if row is None:

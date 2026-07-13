@@ -22,6 +22,13 @@ ssh_manager = LazyModule("core.ssh_manager")
 sync_manager = LazyModule("core.sync_manager")
 auto_continue_manager = LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
 training_prompt_template_by_key = LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
+SSH_TAB_STACK_MAX_WIDTH = 820
+
+
+def _ssh_tab_stacked(width: int) -> bool:
+    """Return whether dense SSH controls need a vertical layout."""
+
+    return int(width) <= SSH_TAB_STACK_MAX_WIDTH
 
 
 def _format_server_batch_item(server_name: str, result) -> str:
@@ -192,6 +199,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             "Claude API": "claude",
             "Codex API": "codex",
         }
+        self._responsive_after_id = None
+        self._responsive_state = None
+        self._proxy_grid_layout = None
+        self._remote_auto_action_bar = None
+        self._remote_switch_frame = None
+        self._remote_switch_layout = None
         self._build_ui()
 
     def _build_ui(self):
@@ -227,18 +240,20 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         overview = ctk.CTkFrame(self, **card_frame_kwargs(COLORS["border_soft"]))
         overview.pack(fill="x", padx=14, pady=(0, 10))
-        overview_content = ctk.CTkFrame(overview, fg_color="transparent")
-        overview_content.pack(fill="x", padx=14, pady=12)
+        self._overview_content = ctk.CTkFrame(overview, fg_color="transparent")
+        self._overview_content.pack(fill="x", padx=14, pady=12)
         for column in range(3):
-            overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
+            self._overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
         overview_items = [
             ("1 勾选目标", "在服务器卡片选择 1 台或多台目标", "primary"),
             ("2 同步配置", "推送/拉取 API、账号和 Git 登录", "accent"),
             ("3 部署能力", "远端 AI 代理与自动续跑", "success"),
         ]
+        self._overview_items = []
         for column, (title, body, color_key) in enumerate(overview_items):
-            item = ctk.CTkFrame(overview_content, fg_color=COLORS["surface_alt"], corner_radius=8)
+            item = ctk.CTkFrame(self._overview_content, fg_color=COLORS["surface_alt"], corner_radius=8)
             item.grid(row=0, column=column, sticky="ew", padx=(0, 8) if column < 2 else 0)
+            self._overview_items.append(item)
             ctk.CTkLabel(
                 item,
                 text=title,
@@ -295,14 +310,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_frame.pack(fill="x", padx=14, pady=(0, 12))
 
         # Sync controls
-        sync_controls = ctk.CTkFrame(self._sync_frame, fg_color="transparent")
-        sync_controls.pack(fill="x", padx=14, pady=14)
-        sync_controls.grid_columnconfigure(1, weight=1, minsize=190)
-        sync_controls.grid_columnconfigure(2, weight=2, minsize=240)
-        sync_controls.grid_columnconfigure(3, weight=0, minsize=240)
+        self._sync_controls = ctk.CTkFrame(self._sync_frame, fg_color="transparent")
+        self._sync_controls.pack(fill="x", padx=14, pady=14)
+        sync_controls = self._sync_controls
+        self._sync_controls.grid_columnconfigure(1, weight=1, minsize=190)
+        self._sync_controls.grid_columnconfigure(2, weight=2, minsize=240)
+        self._sync_controls.grid_columnconfigure(3, weight=0, minsize=240)
 
         self._target_summary_label = ctk.CTkLabel(
-            sync_controls,
+            self._sync_controls,
             text="未选择目标服务器",
             text_color=COLORS["warning"],
             font=font(13, "bold"),
@@ -311,7 +327,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._target_summary_label.grid(row=0, column=0, columnspan=4, sticky="ew")
         self._target_hint_label = ctk.CTkLabel(
-            sync_controls,
+            self._sync_controls,
             text="在上方服务器卡片勾选目标。选 1 台就是单台操作，选多台就是批量；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。",
             text_color=COLORS["muted"],
             font=font(12),
@@ -319,15 +335,16 @@ class SSHTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         self._target_hint_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        bind_wraplength(sync_controls, self._target_hint_label, padding=20)
+        bind_wraplength(self._sync_controls, self._target_hint_label, padding=20)
 
-        ctk.CTkLabel(
+        self._push_content_label = ctk.CTkLabel(
             sync_controls,
             text="推送内容",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        )
+        self._push_content_label.grid(row=2, column=0, sticky="w", pady=(12, 0))
         self._sync_kind_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._sync_kind_options.keys()),
@@ -346,10 +363,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._profile_combo.grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(12, 0))
 
-        push_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
-        push_button_frame.grid(row=2, column=3, sticky="e", pady=(12, 0))
+        self._push_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        self._push_button_frame.grid(row=2, column=3, sticky="e", pady=(12, 0))
         self._sync_current_button = ctk.CTkButton(
-            push_button_frame,
+            self._push_button_frame,
             text="推送当前生效",
             width=132,
             command=self._sync_current,
@@ -357,7 +374,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._sync_current_button.pack(side="left", padx=(0, 6))
         self._sync_selected_button = ctk.CTkButton(
-            push_button_frame,
+            self._push_button_frame,
             text="推送所选配置",
             width=132,
             command=self._sync_selected,
@@ -365,13 +382,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._sync_selected_button.pack(side="left")
 
-        ctk.CTkLabel(
+        self._remote_pull_label = ctk.CTkLabel(
             sync_controls,
             text="远端拉取",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        )
+        self._remote_pull_label.grid(row=3, column=0, sticky="w", pady=(10, 0))
         self._remote_pull_type_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._remote_pull_type_options.keys()),
@@ -391,10 +409,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._remote_pull_combo.grid(row=3, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
         self._remote_pull_combo.set("请先读取远端配置")
-        remote_pull_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
-        remote_pull_button_frame.grid(row=3, column=3, sticky="e", pady=(10, 0))
+        self._remote_pull_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        self._remote_pull_button_frame.grid(row=3, column=3, sticky="e", pady=(10, 0))
         self._remote_inspect_button = ctk.CTkButton(
-            remote_pull_button_frame,
+            self._remote_pull_button_frame,
             text="读取目标",
             width=86,
             command=self._inspect_remote_configs,
@@ -402,7 +420,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._remote_inspect_button.pack(side="left", padx=(0, 6))
         self._remote_pull_button = ctk.CTkButton(
-            remote_pull_button_frame,
+            self._remote_pull_button_frame,
             text="拉取到本机",
             width=86,
             command=self._pull_from_server,
@@ -421,13 +439,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_pull_hint.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         bind_wraplength(sync_controls, self._remote_pull_hint, padding=20)
 
-        ctk.CTkLabel(
+        self._codex_wire_api_label = ctk.CTkLabel(
             sync_controls,
             text="Codex Wire API",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=5, column=0, sticky="w", pady=(10, 0))
+        )
+        self._codex_wire_api_label.grid(row=5, column=0, sticky="w", pady=(10, 0))
         self._codex_wire_api_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._codex_wire_api_options.keys()),
@@ -447,13 +466,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._codex_wire_api_hint.grid(row=5, column=2, columnspan=2, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._codex_wire_api_hint, padding=20)
 
-        ctk.CTkLabel(
+        self._clear_api_label = ctk.CTkLabel(
             sync_controls,
             text="远端清理",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=6, column=0, sticky="w", pady=(10, 0))
+        )
+        self._clear_api_label.grid(row=6, column=0, sticky="w", pady=(10, 0))
         self._clear_api_combo = ctk.CTkComboBox(
             sync_controls,
             values=list(self._clear_api_options.keys()),
@@ -462,7 +482,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._clear_api_combo.grid(row=6, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
         self._clear_api_combo.set("Claude + Codex")
-        clear_hint = ctk.CTkLabel(
+        self._clear_api_hint = ctk.CTkLabel(
             sync_controls,
             text="移除服务器当前 API Key/Token、Base URL 覆盖和本工具写入的相关远端环境变量。",
             text_color=COLORS["muted"],
@@ -470,23 +490,25 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        clear_hint.grid(row=6, column=2, sticky="ew", pady=(10, 0))
-        bind_wraplength(sync_controls, clear_hint, padding=20)
-        ctk.CTkButton(
+        self._clear_api_hint.grid(row=6, column=2, sticky="ew", pady=(10, 0))
+        bind_wraplength(sync_controls, self._clear_api_hint, padding=20)
+        self._clear_api_button = ctk.CTkButton(
             sync_controls,
             text="清除远端 API",
             width=126,
             command=self._clear_remote_api_info,
             **button_style("danger"),
-        ).grid(row=6, column=3, sticky="e", pady=(10, 0))
+        )
+        self._clear_api_button.grid(row=6, column=3, sticky="e", pady=(10, 0))
 
-        ctk.CTkLabel(
+        self._git_login_label = ctk.CTkLabel(
             sync_controls,
             text="Git 登录",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=7, column=0, sticky="w", pady=(10, 0))
+        )
+        self._git_login_label.grid(row=7, column=0, sticky="w", pady=(10, 0))
         self._git_login_status_label = ctk.CTkLabel(
             sync_controls,
             text="检查/从 SSH 导入需要刚好勾选 1 台；同步到 SSH 使用所有已勾选目标。",
@@ -497,24 +519,24 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._git_login_status_label.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
         bind_wraplength(sync_controls, self._git_login_status_label, padding=20)
-        git_btn_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
-        git_btn_frame.grid(row=7, column=3, sticky="e", pady=(10, 0))
+        self._git_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        self._git_button_frame.grid(row=7, column=3, sticky="e", pady=(10, 0))
         ctk.CTkButton(
-            git_btn_frame,
+            self._git_button_frame,
             text="检查",
             width=58,
             command=self._inspect_git_login,
             **button_style("secondary", compact=True),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            git_btn_frame,
+            self._git_button_frame,
             text="同步到 SSH",
             width=84,
             command=self._sync_git_login,
             **button_style("accent", compact=True),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            git_btn_frame,
+            self._git_button_frame,
             text="从 SSH 导入",
             width=86,
             command=self._import_git_login,
@@ -532,8 +554,237 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._sync_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(sync_controls, self._sync_status_label, padding=20)
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._install_deployment_sections_placeholder()
         self._initial_refresh_after_id = self.after(self.INITIAL_REFRESH_DELAY_MS, self.refresh)
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._destroyed or self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            if not self._destroyed:
+                self._apply_responsive_layout()
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked = _ssh_tab_stacked(self._logical_layout_width())
+        if stacked == self._responsive_state:
+            return
+        self._responsive_state = stacked
+
+        for column in range(3):
+            self._overview_content.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        if stacked:
+            self._overview_content.grid_columnconfigure(0, weight=1)
+            for row, item in enumerate(self._overview_items):
+                item.grid(row=row, column=0, sticky="ew", padx=0, pady=(0, 8) if row < 2 else 0)
+        else:
+            for column in range(3):
+                self._overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
+            for column, item in enumerate(self._overview_items):
+                item.grid(row=0, column=column, sticky="ew", padx=(0, 8) if column < 2 else 0, pady=0)
+
+        widgets = (
+            self._target_summary_label,
+            self._target_hint_label,
+            self._push_content_label,
+            self._sync_kind_combo,
+            self._profile_combo,
+            self._push_button_frame,
+            self._remote_pull_label,
+            self._remote_pull_type_combo,
+            self._remote_pull_combo,
+            self._remote_pull_button_frame,
+            self._remote_pull_hint,
+            self._codex_wire_api_label,
+            self._codex_wire_api_combo,
+            self._codex_wire_api_hint,
+            self._clear_api_label,
+            self._clear_api_combo,
+            self._clear_api_hint,
+            self._clear_api_button,
+            self._git_login_label,
+            self._git_login_status_label,
+            self._git_button_frame,
+            self._sync_status_label,
+        )
+        for widget in widgets:
+            widget.grid_forget()
+        for column in range(4):
+            self._sync_controls.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if stacked:
+            self._sync_controls.grid_columnconfigure(0, weight=0)
+            self._sync_controls.grid_columnconfigure(1, weight=1)
+            self._target_summary_label.grid(row=0, column=0, columnspan=2, sticky="ew")
+            self._target_hint_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+            self._push_content_label.grid(row=2, column=0, sticky="w", pady=(12, 0))
+            self._sync_kind_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+            self._profile_combo.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            self._push_button_frame.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._remote_pull_label.grid(row=5, column=0, sticky="w", pady=(12, 0))
+            self._remote_pull_type_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+            self._remote_pull_combo.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            self._remote_pull_button_frame.grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._remote_pull_hint.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            self._codex_wire_api_label.grid(row=9, column=0, sticky="w", pady=(12, 0))
+            self._codex_wire_api_combo.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+            self._codex_wire_api_hint.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            self._clear_api_label.grid(row=11, column=0, sticky="w", pady=(12, 0))
+            self._clear_api_combo.grid(row=11, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+            self._clear_api_hint.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            self._clear_api_button.grid(row=13, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._git_login_label.grid(row=14, column=0, columnspan=2, sticky="w", pady=(12, 0))
+            self._git_login_status_label.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+            self._git_button_frame.grid(row=16, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._sync_status_label.grid(row=17, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            self._apply_deployment_responsive_layout(stacked=True)
+            return
+
+        self._sync_controls.grid_columnconfigure(1, weight=1, minsize=190)
+        self._sync_controls.grid_columnconfigure(2, weight=2, minsize=240)
+        self._sync_controls.grid_columnconfigure(3, weight=0, minsize=240)
+        self._target_summary_label.grid(row=0, column=0, columnspan=4, sticky="ew")
+        self._target_hint_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self._push_content_label.grid(row=2, column=0, sticky="w", pady=(12, 0))
+        self._sync_kind_combo.grid(row=2, column=1, sticky="w", padx=(8, 12), pady=(12, 0))
+        self._profile_combo.grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(12, 0))
+        self._push_button_frame.grid(row=2, column=3, sticky="e", pady=(12, 0))
+        self._remote_pull_label.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        self._remote_pull_type_combo.grid(row=3, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._remote_pull_combo.grid(row=3, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
+        self._remote_pull_button_frame.grid(row=3, column=3, sticky="e", pady=(10, 0))
+        self._remote_pull_hint.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self._codex_wire_api_label.grid(row=5, column=0, sticky="w", pady=(10, 0))
+        self._codex_wire_api_combo.grid(row=5, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._codex_wire_api_hint.grid(row=5, column=2, columnspan=2, sticky="ew", pady=(10, 0))
+        self._clear_api_label.grid(row=6, column=0, sticky="w", pady=(10, 0))
+        self._clear_api_combo.grid(row=6, column=1, sticky="w", padx=(8, 12), pady=(10, 0))
+        self._clear_api_hint.grid(row=6, column=2, sticky="ew", pady=(10, 0))
+        self._clear_api_button.grid(row=6, column=3, sticky="e", pady=(10, 0))
+        self._git_login_label.grid(row=7, column=0, sticky="w", pady=(10, 0))
+        self._git_login_status_label.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
+        self._git_button_frame.grid(row=7, column=3, sticky="e", pady=(10, 0))
+        self._sync_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._apply_deployment_responsive_layout(stacked=False)
+
+    @staticmethod
+    def _capture_grid_layout(frame) -> tuple[tuple[object, dict], ...]:
+        layout = []
+        for widget in frame.grid_slaves():
+            info = dict(widget.grid_info())
+            info.pop("in", None)
+            layout.append((widget, info))
+        return tuple(
+            sorted(
+                layout,
+                key=lambda item: (int(item[1].get("row", 0)), int(item[1].get("column", 0))),
+            )
+        )
+
+    @staticmethod
+    def _restore_grid_layout(frame, layout: tuple[tuple[object, dict], ...], column_count: int) -> None:
+        for widget, _info in layout:
+            widget.grid_forget()
+        for column in range(column_count):
+            frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        for widget, info in layout:
+            widget.grid(**info)
+
+    def _apply_deployment_responsive_layout(self, stacked: bool) -> None:
+        layout = self._proxy_grid_layout
+        proxy_controls = getattr(self, "_proxy_controls", None)
+        if layout and proxy_controls is not None:
+            if stacked:
+                for widget, _info in layout:
+                    widget.grid_forget()
+                for column in range(4):
+                    proxy_controls.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+                proxy_controls.grid_columnconfigure(0, weight=1)
+                for row, (widget, _info) in enumerate(layout):
+                    widget.grid(row=row, column=0, sticky="ew", padx=0, pady=(6, 0))
+            else:
+                self._restore_grid_layout(proxy_controls, layout, 4)
+                proxy_controls.grid_columnconfigure(1, weight=1, minsize=260)
+                proxy_controls.grid_columnconfigure(2, weight=1, minsize=220)
+                proxy_controls.grid_columnconfigure(3, weight=0, minsize=190)
+
+        proxy_header = getattr(self, "_proxy_header", None)
+        if proxy_header is not None:
+            for widget in (
+                self._proxy_header_title,
+                self._proxy_header_subtitle,
+                self._proxy_header_spacer,
+                self._proxy_target_label,
+            ):
+                widget.pack_forget()
+            if stacked:
+                self._proxy_header_title.pack(anchor="w")
+                self._proxy_header_subtitle.pack(fill="x", pady=(3, 0))
+                self._proxy_target_label.pack(anchor="w", pady=(5, 0))
+            else:
+                self._proxy_header_title.pack(side="left")
+                self._proxy_header_subtitle.pack(side="left", padx=(10, 0))
+                self._proxy_header_spacer.pack(side="left", fill="x", expand=True)
+                self._proxy_target_label.pack(side="right")
+
+        auto_header = getattr(self, "_remote_auto_header", None)
+        if auto_header is not None:
+            self._remote_auto_header_title.pack_forget()
+            self._remote_auto_header_subtitle.pack_forget()
+            if stacked:
+                self._remote_auto_header_title.pack(anchor="w")
+                self._remote_auto_header_subtitle.pack(fill="x", pady=(3, 0))
+            else:
+                self._remote_auto_header_title.pack(side="left")
+                self._remote_auto_header_subtitle.pack(side="left", padx=(10, 0))
+
+        action_bar = self._remote_auto_action_bar
+        if action_bar is not None:
+            columns = 2 if stacked else 6
+            for column in range(6):
+                action_bar.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+            for column in range(columns):
+                action_bar.grid_columnconfigure(column, weight=1 if stacked else 0, uniform="remote_auto_actions" if stacked else "")
+            for index, button in enumerate(self._remote_auto_buttons):
+                button.grid(
+                    row=index // columns,
+                    column=index % columns,
+                    sticky="ew" if stacked else "w",
+                    padx=(0, 8),
+                    pady=(0, 6 if stacked else 4),
+                )
+
+        switch_layout = self._remote_switch_layout
+        switch_frame = self._remote_switch_frame
+        if switch_layout and switch_frame is not None:
+            if stacked:
+                for widget, _info in switch_layout:
+                    widget.grid_forget()
+                for column in range(5):
+                    switch_frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+                for column in range(2):
+                    switch_frame.grid_columnconfigure(column, weight=1, uniform="remote_auto_switches")
+                self._remote_switch_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                for index, switch in enumerate(self._remote_auto_switches):
+                    switch.grid(row=1 + index // 2, column=index % 2, sticky="w", padx=(0, 8), pady=3)
+            else:
+                self._restore_grid_layout(switch_frame, switch_layout, 5)
 
     def _install_deployment_sections_placeholder(self):
         self._deployment_sections_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -573,23 +824,29 @@ class SSHTab(ctk.CTkScrollableFrame):
         except Exception:
             pass
         self._deployment_sections_built = True
-        proxy_header = ctk.CTkFrame(deployment_parent, fg_color="transparent")
-        proxy_header.pack(fill="x", padx=14, pady=(4, 5))
-        ctk.CTkLabel(
-            proxy_header,
+        self._proxy_header = ctk.CTkFrame(deployment_parent, fg_color="transparent")
+        self._proxy_header.pack(fill="x", padx=14, pady=(4, 5))
+        self._proxy_header_title = ctk.CTkLabel(
+            self._proxy_header,
             text="SSH 远端 AI 代理",
             text_color=COLORS["text"],
             font=font(16, "bold"),
-        ).pack(side="left")
-        ctk.CTkLabel(
-            proxy_header,
+        )
+        self._proxy_header_title.pack(side="left")
+        self._proxy_header_subtitle = ctk.CTkLabel(
+            self._proxy_header,
             text="写入 VS Code Remote/Codex/Claude Code 的远端代理入口；Win11 本机代理已移到单独标签页",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left", padx=(10, 0))
-        ctk.CTkFrame(proxy_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
+            anchor="w",
+            justify="left",
+        )
+        self._proxy_header_subtitle.pack(side="left", padx=(10, 0))
+        bind_wraplength(self._proxy_header, self._proxy_header_subtitle, padding=220, min_width=220, max_width=680)
+        self._proxy_header_spacer = ctk.CTkFrame(self._proxy_header, fg_color="transparent")
+        self._proxy_header_spacer.pack(side="left", fill="x", expand=True)
         self._proxy_target_label = ctk.CTkLabel(
-            proxy_header,
+            self._proxy_header,
             text="已选目标: 未勾选服务器",
             text_color=COLORS["warning"],
             font=font(12, "bold"),
@@ -598,8 +855,9 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         proxy_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
-        proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
-        proxy_controls.pack(fill="x", padx=14, pady=14)
+        self._proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
+        self._proxy_controls.pack(fill="x", padx=14, pady=14)
+        proxy_controls = self._proxy_controls
         proxy_controls.grid_columnconfigure(1, weight=1, minsize=260)
         proxy_controls.grid_columnconfigure(2, weight=1, minsize=220)
         proxy_controls.grid_columnconfigure(3, weight=0, minsize=190)
@@ -924,6 +1182,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
+        self._proxy_grid_layout = self._capture_grid_layout(proxy_controls)
+        self._apply_deployment_responsive_layout(_ssh_tab_stacked(self._logical_layout_width()))
         self._update_proxy_target_label()
 
         self._install_remote_auto_section_placeholder(deployment_parent)
@@ -1003,20 +1263,25 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_buttons = []
         self._remote_auto_switches = []
 
-        auto_header = ctk.CTkFrame(parent, fg_color="transparent")
-        auto_header.pack(fill="x", padx=14, pady=(4, 5))
-        ctk.CTkLabel(
-            auto_header,
+        self._remote_auto_header = ctk.CTkFrame(parent, fg_color="transparent")
+        self._remote_auto_header.pack(fill="x", padx=14, pady=(4, 5))
+        self._remote_auto_header_title = ctk.CTkLabel(
+            self._remote_auto_header,
             text="远端自动续跑",
             text_color=COLORS["text"],
             font=font(16, "bold"),
-        ).pack(side="left")
-        ctk.CTkLabel(
-            auto_header,
+        )
+        self._remote_auto_header_title.pack(side="left")
+        self._remote_auto_header_subtitle = ctk.CTkLabel(
+            self._remote_auto_header,
             text="同步本机 Hook 设置；Git 仓库会在远端项目首次触发时自动初始化",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left", padx=(10, 0))
+            anchor="w",
+            justify="left",
+        )
+        self._remote_auto_header_subtitle.pack(side="left", padx=(10, 0))
+        bind_wraplength(self._remote_auto_header, self._remote_auto_header_subtitle, padding=160, min_width=220, max_width=680)
 
         auto_frame = ctk.CTkFrame(parent, **card_frame_kwargs())
         auto_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -1042,7 +1307,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_provider_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
         self._remote_auto_provider_combo.set("Claude + Codex")
 
-        action_bar = ctk.CTkFrame(auto_controls, fg_color="transparent")
+        self._remote_auto_action_bar = ctk.CTkFrame(auto_controls, fg_color="transparent")
+        action_bar = self._remote_auto_action_bar
         action_bar.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(10, 0))
         for column in range(6):
             action_bar.grid_columnconfigure(column, weight=0)
@@ -1104,16 +1370,18 @@ class SSHTab(ctk.CTkScrollableFrame):
             copy_diag_button,
         ]
 
-        remote_switch_frame = ctk.CTkFrame(auto_controls, fg_color="transparent")
+        self._remote_switch_frame = ctk.CTkFrame(auto_controls, fg_color="transparent")
+        remote_switch_frame = self._remote_switch_frame
         remote_switch_frame.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         for col in range(1, 5):
             remote_switch_frame.grid_columnconfigure(col, weight=0)
-        ctk.CTkLabel(
+        self._remote_switch_title = ctk.CTkLabel(
             remote_switch_frame,
             text="远端开关",
             text_color=COLORS["muted"],
             font=font(12, "bold"),
-        ).grid(row=0, column=0, rowspan=3, sticky="w", padx=(0, 10))
+        )
+        self._remote_switch_title.grid(row=0, column=0, rowspan=3, sticky="w", padx=(0, 10))
 
         def add_remote_switch(text, variable, feature, row, column, color="success"):
             switch = ctk.CTkSwitch(
@@ -1186,12 +1454,20 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_status_label.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
+        self._remote_switch_layout = self._capture_grid_layout(remote_switch_frame)
+        self._apply_deployment_responsive_layout(_ssh_tab_stacked(self._logical_layout_width()))
         self._update_remote_auto_feature_label()
         self._refresh_remote_auto_switch_availability()
 
     def destroy(self):
         self._destroyed = True
         self._server_refresh_generation += 1
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         self._cancel_initial_after_callbacks()
         self._cancel_server_render()
         self._cancel_server_resume_render()

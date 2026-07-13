@@ -18,6 +18,13 @@ ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
 PasswordDialog = LazyAttribute("ui.dialogs.password_dialog", "PasswordDialog")
 
 
+def _backup_tab_layout(width: int) -> tuple[bool, int, bool]:
+    """Return header stacking, action columns and ZIP-panel stacking."""
+
+    available = max(1, int(width))
+    return available < 820, (5 if available >= 820 else (3 if available >= 520 else 2)), available < 620
+
+
 class BackupTab(ctk.CTkScrollableFrame):
     """Tab for managing backups."""
 
@@ -31,72 +38,66 @@ class BackupTab(ctk.CTkScrollableFrame):
         self._refresh_generation = 0
         self._render_after_id = None
         self._deferred_render_pending = False
+        self._responsive_after_id = None
+        self._responsive_state = None
+        self._header = None
+        self._title_area = None
+        self._header_actions = None
+        self._header_action_buttons = []
+        self._zip_panel = None
+        self._zip_text_area = None
+        self._zip_actions = None
         self._build_ui()
 
     def destroy(self):
         self._cancel_render()
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         super().destroy()
 
     def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header = ctk.CTkFrame(self, fg_color="transparent")
+        self._header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header.grid_columnconfigure(0, weight=1)
 
-        title_area = ctk.CTkFrame(header, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        self._title_area = ctk.CTkFrame(self._header, fg_color="transparent")
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="备份管理",
             text_color=COLORS["text"],
             font=font(18, "bold"),
         ).pack(anchor="w")
-        ctk.CTkLabel(
-            title_area,
+        subtitle = ctk.CTkLabel(
+            self._title_area,
             text="创建本机备份，导出完整配置 ZIP，或导出可跨电脑迁移的加密 Profile 包",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(anchor="w", pady=(2, 0))
+            anchor="w",
+            justify="left",
+        )
+        subtitle.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(self._title_area, subtitle, padding=8, min_width=240, max_width=720)
 
-        ctk.CTkButton(
-            header,
-            text="导入迁移包",
-            width=108,
-            command=self._import_portable,
-            **button_style("accent"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            header,
-            text="导出迁移包",
-            width=108,
-            command=self._export_portable,
-            **button_style("success"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            header,
-            text="清理旧备份",
-            width=108,
-            command=self._prune,
-            **button_style("secondary"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            header,
-            text="回滚最近",
-            width=108,
-            command=self._restore_latest,
-            **button_style("warning"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            header,
-            text="立即备份",
-            width=108,
-            command=self._create_backup,
-            **button_style("primary"),
-        ).pack(side="right")
+        self._header_actions = ctk.CTkFrame(self._header, fg_color="transparent")
+        self._header_action_buttons = [
+            ctk.CTkButton(self._header_actions, text="立即备份", width=108, command=self._create_backup, **button_style("primary")),
+            ctk.CTkButton(self._header_actions, text="回滚最近", width=108, command=self._restore_latest, **button_style("warning")),
+            ctk.CTkButton(self._header_actions, text="清理旧备份", width=108, command=self._prune, **button_style("secondary")),
+            ctk.CTkButton(self._header_actions, text="导出迁移包", width=108, command=self._export_portable, **button_style("success")),
+            ctk.CTkButton(self._header_actions, text="导入迁移包", width=108, command=self._import_portable, **button_style("accent")),
+        ]
 
         self._build_local_config_zip_panel()
 
         self._list_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self.after(20, self.refresh)
 
     def refresh(self):
@@ -242,20 +243,20 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(side="left", padx=(0, 5))
 
     def _build_local_config_zip_panel(self):
-        panel = ctk.CTkFrame(self, **card_frame_kwargs())
-        panel.pack(fill="x", padx=14, pady=(0, 10))
+        self._zip_panel = ctk.CTkFrame(self, **card_frame_kwargs())
+        self._zip_panel.pack(fill="x", padx=14, pady=(0, 10))
+        self._zip_panel.grid_columnconfigure(0, weight=1)
 
-        text_area = ctk.CTkFrame(panel, fg_color="transparent")
-        text_area.pack(side="left", fill="x", expand=True, padx=14, pady=12)
+        self._zip_text_area = ctk.CTkFrame(self._zip_panel, fg_color="transparent")
 
         ctk.CTkLabel(
-            text_area,
+            self._zip_text_area,
             text="完整配置 ZIP",
             text_color=COLORS["text"],
             font=font(14, "bold"),
         ).pack(anchor="w")
         desc = ctk.CTkLabel(
-            text_area,
+            self._zip_text_area,
             text="一键导出/导入本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据和引用密钥；密钥用迁移密码加密。",
             text_color=COLORS["muted"],
             font=font(12),
@@ -263,24 +264,82 @@ class BackupTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         desc.pack(fill="x", pady=(3, 0))
-        bind_wraplength(text_area, desc, padding=8, min_width=320, max_width=760)
+        bind_wraplength(self._zip_text_area, desc, padding=8, min_width=220, max_width=760)
 
-        actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.pack(side="right", padx=14, pady=12)
+        self._zip_actions = ctk.CTkFrame(self._zip_panel, fg_color="transparent")
+        self._zip_actions.grid_columnconfigure((0, 1), weight=1, uniform="backup-zip-actions")
         ctk.CTkButton(
-            actions,
+            self._zip_actions,
             text="导入 ZIP",
             width=94,
             command=self._import_local_config_zip,
             **button_style("accent", compact=True),
-        ).pack(side="right", padx=(8, 0))
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
         ctk.CTkButton(
-            actions,
+            self._zip_actions,
             text="导出 ZIP",
             width=94,
             command=self._export_local_config_zip,
             **button_style("success", compact=True),
-        ).pack(side="right")
+        ).grid(row=0, column=0, sticky="ew")
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_layout_width()
+        stacked, action_columns, zip_stacked = _backup_tab_layout(width)
+        state = (stacked, action_columns, zip_stacked)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        self._title_area.grid(row=0, column=0, sticky="ew")
+        if stacked:
+            self._header_actions.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        else:
+            self._header_actions.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        for column in range(5):
+            self._header_actions.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        for column in range(action_columns):
+            self._header_actions.grid_columnconfigure(column, weight=1, uniform="backup-actions")
+        for index, button in enumerate(self._header_action_buttons):
+            button.grid(
+                row=index // action_columns,
+                column=index % action_columns,
+                sticky="ew",
+                padx=(0 if index % action_columns == 0 else 8, 0),
+                pady=(0 if index < action_columns else 6, 0),
+            )
+
+        if zip_stacked:
+            self._zip_text_area.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 6))
+            self._zip_actions.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
+        else:
+            self._zip_text_area.grid(row=0, column=0, sticky="ew", padx=14, pady=12)
+            self._zip_actions.grid(row=0, column=1, sticky="e", padx=14, pady=12)
 
     def _create_backup(self):
         try:

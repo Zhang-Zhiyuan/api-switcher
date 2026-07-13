@@ -1757,15 +1757,20 @@ def install_ai_proxy_verified(
             )
         tried.append(f"{node_summary} {latency_label}: {_probe_summary_counts(candidate_probe)}")
 
+    restore_error = ""
     try:
         install_ai_proxy(ssh_name, format_proxy_node(requested_node), mixed_port)
-    except Exception:
-        pass
+    except Exception as exc:
+        restore_error = str(exc).splitlines()[0][:240] or type(exc).__name__
     tried_summary = "；".join(tried[:3])
     suffix = f"；尝试摘要: {tried_summary}" if tried_summary else ""
+    if restore_error:
+        restore_status = f"，但恢复原节点失败: {restore_error}；请重新检查远端代理状态"
+    else:
+        restore_status = "，已恢复原节点"
     return (
         f"{install_message}；验证失败: {_compact_probe_summary(probe_message)}；"
-        f"自动尝试 {attempts} 个测速靠前节点仍未 3/3 可达，已恢复原节点{suffix}"
+        f"自动尝试 {attempts} 个测速靠前节点仍未 3/3 可达{restore_status}{suffix}"
     )
 
 

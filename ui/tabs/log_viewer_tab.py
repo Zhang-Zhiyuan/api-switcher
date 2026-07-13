@@ -8,11 +8,18 @@ from tkinter import filedialog
 from datetime import datetime
 
 from core.log_handler import log_manager
-from ui.theme import COLORS, button_style, combo_style, font, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font, textbox_style
 from ui.widgets.toast import show_toast
 
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+LOG_VIEWER_STACK_MAX_WIDTH = 560
+
+
+def _log_viewer_stacked(width: int) -> bool:
+    """Return whether log actions and statistics need separate rows."""
+
+    return int(width) <= LOG_VIEWER_STACK_MAX_WIDTH
 
 
 def _coerce_levelno(value, level: str) -> int:
@@ -69,65 +76,87 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._poll_after_id = None
         self._log_entries: list[dict] = []
         self._visible_line_count = 0
+        self._responsive_after_id = None
+        self._responsive_state = None
         self._build_ui()
         self._reload_log_cache()
         self._start_log_polling()
 
     def destroy(self):
         self._cancel_log_polling()
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         super().destroy()
 
     def _build_ui(self):
         """构建 UI"""
         # 顶部工具栏
-        toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        toolbar.pack(fill="x", padx=14, pady=(14, 8))
+        self._toolbar = ctk.CTkFrame(self, fg_color="transparent")
+        self._toolbar.pack(fill="x", padx=14, pady=(14, 8))
+        self._toolbar.grid_columnconfigure(0, weight=1)
 
         # 标题区域
-        title_area = ctk.CTkFrame(toolbar, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        self._title_area = ctk.CTkFrame(self._toolbar, fg_color="transparent")
+        self._title_area.grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="日志查看器",
             text_color=COLORS["text"],
             font=font(18, "bold")
         ).pack(anchor="w")
-        ctk.CTkLabel(
-            title_area,
+        subtitle_label = ctk.CTkLabel(
+            self._title_area,
             text="实时查看应用程序日志，支持过滤和导出",
             text_color=COLORS["muted"],
-            font=font(12)
-        ).pack(anchor="w", pady=(2, 0))
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(self._title_area, subtitle_label, padding=16, min_width=220, max_width=620)
 
         # 按钮区域
-        ctk.CTkButton(
-            toolbar,
-            text="导出日志",
-            width=96,
-            command=self._export_logs,
-            **button_style("accent")
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            toolbar,
+        self._toolbar_actions = ctk.CTkFrame(self._toolbar, fg_color="transparent")
+        self._toolbar_actions.grid(row=0, column=1, sticky="e")
+        for column in range(2):
+            self._toolbar_actions.grid_columnconfigure(column, weight=1, uniform="log_actions")
+        self._clear_button = ctk.CTkButton(
+            self._toolbar_actions,
             text="清空日志",
             width=96,
             command=self._clear_logs,
-            **button_style("danger")
-        ).pack(side="right", padx=(8, 0))
+            **button_style("danger"),
+        )
+        self._clear_button.grid(row=0, column=0, sticky="ew")
+        self._export_button = ctk.CTkButton(
+            self._toolbar_actions,
+            text="导出日志",
+            width=96,
+            command=self._export_logs,
+            **button_style("accent"),
+        )
+        self._export_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         # 过滤工具栏
-        filter_bar = ctk.CTkFrame(self, fg_color="transparent")
-        filter_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self._filter_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self._filter_bar.pack(fill="x", padx=14, pady=(0, 8))
+        self._filter_bar.grid_columnconfigure(0, weight=1)
+        self._filter_controls = ctk.CTkFrame(self._filter_bar, fg_color="transparent")
+        self._filter_controls.grid(row=0, column=0, sticky="w")
 
         ctk.CTkLabel(
-            filter_bar,
+            self._filter_controls,
             text="日志级别:",
             text_color=COLORS["muted"],
             font=font(12)
         ).pack(side="left", padx=(0, 8))
 
         self._level_combo = ctk.CTkComboBox(
-            filter_bar,
+            self._filter_controls,
             values=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
             width=120,
             command=self._on_level_change,
@@ -139,7 +168,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         # 自动滚动开关
         self._auto_scroll_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            filter_bar,
+            self._filter_controls,
             text="自动滚动",
             variable=self._auto_scroll_var,
             command=self._toggle_auto_scroll,
@@ -149,12 +178,13 @@ class LogViewerTab(ctk.CTkScrollableFrame):
 
         # 统计信息
         self._stats_label = ctk.CTkLabel(
-            filter_bar,
+            self._filter_bar,
             text="",
             text_color=COLORS["muted"],
-            font=font(12)
+            font=font(12),
+            anchor="w",
         )
-        self._stats_label.pack(side="right")
+        self._stats_label.grid(row=0, column=1, sticky="e")
 
         self._render_status_label = ctk.CTkLabel(
             self,
@@ -187,9 +217,57 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             for level in LOG_LEVELS
         }
         self._update_stats()
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked = _log_viewer_stacked(self._logical_layout_width())
+        if stacked == self._responsive_state:
+            return
+        self._responsive_state = stacked
+
+        self._title_area.grid_forget()
+        self._toolbar_actions.grid_forget()
+        self._filter_controls.grid_forget()
+        self._stats_label.grid_forget()
+        if stacked:
+            self._title_area.grid(row=0, column=0, columnspan=2, sticky="ew")
+            self._toolbar_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            self._filter_controls.grid(row=0, column=0, columnspan=2, sticky="w")
+            self._stats_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(7, 0))
+        else:
+            self._title_area.grid(row=0, column=0, sticky="ew")
+            self._toolbar_actions.grid(row=0, column=1, sticky="e")
+            self._filter_controls.grid(row=0, column=0, sticky="w")
+            self._stats_label.grid(row=0, column=1, sticky="e")
 
     def _reload_log_cache(self):
-        self._log_entries = log_manager.get_recent_entries(self.MAX_STORED_ENTRIES)
+        self._log_entries = log_manager.consume_recent_entries(self.MAX_STORED_ENTRIES)
         self._render_log_entries()
 
     def _start_log_polling(self):

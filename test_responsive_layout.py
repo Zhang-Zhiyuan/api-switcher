@@ -7,6 +7,17 @@ from ui.widgets.toast import _toast_wraplength
 from ui.startup_splash import _splash_layout
 from ui.dialogs.auto_continue_logs_dialog import _auto_continue_logs_layout
 from ui.dialogs.git_snapshot_history_dialog import _git_history_layout
+from ui.dialogs.browser_profile_editor import _browser_profile_editor_stacked
+from ui.dialogs.switch_preview_dialog import _preview_summary_text
+from ui.tabs.backup_tab import _backup_tab_layout
+from ui.tabs.browser_tab import _browser_tab_layout
+from ui.tabs.claude_tab import _profile_tab_stacked as _claude_profile_tab_stacked
+from ui.tabs.codex_tab import _profile_tab_stacked as _codex_profile_tab_stacked
+from ui.tabs.local_proxy_tab import _local_proxy_tab_layout
+from ui.tabs.log_viewer_tab import _log_viewer_stacked
+from ui.tabs.ssh_tab import _ssh_tab_stacked
+from ui.tabs.usage_stats_tab import _usage_stats_layout
+from ui.widgets.proxy_node_picker import _proxy_node_picker_layout
 
 
 def test_window_layout_preserves_preferred_size_on_large_screen():
@@ -144,3 +155,57 @@ def test_large_two_pane_dialogs_stack_and_wrap_actions_on_narrow_screens():
     assert _auto_continue_logs_layout(900) == (False, 5, False)
     assert _auto_continue_logs_layout(720) == (True, 5, True)
     assert _auto_continue_logs_layout(480) == (True, 3, True)
+
+
+def test_switch_preview_summary_is_bounded_and_normalized():
+    assert _preview_summary_text("  short\nsummary  ") == "short summary"
+
+    result = _preview_summary_text("x" * 200)
+
+    assert len(result) == 140
+    assert result.endswith("…")
+
+
+def test_feature_toolbars_wrap_at_narrow_breakpoints():
+    assert _browser_tab_layout(900) == (False, 4, 5)
+    assert _browser_tab_layout(720) == (True, 2, 3)
+    assert _browser_tab_layout(480) == (True, 2, 2)
+
+    assert _usage_stats_layout(900) == (False, 4, 4)
+    assert _usage_stats_layout(720) == (True, 4, 2)
+    assert _usage_stats_layout(480) == (True, 2, 2)
+
+    assert _backup_tab_layout(900) == (False, 5, False)
+    assert _backup_tab_layout(720) == (True, 3, False)
+    assert _backup_tab_layout(480) == (True, 2, True)
+
+
+def test_compact_picker_and_editor_switch_to_stacked_layouts():
+    assert _proxy_node_picker_layout(600) == (4, False)
+    assert _proxy_node_picker_layout(480) == (2, False)
+    assert _proxy_node_picker_layout(320) == (1, True)
+
+    assert _browser_profile_editor_stacked(700) is False
+    assert _browser_profile_editor_stacked(520) is True
+
+
+def test_local_proxy_outer_form_stacks_before_controls_are_squeezed():
+    assert _local_proxy_tab_layout(900) == (False, 4, 4, 4, False)
+    assert _local_proxy_tab_layout(720) == (True, 2, 4, 4, False)
+    assert _local_proxy_tab_layout(560) == (True, 2, 2, 2, False)
+    assert _local_proxy_tab_layout(480) == (True, 2, 2, 2, True)
+
+
+def test_profile_ssh_and_log_sections_stack_on_narrow_tabs():
+    for layout in (
+        _claude_profile_tab_stacked,
+        _codex_profile_tab_stacked,
+        _log_viewer_stacked,
+    ):
+        assert layout(561) is False
+        assert layout(560) is True
+        assert layout(480) is True
+
+    assert _ssh_tab_stacked(821) is False
+    assert _ssh_tab_stacked(820) is True
+    assert _ssh_tab_stacked(680) is True

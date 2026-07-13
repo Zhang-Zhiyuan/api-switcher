@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from core import backup_manager, network_diagnostic_settings, profile_manager, security
-from core.atomic_io import atomic_write_text, replace_with_retry, temp_path_for
+from core.atomic_io import atomic_write_bytes, atomic_write_text, replace_with_retry, temp_path_for
 
 
 PACKAGE_FORMAT = "api-switcher-local-config-zip"
@@ -25,8 +25,10 @@ PACKAGE_VERSION = 1
 PAYLOAD_FORMAT = "api-switcher-local-config-payload"
 PAYLOAD_VERSION = 1
 KDF_ITERATIONS = 390_000
+MAX_KDF_ITERATIONS = 2_000_000
 MAX_ZIP_BYTES = 256 * 1024 * 1024
 MAX_ZIP_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_DECRYPTED_PAYLOAD_BYTES = 64 * 1024 * 1024
 MANIFEST_NAME = "manifest.json"
 PAYLOAD_NAME = "payload.enc.json"
 
@@ -65,6 +67,12 @@ class LocalConfigPackageSummary:
     secret_count: int
     missing_secret_count: int
     created_at: str
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    existed: bool
+    content: bytes = b""
 
 
 def _b64encode(data: bytes) -> str:
@@ -127,7 +135,7 @@ def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
         iterations = int(kdf.get("iterations") or 0)
     except (TypeError, ValueError) as e:
         raise ValueError("完整配置 ZIP KDF 参数异常") from e
-    if iterations < 100_000:
+    if iterations < 100_000 or iterations > MAX_KDF_ITERATIONS:
         raise ValueError("完整配置 ZIP KDF 参数异常")
 
     try:
@@ -136,6 +144,8 @@ def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
         ciphertext = _b64decode(str(bundle["payload"]))
     except Exception as e:
         raise ValueError("完整配置 ZIP 编码损坏") from e
+    if len(salt) != 16 or len(nonce) != 12:
+        raise ValueError("完整配置 ZIP 加密参数异常")
 
     try:
         key = PBKDF2HMAC(
@@ -150,9 +160,19 @@ def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
 
     try:
         if bundle.get("compression") == "zlib":
-            plaintext = zlib.decompress(decrypted)
+            decompressor = zlib.decompressobj()
+            plaintext = decompressor.decompress(decrypted, MAX_DECRYPTED_PAYLOAD_BYTES + 1)
+            if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES or decompressor.unconsumed_tail:
+                raise ValueError("完整配置 ZIP 解密后内容过大")
+            plaintext += decompressor.flush(MAX_DECRYPTED_PAYLOAD_BYTES + 1 - len(plaintext))
+            if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
+                raise ValueError("完整配置 ZIP 解密后内容过大")
+            if not decompressor.eof:
+                raise ValueError("完整配置 ZIP 压缩数据损坏")
         elif bundle.get("compression") in {None, "none"}:
             plaintext = decrypted
+            if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
+                raise ValueError("完整配置 ZIP 解密后内容过大")
         else:
             raise ValueError(f"不支持的完整配置 ZIP 压缩方式: {bundle.get('compression')}")
     except zlib.error as e:
@@ -251,6 +271,35 @@ def _merge_profile_lists(existing: list[Any], imported: list[Any]) -> list[dict[
     return merged
 
 
+def _collect_unreplaced_profile_secret_refs(
+    existing_store: dict[str, Any],
+    imported_store: dict[str, Any],
+) -> set[str]:
+    """Return refs owned by existing profiles that will survive the merge."""
+    retained_store: dict[str, list[dict[str, Any]]] = {}
+    for key in profile_manager.PROFILE_LIST_KEYS:
+        imported_items = imported_store.get(key, [])
+        if not isinstance(imported_items, list):
+            imported_items = []
+        imported_names = {
+            item.get("name")
+            for item in imported_items
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+        }
+        existing_items = existing_store.get(key, [])
+        if not isinstance(existing_items, list):
+            existing_items = []
+        retained_store[key] = [
+            item
+            for item in existing_items
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item.get("name") not in imported_names
+        ]
+    return _collect_secret_refs(retained_store)
+
+
 def _apply_imported_active_profiles(target_store: dict[str, Any], imported_store: dict[str, Any]) -> None:
     for active_key, list_key in ACTIVE_TO_LIST_KEY.items():
         imported_active = imported_store.get(active_key)
@@ -335,16 +384,74 @@ def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
     return data
 
 
-def _write_profiles_safety_backup(backup_entry: Any, store: dict[str, Any]) -> None:
-    directory = getattr(backup_entry, "directory", None)
-    if not directory:
-        return
+def _validate_local_config_export_path(path: Path, store: dict[str, Any]) -> None:
+    """Prevent an export archive from replacing live data it represents."""
+    resolved = Path(path).expanduser().resolve(strict=False)
+    protected_files = {
+        Path(profile_manager.PROFILES_FILE).expanduser().resolve(strict=False),
+        Path(network_diagnostic_settings.SETTINGS_FILE).expanduser().resolve(strict=False),
+    }
+    if resolved in protected_files:
+        raise ValueError("完整配置 ZIP 不能覆盖当前应用配置文件")
+
+    for profile in store.get("browser_profiles", []):
+        if not isinstance(profile, dict):
+            continue
+        source_text = str(profile.get("user_data_dir") or "").strip()
+        if not source_text:
+            continue
+        source_dir = Path(source_text).expanduser().resolve(strict=False)
+        if resolved == source_dir or source_dir in resolved.parents:
+            raise ValueError("完整配置 ZIP 不能保存在浏览器 Profile 目录内")
+
+
+def _snapshot_file(path: Path) -> _FileSnapshot:
+    if not path.exists():
+        return _FileSnapshot(existed=False)
+    if not path.is_file():
+        raise ValueError(f"配置路径不是文件: {path}")
+    return _FileSnapshot(existed=True, content=path.read_bytes())
+
+
+def _restore_file(path: Path, snapshot: _FileSnapshot) -> None:
+    if snapshot.existed:
+        atomic_write_bytes(path, snapshot.content)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _snapshot_secrets(refs: set[str]) -> dict[str, str | None]:
+    return {ref: security.get_secret(ref) for ref in sorted(refs)}
+
+
+def _rollback_import(
+    profile_snapshot: _FileSnapshot,
+    settings_snapshot: _FileSnapshot | None,
+    secret_snapshot: dict[str, str | None],
+) -> list[str]:
+    errors: list[str] = []
+    for ref, previous_value in secret_snapshot.items():
+        try:
+            if previous_value is None:
+                security.delete_secret(ref)
+            else:
+                security.set_secret(ref, previous_value)
+        except Exception as exc:
+            errors.append(f"密钥 {ref}: {exc}")
+
     try:
-        target = Path(directory) / "profiles.json"
-        atomic_write_text(target, json.dumps(store, ensure_ascii=False, indent=2))
-    except Exception:
-        # Import can still rely on profile_manager's own profiles.backup file.
-        return
+        _restore_file(profile_manager.PROFILES_FILE, profile_snapshot)
+        profile_manager.clear_profile_store_cache()
+    except Exception as exc:
+        errors.append(f"Profile: {exc}")
+
+    if settings_snapshot is not None:
+        try:
+            _restore_file(network_diagnostic_settings.SETTINGS_FILE, settings_snapshot)
+            network_diagnostic_settings.clear_settings_cache()
+        except Exception as exc:
+            errors.append(f"环境检测设置: {exc}")
+    return errors
 
 
 def inspect_local_config_zip(input_path: str | Path) -> LocalConfigPackageSummary:
@@ -442,6 +549,7 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
     path = Path(output_path).expanduser().resolve()
     if path.exists() and path.is_dir():
         raise ValueError("导出路径不能是目录")
+    _validate_local_config_export_path(path, store)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_output = temp_path_for(path)
@@ -508,17 +616,48 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
         if isinstance(ref, str) and ref
     ]
 
+    allowed_secret_refs = _collect_secret_refs(imported_store)
+    if isinstance(imported_network_diagnostics, dict):
+        allowed_secret_refs.update(
+            _collect_network_diagnostic_secret_refs(imported_network_diagnostics)
+        )
+
+    existing_store = _normalized_store_for_import(profile_manager._load_store())
+    protected_secret_refs = _collect_unreplaced_profile_secret_refs(
+        existing_store,
+        imported_store,
+    )
+    if not _has_network_diagnostic_settings(imported_network_diagnostics):
+        protected_secret_refs.update(
+            _collect_network_diagnostic_secret_refs(
+                _load_network_diagnostic_settings_payload()
+            )
+        )
+    conflicting_refs = sorted(allowed_secret_refs & protected_secret_refs)
+    if conflicting_refs:
+        details = ", ".join(conflicting_refs[:3])
+        suffix = f" 等 {len(conflicting_refs)} 项" if len(conflicting_refs) > 3 else ""
+        raise ValueError(
+            f"完整配置 ZIP 的密钥引用与未替换的现有配置冲突: {details}{suffix}"
+        )
+
     skipped: list[str] = []
     valid_secrets: list[tuple[str, str]] = []
     for ref, value in secrets.items():
         if not isinstance(ref, str) or not isinstance(value, str):
             skipped.append(str(ref))
             continue
+        if ref not in allowed_secret_refs:
+            skipped.append(f"{ref} (未被导入配置引用)")
+            continue
         valid_secrets.append((ref, value))
 
-    existing_store = _normalized_store_for_import(profile_manager._load_store())
-    backup_entry = backup_manager.create_backup("导入完整配置 ZIP 前自动备份")
-    _write_profiles_safety_backup(backup_entry, existing_store)
+    missing_from_source = [
+        ref for ref in missing_from_source
+        if ref in allowed_secret_refs
+    ]
+
+    backup_entry = backup_manager.create_backup("导入 ZIP 前客户端运行配置备份")
     new_store = dict(existing_store)
     for key in profile_manager.PROFILE_LIST_KEYS:
         new_store[key] = _merge_profile_lists(existing_store.get(key, []), imported_store.get(key, []))
@@ -528,24 +667,43 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
     except (TypeError, ValueError):
         new_store["version"] = existing_store.get("version", 1)
 
-    restored = 0
-    for ref, value in valid_secrets:
-        try:
-            security.set_secret(ref, value)
-        except Exception as e:
-            skipped.append(f"{ref} ({e})")
-            continue
-        restored += 1
+    profile_snapshot = _snapshot_file(profile_manager.PROFILES_FILE)
+    settings_snapshot = (
+        _snapshot_file(network_diagnostic_settings.SETTINGS_FILE)
+        if _has_network_diagnostic_settings(imported_network_diagnostics)
+        else None
+    )
+    secret_refs_to_change = {ref for ref, _value in valid_secrets}
+    secret_refs_to_change.update(_collect_secret_refs(existing_store) - _collect_secret_refs(new_store))
+    secret_snapshot = _snapshot_secrets(secret_refs_to_change)
 
-    profile_manager._normalize_store(new_store)
-    profile_manager._save_store(new_store)
-    if _has_network_diagnostic_settings(imported_network_diagnostics):
-        atomic_write_text(
-            network_diagnostic_settings.SETTINGS_FILE,
-            json.dumps(imported_network_diagnostics, ensure_ascii=False, indent=2),
-        )
-    _disconnect_imported_ssh_profiles(imported_store)
-    skipped.extend(_delete_unreferenced_replaced_secrets(existing_store, new_store))
+    restored = 0
+    try:
+        for ref, value in valid_secrets:
+            try:
+                security.set_secret(ref, value)
+            except Exception as e:
+                skipped.append(f"{ref} ({e})")
+                continue
+            restored += 1
+
+        profile_manager._normalize_store(new_store)
+        profile_manager._save_store(new_store)
+        if settings_snapshot is not None:
+            atomic_write_text(
+                network_diagnostic_settings.SETTINGS_FILE,
+                json.dumps(imported_network_diagnostics, ensure_ascii=False, indent=2),
+            )
+            network_diagnostic_settings.clear_settings_cache()
+        _disconnect_imported_ssh_profiles(imported_store)
+        skipped.extend(_delete_unreferenced_replaced_secrets(existing_store, new_store))
+    except Exception as import_error:
+        rollback_errors = _rollback_import(profile_snapshot, settings_snapshot, secret_snapshot)
+        if rollback_errors:
+            details = "；".join(rollback_errors)
+            raise RuntimeError(f"完整配置 ZIP 导入失败，且自动回滚不完整: {details}") from import_error
+        raise
+
     skipped.extend(f"{ref} (源包缺少密钥)" for ref in missing_from_source)
 
     return LocalConfigImportResult(

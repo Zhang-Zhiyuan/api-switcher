@@ -8,6 +8,25 @@ from core.usage_recorder import usage_recorder
 logger = logging.getLogger(__name__)
 
 
+def _ensure_switch_target_healthy(kind: str, name: str) -> None:
+    """Revalidate a target at the mutation boundary.
+
+    Most UI paths show a preview first, but tray/statistics shortcuts can call
+    the switcher directly.  Keeping the blocking checks here prevents those
+    alternate entry points from writing a known-invalid configuration.
+    """
+    from core.switch_preview import build_switch_preview
+
+    preview = build_switch_preview(kind, name)
+    errors = [check for check in preview.checks if check.status == "error"]
+    if not errors:
+        return
+    details = "；".join(f"{check.item}: {check.message}" for check in errors[:3])
+    if len(errors) > 3:
+        details += f"；另有 {len(errors) - 3} 项"
+    raise ValueError(f"配置健康检查未通过：{details}")
+
+
 def _codex_api_env_names_to_clear(config: dict | None = None) -> list[str]:
     names = ["OPENAI_API_KEY"]
     for provider in ProviderRegistry.get_codex_providers():
@@ -90,6 +109,7 @@ def switch_claude_profile(name: str) -> None:
         raise ValueError("只能切换第三方 Claude API 配置")
     if not (security.get_secret(target.auth_token_ref) or security.get_secret(getattr(target, "primary_api_key_ref", None))):
         raise ValueError("Claude API 配置需要 Auth Token")
+    _ensure_switch_target_healthy("claude_api", name)
 
     backup_manager.create_backup(f"切换 Claude 到: {name}")
 
@@ -130,6 +150,7 @@ def switch_codex_profile(name: str) -> None:
     api_key = security.get_secret(target.api_key_ref) if not uses_openai_auth else ""
     if not uses_openai_auth and not api_key:
         raise ValueError("Codex API 配置需要 API Key")
+    _ensure_switch_target_healthy("codex_api", name)
 
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 

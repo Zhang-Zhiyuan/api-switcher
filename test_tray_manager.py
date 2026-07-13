@@ -57,3 +57,30 @@ def test_tray_stop_stops_icon_and_joins_thread():
     assert joined == [0.25]
     assert manager.icon is None
     assert manager._thread is None
+
+
+@pytest.mark.parametrize(
+    ("profile_type", "method_name", "switch_method"),
+    [
+        ("claude", "_switch_claude", "switch_claude_profile"),
+        ("codex", "_switch_codex", "switch_codex_profile"),
+    ],
+)
+def test_tray_profile_switch_notifies_main_app(monkeypatch, profile_type, method_name, switch_method):
+    switched = []
+    changed = []
+    fake_switcher = SimpleNamespace(**{switch_method: lambda name: switched.append(name)})
+    monkeypatch.setattr(tray_manager, "switcher", fake_switcher)
+    monkeypatch.setattr(tray_manager, "_app_managers_imported", True)
+
+    manager = tray_manager.TrayManager(
+        lambda *_: None,
+        lambda *_: None,
+        on_profile_changed=lambda kind, name: changed.append((kind, name)),
+    )
+    manager.update_menu = lambda: None
+
+    getattr(manager, method_name)("relay")
+
+    assert switched == ["relay"]
+    assert changed == [(profile_type, "relay")]

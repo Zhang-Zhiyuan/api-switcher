@@ -213,6 +213,7 @@ def export_sessions(
     claude_home = claude_home or default_claude_home()
     codex_home = codex_home or default_codex_home()
     output_path = Path(output_path)
+    _validate_local_export_path(output_path, claude_home, codex_home)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     records = list_sessions("all", claude_home=claude_home, codex_home=codex_home)
@@ -295,10 +296,11 @@ def export_remote_sessions(
     if not keys:
         raise ValueError("请选择要导出的会话")
 
+    output_path = Path(output_path)
+    _validate_local_export_path(output_path, default_claude_home(), default_codex_home())
     profile, client = _connect_ssh(ssh_name)
     claude_home = _remote_provider_home(client, profile, "claude")
     codex_home = _remote_provider_home(client, profile, "codex")
-    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     records = list_remote_sessions(ssh_name, provider)
@@ -422,6 +424,7 @@ def import_sessions(
                 try:
                     info = _package_file_info(bundle, archive_path)
                     relative_path = _remap_relative_path(provider, relative_path, target_project_text)
+                    _validate_provider_session_path(provider, relative_path)
                     destination = _safe_destination(home, relative_path)
                 except ValueError:
                     skipped_invalid += 1
@@ -506,6 +509,7 @@ def import_sessions_to_ssh(
                     try:
                         info = _package_file_info(bundle, archive_path)
                         relative_path = _remap_relative_path(provider, relative_path, target_project_text)
+                        _validate_provider_session_path(provider, relative_path)
                         destination = _safe_remote_destination(home, relative_path)
                     except ValueError:
                         skipped_invalid += 1
@@ -1023,6 +1027,20 @@ def _provider_home(provider: str, claude_home: Path, codex_home: Path) -> Path:
     raise ValueError(f"不支持的会话来源: {provider}")
 
 
+def _validate_local_export_path(output_path: Path, claude_home: Path, codex_home: Path) -> None:
+    """Keep an exported ZIP outside the live session trees.
+
+    Replacing a selected JSONL file (or creating the ZIP inside a Claude
+    support directory that is being archived) can destroy the source session
+    or make the archive include its own temporary output.
+    """
+    resolved_output = Path(output_path).expanduser().resolve(strict=False)
+    for home in (claude_home, codex_home):
+        resolved_home = Path(home).expanduser().resolve(strict=False)
+        if resolved_output == resolved_home or resolved_home in resolved_output.parents:
+            raise ValueError("会话迁移包不能保存在 Claude/Codex 会话目录内")
+
+
 def _connect_ssh(ssh_name: str):
     profiles = profile_manager.list_ssh_profiles()
     profile = next((item for item in profiles if item.name == ssh_name), None)
@@ -1144,6 +1162,20 @@ def _safe_destination(root: Path, relative_path: str) -> Path:
     if target != resolved_root and resolved_root not in target.parents:
         raise ValueError(f"目标路径越界: {relative_path}")
     return target
+
+
+def _validate_provider_session_path(provider: str, relative_path: str) -> None:
+    """Restrict package writes to provider-owned session subtrees."""
+    pure = PurePosixPath(str(relative_path or ""))
+    expected_root = {"claude": "projects", "codex": "sessions"}.get(provider)
+    if (
+        expected_root is None
+        or pure.is_absolute()
+        or len(pure.parts) < 2
+        or pure.parts[0] != expected_root
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
+        raise ValueError(f"不支持的 {provider} 会话路径: {relative_path}")
 
 
 def _safe_remote_destination(root: str, relative_path: str) -> str:

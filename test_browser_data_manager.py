@@ -1,6 +1,12 @@
 import sqlite3
+from pathlib import Path
 
+import pytest
+
+import core.browser_data_manager as browser_data_module
+import core.browser_profile_manager as browser_profile_module
 from core.browser_data_manager import BrowserDataManager
+from models.profile import BrowserProfile
 
 
 def test_clear_cookies_db_uses_unique_temps_and_cleans_target_domains(tmp_path):
@@ -34,3 +40,202 @@ def test_clear_cookies_db_uses_unique_temps_and_cleans_target_domains(tmp_path):
 
     assert rows == ["example.com"]
     assert not list(network_dir.glob("Cookies.*"))
+
+
+def test_full_reset_requires_opt_in_and_never_accepts_managed_root(tmp_path, monkeypatch):
+    managed_root = tmp_path / "browser_profiles"
+    child = managed_root / "chrome_child"
+    sibling = managed_root / "chrome_sibling"
+    child.mkdir(parents=True)
+    sibling.mkdir()
+    sentinel = sibling / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    monkeypatch.setattr(browser_data_module, "MANAGED_BROWSER_PROFILES_DIR", managed_root)
+    monkeypatch.setattr(browser_profile_module, "MANAGED_BROWSER_PROFILES_DIR", managed_root)
+
+    disabled = BrowserProfile(
+        name="Disabled",
+        browser_type="chrome",
+        profile_mode="managed",
+        user_data_dir=str(child),
+        allow_full_reset=False,
+        created_by_app=True,
+    )
+    allowed, reason = BrowserDataManager().can_full_reset(disabled)
+    assert allowed is False
+    assert "未开启" in reason
+
+    root_profile = BrowserProfile(
+        name="Root",
+        browser_type="chrome",
+        profile_mode="managed",
+        user_data_dir=str(managed_root),
+        allow_full_reset=True,
+        created_by_app=True,
+    )
+    profile_manager = browser_profile_module.BrowserProfileManager()
+    assert profile_manager.validate_profile(root_profile)[0] is False
+    assert BrowserDataManager().can_full_reset(root_profile)[0] is False
+
+    with pytest.raises(RuntimeError, match="不允许整目录清理"):
+        BrowserDataManager().full_reset(root_profile)
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_site_cleanup_clears_shared_leveldb_and_only_target_origin_directories(tmp_path):
+    default_dir = tmp_path / "Default"
+    shared_files = [
+        default_dir / "Local Storage" / "leveldb" / "000003.log",
+        default_dir / "Session Storage" / "000004.log",
+        default_dir / "Service Worker" / "CacheStorage" / "opaque-cache" / "data",
+        default_dir / "Service Worker" / "Database" / "000005.log",
+    ]
+    for path in shared_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("shared data for chatgpt.com and example.com", encoding="utf-8")
+
+    indexed_target = default_dir / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb"
+    indexed_other = default_dir / "IndexedDB" / "https_example.com_0.indexeddb.leveldb"
+    indexed_false_positive = default_dir / "IndexedDB" / "https_notchatgpt.com_0.indexeddb.leveldb"
+    for path in (indexed_target, indexed_other, indexed_false_positive):
+        path.mkdir(parents=True)
+        (path / "data").write_text("value", encoding="utf-8")
+
+    legacy_target = default_dir / "Local Storage" / "https_chatgpt.com_0.localstorage"
+    legacy_other = default_dir / "Local Storage" / "https_example.com_0.localstorage"
+    legacy_target.write_text("target", encoding="utf-8")
+    legacy_other.write_text("other", encoding="utf-8")
+
+    BrowserDataManager()._clear_storage_for_domains(
+        default_dir,
+        ["chatgpt.com"],
+        clear_shared_storage=True,
+    )
+
+    assert not (default_dir / "Local Storage" / "leveldb").exists()
+    assert not (default_dir / "Session Storage").exists()
+    assert not (default_dir / "Service Worker" / "CacheStorage").exists()
+    assert not (default_dir / "Service Worker" / "Database").exists()
+    assert not indexed_target.exists()
+    assert indexed_other.exists()
+    assert indexed_false_positive.exists()
+    assert not legacy_target.exists()
+    assert legacy_other.exists()
+
+
+def test_external_profile_site_cleanup_preserves_shared_storage_and_cache(tmp_path, monkeypatch):
+    profile_dir = tmp_path / "external"
+    default_dir = profile_dir / "Default"
+    shared = default_dir / "Local Storage" / "leveldb" / "000003.log"
+    cache = default_dir / "Cache" / "cache.data"
+    indexed_target = default_dir / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb" / "data"
+    for path in (shared, cache, indexed_target):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("keep or clear", encoding="utf-8")
+
+    profile = BrowserProfile(
+        name="External",
+        browser_type="chrome",
+        profile_mode="external",
+        user_data_dir=str(profile_dir),
+        created_by_app=False,
+    )
+    manager = BrowserDataManager()
+    monkeypatch.setattr(manager, "is_browser_running", lambda _profile: False)
+
+    shared_cleared = manager.clear_site_data(profile, "chatgpt")
+
+    assert shared_cleared is False
+    assert shared.exists()
+    assert cache.exists()
+    assert not indexed_target.parent.exists()
+
+
+def _managed_reset_profile(path: Path) -> BrowserProfile:
+    return BrowserProfile(
+        name="Reset",
+        browser_type="chrome",
+        profile_mode="managed",
+        user_data_dir=str(path),
+        allow_full_reset=True,
+        created_by_app=True,
+    )
+
+
+def test_full_reset_uses_unique_backup_and_preserves_backup_named_sibling(tmp_path, monkeypatch):
+    managed_root = tmp_path / "browser_profiles"
+    profile_dir = managed_root / "chrome_reset"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "old.txt").write_text("old", encoding="utf-8")
+    backup_named_sibling = managed_root / "chrome_reset.backup"
+    backup_named_sibling.mkdir()
+    sibling_sentinel = backup_named_sibling / "keep.txt"
+    sibling_sentinel.write_text("keep", encoding="utf-8")
+
+    monkeypatch.setattr(browser_data_module, "MANAGED_BROWSER_PROFILES_DIR", managed_root)
+    manager = BrowserDataManager()
+    monkeypatch.setattr(manager, "is_browser_running", lambda _profile: False)
+
+    manager.full_reset(_managed_reset_profile(profile_dir))
+
+    assert profile_dir.is_dir()
+    assert list(profile_dir.iterdir()) == []
+    assert sibling_sentinel.read_text(encoding="utf-8") == "keep"
+    assert not list(managed_root.glob("*.reset_backup"))
+
+
+def test_full_reset_restores_original_if_empty_profile_creation_fails(tmp_path, monkeypatch):
+    managed_root = tmp_path / "browser_profiles"
+    profile_dir = managed_root / "chrome_reset"
+    profile_dir.mkdir(parents=True)
+    sentinel = profile_dir / "keep.txt"
+    sentinel.write_text("original", encoding="utf-8")
+
+    monkeypatch.setattr(browser_data_module, "MANAGED_BROWSER_PROFILES_DIR", managed_root)
+    manager = BrowserDataManager()
+    monkeypatch.setattr(manager, "is_browser_running", lambda _profile: False)
+    original_mkdir = Path.mkdir
+
+    def fail_recreate(path, *args, **kwargs):
+        if path == profile_dir and not path.exists():
+            raise OSError("forced recreate failure")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_recreate)
+
+    with pytest.raises(RuntimeError, match="forced recreate failure"):
+        manager.full_reset(_managed_reset_profile(profile_dir))
+
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert not list(managed_root.glob("*.reset_backup"))
+
+
+def test_full_reset_keeps_recovery_copy_when_final_cleanup_partially_fails(tmp_path, monkeypatch):
+    managed_root = tmp_path / "browser_profiles"
+    profile_dir = managed_root / "chrome_reset"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "first.txt").write_text("first", encoding="utf-8")
+    (profile_dir / "second.txt").write_text("second", encoding="utf-8")
+
+    monkeypatch.setattr(browser_data_module, "MANAGED_BROWSER_PROFILES_DIR", managed_root)
+    manager = BrowserDataManager()
+    monkeypatch.setattr(manager, "is_browser_running", lambda _profile: False)
+    original_rmtree = browser_data_module.shutil.rmtree
+
+    def partially_fail_backup_cleanup(path, *args, **kwargs):
+        candidate = Path(path)
+        if candidate.name.endswith(".reset_backup"):
+            (candidate / "first.txt").unlink()
+            raise OSError("forced partial cleanup failure")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(browser_data_module.shutil, "rmtree", partially_fail_backup_cleanup)
+
+    with pytest.raises(RuntimeError, match="已清空.*备份清理失败"):
+        manager.full_reset(_managed_reset_profile(profile_dir))
+
+    assert profile_dir.is_dir()
+    assert list(profile_dir.iterdir()) == []
+    [recovery_dir] = list(managed_root.glob("*.reset_backup"))
+    assert (recovery_dir / "second.txt").read_text(encoding="utf-8") == "second"

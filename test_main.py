@@ -5,7 +5,7 @@ import queue
 import sys
 import time
 import threading
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import main
 from ui import app as app_module
@@ -216,6 +216,24 @@ def test_lazy_tray_manager_status_check_does_not_load_tray_core():
 
     assert manager.is_running() is False
     assert "core.tray_manager" not in sys.modules
+
+
+def test_tray_profile_change_refreshes_main_window_state():
+    refreshed = []
+    quick_switch_delays = []
+    status_updates = []
+
+    app = object.__new__(app_module.App)
+    app._run_on_ui_thread = lambda callback: callback()
+    app._refresh_loaded_tab = lambda attr: refreshed.append(attr)
+    app._load_quick_switch_profiles = lambda delay_ms=80: quick_switch_delays.append(delay_ms)
+    app._status = SimpleNamespace(configure=lambda **kwargs: status_updates.append(kwargs))
+
+    app_module.App._on_profile_changed_from_tray(app, "claude", "relay")
+
+    assert refreshed == ["_claude_tab", "_usage_stats_tab"]
+    assert quick_switch_delays == [0]
+    assert status_updates == [{"text": "已从托盘切换 Claude API 配置: relay"}]
 
 
 def test_run_on_ui_thread_queues_worker_callbacks_until_ui_pump():
@@ -441,6 +459,29 @@ def test_tab_change_schedules_load_without_extra_delay():
         ("load", "Win11 代理", 1),
         ("resume", "Win11 代理"),
     ]
+
+
+def test_tab_change_refreshes_footer_for_an_already_loaded_tab():
+    messages = []
+
+    class TabView:
+        def get(self):
+            return "日志查看器"
+
+    app = object.__new__(app_module.App)
+    app._tabview = TabView()
+    app._tab_specs = {"日志查看器": ("_log_viewer_tab", "module", "Class", False)}
+    app._tab_navigation = None
+    app._log_viewer_tab = object()
+    app._tab_is_loaded = lambda attr: attr == "_log_viewer_tab"
+    app._set_app_status = messages.append
+    app._suspend_inactive_tab_work = lambda _label: None
+    app._schedule_tab_load = lambda _label, delay_ms=25: None
+    app._resume_active_tab_work = lambda _label: None
+
+    app_module.App._on_tab_changed(app)
+
+    assert messages == ["已加载 日志查看器"]
 
 
 def test_shutdown_clears_pending_ui_callbacks(monkeypatch):

@@ -7,6 +7,7 @@ user-provided migration password so they can be restored on another computer.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
@@ -23,13 +24,15 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from core import profile_manager, security
-from core.atomic_io import atomic_write_bytes, atomic_write_text
+from core.atomic_io import atomic_write_bytes, atomic_write_text, temp_path_for
 
 
 BUNDLE_FORMAT = "api-switcher-portable-profiles"
 BUNDLE_VERSION = 1
 KDF_ITERATIONS = 390_000
+MAX_KDF_ITERATIONS = 2_000_000
 MAX_BUNDLE_FILE_BYTES = 3 * 1024 * 1024 * 1024
+MAX_DECRYPTED_PAYLOAD_BYTES = 3 * 1024 * 1024 * 1024
 MAX_BROWSER_FILE_BYTES = 512 * 1024 * 1024
 MAX_BROWSER_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -59,7 +62,6 @@ BROWSER_SKIP_FILE_NAMES = {
 BROWSER_SKIP_SUFFIXES = {
     ".crdownload",
     ".lock",
-    ".log",
     ".tmp",
 }
 
@@ -85,12 +87,67 @@ class PortableImportResult:
     skipped_browser_files: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class _FileSnapshot:
+    existed: bool
+    content: bytes = b""
+
+
+@dataclass(frozen=True)
+class _BrowserRestoreSnapshot:
+    target: Path
+    backup: Path
+    had_original: bool
+
+
 def _b64encode(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
 def _b64decode(value: str) -> bytes:
     return base64.b64decode(value.encode("ascii"), validate=True)
+
+
+def _zlib_decompress_bounded(
+    data: bytes,
+    max_output_bytes: int,
+    *,
+    too_large_message: str,
+    corrupt_message: str,
+) -> bytes:
+    """Decompress zlib data without allocating beyond the configured limit."""
+    if max_output_bytes < 0:
+        raise ValueError(too_large_message)
+
+    try:
+        decompressor = zlib.decompressobj()
+        output = decompressor.decompress(data, max_output_bytes + 1)
+        if len(output) > max_output_bytes or decompressor.unconsumed_tail:
+            raise ValueError(too_large_message)
+        output += decompressor.flush(max_output_bytes + 1 - len(output))
+    except zlib.error as exc:
+        raise ValueError(corrupt_message) from exc
+
+    if len(output) > max_output_bytes:
+        raise ValueError(too_large_message)
+    if not decompressor.eof or decompressor.unused_data:
+        raise ValueError(corrupt_message)
+    return output
+
+
+def _base64_encoded_length(raw_size: int) -> int:
+    return 4 * ((raw_size + 2) // 3)
+
+
+def _zlib_compress_bound(source_size: int) -> int:
+    """Return zlib's documented upper bound for a compressed byte string."""
+    return (
+        source_size
+        + (source_size >> 12)
+        + (source_size >> 14)
+        + (source_size >> 25)
+        + 13
+    )
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
@@ -148,7 +205,7 @@ def _decrypt_bundle(bundle: dict[str, Any], password: str) -> dict[str, Any]:
         iterations = int(kdf.get("iterations") or 0)
     except (TypeError, ValueError) as e:
         raise ValueError("迁移包 KDF 参数异常") from e
-    if iterations < 100_000:
+    if iterations < 100_000 or iterations > MAX_KDF_ITERATIONS:
         raise ValueError("迁移包 KDF 参数异常")
 
     try:
@@ -157,6 +214,8 @@ def _decrypt_bundle(bundle: dict[str, Any], password: str) -> dict[str, Any]:
         ciphertext = _b64decode(str(bundle["payload"]))
     except Exception as e:
         raise ValueError("迁移包编码损坏") from e
+    if len(salt) != 16 or len(nonce) != 12:
+        raise ValueError("迁移包加密参数异常")
 
     try:
         key = PBKDF2HMAC(
@@ -170,15 +229,19 @@ def _decrypt_bundle(bundle: dict[str, Any], password: str) -> dict[str, Any]:
         raise ValueError("迁移密码错误，或迁移包已损坏") from e
 
     compression = bundle.get("compression")
-    try:
-        if compression == "zlib":
-            plaintext = zlib.decompress(decrypted)
-        elif compression in {None, "none"}:
-            plaintext = decrypted
-        else:
-            raise ValueError(f"不支持的迁移包压缩方式: {compression}")
-    except zlib.error as e:
-        raise ValueError("迁移包压缩数据损坏") from e
+    if compression == "zlib":
+        plaintext = _zlib_decompress_bounded(
+            decrypted,
+            MAX_DECRYPTED_PAYLOAD_BYTES,
+            too_large_message="迁移包解密后内容过大",
+            corrupt_message="迁移包压缩数据损坏",
+        )
+    elif compression in {None, "none"}:
+        if len(decrypted) > MAX_DECRYPTED_PAYLOAD_BYTES:
+            raise ValueError("迁移包解密后内容过大")
+        plaintext = decrypted
+    else:
+        raise ValueError(f"不支持的迁移包压缩方式: {compression}")
 
     try:
         payload = json.loads(plaintext.decode("utf-8"))
@@ -204,6 +267,35 @@ def _collect_secret_refs_from_store(store: dict[str, Any]) -> set[str]:
     return refs
 
 
+def _collect_unreplaced_profile_secret_refs(
+    existing_store: dict[str, Any],
+    imported_store: dict[str, Any],
+) -> set[str]:
+    """Return refs owned by existing profiles that will survive the merge."""
+    retained_store: dict[str, list[dict[str, Any]]] = {}
+    for key in profile_manager.PROFILE_LIST_KEYS:
+        imported_items = imported_store.get(key, [])
+        if not isinstance(imported_items, list):
+            imported_items = []
+        imported_names = {
+            item.get("name")
+            for item in imported_items
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+        }
+        existing_items = existing_store.get(key, [])
+        if not isinstance(existing_items, list):
+            existing_items = []
+        retained_store[key] = [
+            item
+            for item in existing_items
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item.get("name") not in imported_names
+        ]
+    return _collect_secret_refs_from_store(retained_store)
+
+
 def _count_profiles(store: dict[str, Any]) -> int:
     total = 0
     for key in profile_manager.PROFILE_LIST_KEYS:
@@ -225,13 +317,43 @@ def _managed_browser_profile_path(name: str, browser_type: str) -> Path:
     return paths.STORAGE_DIR / "browser_profiles" / _browser_profile_basename(name, browser_type)
 
 
-def _browser_profile_for_portable(profile: dict[str, Any]) -> dict[str, Any]:
+def _unique_browser_profile_basename(
+    name: str,
+    browser_type: str,
+    used_basenames: set[str] | None = None,
+) -> str:
+    basename = _browser_profile_basename(name, browser_type)
+    if used_basenames is None:
+        return basename
+
+    key = basename.casefold()
+    if key not in used_basenames:
+        used_basenames.add(key)
+        return basename
+
+    digest = hashlib.sha256(f"{browser_type}\0{name}".encode("utf-8")).hexdigest()[:8]
+    candidate = f"{basename}_{digest}"
+    index = 2
+    while candidate.casefold() in used_basenames:
+        candidate = f"{basename}_{digest}_{index}"
+        index += 1
+    used_basenames.add(candidate.casefold())
+    return candidate
+
+
+def _browser_profile_for_portable(
+    profile: dict[str, Any],
+    used_basenames: set[str] | None = None,
+) -> dict[str, Any]:
     cleaned = dict(profile)
     name = str(cleaned.get("name") or "BrowserProfile")
     browser_type = str(cleaned.get("browser_type") or "chrome")
     cleaned["browser_type"] = browser_type if browser_type in {"chrome", "edge"} else "chrome"
     cleaned["profile_mode"] = "managed"
-    cleaned["user_data_dir"] = str(_managed_browser_profile_path(name, cleaned["browser_type"]))
+    basename = _unique_browser_profile_basename(name, cleaned["browser_type"], used_basenames)
+    from config import paths
+
+    cleaned["user_data_dir"] = str(paths.STORAGE_DIR / "browser_profiles" / basename)
     cleaned["allow_full_reset"] = True
     cleaned["created_by_app"] = True
     cleaned["browser_executable"] = None
@@ -250,6 +372,16 @@ def _should_skip_browser_relative_path(relative: Path) -> bool:
         return True
     if any(name.endswith(suffix) for suffix in BROWSER_SKIP_SUFFIXES):
         return True
+    if name.endswith(".log"):
+        # Chromium LevelDB .log files contain live Local Storage,
+        # Session Storage and IndexedDB records.  Other logs are runtime noise.
+        storage_parts = parts[:-1]
+        is_storage_log = any(
+            part == "leveldb" or part.endswith(".leveldb") or part == "session storage"
+            for part in storage_parts
+        ) or ("service worker" in storage_parts and "database" in storage_parts)
+        if not is_storage_log:
+            return True
     if name.startswith("singleton"):
         return True
     return False
@@ -260,8 +392,15 @@ def _portable_relative_path(relative: Path) -> str:
 
 
 def _safe_browser_relative_path(value: str) -> Path:
-    rel = PurePosixPath(str(value).replace("\\", "/"))
-    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+    normalized = str(value).replace("\\", "/")
+    rel = PurePosixPath(normalized)
+    windows_rel = PureWindowsPath(normalized)
+    if (
+        rel.is_absolute()
+        or windows_rel.drive
+        or windows_rel.root
+        or any(part in {"", ".", ".."} or ":" in part for part in rel.parts)
+    ):
         raise ValueError(f"迁移包包含非法浏览器文件路径: {value}")
     return Path(*rel.parts)
 
@@ -272,12 +411,17 @@ def _collect_browser_profile_data(store: dict[str, Any]) -> tuple[dict[str, Any]
     total_bytes = 0
     file_count = 0
     portable_profiles: list[dict[str, Any]] = []
+    used_basenames: set[str] = set()
 
     for profile in store.get("browser_profiles", []):
         if not isinstance(profile, dict) or not isinstance(profile.get("name"), str):
             continue
         name = profile["name"]
-        source_dir = Path(str(profile.get("user_data_dir") or "")).expanduser()
+        source_text = str(profile.get("user_data_dir") or "").strip()
+        if not source_text:
+            skipped.append(f"{name}: Profile 路径为空")
+            continue
+        source_dir = Path(source_text).expanduser()
         if not source_dir.exists() or not source_dir.is_dir():
             skipped.append(f"{name}: Profile 目录不存在")
             continue
@@ -314,7 +458,7 @@ def _collect_browser_profile_data(store: dict[str, Any]) -> tuple[dict[str, Any]
                 skipped.append(f"{name}/{path.name}: 无法读取，已跳过 ({e})")
 
         if files:
-            portable_profile = _browser_profile_for_portable(profile)
+            portable_profile = _browser_profile_for_portable(profile, used_basenames)
             portable_profiles.append(portable_profile)
             browser_data[name] = {
                 "profile": portable_profile,
@@ -327,6 +471,24 @@ def _collect_browser_profile_data(store: dict[str, Any]) -> tuple[dict[str, Any]
 
     store["browser_profiles"] = portable_profiles
     return browser_data, skipped, file_count, total_bytes
+
+
+def _validate_portable_export_path(output_path: Path, store: dict[str, Any]) -> None:
+    """Keep a migration output from replacing one of its live source files."""
+    resolved_output = Path(output_path).expanduser().resolve(strict=False)
+    profile_store = Path(profile_manager.PROFILES_FILE).expanduser().resolve(strict=False)
+    if resolved_output == profile_store:
+        raise ValueError("迁移包不能覆盖当前 Profile 配置文件")
+
+    for profile in store.get("browser_profiles", []):
+        if not isinstance(profile, dict):
+            continue
+        source_text = str(profile.get("user_data_dir") or "").strip()
+        if not source_text:
+            continue
+        source_dir = Path(source_text).expanduser().resolve(strict=False)
+        if resolved_output == source_dir or source_dir in resolved_output.parents:
+            raise ValueError("迁移包不能保存在正在导出的浏览器 Profile 目录内")
 
 
 def _sanitize_portable_store(store: dict[str, Any]) -> dict[str, Any]:
@@ -414,7 +576,76 @@ def _move_browser_path(source: Path, target: Path) -> None:
     shutil.move(str(source), str(target))
 
 
-def _restore_browser_data(browser_data: dict[str, Any]) -> tuple[int, int, list[str], set[str]]:
+def _snapshot_file(path: Path) -> _FileSnapshot:
+    if not path.exists():
+        return _FileSnapshot(existed=False)
+    if not path.is_file():
+        raise ValueError(f"配置路径不是文件: {path}")
+    return _FileSnapshot(existed=True, content=path.read_bytes())
+
+
+def _restore_file(path: Path, snapshot: _FileSnapshot) -> None:
+    if snapshot.existed:
+        atomic_write_bytes(path, snapshot.content)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _rollback_browser_restores(snapshots: list[_BrowserRestoreSnapshot]) -> list[str]:
+    errors: list[str] = []
+    for snapshot in reversed(snapshots):
+        try:
+            if snapshot.target.exists() or snapshot.target.is_symlink():
+                _remove_browser_path(snapshot.target)
+            if snapshot.had_original:
+                if not (snapshot.backup.exists() or snapshot.backup.is_symlink()):
+                    raise FileNotFoundError(f"浏览器回滚备份不存在: {snapshot.backup}")
+                _move_browser_path(snapshot.backup, snapshot.target)
+            elif snapshot.backup.exists() or snapshot.backup.is_symlink():
+                _remove_browser_path(snapshot.backup)
+        except Exception as exc:
+            errors.append(f"浏览器目录 {snapshot.target}: {exc}")
+    return errors
+
+
+def _commit_browser_restores(snapshots: list[_BrowserRestoreSnapshot]) -> list[str]:
+    errors: list[str] = []
+    for snapshot in snapshots:
+        try:
+            if snapshot.backup.exists() or snapshot.backup.is_symlink():
+                _remove_browser_path(snapshot.backup)
+        except Exception as exc:
+            errors.append(f"{snapshot.target.name}: 导入事务备份清理失败 ({exc})")
+    return errors
+
+
+def _rollback_portable_import(
+    profile_snapshot: _FileSnapshot,
+    secret_snapshot: dict[str, str | None],
+    browser_snapshots: list[_BrowserRestoreSnapshot],
+) -> list[str]:
+    errors = _rollback_browser_restores(browser_snapshots)
+    for ref, previous_value in secret_snapshot.items():
+        try:
+            if previous_value is None:
+                security.delete_secret(ref)
+            else:
+                security.set_secret(ref, previous_value)
+        except Exception as exc:
+            errors.append(f"密钥 {ref}: {exc}")
+    try:
+        _restore_file(profile_manager.PROFILES_FILE, profile_snapshot)
+        profile_manager.clear_profile_store_cache()
+    except Exception as exc:
+        errors.append(f"Profile: {exc}")
+    return errors
+
+
+def _restore_browser_data(
+    browser_data: dict[str, Any],
+    *,
+    transaction_snapshots: list[_BrowserRestoreSnapshot] | None = None,
+) -> tuple[int, int, list[str], set[str]]:
     restored_files = 0
     restored_bytes = 0
     skipped: list[str] = []
@@ -443,16 +674,21 @@ def _restore_browser_data(browser_data: dict[str, Any]) -> tuple[int, int, list[
             target = target.resolve()
         except OSError:
             target = target.absolute()
-        if target != managed_root and managed_root not in target.parents:
+        if target == managed_root or managed_root not in target.parents:
             skipped.append(f"{name}: 目标目录不在托管目录内，已跳过")
             continue
 
-        backup = target.with_name(f"{target.name}.import_backup")
+        backup = temp_path_for(target).with_suffix(".import_backup")
+        had_original = target.exists()
+        original_moved = False
+        profile_start_files = restored_files
+        profile_start_bytes = restored_bytes
         try:
-            if backup.exists():
-                _remove_browser_path(backup)
-            if target.exists():
+            if backup.exists() or backup.is_symlink():
+                raise FileExistsError(f"临时浏览器备份路径已存在: {backup}")
+            if had_original:
                 _move_browser_path(target, backup)
+                original_moved = True
             target.mkdir(parents=True, exist_ok=True)
 
             files = item.get("files", [])
@@ -465,35 +701,59 @@ def _restore_browser_data(browser_data: dict[str, Any]) -> tuple[int, int, list[
                     skipped.append(f"{name}: 跳过异常文件条目")
                     continue
                 rel_path = _safe_browser_relative_path(str(file_entry.get("path") or ""))
+                declared_size = file_entry.get("size")
+                if declared_size is None:
+                    skipped.append(f"{name}/{rel_path}: 文件大小元数据缺失")
+                    continue
+                try:
+                    declared_size_int = int(declared_size)
+                except (TypeError, ValueError):
+                    skipped.append(f"{name}/{rel_path}: 文件大小元数据异常")
+                    continue
+                if declared_size_int < 0:
+                    skipped.append(f"{name}/{rel_path}: 文件大小元数据异常")
+                    continue
+                if declared_size_int > MAX_BROWSER_FILE_BYTES:
+                    skipped.append(f"{name}/{rel_path}: 文件过大，已跳过")
+                    continue
+                remaining_total = MAX_BROWSER_TOTAL_BYTES - restored_bytes
+                if declared_size_int > remaining_total:
+                    skipped.append(f"{name}/{rel_path}: 浏览器数据超过导入上限，已跳过")
+                    continue
+
                 encoded = file_entry.get("data")
                 if not isinstance(encoded, str):
                     skipped.append(f"{name}/{rel_path}: 文件数据缺失")
                     continue
+                compression = file_entry.get("compression")
+                if compression == "zlib":
+                    max_raw_size = _zlib_compress_bound(declared_size_int)
+                elif compression in {None, "none"}:
+                    max_raw_size = declared_size_int
+                else:
+                    skipped.append(f"{name}/{rel_path}: 解码失败 (不支持的文件压缩方式)")
+                    continue
+                if len(encoded) > _base64_encoded_length(max_raw_size):
+                    skipped.append(f"{name}/{rel_path}: 编码数据超过声明大小边界")
+                    continue
                 try:
                     raw = _b64decode(encoded)
-                    if file_entry.get("compression") == "zlib":
-                        content = zlib.decompress(raw)
-                    elif file_entry.get("compression") in {None, "none"}:
-                        content = raw
+                    if len(raw) > max_raw_size:
+                        raise ValueError("编码数据超过声明大小边界")
+                    if compression == "zlib":
+                        content = _zlib_decompress_bounded(
+                            raw,
+                            declared_size_int,
+                            too_large_message="解压后内容超过声明大小",
+                            corrupt_message="压缩数据损坏",
+                        )
                     else:
-                        raise ValueError("不支持的文件压缩方式")
+                        content = raw
                 except Exception as e:
                     skipped.append(f"{name}/{rel_path}: 解码失败 ({e})")
                     continue
-                declared_size = file_entry.get("size")
-                try:
-                    declared_size_int = int(declared_size) if declared_size is not None else len(content)
-                except (TypeError, ValueError):
-                    skipped.append(f"{name}/{rel_path}: 文件大小元数据异常")
-                    continue
                 if declared_size_int != len(content):
                     skipped.append(f"{name}/{rel_path}: 文件大小校验失败")
-                    continue
-                if len(content) > MAX_BROWSER_FILE_BYTES:
-                    skipped.append(f"{name}/{rel_path}: 文件过大，已跳过")
-                    continue
-                if restored_bytes + len(content) > MAX_BROWSER_TOTAL_BYTES:
-                    skipped.append(f"{name}/{rel_path}: 浏览器数据超过导入上限，已跳过")
                     continue
                 dest = target / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -504,22 +764,45 @@ def _restore_browser_data(browser_data: dict[str, Any]) -> tuple[int, int, list[
 
             if profile_file_count <= 0:
                 raise ValueError("没有成功恢复任何浏览器文件")
+            snapshot = _BrowserRestoreSnapshot(
+                target=target,
+                backup=backup,
+                had_original=had_original,
+            )
+            if transaction_snapshots is None:
+                skipped.extend(_commit_browser_restores([snapshot]))
+            else:
+                transaction_snapshots.append(snapshot)
             restored_profiles.add(profile_name)
-
-            if backup.exists():
-                shutil.rmtree(backup)
         except Exception as e:
+            restored_files = profile_start_files
+            restored_bytes = profile_start_bytes
             skipped.append(f"{name}: 恢复失败 ({e})")
-            if target.exists():
+            if had_original and not original_moved:
+                # The same-volume move is the first mutation. If it failed,
+                # the original target is still authoritative and must not be
+                # mistaken for a partially imported directory.
+                continue
+            cleanup_error: Exception | None = None
+            if target.exists() or target.is_symlink():
                 try:
                     _remove_browser_path(target)
-                except OSError as cleanup_error:
-                    skipped.append(f"{name}: 清理失败目录失败 ({cleanup_error})")
-            if backup.exists():
+                except Exception as exc:
+                    cleanup_error = exc
+                    skipped.append(f"{name}: 清理失败目录失败 ({exc})")
+            if backup.exists() or backup.is_symlink():
                 try:
                     _move_browser_path(backup, target)
-                except OSError:
-                    skipped.append(f"{name}: 原目录恢复失败")
+                    cleanup_error = None
+                except Exception as restore_error:
+                    skipped.append(f"{name}: 原目录恢复失败 ({restore_error})")
+                    raise RuntimeError(
+                        f"{name}: 浏览器数据恢复失败，且原目录自动恢复失败；保留备份: {backup}"
+                    ) from e
+            elif cleanup_error is not None:
+                raise RuntimeError(
+                    f"{name}: 浏览器数据恢复失败，且失败目录清理不完整: {cleanup_error}"
+                ) from e
 
     return restored_files, restored_bytes, skipped, restored_profiles
 
@@ -530,13 +813,14 @@ def _prepare_imported_browser_data(browser_data: Any) -> tuple[dict[str, Any], l
 
     prepared: dict[str, Any] = {}
     profiles: list[dict[str, Any]] = []
+    used_basenames: set[str] = set()
     for name, item in browser_data.items():
         if not isinstance(item, dict):
             continue
         profile = item.get("profile")
         if not isinstance(profile, dict) or not isinstance(profile.get("name"), str):
             continue
-        portable_profile = _browser_profile_for_portable(profile)
+        portable_profile = _browser_profile_for_portable(profile, used_basenames)
         prepared[name] = dict(item)
         prepared[name]["profile"] = portable_profile
         profiles.append(portable_profile)
@@ -548,7 +832,11 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
     if len(password) < 8:
         raise ValueError("迁移密码至少需要 8 个字符")
 
+    path = Path(output_path).expanduser().resolve()
+    if path.exists() and path.is_dir():
+        raise ValueError("导出路径不能是目录")
     store = _sanitize_portable_store(profile_manager._load_store())
+    _validate_portable_export_path(path, store)
     browser_data, skipped_browser_files, browser_file_count, browser_bytes = _collect_browser_profile_data(store)
     secret_refs = sorted(_collect_secret_refs_from_store(store))
     secrets: dict[str, str] = {}
@@ -577,9 +865,6 @@ def export_portable_profiles(output_path: str | Path, password: str) -> Portable
     }
     bundle = _encrypt_payload(payload, password)
 
-    path = Path(output_path).expanduser().resolve()
-    if path.exists() and path.is_dir():
-        raise ValueError("导出路径不能是目录")
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(bundle, ensure_ascii=False, indent=2))
 
@@ -629,62 +914,109 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
     if not isinstance(secrets, dict):
         raise ValueError("迁移包中的密钥数据无效")
 
+    allowed_secret_refs = _collect_secret_refs_from_store(imported_store)
+    existing_store = profile_manager._load_store()
+    conflicting_refs = sorted(
+        allowed_secret_refs
+        & _collect_unreplaced_profile_secret_refs(existing_store, imported_store)
+    )
+    if conflicting_refs:
+        details = ", ".join(conflicting_refs[:3])
+        suffix = f" 等 {len(conflicting_refs)} 项" if len(conflicting_refs) > 3 else ""
+        raise ValueError(
+            f"迁移包的密钥引用与未替换的现有配置冲突: {details}{suffix}"
+        )
+
     skipped: list[str] = []
     valid_secrets: list[tuple[str, str]] = []
     for ref, value in secrets.items():
         if not isinstance(ref, str) or not isinstance(value, str):
             skipped.append(str(ref))
             continue
+        if ref not in allowed_secret_refs:
+            skipped.append(f"{ref} (未被导入配置引用)")
+            continue
         valid_secrets.append((ref, value))
 
-    browser_file_count, browser_bytes, skipped_browser_files, restored_browser_names = _restore_browser_data(browser_data)
-    skipped_browser_files.extend(
-        item for item in payload.get("skipped_browser_files", [])
-        if isinstance(item, str)
-    )
-    if browser_profiles:
-        imported_store["browser_profiles"] = [
-            profile for profile in imported_store.get("browser_profiles", [])
-            if isinstance(profile, dict) and profile.get("name") in restored_browser_names
-        ]
-        if imported_store.get("active_browser_profile") not in restored_browser_names:
-            imported_store["active_browser_profile"] = None
-
-    existing_store = profile_manager._load_store()
-    new_store = dict(existing_store)
-    for key in profile_manager.PROFILE_LIST_KEYS:
-        new_store[key] = _merge_profile_lists(
-            existing_store.get(key, []),
-            imported_store.get(key, []),
-        )
-
-    for active_key in profile_manager.ACTIVE_PROFILE_KEYS:
-        imported_active = imported_store.get(active_key)
-        if isinstance(imported_active, str):
-            list_key = active_key.replace("active_", "") + "s"
-            if list_key == "claude_profiles":
-                list_key = "claude_profiles"
-            names = {
-                item.get("name")
-                for item in new_store.get(list_key, [])
-                if isinstance(item, dict)
-            }
-            if imported_active in names:
-                new_store[active_key] = imported_active
-
-    new_store["version"] = max(_store_version(existing_store), _store_version(imported_store))
-
+    profile_snapshot = _snapshot_file(profile_manager.PROFILES_FILE)
+    secret_snapshot = {
+        ref: security.get_secret(ref)
+        for ref, _value in sorted(valid_secrets)
+    }
+    browser_snapshots: list[_BrowserRestoreSnapshot] = []
+    browser_file_count = 0
+    browser_bytes = 0
+    skipped_browser_files: list[str] = []
+    restored_browser_names: set[str] = set()
     restored = 0
-    for ref, value in valid_secrets:
-        try:
-            security.set_secret(ref, value)
-        except Exception as e:
-            skipped.append(f"{ref} ({e})")
-            continue
-        restored += 1
+    try:
+        (
+            browser_file_count,
+            browser_bytes,
+            skipped_browser_files,
+            restored_browser_names,
+        ) = _restore_browser_data(
+            browser_data,
+            transaction_snapshots=browser_snapshots,
+        )
+        source_browser_skips = payload.get("skipped_browser_files", [])
+        if isinstance(source_browser_skips, list):
+            skipped_browser_files.extend(
+                item for item in source_browser_skips
+                if isinstance(item, str)
+            )
 
-    profile_manager._normalize_store(new_store)
-    profile_manager._save_store(new_store)
+        if browser_profiles:
+            imported_store["browser_profiles"] = [
+                profile for profile in imported_store.get("browser_profiles", [])
+                if isinstance(profile, dict) and profile.get("name") in restored_browser_names
+            ]
+            if imported_store.get("active_browser_profile") not in restored_browser_names:
+                imported_store["active_browser_profile"] = None
+
+        new_store = dict(existing_store)
+        for key in profile_manager.PROFILE_LIST_KEYS:
+            new_store[key] = _merge_profile_lists(
+                existing_store.get(key, []),
+                imported_store.get(key, []),
+            )
+
+        for active_key in profile_manager.ACTIVE_PROFILE_KEYS:
+            imported_active = imported_store.get(active_key)
+            if isinstance(imported_active, str):
+                list_key = active_key.replace("active_", "") + "s"
+                names = {
+                    item.get("name")
+                    for item in new_store.get(list_key, [])
+                    if isinstance(item, dict)
+                }
+                if imported_active in names:
+                    new_store[active_key] = imported_active
+
+        new_store["version"] = max(_store_version(existing_store), _store_version(imported_store))
+
+        for ref, value in valid_secrets:
+            try:
+                security.set_secret(ref, value)
+            except Exception as e:
+                skipped.append(f"{ref} ({e})")
+                continue
+            restored += 1
+
+        profile_manager._normalize_store(new_store)
+        profile_manager._save_store(new_store)
+    except Exception as import_error:
+        rollback_errors = _rollback_portable_import(
+            profile_snapshot,
+            secret_snapshot,
+            browser_snapshots,
+        )
+        if rollback_errors:
+            details = "；".join(rollback_errors)
+            raise RuntimeError(f"迁移包导入失败，且自动回滚不完整: {details}") from import_error
+        raise
+
+    skipped_browser_files.extend(_commit_browser_restores(browser_snapshots))
 
     return PortableImportResult(
         profile_count=_count_profiles(imported_store),

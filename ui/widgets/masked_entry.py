@@ -8,6 +8,7 @@ class MaskedEntry(ctk.CTkFrame):
 
     def __init__(self, master, placeholder="API Key / Token", **kwargs):
         super().__init__(master, fg_color="transparent")
+        self.grid_columnconfigure(0, weight=1)
 
         entry_width = kwargs.pop("width", 400)
         entry_height = kwargs.pop("height", 34)
@@ -22,7 +23,7 @@ class MaskedEntry(ctk.CTkFrame):
             height=entry_height,
             **style,
         )
-        self.entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
 
         self._visible = False
         self.toggle_btn = ctk.CTkButton(
@@ -32,7 +33,7 @@ class MaskedEntry(ctk.CTkFrame):
             command=self._toggle,
             **button_style("secondary", compact=True),
         )
-        self.toggle_btn.pack(side="right")
+        self.toggle_btn.grid(row=0, column=1, sticky="e")
 
     def _toggle(self):
         self._visible = not self._visible

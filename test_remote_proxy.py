@@ -1877,6 +1877,97 @@ def test_install_ai_proxy_verified_falls_back_to_working_candidate(monkeypatch):
     assert "验证通过" in message
 
 
+def test_install_remote_proxy_verified_reports_failed_original_restore(monkeypatch):
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: requested, type: vless, server: bad.example.com, port: 443 }"),
+    )
+    candidate = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node("{ name: candidate, type: vless, server: worse.example.com, port: 443 }"),
+    )
+    calls = []
+
+    def fake_install(_server, text, _port=7890):
+        name = remote_proxy.parse_proxy_node(text)["name"]
+        calls.append(name)
+        if name == "requested" and calls.count("requested") > 1:
+            raise RuntimeError("restore boom")
+        return f"installed {name}"
+
+    latency = remote_proxy.ProxyNodeLatencyResult(
+        remote_proxy.proxy_node_key(candidate.node),
+        True,
+        latency_ms=20,
+    )
+    monkeypatch.setattr(remote_proxy, "install_ai_proxy", fake_install)
+    monkeypatch.setattr(
+        remote_proxy,
+        "probe_ai_proxy",
+        lambda *_args, **_kwargs: "server: AI 连通性 0/3 可达",
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "measure_proxy_node_latencies_on_server",
+        lambda *_args, **_kwargs: {remote_proxy.proxy_node_key(candidate.node): latency},
+    )
+
+    message = remote_proxy.install_ai_proxy_verified(
+        "server",
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, candidate],
+    )
+
+    assert calls == ["requested", "candidate", "requested"]
+    assert "恢复原节点失败: restore boom" in message
+    assert "已恢复原节点" not in message
+
+
+def test_install_local_proxy_verified_reports_failed_original_restore(monkeypatch):
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node("{ name: requested, type: vless, server: bad.example.com, port: 443 }"),
+    )
+    candidate = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node("{ name: candidate, type: vless, server: worse.example.com, port: 443 }"),
+    )
+    calls = []
+
+    def fake_install(text, _port=17897):
+        name = remote_proxy.parse_proxy_node(text)["name"]
+        calls.append(name)
+        if name == "requested" and calls.count("requested") > 1:
+            raise RuntimeError("restore boom")
+        return f"installed {name}"
+
+    latency = remote_proxy.ProxyNodeLatencyResult(
+        remote_proxy.proxy_node_key(candidate.node),
+        True,
+        latency_ms=20,
+    )
+    monkeypatch.setattr(local_proxy, "install_local_ai_proxy", fake_install)
+    monkeypatch.setattr(
+        local_proxy,
+        "probe_local_ai_proxy",
+        lambda *_args, **_kwargs: "本机 AI 连通性 0/3 可达",
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "measure_proxy_node_latencies",
+        lambda *_args, **_kwargs: {remote_proxy.proxy_node_key(candidate.node): latency},
+    )
+
+    message = local_proxy.install_local_ai_proxy_verified(
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, candidate],
+    )
+
+    assert calls == ["requested", "candidate", "requested"]
+    assert "恢复原节点失败: restore boom" in message
+    assert "已恢复原节点" not in message
+
+
 def test_install_ai_proxy_verified_prefers_quality_ranked_candidate(monkeypatch):
     requested = remote_proxy.ProxySubscriptionNode(
         1,

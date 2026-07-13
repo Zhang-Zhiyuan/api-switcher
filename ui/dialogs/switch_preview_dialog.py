@@ -4,10 +4,18 @@ from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
-from ui.theme import COLORS, button_style, center_window, font, textbox_style
+from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, textbox_style
 
 if TYPE_CHECKING:
     from core.switch_preview import SwitchPreview
+
+
+def _preview_summary_text(value: object, limit: int = 140) -> str:
+    """Return a bounded one-paragraph summary for the fixed dialog header."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
 
 
 class SwitchPreviewDialog(ctk.CTkToplevel):
@@ -36,21 +44,27 @@ class SwitchPreviewDialog(ctk.CTkToplevel):
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=20, pady=(18, 12))
 
-        ctk.CTkLabel(
+        title_label = ctk.CTkLabel(
             body,
             text=self.preview.title,
             text_color=COLORS["text"],
             font=font(18, "bold"),
-        ).pack(anchor="w")
+            anchor="w",
+            justify="left",
+        )
+        title_label.pack(fill="x", anchor="w")
+        bind_wraplength(body, title_label, padding=4, min_width=240, max_width=900)
 
-        ctk.CTkLabel(
+        summary_label = ctk.CTkLabel(
             body,
-            text=self.preview.summary,
+            text=_preview_summary_text(self.preview.summary),
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
-        ).pack(fill="x", anchor="w", pady=(4, 10))
+        )
+        summary_label.pack(fill="x", anchor="w", pady=(4, 10))
+        bind_wraplength(body, summary_label, padding=4, min_width=240, max_width=900)
 
         status_frame = ctk.CTkFrame(body, fg_color=COLORS["surface"], corner_radius=8)
         status_frame.pack(fill="x", pady=(0, 10))
@@ -63,27 +77,39 @@ class SwitchPreviewDialog(ctk.CTkToplevel):
             status_text = f"有 {self.preview.warning_count} 个提醒"
             status_color = COLORS["warning"]
 
-        ctk.CTkLabel(
+        status_label = ctk.CTkLabel(
             status_frame,
             text=status_text,
             text_color=status_color,
             font=font(13, "bold"),
-        ).pack(side="left", padx=12, pady=8)
+            anchor="w",
+        )
+        status_label.pack(fill="x", padx=12, pady=(8, 0))
 
-        ctk.CTkLabel(
+        status_note = ctk.CTkLabel(
             status_frame,
             text="确认后会先创建备份，再写入本机配置文件。",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left", padx=(8, 12), pady=8)
+            anchor="w",
+            justify="left",
+        )
+        status_note.pack(fill="x", padx=12, pady=(2, 8))
+        bind_wraplength(status_frame, status_note, padding=24, min_width=220, max_width=700)
 
-        self.textbox = ctk.CTkTextbox(body, wrap="word", **textbox_style(monospace=True))
+        # Keep the requested height modest so all fixed controls remain
+        # visible when the dialog is clamped to a short work area.  The
+        # textbox still expands to use available room on larger screens.
+        self.textbox = ctk.CTkTextbox(body, height=120, wrap="word", **textbox_style(monospace=True))
         self.textbox.pack(fill="both", expand=True)
         self._write_preview_text()
         self.textbox.configure(state="disabled")
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=20, pady=(0, 18))
+        # Reserve the action row before the expanding body is laid out.  Tk's
+        # packer allocates space in packing order; on a short/high-DPI screen,
+        # packing this after ``body`` can leave the modal buttons off-screen.
+        btn_frame.pack(side="bottom", fill="x", padx=20, pady=(0, 18), before=body)
 
         ctk.CTkButton(
             btn_frame,

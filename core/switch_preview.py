@@ -355,7 +355,17 @@ def _validate_codex_api_target(profile: CodexProfile) -> list[PreviewCheck]:
         checks.append(PreviewCheck(category, "配置类型", "ok", "第三方 Codex API 配置。"))
 
     if profile.custom_requires_openai_auth:
-        checks.append(PreviewCheck(category, "API Key", "ok", "该 Provider 使用 OpenAI 认证，不需要单独 API Key。"))
+        auth = auth_parser.read_codex_auth()
+        if _codex_has_openai_auth(auth):
+            checks.append(PreviewCheck(category, "OpenAI 认证", "ok", "已找到本机 OpenAI API Key 或 ChatGPT 登录凭据。"))
+        else:
+            checks.append(PreviewCheck(
+                category,
+                "OpenAI 认证",
+                "error",
+                "该 Provider 要求 OpenAI 认证，但本机 auth.json 没有 ChatGPT/OpenAI token。",
+                "先在 Codex CLI 完成官方账号登录，或关闭 Provider 的 requires_openai_auth。",
+            ))
     elif security.get_secret(profile.api_key_ref):
         checks.append(PreviewCheck(category, "API Key", "ok", "已找到本机保存的 API Key。"))
     else:
@@ -548,6 +558,14 @@ def _valid_http_url(value: object) -> bool:
 def _codex_has_official_tokens(auth: dict) -> bool:
     tokens = auth.get("tokens") if isinstance(auth, dict) else None
     return isinstance(tokens, dict) and bool(tokens)
+
+
+def _codex_has_openai_auth(auth: dict) -> bool:
+    if not isinstance(auth, dict):
+        return False
+    if str(auth.get("OPENAI_API_KEY") or "").strip():
+        return True
+    return _codex_has_official_tokens(auth)
 
 
 def _prefix_items(checks: list[PreviewCheck], prefix: str) -> list[PreviewCheck]:

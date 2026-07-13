@@ -127,7 +127,7 @@
 
 ## 🔐 跨电脑迁移 Profile
 
-在“备份管理”中使用“导出 ZIP”可以生成完整本地配置 ZIP。它面向本机配置备份/迁移，包含已保存的 Claude/Codex API Profile、官方账号快照、SSH 服务器、浏览器 Profile 元数据、活动选择，以及这些条目引用的 API Key、账号 token、SSH 密码和私钥口令。ZIP 内的密钥数据会用迁移密码加密；导入 ZIP 时会先显示包内 Profile/密钥数量，导入前自动备份当前配置，同名 Profile 会被替换，不同名 Profile 会保留。
+在“备份管理”中使用“导出 ZIP”可以生成完整本地配置 ZIP。它面向本机配置备份/迁移，包含已保存的 Claude/Codex API Profile、官方账号快照、SSH 服务器、浏览器 Profile 元数据、活动选择，以及这些条目引用的 API Key、账号 token、SSH 密码和私钥口令。ZIP 内的密钥数据会用迁移密码加密；导入 ZIP 时会先显示包内 Profile/密钥数量，同名 Profile 会被替换，不同名 Profile 会保留。导入过程具有事务回滚保护，失败时会恢复 Profile、相关密钥和环境检测设置；同时创建的普通备份仅保护 Claude/Codex/VS Code 客户端运行配置，不包含可独立恢复的密钥快照。
 
 在“备份管理”中使用“导出迁移包”可以生成加密的 `.asxprofile` 文件。迁移包包含 Claude/Codex/SSH 的第三方 API Profile 元数据、API Key、SSH 密码、SSH 密钥口令，以及浏览器 Profile 目录中的 Cookies、Local State、本地存储、IndexedDB、Session Storage、Service Worker 等登录态相关数据。导入到另一台电脑时，输入同一个迁移密码，软件会把密钥重新写入新电脑的本机凭据存储，并把浏览器数据恢复到本机托管的 `browser_profiles` 目录。
 

@@ -25,6 +25,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._refresh_busy = False
         self._refresh_buttons = []
         self._last_model_for_effort_options = None
+        self._field_layouts = {}
+        self._responsive_after_id = None
+        self._responsive_stacked = None
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -88,26 +91,29 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         )
         self._save_btn.pack(side="right")
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
 
     def _add_field(self, parent, label, key, value="", field_type="entry"):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
-        ctk.CTkLabel(
+        label_widget = ctk.CTkLabel(
             row,
             text=label,
             width=128,
             anchor="w",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(side="left")
+        )
+        label_widget.pack(side="left")
 
         if field_type == "entry":
-            widget = ctk.CTkEntry(row, width=360, **input_style())
+            widget = ctk.CTkEntry(row, width=180, **input_style())
             widget.insert(0, str(value))
             widget.pack(side="left", fill="x", expand=True)
         elif field_type == "masked":
-            widget = MaskedEntry(row, width=360)
+            widget = MaskedEntry(row, width=180)
             if value:
                 widget.set(str(value))
             widget.pack(side="left", fill="x", expand=True)
@@ -115,7 +121,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             widget = ctk.CTkComboBox(
                 row,
                 values=value,
-                width=360,
+                width=180,
                 **combo_style(),
             )
             widget.pack(side="left", fill="x", expand=True)
@@ -132,6 +138,12 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             widget.pack(side="left")
 
         self._fields[key] = (widget, field_type)
+        self._field_layouts[key] = {
+            "row": row,
+            "label": label_widget,
+            "field": widget,
+            "buttons": [],
+        }
         return widget
 
     def _add_provider_note(self, parent):
@@ -162,6 +174,58 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         )
         button.pack(side="left", padx=(8, 0))
         self._refresh_buttons.append(button)
+        layout = self._field_layouts.get(key)
+        if layout is not None:
+            layout["buttons"].append(button)
+
+    def _logical_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked = self._logical_width() < 620
+        if stacked == self._responsive_stacked:
+            return
+        self._responsive_stacked = stacked
+        for layout in self._field_layouts.values():
+            label = layout["label"]
+            field = layout["field"]
+            buttons = list(layout["buttons"])
+            for widget in (label, field, *buttons):
+                widget.pack_forget()
+            if stacked:
+                label.configure(width=0)
+                label.pack(side="top", fill="x", anchor="w")
+                field.pack(side="top", fill="x", expand=True, pady=(3, 0))
+                for index, button in enumerate(buttons):
+                    button.pack(side="left", fill="x", expand=True, pady=(5, 0), padx=(0 if index == 0 else 5, 0))
+            else:
+                label.configure(width=128)
+                label.pack(side="left")
+                field.pack(side="left", fill="x", expand=True)
+                for button in buttons:
+                    button.pack(side="left", padx=(8, 0))
 
     def _build_claude_fields(self, parent):
         p = self._profile

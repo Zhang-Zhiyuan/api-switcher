@@ -4,10 +4,14 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from core.lazy_imports import LazyAttribute
-from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style
+from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 
 browser_profile_manager = LazyAttribute("core.browser_profile_manager", "browser_profile_manager")
 BrowserProfile = LazyAttribute("models.profile", "BrowserProfile")
+
+
+def _browser_profile_editor_stacked(width: int) -> bool:
+    return max(1, int(width)) < 620
 
 
 class BrowserProfileEditorDialog(ctk.CTkToplevel):
@@ -25,6 +29,9 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
         self._on_save = on_save
         self._profile = profile
         self._fields = {}
+        self._responsive_rows = []
+        self._responsive_after_id = None
+        self._responsive_stacked = None
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -51,35 +58,43 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
         self._add_field(launch_box, "窗口宽度", "launch_width", getattr(profile, "launch_width", 1280) if profile else 1280)
         self._add_field(launch_box, "窗口高度", "launch_height", getattr(profile, "launch_height", 900) if profile else 900)
         self._add_field(launch_box, "语言代码", "launch_language", getattr(profile, "launch_language", "zh-CN") if profile else "zh-CN")
-        ctk.CTkLabel(
+        launch_description = ctk.CTkLabel(
             launch_box,
             text="Profile 会隔离 Cookies、本地存储、IndexedDB 和浏览器缓存；网页仍可能基于 IP、系统、显卡、字体、WebGL、Canvas、时区等生成设备指纹，跨机器无法保证完全一致。",
             text_color=COLORS["muted"],
             font=font(11),
             justify="left",
-            wraplength=500,
-        ).pack(fill="x", padx=12, pady=(4, 10))
+        )
+        launch_description.pack(fill="x", padx=12, pady=(4, 10))
+        bind_wraplength(launch_box, launch_description, padding=28, min_width=220, max_width=640)
 
         # Executable row
         exe_row = ctk.CTkFrame(scroll, fg_color="transparent")
         exe_row.pack(fill="x", pady=5)
-        ctk.CTkLabel(exe_row, text="浏览器可执行文件", width=128, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
-        self._exe_entry = ctk.CTkEntry(exe_row, width=300, **input_style())
+        exe_label = ctk.CTkLabel(exe_row, text="浏览器可执行文件", width=128, anchor="w", text_color=COLORS["muted"], font=font(12))
+        exe_label.pack(side="left")
+        self._exe_entry = ctk.CTkEntry(exe_row, width=180, **input_style())
         if profile and profile.browser_executable:
             self._exe_entry.insert(0, profile.browser_executable)
         self._exe_entry.pack(side="left", padx=(0, 5), fill="x", expand=True)
-        ctk.CTkButton(exe_row, text="浏览", width=58, command=self._browse_exe, **button_style("secondary", compact=True)).pack(side="left")
+        exe_browse = ctk.CTkButton(exe_row, text="浏览", width=58, command=self._browse_exe, **button_style("secondary", compact=True))
+        exe_browse.pack(side="left")
+        self._responsive_rows.append((exe_row, exe_label, self._exe_entry, [exe_browse]))
 
         # Path row
         path_row = ctk.CTkFrame(scroll, fg_color="transparent")
         path_row.pack(fill="x", pady=5)
-        ctk.CTkLabel(path_row, text="Profile 路径", width=128, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
-        self._path_entry = ctk.CTkEntry(path_row, width=300, **input_style())
+        path_label = ctk.CTkLabel(path_row, text="Profile 路径", width=128, anchor="w", text_color=COLORS["muted"], font=font(12))
+        path_label.pack(side="left")
+        self._path_entry = ctk.CTkEntry(path_row, width=180, **input_style())
         if profile and profile.user_data_dir:
             self._path_entry.insert(0, profile.user_data_dir)
         self._path_entry.pack(side="left", padx=(0, 5), fill="x", expand=True)
-        ctk.CTkButton(path_row, text="浏览", width=58, command=self._browse_dir, **button_style("secondary", compact=True)).pack(side="left", padx=(0, 5))
-        ctk.CTkButton(path_row, text="生成", width=58, command=self._generate_managed_path, **button_style("accent", compact=True)).pack(side="left")
+        path_browse = ctk.CTkButton(path_row, text="浏览", width=58, command=self._browse_dir, **button_style("secondary", compact=True))
+        path_browse.pack(side="left", padx=(0, 5))
+        path_generate = ctk.CTkButton(path_row, text="生成", width=58, command=self._generate_managed_path, **button_style("accent", compact=True))
+        path_generate.pack(side="left")
+        self._responsive_rows.append((path_row, path_label, self._path_entry, [path_browse, path_generate]))
 
         # Switches
         switches = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -120,32 +135,84 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
         ctk.CTkButton(btn_frame, text="取消", width=84, command=self.destroy, **button_style("secondary")).pack(side="right", padx=(8, 0))
         ctk.CTkButton(btn_frame, text="保存", width=84, command=self._save, **button_style("primary")).pack(side="right")
 
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
 
     def _add_field(self, parent, label, key, value=""):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text=label, width=128, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
-        widget = ctk.CTkEntry(row, width=380, **input_style())
+        label_widget = ctk.CTkLabel(row, text=label, width=128, anchor="w", text_color=COLORS["muted"], font=font(12))
+        label_widget.pack(side="left")
+        widget = ctk.CTkEntry(row, width=180, **input_style())
         widget.insert(0, str(value or ""))
         widget.pack(side="left", fill="x", expand=True)
         self._fields[key] = widget
+        self._responsive_rows.append((row, label_widget, widget, []))
         return widget
 
     def _add_combo(self, parent, label, key, values, current):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text=label, width=128, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
+        label_widget = ctk.CTkLabel(row, text=label, width=128, anchor="w", text_color=COLORS["muted"], font=font(12))
+        label_widget.pack(side="left")
         widget = ctk.CTkComboBox(
             row,
             values=values,
-            width=380,
+            width=180,
             **combo_style(),
         )
         widget.set(current)
         widget.pack(side="left", fill="x", expand=True)
         self._fields[key] = widget
+        self._responsive_rows.append((row, label_widget, widget, []))
         return widget
+
+    def _logical_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked = _browser_profile_editor_stacked(self._logical_width())
+        if stacked == self._responsive_stacked:
+            return
+        self._responsive_stacked = stacked
+        for _row, label, field, buttons in self._responsive_rows:
+            for widget in (label, field, *buttons):
+                widget.pack_forget()
+            if stacked:
+                label.configure(width=0)
+                label.pack(side="top", fill="x", anchor="w")
+                field.pack(side="top", fill="x", expand=True, pady=(3, 0))
+                for index, button in enumerate(buttons):
+                    button.pack(side="left", fill="x", expand=True, padx=(0 if index == 0 else 5, 0), pady=(5, 0))
+            else:
+                label.configure(width=128)
+                label.pack(side="left")
+                field.pack(side="left", fill="x", expand=True, padx=(0, 5) if buttons else 0)
+                for index, button in enumerate(buttons):
+                    button.pack(side="left", padx=(0, 5) if index < len(buttons) - 1 else 0)
 
     def _browse_dir(self):
         path = filedialog.askdirectory(title="选择浏览器 Profile 目录")

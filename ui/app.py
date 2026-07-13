@@ -162,6 +162,7 @@ class App(ctk.CTk):
             on_exit=self._exit_app,
             on_startup_changed=self._on_startup_changed_from_tray,
             on_hide_window=self._hide_to_tray,
+            on_profile_changed=self._on_profile_changed_from_tray,
         )
         self._start_minimized_to_tray = bool(start_minimized and self.tray_manager.is_available())
         if self._start_minimized_to_tray:
@@ -853,6 +854,12 @@ class App(ctk.CTk):
         navigation = self.__dict__.get("_tab_navigation")
         if navigation is not None:
             navigation.set(label)
+        spec = self.__dict__.get("_tab_specs", {}).get(label)
+        if spec and self._tab_is_loaded(spec[0]):
+            # Loading a tab already updates the footer in
+            # _instantiate_tab_from_class. Revisiting an existing tab does not
+            # instantiate it again, so keep the footer in sync here as well.
+            self._set_app_status(f"已加载 {label}")
         self._suspend_inactive_tab_work(label)
         self._schedule_tab_load(label, delay_ms=1)
         self._resume_active_tab_work(label)
@@ -1398,6 +1405,26 @@ class App(ctk.CTk):
             self._refresh_loaded_tab("_common_tab")
 
         self._run_on_ui_thread(refresh_startup)
+
+    def _on_profile_changed_from_tray(self, profile_type: str, profile_name: str):
+        """Refresh main-window state after a profile is switched in the tray thread."""
+        kind = str(profile_type or "").strip().lower()
+
+        def refresh_profile_state():
+            if kind == "claude":
+                self._refresh_loaded_tab("_claude_tab")
+                label = "Claude API"
+            elif kind == "codex":
+                self._refresh_loaded_tab("_codex_tab")
+                label = "Codex API"
+            else:
+                logger.warning("Unknown tray profile type: %s", profile_type)
+                return
+            self._refresh_loaded_tab("_usage_stats_tab")
+            self._load_quick_switch_profiles(delay_ms=0)
+            self._status.configure(text=f"已从托盘切换 {label} 配置: {profile_name}")
+
+        self._run_on_ui_thread(refresh_profile_state)
 
     def _schedule_ui_callback_pump(self, delay_ms: int = 35):
         if self._exit_requested or self._ui_callback_after_id:

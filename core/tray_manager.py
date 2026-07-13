@@ -71,11 +71,13 @@ class TrayManager:
         on_exit: Callable,
         on_startup_changed: Callable | None = None,
         on_hide_window: Callable | None = None,
+        on_profile_changed: Callable[[str, str], None] | None = None,
     ):
         self.on_show_window = on_show_window
         self.on_exit = on_exit
         self.on_startup_changed = on_startup_changed
         self.on_hide_window = on_hide_window
+        self.on_profile_changed = on_profile_changed
         self.icon: object | None = None
         self._thread: threading.Thread | None = None
 
@@ -216,6 +218,7 @@ class TrayManager:
         try:
             switcher.switch_claude_profile(name)
             logger.info("Switched Claude profile to: %s (from tray)", name)
+            self._notify_profile_changed("claude", name)
             self.update_menu()
         except Exception as e:
             logger.error("Failed to switch Claude profile from tray: %s", e, exc_info=True)
@@ -226,9 +229,18 @@ class TrayManager:
         try:
             switcher.switch_codex_profile(name)
             logger.info("Switched Codex profile to: %s (from tray)", name)
+            self._notify_profile_changed("codex", name)
             self.update_menu()
         except Exception as e:
             logger.error("Failed to switch Codex profile from tray: %s", e, exc_info=True)
+
+    def _notify_profile_changed(self, profile_type: str, name: str) -> None:
+        if self.on_profile_changed is None:
+            return
+        try:
+            self.on_profile_changed(profile_type, name)
+        except Exception as e:
+            logger.error("Failed to notify app about tray profile switch: %s", e, exc_info=True)
 
     def _on_exit_clicked(self, icon=None, item=None):
         """Handle exit menu item click."""

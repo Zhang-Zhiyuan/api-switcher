@@ -19,6 +19,13 @@ DASHBOARD_SECTIONS_SCROLL_IDLE_MS = 850
 DASHBOARD_SECTIONS_RETRY_MS = 260
 
 
+def _usage_stats_layout(width: int) -> tuple[bool, int, int]:
+    """Return header stacking, toolbar columns and summary-card columns."""
+
+    available = max(1, int(width))
+    return available < 760, (4 if available >= 520 else 2), (4 if available >= 760 else (2 if available >= 360 else 1))
+
+
 def _summary_int(summary: dict, key: str) -> int:
     try:
         return max(0, int(summary.get(key) or 0))
@@ -53,6 +60,14 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         self.top_profiles_frame = None
         self.recent_profiles_frame = None
         self.trend_frame = None
+        self._responsive_after_id = None
+        self._responsive_state = None
+        self._header = None
+        self._title_area = None
+        self._controls = None
+        self._control_groups = []
+        self._control_buttons = []
+        self._summary_frame = None
         self._build_ui()
         self.after(320, self.refresh)
 
@@ -117,6 +132,12 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             self._dashboard_sections_after_id = None
         self._cancel_auto_refresh()
         self._cancel_dashboard_render()
+        if self._responsive_after_id is not None:
+            try:
+                self.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         super().destroy()
 
     def _cancel_dashboard_render(self):
@@ -139,75 +160,84 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
     def _build_ui(self):
         """Build the UI."""
         # Header
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header = ctk.CTkFrame(self, fg_color="transparent")
+        self._header.pack(fill="x", padx=14, pady=(14, 8))
+        self._header.grid_columnconfigure(0, weight=1)
 
-        title_area = ctk.CTkFrame(header, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        self._title_area = ctk.CTkFrame(self._header, fg_color="transparent")
 
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="使用统计仪表板",
             text_color=COLORS["text"],
             font=font(18, "bold"),
         ).pack(anchor="w")
 
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="查看配置使用情况、Token 消耗和性能统计",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
 
         # Controls
-        controls = ctk.CTkFrame(header, fg_color="transparent")
-        controls.pack(side="right")
+        self._controls = ctk.CTkFrame(self._header, fg_color="transparent")
 
         # Date range filter
-        ctk.CTkLabel(controls, text="时间:", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(0, 5))
+        date_group = ctk.CTkFrame(self._controls, fg_color="transparent")
+        date_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(date_group, text="时间:", text_color=COLORS["muted"], font=font(12)).grid(
+            row=0, column=0, sticky="w", padx=(0, 5)
+        )
 
         self.date_filter = ctk.CTkComboBox(
-            controls,
+            date_group,
             values=["全部时间", "今日", "本周", "本月", "最近7天", "最近30天"],
             width=110,
             command=lambda _: self.refresh(),
             **combo_style(),
         )
-        self.date_filter.pack(side="left", padx=5)
+        self.date_filter.grid(row=0, column=1, sticky="ew")
         self.date_filter.set("全部时间")
 
         # Type filter
-        ctk.CTkLabel(controls, text="类型:", text_color=COLORS["muted"], font=font(12)).pack(side="left", padx=(10, 5))
+        type_group = ctk.CTkFrame(self._controls, fg_color="transparent")
+        type_group.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(type_group, text="类型:", text_color=COLORS["muted"], font=font(12)).grid(
+            row=0, column=0, sticky="w", padx=(0, 5)
+        )
 
         self.type_filter = ctk.CTkComboBox(
-            controls,
+            type_group,
             values=["全部", "Claude", "Codex"],
             width=100,
             command=lambda _: self.refresh(),
             **combo_style(),
         )
-        self.type_filter.pack(side="left", padx=5)
+        self.type_filter.grid(row=0, column=1, sticky="ew")
         self.type_filter.set("全部")
 
-        ctk.CTkButton(
-            controls,
+        refresh_button = ctk.CTkButton(
+            self._controls,
             text="刷新",
             width=80,
             command=self.refresh,
             **button_style("secondary"),
-        ).pack(side="left", padx=5)
+        )
 
-        ctk.CTkButton(
-            controls,
+        clear_button = ctk.CTkButton(
+            self._controls,
             text="清零",
             width=70,
             command=self._clear_stats,
             **button_style("danger"),
-        ).pack(side="left", padx=5)
+        )
+        self._control_groups = [date_group, type_group]
+        self._control_buttons = [refresh_button, clear_button]
 
         # Summary cards
-        summary_frame = ctk.CTkFrame(self, fg_color="transparent")
-        summary_frame.pack(fill="x", padx=14, pady=(0, 10))
+        self._summary_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._summary_frame.pack(fill="x", padx=14, pady=(0, 10))
 
         self.summary_cards = {}
         cards_data = [
@@ -218,9 +248,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
         ]
 
         for i, (key, title, default) in enumerate(cards_data):
-            card = self._create_summary_card(summary_frame, title, default)
-            card.grid(row=0, column=i, padx=5, pady=5, sticky="ew")
-            summary_frame.grid_columnconfigure(i, weight=1)
+            card = self._create_summary_card(self._summary_frame, title, default)
             self.summary_cards[key] = card
 
         self._dashboard_sections_host = ctk.CTkFrame(self, fg_color="transparent")
@@ -239,7 +267,68 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(fill="x", padx=15, pady=15)
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._schedule_dashboard_sections(DASHBOARD_SECTIONS_BUILD_DELAY_MS)
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_layout_width()
+        stacked, control_columns, summary_columns = _usage_stats_layout(width)
+        state = (stacked, control_columns, summary_columns)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        self._title_area.grid(row=0, column=0, sticky="ew")
+        if stacked:
+            self._controls.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        else:
+            self._controls.grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+        for column in range(4):
+            self._controls.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+            self._summary_frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        for column in range(control_columns):
+            self._controls.grid_columnconfigure(column, weight=1, uniform="usage-controls")
+        control_items = [*self._control_groups, *self._control_buttons]
+        for index, widget in enumerate(control_items):
+            widget.grid(
+                row=index // control_columns,
+                column=index % control_columns,
+                sticky="ew",
+                padx=(0 if index % control_columns == 0 else 8, 0),
+                pady=(0 if index < control_columns else 6, 0),
+            )
+
+        for column in range(summary_columns):
+            self._summary_frame.grid_columnconfigure(column, weight=1, uniform="usage-summary")
+        for index, card in enumerate(self.summary_cards.values()):
+            card.grid(row=index // summary_columns, column=index % summary_columns, padx=5, pady=5, sticky="ew")
 
     def _schedule_dashboard_sections(self, delay_ms: int = DASHBOARD_SECTIONS_RETRY_MS):
         if self._dashboard_sections_after_id or self._dashboard_sections_built:

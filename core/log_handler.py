@@ -75,18 +75,17 @@ class LogManager:
         item = dict(entry)
         with self._lock:
             self._history.append(item)
-
-        try:
-            self.log_queue.put_nowait(item)
-        except Full:
-            try:
-                self.log_queue.get_nowait()
-            except Empty:
-                pass
             try:
                 self.log_queue.put_nowait(item)
             except Full:
-                pass
+                try:
+                    self.log_queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    self.log_queue.put_nowait(item)
+                except Full:
+                    pass
 
     def get_recent_entries(self, limit: int | None = None) -> list[dict]:
         """Return a snapshot of recent in-memory log entries."""
@@ -96,15 +95,33 @@ class LogManager:
             return entries
         return entries[-limit:]
 
+    def consume_recent_entries(self, limit: int | None = None) -> list[dict]:
+        """Atomically snapshot history and discard the same queued backlog.
+
+        A newly opened viewer renders the history snapshot. Draining the queue
+        under the same lock prevents that identical backlog from being appended
+        a second time while allowing later publications to remain queued.
+        """
+        with self._lock:
+            entries = list(self._history)
+            while True:
+                try:
+                    self.log_queue.get_nowait()
+                except Empty:
+                    break
+        if limit is None or limit <= 0 or limit >= len(entries):
+            return entries
+        return entries[-limit:]
+
     def clear_history(self) -> None:
         """Clear in-memory logs and any queued-but-not-rendered entries."""
         with self._lock:
             self._history.clear()
-        while True:
-            try:
-                self.log_queue.get_nowait()
-            except Empty:
-                break
+            while True:
+                try:
+                    self.log_queue.get_nowait()
+                except Empty:
+                    break
 
     def shutdown(self):
         """关闭日志系统"""
