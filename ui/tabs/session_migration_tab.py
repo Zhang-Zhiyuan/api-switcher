@@ -300,6 +300,110 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._schedule_responsive_layout(delay_ms=0)
         self._schedule_initial_refresh()
 
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        if scaling > 0:
+            width = round(width / scaling)
+        return max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if getattr(self, "_destroyed", False) or self._responsive_layout_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_layout_after_id = None
+            if not getattr(self, "_destroyed", False):
+                self._apply_responsive_layout()
+
+        try:
+            if delay_ms <= 0:
+                self._responsive_layout_after_id = self.after_idle(apply_layout)
+            else:
+                self._responsive_layout_after_id = self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_layout_after_id = None
+
+    def _cancel_responsive_layout(self) -> None:
+        after_id = getattr(self, "_responsive_layout_after_id", None)
+        self._responsive_layout_after_id = None
+        if after_id is None:
+            return
+        try:
+            self.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_layout_width()
+        mode, action_columns = _session_migration_layout(width)
+        filter_columns = 1 if width < 520 else 2
+        state = (mode, action_columns, filter_columns)
+        if state == self._responsive_layout_state:
+            return
+        self._responsive_layout_state = state
+
+        for column in range(6):
+            self._header.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+            self._header_actions.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+            self._filter_bar.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if mode == "wide":
+            self._header.grid_columnconfigure(0, weight=1)
+            self._title_area.grid(row=0, column=0, sticky="ew")
+            self._header_actions.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        else:
+            self._header.grid_columnconfigure(0, weight=1)
+            self._title_area.grid(row=0, column=0, sticky="ew")
+            self._header_actions.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+
+        for column in range(action_columns):
+            self._header_actions.grid_columnconfigure(column, weight=1, uniform="session-actions")
+        for index, button in enumerate(self._header_action_buttons):
+            button.grid(
+                row=index // action_columns,
+                column=index % action_columns,
+                sticky="ew",
+                padx=(0 if index % action_columns == 0 else 6, 0),
+                pady=(0 if index < action_columns else 6, 0),
+            )
+
+        if mode == "wide":
+            for column in (0, 1):
+                self._filter_bar.grid_columnconfigure(column, weight=1)
+            for index, group in enumerate(self._filter_groups):
+                group.grid(row=0, column=index, sticky="ew", padx=(12 if index == 0 else 10, 0), pady=9)
+            self._select_visible_button.grid(row=0, column=3, sticky="ew", padx=(12, 0), pady=9)
+            self._clear_selection_button.grid(row=0, column=4, sticky="ew", padx=(8, 0), pady=9)
+            self._filter_bar.grid_columnconfigure(5, weight=1)
+            self._stats_label.grid(row=0, column=5, sticky="e", padx=12, pady=9)
+            return
+
+        for column in range(filter_columns):
+            self._filter_bar.grid_columnconfigure(column, weight=1, uniform="session-filters")
+
+        items = [*self._filter_groups, self._select_visible_button, self._clear_selection_button]
+        for index, widget in enumerate(items):
+            widget.grid(
+                row=index // filter_columns,
+                column=index % filter_columns,
+                sticky="ew",
+                padx=(12 if index % filter_columns == 0 else 8, 12 if index % filter_columns == filter_columns - 1 else 0),
+                pady=(9 if index < filter_columns else 0, 7),
+            )
+        stats_row = (len(items) + filter_columns - 1) // filter_columns
+        self._stats_label.grid(
+            row=stats_row,
+            column=0,
+            columnspan=filter_columns,
+            sticky="w",
+            padx=12,
+            pady=(0, 9),
+        )
+
     def _schedule_initial_refresh(self):
         if self._initial_refresh_after_id or getattr(self, "_destroyed", False):
             return

@@ -24,7 +24,7 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
         super().__init__(master)
         self.title("Git 快照历史")
         self.geometry("1120x780")
-        self.minsize(900, 620)
+        self.minsize(560, 480)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.transient(master)
@@ -38,9 +38,13 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
         self._project_var = ctk.StringVar(value=str(Path(project_path or Path.cwd()).resolve()))
         self._count_var = ctk.StringVar(value="50")
         self._auto_only_var = ctk.BooleanVar(value=True)
+        self._responsive_after_id = None
+        self._responsive_state = None
 
         self._build_ui()
         center_window(self, master)
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._refresh()
 
     def _build_ui(self):
@@ -120,76 +124,137 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
         )
         self._status_label.pack(side="left", fill="x", expand=True, padx=(18, 0))
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        self._body.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        self._body.pack_propagate(False)
 
-        left = ctk.CTkFrame(body, fg_color="transparent", width=390)
-        left.pack(side="left", fill="y", padx=(0, 12))
-        left.pack_propagate(False)
+        self._left_pane = ctk.CTkFrame(self._body, fg_color="transparent", width=390)
+        self._left_pane.pack(side="left", fill="y", padx=(0, 12))
+        self._left_pane.pack_propagate(False)
         ctk.CTkLabel(
-            left,
+            self._left_pane,
             text="快照列表",
             text_color=COLORS["text"],
             font=font(13, "bold"),
         ).pack(anchor="w", pady=(0, 6))
-        self._list_frame = ctk.CTkScrollableFrame(left, fg_color="transparent")
+        self._list_frame = ctk.CTkScrollableFrame(self._left_pane, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True)
 
-        right = ctk.CTkFrame(body, fg_color="transparent")
-        right.pack(side="left", fill="both", expand=True)
+        self._right_pane = ctk.CTkFrame(self._body, fg_color="transparent")
+        self._right_pane.pack(side="left", fill="both", expand=True)
         ctk.CTkLabel(
-            right,
+            self._right_pane,
             text="快照详情 / Diff",
             text_color=COLORS["text"],
             font=font(13, "bold"),
         ).pack(anchor="w", pady=(0, 6))
-        self._text = ctk.CTkTextbox(right, wrap="none", **textbox_style(monospace=True))
+        self._text = ctk.CTkTextbox(self._right_pane, wrap="none", **textbox_style(monospace=True))
         self._text.pack(fill="both", expand=True)
 
-        button_row = ctk.CTkFrame(self, fg_color="transparent")
-        button_row.pack(fill="x", padx=18, pady=(0, 18))
+        self._button_row = ctk.CTkFrame(self, fg_color="transparent")
+        self._button_row.pack(fill="x", padx=18, pady=(0, 18))
 
         self._show_diff_btn = ctk.CTkButton(
-            button_row,
+            self._button_row,
             text="显示 Diff",
             width=96,
             command=lambda: self._show_selected_commit(stat_only=False),
             **button_style("secondary"),
         )
-        self._show_diff_btn.pack(side="left", padx=(0, 8))
         self._copy_diff_btn = ctk.CTkButton(
-            button_row,
+            self._button_row,
             text="复制 Diff",
             width=96,
             command=self._copy_diff,
             **button_style("secondary"),
         )
-        self._copy_diff_btn.pack(side="left", padx=(0, 8))
         self._copy_hash_btn = ctk.CTkButton(
-            button_row,
+            self._button_row,
             text="复制 Hash",
             width=96,
             command=self._copy_hash,
             **button_style("accent"),
         )
-        self._copy_hash_btn.pack(side="left", padx=(0, 8))
 
         self._soft_rollback_btn = ctk.CTkButton(
-            button_row,
+            self._button_row,
             text="软回滚",
             width=96,
             command=lambda: self._confirm_rollback(hard=False),
             **button_style("warning"),
         )
-        self._soft_rollback_btn.pack(side="right", padx=(8, 0))
         self._hard_rollback_btn = ctk.CTkButton(
-            button_row,
+            self._button_row,
             text="硬回滚",
             width=96,
             command=lambda: self._confirm_rollback(hard=True),
             **button_style("danger"),
         )
-        self._hard_rollback_btn.pack(side="right", padx=(8, 0))
+        self._action_buttons = [
+            self._show_diff_btn,
+            self._copy_diff_btn,
+            self._copy_hash_btn,
+            self._soft_rollback_btn,
+            self._hard_rollback_btn,
+        ]
+
+    def _logical_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 25) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_width()
+        stacked = width < 820
+        action_columns = 5 if width >= 760 else (3 if width >= 560 else 2)
+        state = (stacked, action_columns)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        self._left_pane.pack_forget()
+        self._right_pane.pack_forget()
+        if stacked:
+            self._left_pane.configure(width=0, height=130)
+            self._left_pane.pack(side="top", fill="x", pady=(0, 10))
+            self._right_pane.pack(side="top", fill="both", expand=True)
+        else:
+            self._left_pane.configure(width=390, height=0)
+            self._left_pane.pack(side="left", fill="y", padx=(0, 12))
+            self._right_pane.pack(side="left", fill="both", expand=True)
+
+        for column in range(5):
+            self._button_row.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        for column in range(action_columns):
+            self._button_row.grid_columnconfigure(column, weight=1, uniform="git-history-actions")
+        for index, button in enumerate(self._action_buttons):
+            button.grid(
+                row=index // action_columns,
+                column=index % action_columns,
+                sticky="ew",
+                padx=(0 if index % action_columns == 0 else 8, 0),
+                pady=(0 if index < action_columns else 6, 0),
+            )
 
     def _project_path(self) -> Path:
         raw = self._project_var.get().strip()

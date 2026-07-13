@@ -1,6 +1,17 @@
 import customtkinter as ctk
 
-from ui.theme import COLORS, font
+from ui.theme import COLORS, _screen_bounds, _window_scaling, font
+
+
+def _toast_wraplength(screen_width: int, scaling: float = 1.0) -> int:
+    """Return a logical text width that leaves room for padding and screen edges."""
+
+    try:
+        scale = max(float(scaling), 0.1)
+    except (TypeError, ValueError):
+        scale = 1.0
+    logical_screen_width = max(1, round(max(1, int(screen_width)) / scale))
+    return max(1, min(360, logical_screen_width - 64))
 
 
 class Toast(ctk.CTkToplevel):
@@ -14,6 +25,8 @@ class Toast(ctk.CTkToplevel):
 
         accent = COLORS["danger"] if is_error else COLORS["success"]
         self.configure(fg_color=COLORS["surface"])
+        screen_x, screen_y, screen_width, screen_height = _screen_bounds(master)
+        wraplength = _toast_wraplength(screen_width, _window_scaling(self))
 
         body = ctk.CTkFrame(
             self,
@@ -31,7 +44,7 @@ class Toast(ctk.CTkToplevel):
             font=font(13),
             padx=20,
             pady=11,
-            wraplength=360,
+            wraplength=wraplength,
         )
         label.pack()
 
@@ -39,17 +52,6 @@ class Toast(ctk.CTkToplevel):
         self.update_idletasks()
         width = self.winfo_width()
         height = self.winfo_height()
-        try:
-            screen_x = master.winfo_vrootx()
-            screen_y = master.winfo_vrooty()
-            screen_width = master.winfo_vrootwidth()
-            screen_height = master.winfo_vrootheight()
-        except Exception:
-            screen_x = 0
-            screen_y = 0
-            screen_width = master.winfo_screenwidth()
-            screen_height = master.winfo_screenheight()
-
         px = master.winfo_rootx() + max(master.winfo_width(), 1) - width - 20
         py = master.winfo_rooty() + 40
         px = min(max(px, screen_x + 8), screen_x + max(screen_width - width - 8, 0))

@@ -35,7 +35,7 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         self.provider = provider
         self.title(f"{provider} 自动续跑日志")
         self.geometry("1080x760")
-        self.minsize(860, 600)
+        self.minsize(560, 480)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.transient(master)
@@ -48,51 +48,59 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         self._row_widgets: list[ctk.CTkFrame] = []
         self._diagnostics_text = ""
         self._refresh_generation = 0
+        self._responsive_after_id = None
+        self._responsive_state = None
+        self._stat_cards = []
 
         self._build_ui()
         center_window(self, master)
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         self._refresh()
 
     def _build_ui(self):
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=18, pady=(18, 10))
+        self._header = ctk.CTkFrame(self, fg_color="transparent")
+        self._header.pack(fill="x", padx=18, pady=(18, 10))
+        self._header.grid_columnconfigure(0, weight=1)
 
-        title_area = ctk.CTkFrame(header, fg_color="transparent")
-        title_area.pack(side="left", fill="x", expand=True)
+        self._title_area = ctk.CTkFrame(self._header, fg_color="transparent")
+        self._title_area.grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="自动续跑日志",
             text_color=COLORS["text"],
             font=font(18, "bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
-            title_area,
+            self._title_area,
             text="按事件查看 Stop 决策、API 恢复、命中规则、次数、训练模板和 Git hash。",
             text_color=COLORS["muted"],
             font=font(12),
         ).pack(anchor="w", pady=(2, 0))
 
-        ctk.CTkButton(
-            header,
+        self._header_actions = ctk.CTkFrame(self._header, fg_color="transparent")
+        copy_diagnostics_button = ctk.CTkButton(
+            self._header_actions,
             text="复制诊断",
             width=104,
             command=self._copy_diagnostics,
             **button_style("accent"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            header,
+        )
+        copy_current_button = ctk.CTkButton(
+            self._header_actions,
             text="复制当前",
             width=96,
             command=self._copy_selected_event,
             **button_style("secondary"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
-            header,
+        )
+        refresh_button = ctk.CTkButton(
+            self._header_actions,
             text="刷新",
             width=82,
             command=self._refresh,
             **button_style("secondary"),
-        ).pack(side="right", padx=(8, 0))
+        )
+        self._header_action_buttons = [refresh_button, copy_current_button, copy_diagnostics_button]
 
         controls = ctk.CTkFrame(self, fg_color="transparent")
         controls.pack(fill="x", padx=18, pady=(0, 10))
@@ -127,47 +135,120 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
         )
         self._status_label.pack(side="left", fill="x", expand=True)
 
-        stats = ctk.CTkFrame(self, fg_color="transparent")
-        stats.pack(fill="x", padx=18, pady=(0, 10))
-        self._total_value = self._summary_card(stats, "事件", "0", COLORS["primary"])
-        self._block_value = self._summary_card(stats, "block_stop", "0", COLORS["success"])
-        self._allow_value = self._summary_card(stats, "allow_stop", "0", COLORS["warning"])
-        self._recovery_value = self._summary_card(stats, "API恢复", "0", COLORS["accent"])
-        self._git_value = self._summary_card(stats, "Git hash", "0", COLORS["secondary"])
+        self._stats_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._stats_frame.pack(fill="x", padx=18, pady=(0, 10))
+        self._total_value = self._summary_card(self._stats_frame, "事件", "0", COLORS["primary"])
+        self._block_value = self._summary_card(self._stats_frame, "block_stop", "0", COLORS["success"])
+        self._allow_value = self._summary_card(self._stats_frame, "allow_stop", "0", COLORS["warning"])
+        self._recovery_value = self._summary_card(self._stats_frame, "API恢复", "0", COLORS["accent"])
+        self._git_value = self._summary_card(self._stats_frame, "Git hash", "0", COLORS["secondary"])
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        self._body.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self._body.pack_propagate(False)
 
-        left = ctk.CTkFrame(body, fg_color="transparent", width=390)
-        left.pack(side="left", fill="y", padx=(0, 12))
-        left.pack_propagate(False)
+        self._left_pane = ctk.CTkFrame(self._body, fg_color="transparent", width=390)
+        self._left_pane.pack(side="left", fill="y", padx=(0, 12))
+        self._left_pane.pack_propagate(False)
         ctk.CTkLabel(
-            left,
+            self._left_pane,
             text="最近事件",
             text_color=COLORS["text"],
             font=font(13, "bold"),
         ).pack(anchor="w", pady=(0, 6))
-        self._list_frame = ctk.CTkScrollableFrame(left, fg_color="transparent")
+        self._list_frame = ctk.CTkScrollableFrame(self._left_pane, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True)
 
-        right = ctk.CTkFrame(body, fg_color="transparent")
-        right.pack(side="left", fill="both", expand=True)
+        self._right_pane = ctk.CTkFrame(self._body, fg_color="transparent")
+        self._right_pane.pack(side="left", fill="both", expand=True)
         ctk.CTkLabel(
-            right,
+            self._right_pane,
             text="事件详情",
             text_color=COLORS["text"],
             font=font(13, "bold"),
         ).pack(anchor="w", pady=(0, 6))
-        self._detail_text = ctk.CTkTextbox(right, wrap="none", **textbox_style(monospace=True))
+        self._detail_text = ctk.CTkTextbox(self._right_pane, wrap="none", **textbox_style(monospace=True))
         self._detail_text.pack(fill="both", expand=True)
 
     def _summary_card(self, parent, title: str, value: str, color: str):
         card = ctk.CTkFrame(parent, **card_frame_kwargs())
-        card.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._stat_cards.append(card)
         ctk.CTkLabel(card, text=title, text_color=COLORS["muted"], font=font(11)).pack(anchor="w", padx=10, pady=(8, 0))
         value_label = ctk.CTkLabel(card, text=value, text_color=color, font=font(18, "bold"))
         value_label.pack(anchor="w", padx=10, pady=(0, 8))
         return value_label
+
+    def _logical_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 25) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(delay_ms, apply_layout)
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        width = self._logical_width()
+        stacked = width < 820
+        stat_columns = 5 if width >= 820 else (3 if width >= 560 else 2)
+        header_stacked = width < 760
+        state = (stacked, stat_columns, header_stacked)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        self._title_area.grid(row=0, column=0, sticky="ew")
+        self._header_actions.grid(
+            row=1 if header_stacked else 0,
+            column=0 if header_stacked else 1,
+            sticky="ew" if header_stacked else "e",
+            padx=0 if header_stacked else (12, 0),
+            pady=(8, 0) if header_stacked else 0,
+        )
+        for column in range(3):
+            self._header_actions.grid_columnconfigure(column, weight=1, uniform="auto-log-actions")
+        for index, button in enumerate(self._header_action_buttons):
+            button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
+
+        for column in range(5):
+            self._stats_frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        for column in range(stat_columns):
+            self._stats_frame.grid_columnconfigure(column, weight=1, uniform="auto-log-stats")
+        for index, card in enumerate(self._stat_cards):
+            card.grid(
+                row=index // stat_columns,
+                column=index % stat_columns,
+                sticky="ew",
+                padx=(0 if index % stat_columns == 0 else 8, 0),
+                pady=(0 if index < stat_columns else 8, 0),
+            )
+
+        self._left_pane.pack_forget()
+        self._right_pane.pack_forget()
+        if stacked:
+            self._left_pane.configure(width=0, height=110)
+            self._left_pane.pack(side="top", fill="x", pady=(0, 10))
+            self._right_pane.pack(side="top", fill="both", expand=True)
+        else:
+            self._left_pane.configure(width=390, height=0)
+            self._left_pane.pack(side="left", fill="y", padx=(0, 12))
+            self._right_pane.pack(side="left", fill="both", expand=True)
 
     def _limit(self) -> int:
         try:

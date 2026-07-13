@@ -1,6 +1,12 @@
 from types import SimpleNamespace
 
-from ui.tabs.session_migration_tab import SessionMigrationTab, _session_record_summary
+from ui.tabs.session_migration_tab import (
+    SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH,
+    SESSION_MIGRATION_WIDE_MIN_WIDTH,
+    SessionMigrationTab,
+    _session_migration_layout,
+    _session_record_summary,
+)
 
 
 def test_session_record_summary_counts_visible_selection_and_size():
@@ -27,6 +33,13 @@ def test_session_record_summary_tolerates_empty_and_negative_sizes():
 
     assert summary["selected_count"] == 2
     assert summary["total_size"] == 0
+
+
+def test_session_migration_layout_breakpoints_keep_actions_reachable():
+    assert _session_migration_layout(SESSION_MIGRATION_WIDE_MIN_WIDTH) == ("wide", 5)
+    assert _session_migration_layout(SESSION_MIGRATION_WIDE_MIN_WIDTH - 1) == ("compact", 3)
+    assert _session_migration_layout(SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH) == ("compact", 3)
+    assert _session_migration_layout(SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH - 1) == ("compact", 2)
 
 
 def test_session_migration_suspend_cancels_initial_refresh():

@@ -13,6 +13,22 @@ from pathlib import Path
 
 
 SPLASH_ARG = "--splash-child"
+SPLASH_PREFERRED_SIZE = (380, 168)
+SPLASH_SCREEN_MARGIN = 16
+
+
+def _splash_layout(screen_width: int, screen_height: int) -> tuple[int, int, int, int]:
+    """Fit and centre the splash on very small displays."""
+
+    screen_width = max(1, int(screen_width))
+    screen_height = max(1, int(screen_height))
+    available_width = max(1, screen_width - SPLASH_SCREEN_MARGIN * 2)
+    available_height = max(1, screen_height - SPLASH_SCREEN_MARGIN * 2)
+    width = min(SPLASH_PREFERRED_SIZE[0], available_width)
+    height = min(SPLASH_PREFERRED_SIZE[1], available_height)
+    x = max(0, (screen_width - width) // 2)
+    y = max(0, (screen_height - height) // 2)
+    return width, height, x, y
 
 
 class StartupSplash:
@@ -147,12 +163,21 @@ def run_splash_process() -> int:
             pass
         root.configure(bg="#101216")
 
-        width, height = 380, 168
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
-        x = max(0, (screen_w - width) // 2)
-        y = max(0, (screen_h - height) // 2)
+        width, height, x, y = _splash_layout(screen_w, screen_h)
         root.geometry(f"{width}x{height}+{x}+{y}")
+
+        scale = min(width / SPLASH_PREFERRED_SIZE[0], height / SPLASH_PREFERRED_SIZE[1])
+        horizontal_pad = max(6, round(28 * scale))
+        title_y = max(16, round(44 * height / SPLASH_PREFERRED_SIZE[1]))
+        status_y = max(title_y + 18, round(78 * height / SPLASH_PREFERRED_SIZE[1]))
+        track_top = max(status_y + 18, round(122 * height / SPLASH_PREFERRED_SIZE[1]))
+        track_bottom = min(height - 18, max(track_top + 3, round(128 * height / SPLASH_PREFERRED_SIZE[1])))
+        footer_y = min(height - 5, max(track_bottom + 10, round(148 * height / SPLASH_PREFERRED_SIZE[1])))
+        title_font_size = max(9, round(17 * scale))
+        status_font_size = max(7, round(10 * scale))
+        footer_font_size = max(7, round(9 * scale))
 
         canvas = tk.Canvas(
             root,
@@ -166,30 +191,39 @@ def run_splash_process() -> int:
         canvas.create_rectangle(1, 1, width - 2, height - 2, outline="#2a323d", width=1)
         canvas.create_rectangle(0, 0, width, 4, fill="#3578f6", outline="")
         canvas.create_text(
-            28,
-            44,
+            horizontal_pad,
+            title_y,
             anchor="w",
             text="API 配置切换器",
             fill="#f3f6fb",
-            font=("Microsoft YaHei UI", 17, "bold"),
+            font=("Microsoft YaHei UI", title_font_size, "bold"),
         )
         status_item = canvas.create_text(
-            28,
-            78,
+            horizontal_pad,
+            status_y,
             anchor="w",
             text="正在启动...",
             fill="#a0a9b5",
-            font=("Microsoft YaHei UI", 10),
+            font=("Microsoft YaHei UI", status_font_size),
         )
-        canvas.create_rectangle(28, 122, width - 28, 128, fill="#20252d", outline="")
-        pulse_item = canvas.create_rectangle(28, 122, 96, 128, fill="#14a6a8", outline="")
+        track_right = max(horizontal_pad + 1, width - horizontal_pad)
+        pulse_width = max(8, min(round(68 * scale), track_right - horizontal_pad))
+        canvas.create_rectangle(horizontal_pad, track_top, track_right, track_bottom, fill="#20252d", outline="")
+        pulse_item = canvas.create_rectangle(
+            horizontal_pad,
+            track_top,
+            horizontal_pad + pulse_width,
+            track_bottom,
+            fill="#14a6a8",
+            outline="",
+        )
         canvas.create_text(
-            width - 28,
-            148,
+            width - horizontal_pad,
+            footer_y,
             anchor="e",
             text="请稍候",
             fill="#737d8a",
-            font=("Microsoft YaHei UI", 9),
+            font=("Microsoft YaHei UI", footer_font_size),
         )
 
         state = {"offset": 0}
@@ -208,12 +242,11 @@ def run_splash_process() -> int:
             except queue.Empty:
                 pass
 
-            track_left, track_right = 28, 352
-            pulse_width = 76
+            track_left = horizontal_pad
             travel = max(track_right - track_left - pulse_width, 1)
             state["offset"] = (state["offset"] + 8) % travel
             x1 = track_left + state["offset"]
-            canvas.coords(pulse_item, x1, 122, x1 + pulse_width, 128)
+            canvas.coords(pulse_item, x1, track_top, x1 + pulse_width, track_bottom)
             root.after(33, tick)
 
         root.deiconify()

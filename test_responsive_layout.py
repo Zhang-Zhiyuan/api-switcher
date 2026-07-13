@@ -3,6 +3,8 @@ from __future__ import annotations
 from ui import theme
 from ui.app import MAIN_LAYOUT_COMPACT_MIN_WIDTH, MAIN_LAYOUT_WIDE_MIN_WIDTH, main_layout_mode
 from ui.widgets.adaptive_tab_bar import adaptive_tab_columns
+from ui.widgets.toast import _toast_wraplength
+from ui.startup_splash import _splash_layout
 
 
 def test_window_layout_preserves_preferred_size_on_large_screen():
@@ -121,3 +123,12 @@ def test_adaptive_tab_columns_wrap_all_destinations():
     assert adaptive_tab_columns(480, 11) == 4
     assert adaptive_tab_columns(80, 11) == 1
 
+
+def test_toast_wraplength_respects_physical_screen_and_dpi():
+    assert _toast_wraplength(1920, 1.5) == 360
+    assert _toast_wraplength(480, 1.5) == 256
+
+
+def test_splash_layout_keeps_normal_size_and_fits_tiny_screen():
+    assert _splash_layout(1920, 1080) == (380, 168, 770, 456)
+    assert _splash_layout(320, 180) == (288, 148, 16, 16)
