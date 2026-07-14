@@ -133,6 +133,9 @@ class App(ctk.CTk):
         self._tray_starting = False
         self._close_dialog = None
         self._force_exit_timer_started = False
+        self._critical_operation_lock = threading.RLock()
+        self._critical_operations: dict[str, str] = {}
+        self._critical_widget_states = []
         self._proxy_quality_dialog = None
         self._tab_frames = {}
         self._tab_class_cache = {}
@@ -502,6 +505,98 @@ class App(ctk.CTk):
             status.configure(text=message)
         except Exception as exc:
             logger.debug("Failed to update status bar: %s", exc)
+
+    def _begin_critical_operation(self, key: str, label: str) -> bool:
+        """Prevent navigation and process exit during a multi-step data transaction."""
+        operation_key = str(key or "").strip()
+        if not operation_key:
+            return False
+        lock = getattr(self, "_critical_operation_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._critical_operation_lock = lock
+        with lock:
+            operations = getattr(self, "_critical_operations", None)
+            if operations is None:
+                operations = {}
+                self._critical_operations = operations
+            if operation_key in operations or operations:
+                return False
+            operations[operation_key] = str(label or "关键数据操作")
+        try:
+            self._set_critical_operation_ui_state(True)
+        except Exception as exc:
+            logger.error("Failed to enter critical-operation UI state: %s", exc, exc_info=True)
+            with lock:
+                operations.pop(operation_key, None)
+            try:
+                self._set_critical_operation_ui_state(False)
+            except Exception:
+                pass
+            return False
+        return True
+
+    def _end_critical_operation(self, key: str) -> None:
+        lock = getattr(self, "_critical_operation_lock", None)
+        if lock is None:
+            return
+        with lock:
+            operations = getattr(self, "_critical_operations", {})
+            operations.pop(str(key or "").strip(), None)
+            active = bool(operations)
+        if not active:
+            self._set_critical_operation_ui_state(False)
+
+    def _abandon_critical_operation(self, key: str) -> None:
+        """Release registry state when the UI no longer accepts callbacks."""
+        lock = getattr(self, "_critical_operation_lock", None)
+        if lock is None:
+            return
+        with lock:
+            getattr(self, "_critical_operations", {}).pop(str(key or "").strip(), None)
+
+    def _active_critical_operation_label(self) -> str:
+        lock = getattr(self, "_critical_operation_lock", None)
+        if lock is None:
+            return ""
+        with lock:
+            operations = getattr(self, "_critical_operations", {})
+            return next(iter(operations.values()), "")
+
+    def _set_critical_operation_ui_state(self, busy: bool) -> None:
+        navigation = getattr(self, "_tab_navigation", None)
+        set_enabled = getattr(navigation, "set_enabled", None)
+        if callable(set_enabled):
+            try:
+                set_enabled(not busy)
+            except Exception as exc:
+                logger.debug("Failed to update tab navigation critical state: %s", exc)
+
+        if busy:
+            snapshots = []
+            widgets = list(getattr(self, "_global_action_buttons", ()))
+            widgets.extend(
+                widget
+                for widget in (getattr(self, "claude_switch", None), getattr(self, "codex_switch", None))
+                if widget is not None
+            )
+            for widget in widgets:
+                try:
+                    snapshots.append((widget, widget.cget("state")))
+                    widget.configure(state="disabled")
+                except Exception:
+                    continue
+            self._critical_widget_states = snapshots
+            self._set_app_status("正在执行 Profile 迁移导入，请勿退出程序")
+            return
+
+        for widget, state in list(getattr(self, "_critical_widget_states", ())):
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+        self._critical_widget_states = []
+        self._set_app_status("Profile 迁移导入已完成")
 
     def _show_tab_loading(self, label: str):
         frame = self._tab_frames.get(label)
@@ -1089,15 +1184,22 @@ class App(ctk.CTk):
         threading.Thread(target=run, name="quick-switch-refresh", daemon=True).start()
 
     def _apply_quick_switch_profiles(self, claude_names, claude_current, codex_names, codex_current):
+        active_critical_operation = bool(self._active_critical_operation_label())
         if claude_names:
-            self.claude_switch.configure(values=claude_names, state="normal")
+            self.claude_switch.configure(
+                values=claude_names,
+                state="disabled" if active_critical_operation else "normal",
+            )
             self.claude_switch.set(claude_current if claude_current in claude_names else claude_names[0])
         else:
             self.claude_switch.configure(values=["暂无 Claude API 配置"], state="disabled")
             self.claude_switch.set("暂无 Claude API 配置")
 
         if codex_names:
-            self.codex_switch.configure(values=codex_names, state="normal")
+            self.codex_switch.configure(
+                values=codex_names,
+                state="disabled" if active_critical_operation else "normal",
+            )
             self.codex_switch.set(codex_current if codex_current in codex_names else codex_names[0])
         else:
             self.codex_switch.configure(values=["暂无 Codex API 配置"], state="disabled")
@@ -1105,10 +1207,24 @@ class App(ctk.CTk):
 
     def _quick_switch_claude(self, profile_name: str):
         """Quick switch Claude profile."""
+        critical_label = self._active_critical_operation_label()
+        if critical_label:
+            from ui.widgets.toast import show_toast
+
+            show_toast(self, f"{critical_label}，暂不能切换配置", is_error=True)
+            return
         if profile_name in {"Claude", "Claude Profile", "Claude API", "暂无 Claude Profile", "暂无 Claude API 配置", "无配置"}:
             return
 
         def perform_switch():
+            critical_label = self._active_critical_operation_label()
+            if critical_label:
+                from ui.widgets.toast import show_toast
+
+                show_toast(self, f"{critical_label}，暂不能切换配置", is_error=True)
+                self._set_app_status(f"{critical_label}，配置切换已取消")
+                self._load_quick_switch_profiles()
+                return
             try:
                 from core import switcher
                 from ui.widgets.toast import show_toast
@@ -1136,10 +1252,24 @@ class App(ctk.CTk):
 
     def _quick_switch_codex(self, profile_name: str):
         """Quick switch Codex profile."""
+        critical_label = self._active_critical_operation_label()
+        if critical_label:
+            from ui.widgets.toast import show_toast
+
+            show_toast(self, f"{critical_label}，暂不能切换配置", is_error=True)
+            return
         if profile_name in {"Codex", "Codex Profile", "Codex API", "暂无 Codex Profile", "暂无 Codex API 配置", "无配置"}:
             return
 
         def perform_switch():
+            critical_label = self._active_critical_operation_label()
+            if critical_label:
+                from ui.widgets.toast import show_toast
+
+                show_toast(self, f"{critical_label}，暂不能切换配置", is_error=True)
+                self._set_app_status(f"{critical_label}，配置切换已取消")
+                self._load_quick_switch_profiles()
+                return
             try:
                 from core import switcher
                 from ui.widgets.toast import show_toast
@@ -1186,6 +1316,12 @@ class App(ctk.CTk):
 
             def finish():
                 if generation != self._switch_preview_generation or self._exit_requested:
+                    return
+                critical_label = self._active_critical_operation_label()
+                if critical_label:
+                    self._set_app_status(f"{critical_label}，切换预览已取消")
+                    if on_cancel:
+                        on_cancel()
                     return
                 if not payload["ok"]:
                     logger.error("Failed to build switch preview: %s", payload["error"])
@@ -1291,6 +1427,17 @@ class App(ctk.CTk):
 
     def _exit_app_now(self):
         if self._exit_requested:
+            return
+        critical_label = self._active_critical_operation_label()
+        if critical_label:
+            logger.warning("Exit deferred while critical operation is active: %s", critical_label)
+            self._set_app_status(f"{critical_label}，完成前不能退出")
+            try:
+                from ui.widgets.toast import show_toast
+
+                show_toast(self, f"{critical_label}，请等待完成后再退出", is_error=True)
+            except Exception:
+                pass
             return
         self._exit_requested = True
         logger.info("Exiting application")
@@ -1505,23 +1652,26 @@ class App(ctk.CTk):
 
     def _run_on_ui_thread(self, callback):
         if self._exit_requested:
-            return
+            return False
         if getattr(self, "_ui_thread_id", None) == threading.get_ident():
             try:
                 if self.winfo_exists():
                     self.after(0, callback)
+                    return True
             except Exception as e:
                 logger.debug("Failed to schedule UI callback: %s", e)
-            return
+            return False
         callbacks = getattr(self, "_ui_callback_queue", None)
         if callbacks is not None:
             callbacks.put(callback)
-            return
+            return True
         try:
             if self.winfo_exists():
                 self.after(0, callback)
+                return True
         except Exception as e:
             logger.debug("Failed to schedule UI callback: %s", e)
+        return False
 
     def _show_env_tab(self):
         self._select_tab(ENV_TAB_LABEL)

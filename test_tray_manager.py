@@ -59,6 +59,19 @@ def test_tray_stop_stops_icon_and_joins_thread():
     assert manager._thread is None
 
 
+def test_tray_exit_defers_icon_stop_to_app_shutdown():
+    events = []
+    manager = tray_manager.TrayManager(
+        lambda *_: None,
+        lambda: events.append("exit-requested"),
+    )
+    manager.stop = lambda *_args, **_kwargs: events.append("stopped")
+
+    manager._on_exit_clicked()
+
+    assert events == ["exit-requested"]
+
+
 @pytest.mark.parametrize(
     ("profile_type", "method_name", "switch_method"),
     [

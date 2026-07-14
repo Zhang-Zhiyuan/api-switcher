@@ -576,6 +576,8 @@ def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
     app = object.__new__(app_module.App)
     app._exit_requested = False
     app._switch_preview_generation = 0
+    app._critical_operation_lock = threading.RLock()
+    app._critical_operations = {}
     app._set_app_status = lambda message: statuses.append(message)
     app._run_on_ui_thread = lambda callback: callback()
 

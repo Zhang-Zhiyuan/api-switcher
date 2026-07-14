@@ -51,10 +51,16 @@ def _session_record_summary(records, selected_keys: set[str]) -> dict:
     visible_keys = {record.key for record in records}
     selected_count = sum(1 for key in selected_keys if key in visible_keys)
     total_size = sum(_nonnegative_int(getattr(record, "size_bytes", 0)) for record in records)
+    selected_size = sum(
+        _nonnegative_int(getattr(record, "size_bytes", 0))
+        for record in records
+        if record.key in selected_keys
+    )
     return {
         "visible_keys": visible_keys,
         "selected_count": selected_count,
         "total_size": total_size,
+        "selected_size": selected_size,
     }
 
 
@@ -108,6 +114,10 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._filter_groups = []
         self._select_visible_button = None
         self._clear_selection_button = None
+        self._compact_export_var = ctk.BooleanVar(value=False)
+        self._compact_export_checkbox = None
+        self._session_operation_lock = threading.Lock()
+        self._session_operation_in_progress = False
         self._build_ui()
 
     def destroy(self):
@@ -128,15 +138,59 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     def _run_on_ui_thread(self, callback):
         if getattr(self, "_destroyed", False):
-            return
+            return False
         dispatch = getattr(self, "_ui_dispatch", None)
-        if callable(dispatch):
-            dispatch(callback)
-            return
         try:
-            self.after(0, callback)
+            if callable(dispatch):
+                dispatch(callback)
+            else:
+                self.after(0, callback)
         except Exception:
             logger.exception("Failed to schedule session migration UI callback")
+            return False
+        return True
+
+    def _set_session_operation_busy(self, busy: bool) -> None:
+        self._session_operation_in_progress = bool(busy)
+        state = "disabled" if busy else "normal"
+        for button in list(getattr(self, "_header_action_buttons", ()))[:4]:
+            try:
+                button.configure(state=state)
+            except Exception:
+                pass
+
+    def _begin_session_operation(self) -> bool:
+        operation_lock = getattr(self, "_session_operation_lock", None)
+        if operation_lock is None:
+            operation_lock = threading.Lock()
+            self._session_operation_lock = operation_lock
+        if not operation_lock.acquire(blocking=False):
+            show_toast(self.winfo_toplevel(), "会话迁移任务正在处理，请稍候", is_error=True)
+            return False
+        self._set_session_operation_busy(True)
+        return True
+
+    def _end_session_operation(self) -> None:
+        if not getattr(self, "_session_operation_in_progress", False):
+            return
+        self._set_session_operation_busy(False)
+        operation_lock = getattr(self, "_session_operation_lock", None)
+        if operation_lock is not None:
+            try:
+                operation_lock.release()
+            except RuntimeError:
+                logger.exception("Session migration operation lock was already released")
+
+    def _abandon_session_operation(self) -> None:
+        """Release the operation guard when no UI callback can be scheduled."""
+
+        self._session_operation_in_progress = False
+        operation_lock = getattr(self, "_session_operation_lock", None)
+        if operation_lock is not None:
+            try:
+                operation_lock.release()
+            except RuntimeError:
+                logger.exception("Session migration operation lock was already released")
 
     def _build_ui(self):
         self._header = ctk.CTkFrame(self, fg_color="transparent")
@@ -178,8 +232,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         )
         export_button = ctk.CTkButton(
             self._header_actions,
-            text="导出选中",
-            width=104,
+            text="导出选中会话",
+            width=120,
             command=self._export_selected,
             **button_style("success"),
         )
@@ -278,7 +332,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
         warning = ctk.CTkLabel(
             self,
-            text="会话迁移包会包含完整对话内容和工具记录，可能包含敏感信息；导入本机或 SSH 服务器只迁移历史会话，不迁移账号登录态或 API Key。",
+            text="只会导出已勾选的会话。完整包包含对话和工具记录，可能包含敏感信息；不会包含本 app 日志、账号登录态或 API Key。",
             text_color=COLORS["warning"],
             font=font(12),
             anchor="w",
@@ -286,6 +340,29 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         )
         warning.pack(fill="x", padx=14, pady=(0, 8))
         bind_wraplength(self, warning, padding=42, min_width=260, max_width=900)
+
+        compact_row = ctk.CTkFrame(self, fg_color="transparent")
+        compact_row.pack(fill="x", padx=14, pady=(0, 10))
+        self._compact_export_checkbox = ctk.CTkCheckBox(
+            compact_row,
+            text="精简导出",
+            variable=self._compact_export_var,
+            text_color=COLORS["text"],
+            font=font(12),
+            checkbox_width=18,
+            checkbox_height=18,
+        )
+        self._compact_export_checkbox.pack(side="left", anchor="n", padx=(0, 8))
+        compact_description = ctk.CTkLabel(
+            compact_row,
+            text="省略单段超过 256 KB 的工具输出且不附带 Claude 辅助文件；原会话不变，但迁移后续聊时可能缺少部分工具上下文。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        compact_description.pack(side="left", fill="x", expand=True)
+        bind_wraplength(compact_row, compact_description, padding=128, min_width=180, max_width=760)
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
@@ -536,7 +613,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._stats_label.configure(
             text=(
                 f"会话 {len(records)}  |  已选 {summary['selected_count']}  |  "
-                f"主文件 {session_migration.format_size(summary['total_size'])}"
+                f"已选主文件 {session_migration.format_size(summary['selected_size'])}  |  "
+                f"全部 {session_migration.format_size(summary['total_size'])}"
             )
         )
 
@@ -761,6 +839,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     def _on_filter_change(self, label: str):
         self._provider_filter = self.FILTER_OPTIONS.get(label, "all")
+        self._selected_keys.clear()
         self._visible_limit = self.MAX_VISIBLE_RECORDS
         self.refresh()
 
@@ -788,6 +867,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         if not self._selected_keys:
             show_toast(self.winfo_toplevel(), "请先选择要导出的会话", is_error=True)
             return
+        selected_keys = set(self._selected_keys)
         output_path = filedialog.asksaveasfilename(
             parent=self.winfo_toplevel(),
             title="导出会话迁移包",
@@ -799,18 +879,68 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         )
         if not output_path:
             return
+        source_ssh_name = self._current_source_ssh_name()
+        provider_filter = self._provider_filter
+        content_mode = (
+            session_migration.CONTENT_MODE_COMPACT
+            if self._compact_export_var.get()
+            else session_migration.CONTENT_MODE_FULL
+        )
+        if not self._begin_session_operation():
+            return
+        if self._stats_label:
+            self._stats_label.configure(text=f"正在导出已选 {len(selected_keys)} 个会话...")
+
+        def worker():
+            try:
+                result = self._export_current_selection_to_package(
+                    output_path,
+                    source_ssh_name,
+                    selected_keys=selected_keys,
+                    provider_filter=provider_filter,
+                    content_mode=content_mode,
+                )
+                payload = {"result": result, "error": None}
+            except Exception as exc:
+                payload = {"result": None, "error": str(exc)}
+
+            def finish():
+                self._end_session_operation()
+                if not self.winfo_exists():
+                    return
+                if payload["error"]:
+                    show_toast(self.winfo_toplevel(), f"导出失败: {payload['error']}", is_error=True)
+                    self._update_stats_label()
+                    return
+                result = payload["result"]
+                try:
+                    package_size = result.path.stat().st_size
+                except OSError:
+                    package_size = result.total_bytes
+                mode_label = "精简" if result.content_mode == session_migration.CONTENT_MODE_COMPACT else "完整"
+                message = (
+                    f"{mode_label}会话迁移包已导出: {result.session_count} 个会话, "
+                    f"{result.file_count} 个文件, 包大小 {session_migration.format_size(package_size)}"
+                )
+                if result.omitted_output_count:
+                    message += (
+                        f"，省略 {result.omitted_output_count} 段超大工具输出"
+                        f"（约 {session_migration.format_size(result.omitted_bytes)}）"
+                    )
+                if result.skipped_keys:
+                    message += f"，{len(result.skipped_keys)} 个会话未找到"
+                show_toast(self.winfo_toplevel(), message)
+                self._update_stats_label()
+
+            if not self._run_on_ui_thread(finish):
+                self._abandon_session_operation()
+
         try:
-            source_ssh_name = self._current_source_ssh_name()
-            result = self._export_current_selection_to_package(output_path, source_ssh_name)
-            message = (
-                f"会话迁移包已导出: {result.session_count} 个会话, "
-                f"{result.file_count} 个文件, {session_migration.format_size(result.total_bytes)}"
-            )
-            if result.skipped_keys:
-                message += f"，{len(result.skipped_keys)} 个会话未找到"
-            show_toast(self.winfo_toplevel(), message)
+            threading.Thread(target=worker, name="session-package-export", daemon=True).start()
         except Exception as exc:
-            show_toast(self.winfo_toplevel(), f"导出失败: {exc}", is_error=True)
+            self._end_session_operation()
+            self._update_stats_label()
+            show_toast(self.winfo_toplevel(), f"无法启动导出任务: {exc}", is_error=True)
 
     def _import_package(self):
         input_path = self._choose_package()
@@ -820,11 +950,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         target_label = self._endpoint_label(target_ssh_name)
 
         def do_import():
-            try:
-                result = self._import_package_to_endpoint(input_path, target_ssh_name)
-                self._show_import_result(result)
-            except Exception as exc:
-                show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
+            self._start_import_task(input_path, target_ssh_name)
 
         ConfirmDialog(
             self.winfo_toplevel(),
@@ -857,11 +983,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             return
 
         def do_import():
-            try:
-                result = self._import_package_to_endpoint(input_path, target_ssh_name, target_project)
-                self._show_import_result(result)
-            except Exception as exc:
-                show_toast(self.winfo_toplevel(), f"导入失败: {exc}", is_error=True)
+            self._start_import_task(input_path, target_ssh_name, target_project)
 
         ConfirmDialog(
             self.winfo_toplevel(),
@@ -873,6 +995,49 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             ),
             on_confirm=do_import,
         )
+
+    def _start_import_task(
+        self,
+        input_path,
+        target_ssh_name: str,
+        target_project_path: str | None = None,
+    ) -> None:
+        if not self._begin_session_operation():
+            return
+        target_label = self._endpoint_label(target_ssh_name)
+        if self._stats_label:
+            self._stats_label.configure(text=f"正在导入会话到{target_label}...")
+
+        def worker():
+            try:
+                result = self._import_package_to_endpoint(
+                    input_path,
+                    target_ssh_name,
+                    target_project_path,
+                )
+                payload = {"result": result, "error": None}
+            except Exception as exc:
+                payload = {"result": None, "error": str(exc)}
+
+            def finish():
+                self._end_session_operation()
+                if not self.winfo_exists():
+                    return
+                if payload["error"]:
+                    show_toast(self.winfo_toplevel(), f"导入失败: {payload['error']}", is_error=True)
+                    self._update_stats_label()
+                    return
+                self._show_import_result(payload["result"])
+
+            if not self._run_on_ui_thread(finish):
+                self._abandon_session_operation()
+
+        try:
+            threading.Thread(target=worker, name="session-package-import", daemon=True).start()
+        except Exception as exc:
+            self._end_session_operation()
+            self._update_stats_label()
+            show_toast(self.winfo_toplevel(), f"无法启动导入任务: {exc}", is_error=True)
 
     def _choose_package(self):
         return filedialog.askopenfilename(
@@ -901,6 +1066,14 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             lines.append("原项目: " + " | ".join(shown))
             if len(summary.project_paths) > len(shown):
                 lines.append(f"另有 {len(summary.project_paths) - len(shown)} 个项目路径")
+        if summary.content_mode == session_migration.CONTENT_MODE_COMPACT:
+            compact_text = "精简包"
+            if summary.omitted_output_count:
+                compact_text += (
+                    f"，已省略 {summary.omitted_output_count} 段超大工具输出"
+                    f"（约 {session_migration.format_size(summary.omitted_bytes)}）"
+                )
+            lines.append("内容模式: " + compact_text)
         return "\n".join(lines)
 
     def _show_import_result(self, result: session_migration.SessionImportResult):
@@ -938,6 +1111,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         )
 
     def _run_transfer_task(self, source_ssh_name: str, target_ssh_name: str):
+        if not self._begin_session_operation():
+            return
         selected_keys = set(self._selected_keys)
         provider_filter = self._provider_filter
         if self._stats_label:
@@ -953,6 +1128,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                     source_ssh_name,
                     selected_keys=selected_keys,
                     provider_filter=provider_filter,
+                    content_mode=session_migration.CONTENT_MODE_FULL,
                 )
                 imported = self._import_package_to_endpoint(temp_path, target_ssh_name)
                 payload = {"ok": True, "exported": exported, "imported": imported, "error": None}
@@ -966,6 +1142,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                         pass
 
             def finish():
+                self._end_session_operation()
                 if not self.winfo_exists():
                     return
                 if not payload["ok"]:
@@ -981,9 +1158,15 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 show_toast(self.winfo_toplevel(), message)
                 self.refresh()
 
-            self._run_on_ui_thread(finish)
+            if not self._run_on_ui_thread(finish):
+                self._abandon_session_operation()
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="session-direct-transfer", daemon=True).start()
+        except Exception as exc:
+            self._end_session_operation()
+            self._update_stats_label()
+            show_toast(self.winfo_toplevel(), f"无法启动迁移任务: {exc}", is_error=True)
 
     def _export_current_selection_to_package(
         self,
@@ -991,17 +1174,19 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         source_ssh_name: str,
         selected_keys: set[str] | None = None,
         provider_filter: str | None = None,
+        content_mode: str = "full",
     ):
-        keys = selected_keys or self._selected_keys
-        provider = provider_filter or self._provider_filter
+        keys = self._selected_keys if selected_keys is None else selected_keys
+        provider = self._provider_filter if provider_filter is None else provider_filter
         if source_ssh_name:
             return session_migration.export_remote_sessions(
                 source_ssh_name,
                 output_path,
                 keys,
                 provider=provider,
+                content_mode=content_mode,
             )
-        return session_migration.export_sessions(output_path, keys)
+        return session_migration.export_sessions(output_path, keys, content_mode=content_mode)
 
     @staticmethod
     def _import_package_to_endpoint(input_path, target_ssh_name: str, target_project_path: str | None = None):

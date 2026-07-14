@@ -6,15 +6,17 @@ import os
 import posixpath
 import shutil
 import stat
+import tempfile
 import threading
 import uuid
 import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from core.atomic_io import atomic_write_bytes, atomic_write_text, replace_with_retry, temp_path_for
+from core.atomic_io import replace_with_retry, temp_path_for
 from core import profile_manager, remote_config
 from core.ssh_manager import ssh_manager
 
@@ -22,6 +24,11 @@ from core.ssh_manager import ssh_manager
 PACKAGE_FORMAT = "api-switcher-session-migration"
 PACKAGE_VERSION = 1
 PACKAGE_EXTENSION = ".asxsession"
+CONTENT_MODE_FULL = "full"
+CONTENT_MODE_COMPACT = "compact"
+COMPACT_TOOL_OUTPUT_LIMIT_BYTES = 256 * 1024
+COMPACT_TOOL_OUTPUT_MARKER = "[API切换器精简迁移包：已省略超大工具输出]"
+EXPORT_SPOOL_MAX_MEMORY_BYTES = 8 * 1024 * 1024
 MAX_SCAN_LINES = 200
 MAX_REMOTE_SESSION_FILES = 5000
 MAX_REMOTE_PARSE_BYTES = 8 * 1024 * 1024
@@ -30,6 +37,11 @@ MAX_PACKAGE_FILE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 _LOCAL_SESSION_CACHE_LOCK = threading.RLock()
 _LOCAL_SESSION_CACHE: dict[tuple[str, str, str], tuple[tuple, tuple[Any, ...]]] = {}
+
+
+class SessionSourceChangedError(ValueError):
+    """A selected source changed after its export size was validated."""
+_CODEX_INDEX_APPEND_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -65,6 +77,9 @@ class SessionExportResult:
     file_count: int
     total_bytes: int
     skipped_keys: list[str]
+    content_mode: str = CONTENT_MODE_FULL
+    omitted_output_count: int = 0
+    omitted_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -82,6 +97,9 @@ class SessionPackageSummary:
     total_bytes: int
     providers: dict[str, int]
     project_paths: list[str]
+    content_mode: str = CONTENT_MODE_FULL
+    omitted_output_count: int = 0
+    omitted_bytes: int = 0
 
 
 def default_claude_home() -> Path:
@@ -107,9 +125,9 @@ def _local_session_cache_key(provider: str, claude_home: Path, codex_home: Path)
 
 def _session_file_signature(path: Path, root: Path, provider: str):
     try:
-        if not path.is_file():
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or _path_is_link_or_reparse(path, info):
             return None
-        info = path.stat()
         try:
             relative = path.relative_to(root)
         except ValueError:
@@ -124,8 +142,12 @@ def _local_session_signature(provider: str, claude_home: Path, codex_home: Path)
     parts = []
     if provider in {"all", "claude"}:
         projects_dir = Path(claude_home) / "projects"
-        if projects_dir.exists():
-            for path in sorted(projects_dir.glob("*/*.jsonl")):
+        if _local_directory_is_safe(projects_dir):
+            for path in sorted(_iter_local_claude_session_files(projects_dir)):
+                try:
+                    _validate_local_source_file(path, projects_dir)
+                except (OSError, ValueError):
+                    continue
                 signature = _session_file_signature(path, claude_home, "claude")
                 if signature is not None:
                     parts.append(signature)
@@ -135,8 +157,12 @@ def _local_session_signature(provider: str, claude_home: Path, codex_home: Path)
         if index_signature is not None:
             parts.append(index_signature)
         sessions_dir = codex_home / "sessions"
-        if sessions_dir.exists():
-            for path in sorted(sessions_dir.rglob("*.jsonl")):
+        if _local_directory_is_safe(sessions_dir):
+            for path in sorted(path for path in _iter_local_files(sessions_dir) if path.suffix == ".jsonl"):
+                try:
+                    _validate_local_source_file(path, sessions_dir)
+                except (OSError, ValueError):
+                    continue
                 signature = _session_file_signature(path, codex_home, "codex")
                 if signature is not None:
                     parts.append(signature)
@@ -204,8 +230,10 @@ def export_sessions(
     selected_keys: set[str] | list[str] | tuple[str, ...],
     claude_home: Path | None = None,
     codex_home: Path | None = None,
+    content_mode: str = CONTENT_MODE_FULL,
 ) -> SessionExportResult:
     """Export selected sessions to a portable .asxsession zip package."""
+    content_mode = _normalize_content_mode(content_mode)
     keys = {str(key) for key in selected_keys}
     if not keys:
         raise ValueError("请选择要导出的会话")
@@ -225,6 +253,8 @@ def export_sessions(
     manifest_entries: list[dict[str, Any]] = []
     file_count = 0
     total_bytes = 0
+    omitted_output_count = 0
+    omitted_bytes = 0
 
     tmp_output = temp_path_for(output_path)
     try:
@@ -234,30 +264,72 @@ def export_sessions(
                 entry = record.to_manifest()
                 entry["files"] = []
 
-                for file_path in _record_files(record):
+                for file_path in _record_files(
+                    record,
+                    include_support_files=content_mode == CONTENT_MODE_FULL,
+                ):
                     try:
-                        if not file_path.is_file():
-                            continue
-                        relative_path = _relative_to_home(file_path, home)
-                        size = file_path.stat().st_size
+                        relative_path, file_info = _local_export_file_info(
+                            file_path,
+                            home,
+                            record.provider,
+                        )
+                        size = int(file_info.st_size)
                     except (OSError, ValueError):
                         continue
-                    if not _package_size_allowed(size, total_bytes):
+                    compact_main = content_mode == CONTENT_MODE_COMPACT and file_path == record.source_path
+                    compact_output_limit = min(
+                        MAX_PACKAGE_FILE_BYTES,
+                        MAX_PACKAGE_TOTAL_BYTES - total_bytes,
+                    )
+                    if compact_main:
+                        if compact_output_limit <= 0:
+                            continue
+                    elif not _package_size_allowed(size, total_bytes):
                         continue
 
                     archive_path = f"files/{index}/{relative_path}"
                     try:
-                        bundle.write(file_path, archive_path)
-                    except OSError:
+                        source_root = _local_provider_session_root(home, record.provider)
+                        with _open_validated_local_source(file_path, source_root, file_info) as source:
+                            if compact_main:
+                                written_size, file_omitted_count, file_omitted_bytes = _write_compact_stream_to_bundle(
+                                    source,
+                                    bundle,
+                                    archive_path,
+                                    record.provider,
+                                    max_output_bytes=compact_output_limit,
+                                )
+                            else:
+                                with bundle.open(archive_path, "w") as target:
+                                    written_size = _copy_binary_stream(source, target, size)
+                                file_omitted_count = 0
+                                file_omitted_bytes = 0
+                    except SessionSourceChangedError:
+                        # The ZIP entry may already contain partial bytes. Abort
+                        # the temporary package instead of returning a bloated
+                        # archive whose manifest omits that orphan entry.
+                        raise
+                    except (OSError, ValueError):
                         continue
-                    entry["files"].append({
+                    file_entry = {
                         "relative_path": relative_path,
                         "archive_path": archive_path,
-                        "size": size,
+                        "size": written_size,
                         "main": file_path == record.source_path,
-                    })
+                    }
+                    if file_omitted_count:
+                        file_entry.update({
+                            "source_size": size,
+                            "compacted": True,
+                            "omitted_output_count": file_omitted_count,
+                            "omitted_bytes": file_omitted_bytes,
+                        })
+                    entry["files"].append(file_entry)
                     file_count += 1
-                    total_bytes += size
+                    total_bytes += written_size
+                    omitted_output_count += file_omitted_count
+                    omitted_bytes += file_omitted_bytes
 
                 if _entry_has_main_file(entry):
                     manifest_entries.append(entry)
@@ -268,6 +340,13 @@ def export_sessions(
                 "format": PACKAGE_FORMAT,
                 "version": PACKAGE_VERSION,
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "content_mode": content_mode,
+                "compact_policy": {
+                    "max_tool_output_bytes": COMPACT_TOOL_OUTPUT_LIMIT_BYTES,
+                    "include_claude_support_files": False,
+                } if content_mode == CONTENT_MODE_COMPACT else None,
+                "omitted_output_count": omitted_output_count,
+                "omitted_bytes": omitted_bytes,
                 "sessions": manifest_entries,
             }
             bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -282,6 +361,9 @@ def export_sessions(
         file_count=file_count,
         total_bytes=total_bytes,
         skipped_keys=sorted(set(skipped_keys)),
+        content_mode=content_mode,
+        omitted_output_count=omitted_output_count,
+        omitted_bytes=omitted_bytes,
     )
 
 
@@ -290,8 +372,10 @@ def export_remote_sessions(
     output_path: str | Path,
     selected_keys: set[str] | list[str] | tuple[str, ...],
     provider: str = "all",
+    content_mode: str = CONTENT_MODE_FULL,
 ) -> SessionExportResult:
     """Export selected sessions from an SSH server to a local .asxsession package."""
+    content_mode = _normalize_content_mode(content_mode)
     keys = {str(key) for key in selected_keys}
     if not keys:
         raise ValueError("请选择要导出的会话")
@@ -312,6 +396,8 @@ def export_remote_sessions(
     manifest_entries: list[dict[str, Any]] = []
     file_count = 0
     total_bytes = 0
+    omitted_output_count = 0
+    omitted_bytes = 0
     tmp_output = temp_path_for(output_path)
     sftp = None
     try:
@@ -324,30 +410,73 @@ def export_remote_sessions(
                 entry["ssh_name"] = ssh_name
                 entry["files"] = []
 
-                for remote_path in _remote_record_files(sftp, record):
+                for remote_path in _remote_record_files(
+                    sftp,
+                    record,
+                    include_support_files=content_mode == CONTENT_MODE_FULL,
+                ):
                     try:
-                        relative_path = _remote_relative_to_home(remote_path, home)
-                        info = sftp.stat(remote_path)
+                        relative_path, info = _remote_export_file_info(
+                            sftp,
+                            remote_path,
+                            home,
+                            record.provider,
+                        )
                     except Exception:
                         continue
                     size = int(getattr(info, "st_size", 0) or 0)
-                    if not _package_size_allowed(size, total_bytes):
+                    compact_main = content_mode == CONTENT_MODE_COMPACT and remote_path == record.remote_path
+                    compact_output_limit = min(
+                        MAX_PACKAGE_FILE_BYTES,
+                        MAX_PACKAGE_TOTAL_BYTES - total_bytes,
+                    )
+                    if compact_main:
+                        if compact_output_limit <= 0:
+                            continue
+                    elif not _package_size_allowed(size, total_bytes):
                         continue
 
                     archive_path = f"files/{index}/{relative_path}"
                     try:
-                        with sftp.open(remote_path, "rb") as source, bundle.open(archive_path, "w") as target:
-                            shutil.copyfileobj(source, target)
+                        with sftp.open(remote_path, "rb") as source:
+                            _validate_open_remote_source(sftp, remote_path, source, info)
+                            if compact_main:
+                                written_size, file_omitted_count, file_omitted_bytes = _write_compact_stream_to_bundle(
+                                    source,
+                                    bundle,
+                                    archive_path,
+                                    record.provider,
+                                    max_output_bytes=compact_output_limit,
+                                )
+                            else:
+                                written_size = _write_binary_stream_to_bundle(
+                                    source,
+                                    bundle,
+                                    archive_path,
+                                    expected_size=size,
+                                )
+                                file_omitted_count = 0
+                                file_omitted_bytes = 0
                     except Exception:
                         continue
-                    entry["files"].append({
+                    file_entry = {
                         "relative_path": relative_path,
                         "archive_path": archive_path,
-                        "size": size,
+                        "size": written_size,
                         "main": remote_path == record.remote_path,
-                    })
+                    }
+                    if file_omitted_count:
+                        file_entry.update({
+                            "source_size": size,
+                            "compacted": True,
+                            "omitted_output_count": file_omitted_count,
+                            "omitted_bytes": file_omitted_bytes,
+                        })
+                    entry["files"].append(file_entry)
                     file_count += 1
-                    total_bytes += size
+                    total_bytes += written_size
+                    omitted_output_count += file_omitted_count
+                    omitted_bytes += file_omitted_bytes
 
                 if _entry_has_main_file(entry):
                     manifest_entries.append(entry)
@@ -358,6 +487,13 @@ def export_remote_sessions(
                 "format": PACKAGE_FORMAT,
                 "version": PACKAGE_VERSION,
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "content_mode": content_mode,
+                "compact_policy": {
+                    "max_tool_output_bytes": COMPACT_TOOL_OUTPUT_LIMIT_BYTES,
+                    "include_claude_support_files": False,
+                } if content_mode == CONTENT_MODE_COMPACT else None,
+                "omitted_output_count": omitted_output_count,
+                "omitted_bytes": omitted_bytes,
                 "sessions": manifest_entries,
             }
             bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -378,6 +514,9 @@ def export_remote_sessions(
         file_count=file_count,
         total_bytes=total_bytes,
         skipped_keys=sorted(set(skipped_keys)),
+        content_mode=content_mode,
+        omitted_output_count=omitted_output_count,
+        omitted_bytes=omitted_bytes,
     )
 
 
@@ -426,11 +565,12 @@ def import_sessions(
                     relative_path = _remap_relative_path(provider, relative_path, target_project_text)
                     _validate_provider_session_path(provider, relative_path)
                     destination = _safe_destination(home, relative_path)
+                    destination_exists = _validate_local_import_destination(home, destination)
                 except ValueError:
                     skipped_invalid += 1
                     continue
 
-                if destination.exists() and not overwrite:
+                if destination_exists and not overwrite:
                     skipped_existing += 1
                     continue
                 if imported_bytes + info.file_size > MAX_PACKAGE_TOTAL_BYTES:
@@ -439,9 +579,23 @@ def import_sessions(
 
                 if target_project_text and destination.suffix.lower() == ".jsonl":
                     data = bundle.read(info)
-                    atomic_write_bytes(destination, _rewrite_jsonl_cwd(data, target_project_text))
+                    written = _write_local_bytes_atomic(
+                        destination,
+                        _rewrite_jsonl_cwd(data, target_project_text),
+                        root=home,
+                        overwrite=overwrite,
+                    )
                 else:
-                    _copy_package_file_atomic(bundle, info, destination)
+                    written = _copy_package_file_atomic(
+                        bundle,
+                        info,
+                        destination,
+                        root=home,
+                        overwrite=overwrite,
+                    )
+                if not written:
+                    skipped_existing += 1
+                    continue
                 imported_bytes += info.file_size
                 file_count += 1
                 imported_main = imported_main or bool(file_entry.get("main"))
@@ -515,23 +669,41 @@ def import_sessions_to_ssh(
                         skipped_invalid += 1
                         continue
 
-                    if _remote_file_exists(sftp, destination) and not overwrite:
-                        skipped_existing += 1
-                        continue
                     if imported_bytes + info.file_size > MAX_PACKAGE_TOTAL_BYTES:
                         skipped_invalid += 1
+                        continue
+                    try:
+                        destination_exists = _prepare_remote_import_destination(sftp, home, destination)
+                    except ValueError:
+                        skipped_invalid += 1
+                        continue
+                    if destination_exists and not overwrite:
+                        skipped_existing += 1
                         continue
 
                     if target_project_text and destination.lower().endswith(".jsonl"):
                         data = bundle.read(info)
-                        _write_remote_bytes_atomic(
+                        written = _write_remote_bytes_atomic(
                             sftp,
                             destination,
                             _rewrite_jsonl_cwd(data, target_project_text),
+                            root=home,
+                            overwrite=overwrite,
                             file_mode=0o600,
                         )
                     else:
-                        _copy_package_file_to_remote(sftp, bundle, info, destination, file_mode=0o600)
+                        written = _copy_package_file_to_remote(
+                            sftp,
+                            bundle,
+                            info,
+                            destination,
+                            root=home,
+                            overwrite=overwrite,
+                            file_mode=0o600,
+                        )
+                    if not written:
+                        skipped_existing += 1
+                        continue
                     imported_bytes += info.file_size
                     file_count += 1
                     imported_main = imported_main or bool(file_entry.get("main"))
@@ -541,15 +713,14 @@ def import_sessions_to_ssh(
                     imported_sessions.add(key)
                     if provider == "codex":
                         imported_codex.append(session)
+        if imported_codex:
+            _update_remote_codex_index(sftp, codex_home, imported_codex)
     finally:
         if sftp:
             try:
                 sftp.close()
             except Exception:
                 pass
-
-    if imported_codex:
-        _update_remote_codex_index(client, codex_home, imported_codex)
 
     return SessionImportResult(
         session_count=len(imported_sessions),
@@ -591,6 +762,9 @@ def inspect_package(input_path: str | Path) -> SessionPackageSummary:
             total_bytes=total_bytes,
             providers=providers,
             project_paths=project_paths,
+            content_mode=_normalize_content_mode(manifest.get("content_mode", CONTENT_MODE_FULL)),
+            omitted_output_count=_nonnegative_manifest_int(manifest.get("omitted_output_count")),
+            omitted_bytes=_nonnegative_manifest_int(manifest.get("omitted_bytes")),
         )
 
 
@@ -602,6 +776,176 @@ def format_size(size_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
     return f"{size_bytes} B"
+
+
+def _normalize_content_mode(value: str) -> str:
+    mode = str(value or CONTENT_MODE_FULL).strip().lower()
+    if mode not in {CONTENT_MODE_FULL, CONTENT_MODE_COMPACT}:
+        raise ValueError(f"不支持的会话迁移内容模式: {value}")
+    return mode
+
+
+def _nonnegative_manifest_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _json_value_size(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value.encode("utf-8", errors="replace"))
+    try:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+def _compact_tool_output(value: Any, *, provider: str) -> tuple[Any, int]:
+    original_size = _json_value_size(value)
+    if original_size <= COMPACT_TOOL_OUTPUT_LIMIT_BYTES:
+        return value, 0
+    if isinstance(value, list):
+        block_type = "text" if provider == "claude" else "input_text"
+        replacement: Any = [{"type": block_type, "text": COMPACT_TOOL_OUTPUT_MARKER}]
+    else:
+        replacement = COMPACT_TOOL_OUTPUT_MARKER
+    omitted_bytes = max(0, original_size - _json_value_size(replacement))
+    return replacement, omitted_bytes
+
+
+def _compact_session_item(item: dict[str, Any], provider: str) -> tuple[int, int]:
+    omitted_output_count = 0
+    omitted_bytes = 0
+
+    if provider == "codex" and item.get("type") == "response_item":
+        payload = item.get("payload")
+        if isinstance(payload, dict) and payload.get("type") in {
+            "function_call_output",
+            "custom_tool_call_output",
+        } and "output" in payload:
+            replacement, removed = _compact_tool_output(payload.get("output"), provider=provider)
+            if removed:
+                payload["output"] = replacement
+                omitted_output_count = 1
+                omitted_bytes = removed
+
+    if provider == "claude" and item.get("type") == "user":
+        message = item.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result" or "content" not in block:
+                    continue
+                replacement, removed = _compact_tool_output(block.get("content"), provider=provider)
+                if removed:
+                    block["content"] = replacement
+                    omitted_output_count += 1
+                    omitted_bytes += removed
+
+    # Claude currently duplicates many tool results in this top-level field.
+    # Compacting only message.content would therefore leave the large payload
+    # (and any secrets it contains) in the package a second time.
+    if provider == "claude" and "toolUseResult" in item:
+        replacement, removed = _compact_tool_output(item.get("toolUseResult"), provider=provider)
+        if removed:
+            item["toolUseResult"] = replacement
+            omitted_output_count += 1
+            omitted_bytes += removed
+
+    return omitted_output_count, omitted_bytes
+
+
+def _compact_session_jsonl_line(raw_line: bytes, provider: str) -> tuple[bytes, int, int]:
+    try:
+        item = json.loads(raw_line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return raw_line, 0, 0
+    if not isinstance(item, dict):
+        return raw_line, 0, 0
+
+    omitted_output_count, omitted_bytes = _compact_session_item(item, provider)
+    if not omitted_output_count:
+        return raw_line, 0, 0
+
+    if raw_line.endswith(b"\r\n"):
+        newline = b"\r\n"
+    elif raw_line.endswith(b"\n"):
+        newline = b"\n"
+    else:
+        newline = b""
+    compacted = json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + newline
+    return compacted, omitted_output_count, omitted_bytes
+
+
+def _copy_session_jsonl(
+    source,
+    target,
+    provider: str,
+    *,
+    compact: bool,
+    max_output_bytes: int | None = None,
+) -> tuple[int, int, int]:
+    written_size = 0
+    omitted_output_count = 0
+    omitted_bytes = 0
+    for raw_line in source:
+        if isinstance(raw_line, str):
+            raw_line = raw_line.encode("utf-8")
+        output_line = raw_line
+        line_omitted_count = 0
+        line_omitted_bytes = 0
+        if compact:
+            output_line, line_omitted_count, line_omitted_bytes = _compact_session_jsonl_line(
+                raw_line,
+                provider,
+            )
+        if max_output_bytes is not None and written_size + len(output_line) > max_output_bytes:
+            raise ValueError("精简后的会话仍超过单文件或迁移包大小上限")
+        target.write(output_line)
+        written_size += len(output_line)
+        omitted_output_count += line_omitted_count
+        omitted_bytes += line_omitted_bytes
+    return written_size, omitted_output_count, omitted_bytes
+
+
+def _write_compact_stream_to_bundle(
+    source,
+    bundle: zipfile.ZipFile,
+    archive_path: str,
+    provider: str,
+    *,
+    max_output_bytes: int,
+) -> tuple[int, int, int]:
+    """Compact before opening the ZIP entry so an oversize result leaves no orphan data."""
+    with tempfile.SpooledTemporaryFile(max_size=EXPORT_SPOOL_MAX_MEMORY_BYTES, mode="w+b") as compacted:
+        result = _copy_session_jsonl(
+            source,
+            compacted,
+            provider,
+            compact=True,
+            max_output_bytes=max_output_bytes,
+        )
+        compacted.seek(0)
+        with bundle.open(archive_path, "w") as target:
+            shutil.copyfileobj(compacted, target)
+        return result
+
+
+def _write_binary_stream_to_bundle(
+    source,
+    bundle: zipfile.ZipFile,
+    archive_path: str,
+    *,
+    expected_size: int,
+) -> int:
+    """Spool a changing remote source before creating its ZIP entry."""
+    with tempfile.SpooledTemporaryFile(max_size=EXPORT_SPOOL_MAX_MEMORY_BYTES, mode="w+b") as staged:
+        written = _copy_binary_stream(source, staged, expected_size)
+        staged.seek(0)
+        with bundle.open(archive_path, "w") as target:
+            shutil.copyfileobj(staged, target)
+        return written
 
 
 def _package_size_allowed(file_size: int, current_total: int) -> bool:
@@ -617,48 +961,74 @@ def _entry_has_main_file(entry: dict[str, Any]) -> bool:
 
 def _list_claude_sessions(claude_home: Path) -> list[SessionRecord]:
     projects_dir = claude_home / "projects"
-    if not projects_dir.exists():
+    if not _local_directory_is_safe(projects_dir):
         return []
 
     records: list[SessionRecord] = []
-    for path in projects_dir.glob("*/*.jsonl"):
-        if path.is_file():
-            try:
-                records.append(_parse_claude_session(path, claude_home))
-            except Exception:
-                continue
+    for path in _iter_local_claude_session_files(projects_dir):
+        try:
+            _validate_local_source_file(path, projects_dir)
+            records.append(_parse_claude_session(path, claude_home))
+        except Exception:
+            continue
     return records
 
 
 def _list_codex_sessions(codex_home: Path) -> list[SessionRecord]:
     sessions_dir = codex_home / "sessions"
-    if not sessions_dir.exists():
+    if not _local_directory_is_safe(sessions_dir):
         return []
 
     index = _read_codex_index(codex_home)
     records: list[SessionRecord] = []
-    for path in sessions_dir.rglob("*.jsonl"):
-        if path.is_file():
-            try:
-                records.append(_parse_codex_session(path, codex_home, index))
-            except Exception:
-                continue
+    for path in (item for item in _iter_local_files(sessions_dir) if item.suffix == ".jsonl"):
+        try:
+            _validate_local_source_file(path, sessions_dir)
+            records.append(_parse_codex_session(path, codex_home, index))
+        except Exception:
+            continue
     return records
 
 
 def _list_remote_claude_sessions(sftp, claude_home: str, ssh_name: str) -> list[SessionRecord]:
     projects_dir = posixpath.join(claude_home, "projects")
     records: list[SessionRecord] = []
+    projects_attr = _remote_lstat(sftp, projects_dir)
+    if projects_attr is None or not _remote_attr_is_dir(projects_attr) or _remote_attr_is_link(projects_attr):
+        return records
     for project_attr in _remote_listdir_attr(sftp, projects_dir):
+        if not _safe_remote_child_name(getattr(project_attr, "filename", "")):
+            continue
         project_dir = posixpath.join(projects_dir, project_attr.filename)
-        if not _remote_attr_is_dir(project_attr) and not _remote_is_dir(sftp, project_dir):
+        actual_project_attr = _remote_lstat(sftp, project_dir, fallback_attr=project_attr)
+        if (
+            actual_project_attr is None
+            or _remote_attr_is_link(actual_project_attr)
+            or not _remote_attr_is_dir(actual_project_attr)
+        ):
             continue
         for file_attr in _remote_listdir_attr(sftp, project_dir):
-            if _remote_attr_is_dir(file_attr) or not file_attr.filename.endswith(".jsonl"):
+            if (
+                not _safe_remote_child_name(getattr(file_attr, "filename", ""))
+                or not file_attr.filename.endswith(".jsonl")
+            ):
                 continue
             path = posixpath.join(project_dir, file_attr.filename)
+            actual_file_attr = _remote_lstat(sftp, path, fallback_attr=file_attr)
+            if (
+                actual_file_attr is None
+                or _remote_attr_is_link(actual_file_attr)
+                or not _remote_attr_is_file(actual_file_attr)
+            ):
+                continue
             try:
-                records.append(_parse_remote_claude_session(path, claude_home, ssh_name, file_attr, _remote_read_text(sftp, path)))
+                records.append(_parse_remote_claude_session(
+                    path,
+                    claude_home,
+                    ssh_name,
+                    actual_file_attr,
+                    _remote_read_text(sftp, path),
+                ))
             except Exception:
                 continue
             if len(records) >= MAX_REMOTE_SESSION_FILES:
@@ -1019,6 +1389,130 @@ def _relative_to_home(path: Path, home: Path) -> str:
     return path.resolve().relative_to(home.resolve()).as_posix()
 
 
+def _absolute_lexical_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _path_is_link_or_reparse(path: Path, info: os.stat_result | None = None) -> bool:
+    try:
+        info = info or path.lstat()
+    except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if int(getattr(info, "st_file_attributes", 0) or 0) & reparse_flag:
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            return bool(is_junction())
+        except OSError:
+            return True
+    return False
+
+
+def _local_directory_is_safe(path: Path) -> bool:
+    try:
+        info = path.lstat()
+        return stat.S_ISDIR(info.st_mode) and not _path_is_link_or_reparse(path, info)
+    except OSError:
+        return False
+
+
+def _validate_local_source_file(path: Path, source_root: Path) -> os.stat_result:
+    """Return lstat data only for a regular, non-reparse file below source_root."""
+    path = _absolute_lexical_path(path)
+    source_root = _absolute_lexical_path(source_root)
+    try:
+        relative = path.relative_to(source_root)
+    except ValueError as exc:
+        raise ValueError(f"会话源文件越界: {path}") from exc
+    if not relative.parts or not _local_directory_is_safe(source_root):
+        raise ValueError(f"会话源目录不安全: {source_root}")
+
+    current = source_root
+    for part in relative.parts[:-1]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise ValueError(f"会话源目录不可访问: {current}") from exc
+        if not stat.S_ISDIR(info.st_mode) or _path_is_link_or_reparse(current, info):
+            raise ValueError(f"会话源目录包含链接或重解析点: {current}")
+
+    try:
+        file_info = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"会话源文件不可访问: {path}") from exc
+    if not stat.S_ISREG(file_info.st_mode) or _path_is_link_or_reparse(path, file_info):
+        raise ValueError(f"会话源文件不是普通文件: {path}")
+
+    resolved_root = source_root.resolve(strict=True)
+    resolved_path = path.resolve(strict=True)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"会话源文件真实路径越界: {path}") from exc
+    return file_info
+
+
+def _local_provider_session_root(home: Path, provider: str) -> Path:
+    source_root_name = {"claude": "projects", "codex": "sessions"}.get(provider)
+    if source_root_name is None:
+        raise ValueError(f"不支持的会话来源: {provider}")
+    return Path(home) / source_root_name
+
+
+def _local_export_file_info(path: Path, home: Path, provider: str) -> tuple[str, os.stat_result]:
+    source_root = _local_provider_session_root(home, provider)
+    info = _validate_local_source_file(path, source_root)
+    resolved_home = Path(home).resolve(strict=False)
+    resolved_path = Path(path).resolve(strict=True)
+    try:
+        relative = resolved_path.relative_to(resolved_home).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"会话源文件不在来源目录内: {path}") from exc
+    _validate_provider_session_path(provider, relative)
+    return relative, info
+
+
+@contextmanager
+def _open_validated_local_source(path: Path, source_root: Path, expected_info: os.stat_result):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    handle = None
+    try:
+        actual_info = os.fstat(descriptor)
+        current_info = _validate_local_source_file(path, source_root)
+        if (
+            not stat.S_ISREG(actual_info.st_mode)
+            or (actual_info.st_dev, actual_info.st_ino) != (current_info.st_dev, current_info.st_ino)
+            or (expected_info.st_dev, expected_info.st_ino) != (actual_info.st_dev, actual_info.st_ino)
+        ):
+            raise ValueError(f"会话源文件在导出期间发生变化: {path}")
+        handle = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        yield handle
+    finally:
+        if handle is not None:
+            handle.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _copy_binary_stream(source, target, expected_size: int) -> int:
+    written = 0
+    while True:
+        chunk = source.read(min(1024 * 1024, expected_size - written + 1))
+        if not chunk:
+            return written
+        written += len(chunk)
+        if written > expected_size:
+            raise SessionSourceChangedError("会话源文件在导出期间增大")
+        target.write(chunk)
+
+
 def _provider_home(provider: str, claude_home: Path, codex_home: Path) -> Path:
     if provider == "claude":
         return claude_home
@@ -1119,69 +1613,155 @@ def _rewrite_cwd_values(value: Any, target_project_path: str) -> None:
             _rewrite_cwd_values(item, target_project_path)
 
 
-def _record_files(record: SessionRecord) -> list[Path]:
+def _record_files(record: SessionRecord, *, include_support_files: bool = True) -> list[Path]:
     files = [record.source_path]
-    if record.provider == "claude":
+    if include_support_files and record.provider == "claude":
         support_dir = record.source_path.with_suffix("")
         if support_dir.is_dir():
             files.extend(_iter_local_files(support_dir))
     return files
 
 
-def _iter_local_files(root: Path):
+def _iter_local_claude_session_files(projects_root: Path):
+    projects_root = _absolute_lexical_path(projects_root)
+    if not _local_directory_is_safe(projects_root):
+        return
     try:
-        walker = os.walk(root, onerror=lambda _error: None)
-        for dirpath, _dirnames, filenames in walker:
-            for filename in filenames:
-                path = Path(dirpath) / filename
+        with os.scandir(projects_root) as projects:
+            for project_entry in projects:
+                if not _safe_local_child_name(project_entry.name):
+                    continue
+                project_dir = projects_root / project_entry.name
+                if not _local_directory_is_safe(project_dir):
+                    continue
                 try:
-                    if path.is_file():
-                        yield path
+                    with os.scandir(project_dir) as entries:
+                        for entry in entries:
+                            if not entry.name.endswith(".jsonl") or not _safe_local_child_name(entry.name):
+                                continue
+                            path = project_dir / entry.name
+                            try:
+                                _validate_local_source_file(path, projects_root)
+                                yield path
+                            except (OSError, ValueError):
+                                continue
                 except OSError:
                     continue
     except OSError:
         return
 
 
-def _remote_record_files(sftp, record: SessionRecord) -> list[str]:
+def _iter_local_files(root: Path):
+    root = _absolute_lexical_path(root)
+    if not _local_directory_is_safe(root):
+        return
+    try:
+        walker = os.walk(root, onerror=lambda _error: None)
+        for dirpath, dirnames, filenames in walker:
+            current_dir = Path(dirpath)
+            safe_dirnames: list[str] = []
+            for dirname in dirnames:
+                child = current_dir / dirname
+                if not _safe_local_child_name(dirname) or not _local_directory_is_safe(child):
+                    continue
+                try:
+                    child.resolve(strict=True).relative_to(root.resolve(strict=True))
+                except (OSError, ValueError):
+                    continue
+                safe_dirnames.append(dirname)
+            dirnames[:] = safe_dirnames
+            for filename in filenames:
+                if not _safe_local_child_name(filename):
+                    continue
+                path = current_dir / filename
+                try:
+                    _validate_local_source_file(path, root)
+                    yield path
+                except (OSError, ValueError):
+                    continue
+    except OSError:
+        return
+
+
+def _remote_record_files(sftp, record: SessionRecord, *, include_support_files: bool = True) -> list[str]:
     if not record.remote_path:
         return []
     files = [record.remote_path]
-    if record.provider == "claude":
+    if include_support_files and record.provider == "claude":
         support_dir = record.remote_path[:-6] if record.remote_path.endswith(".jsonl") else record.remote_path
         files.extend(path for path, _attr in _remote_walk_files(sftp, support_dir, suffix="", limit=MAX_REMOTE_SESSION_FILES))
     return files
 
 
 def _safe_destination(root: Path, relative_path: str) -> Path:
-    pure = PurePosixPath(relative_path)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
-        raise ValueError(f"不安全的相对路径: {relative_path}")
-    target = (root / Path(*pure.parts)).resolve()
-    resolved_root = root.resolve()
-    if target != resolved_root and resolved_root not in target.parents:
+    pure = _validated_portable_relative_path(relative_path)
+    lexical_root = _absolute_lexical_path(root)
+    target = lexical_root / Path(*pure.parts)
+    resolved_root = lexical_root.resolve(strict=False)
+    resolved_target = target.resolve(strict=False)
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
         raise ValueError(f"目标路径越界: {relative_path}")
     return target
 
 
 def _validate_provider_session_path(provider: str, relative_path: str) -> None:
     """Restrict package writes to provider-owned session subtrees."""
-    pure = PurePosixPath(str(relative_path or ""))
+    pure = _validated_portable_relative_path(relative_path)
     expected_root = {"claude": "projects", "codex": "sessions"}.get(provider)
     if (
         expected_root is None
-        or pure.is_absolute()
         or len(pure.parts) < 2
         or pure.parts[0] != expected_root
-        or any(part in {"", ".", ".."} for part in pure.parts)
     ):
         raise ValueError(f"不支持的 {provider} 会话路径: {relative_path}")
 
 
-def _safe_remote_destination(root: str, relative_path: str) -> str:
-    pure = PurePosixPath(relative_path)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+def _validated_portable_relative_path(relative_path: str) -> PurePosixPath:
+    text = str(relative_path or "")
+    if (
+        not text
+        or text != text.strip()
+        or "\\" in text
+        or ":" in text
+        or any(ord(char) < 32 for char in text)
+    ):
         raise ValueError(f"不安全的相对路径: {relative_path}")
+    windows_path = PureWindowsPath(text)
+    if windows_path.is_absolute() or windows_path.drive or windows_path.root:
+        raise ValueError(f"不安全的 Windows 路径: {relative_path}")
+    pure = PurePosixPath(text)
+    if (
+        pure.is_absolute()
+        or not pure.parts
+        or pure.as_posix() != text
+        or any(not _safe_portable_path_component(part) for part in pure.parts)
+    ):
+        raise ValueError(f"不安全的相对路径: {relative_path}")
+    return pure
+
+
+def _safe_portable_path_component(part: str) -> bool:
+    if part in {"", ".", ".."} or part.endswith((" ", ".")):
+        return False
+    base = part.split(".", 1)[0].rstrip(" .").upper()
+    reserved = {"CON", "PRN", "AUX", "NUL"}
+    reserved.update(f"COM{number}" for number in range(1, 10))
+    reserved.update(f"LPT{number}" for number in range(1, 10))
+    return base not in reserved
+
+
+def _safe_local_child_name(name: str) -> bool:
+    text = str(name or "")
+    return (
+        text not in {"", ".", ".."}
+        and "/" not in text
+        and "\\" not in text
+        and "\x00" not in text
+    )
+
+
+def _safe_remote_destination(root: str, relative_path: str) -> str:
+    pure = _validated_portable_relative_path(relative_path)
     target = posixpath.normpath(posixpath.join(root, *pure.parts))
     root_normalized = posixpath.normpath(root)
     if target != root_normalized and not target.startswith(root_normalized.rstrip("/") + "/"):
@@ -1190,8 +1770,12 @@ def _safe_remote_destination(root: str, relative_path: str) -> str:
 
 
 def _remote_relative_to_home(path: str, home: str) -> str:
-    normalized_path = posixpath.normpath(str(path or "").replace("\\", "/"))
-    normalized_home = posixpath.normpath(str(home or "").replace("\\", "/"))
+    raw_path = str(path or "")
+    raw_home = str(home or "")
+    if "\\" in raw_path or "\x00" in raw_path or "\\" in raw_home or "\x00" in raw_home:
+        raise ValueError(f"远端路径格式不安全: {path}")
+    normalized_path = posixpath.normpath(raw_path)
+    normalized_home = posixpath.normpath(raw_home)
     if normalized_home == "/":
         return normalized_path.lstrip("/")
     prefix = normalized_home.rstrip("/") + "/"
@@ -1200,10 +1784,201 @@ def _remote_relative_to_home(path: str, home: str) -> str:
     raise ValueError(f"远端路径不在会话目录内: {path}")
 
 
+def _safe_remote_child_name(name: str) -> bool:
+    text = str(name or "")
+    return (
+        text not in {"", ".", ".."}
+        and "/" not in text
+        and "\\" not in text
+        and "\x00" not in text
+    )
+
+
+def _remote_lstat(sftp, path: str, *, fallback_attr=None):
+    lstat_method = getattr(sftp, "lstat", None)
+    if callable(lstat_method):
+        try:
+            return lstat_method(path)
+        except Exception as exc:
+            if ssh_manager._is_not_found_error(exc):
+                return None
+            raise
+    if fallback_attr is not None:
+        return fallback_attr
+    try:
+        return sftp.stat(path)
+    except Exception as exc:
+        if ssh_manager._is_not_found_error(exc):
+            return None
+        raise
+
+
+def _remote_attr_is_link(attr) -> bool:
+    mode = getattr(attr, "st_mode", None)
+    return bool(mode is not None and stat.S_ISLNK(mode))
+
+
+def _remote_source_root(home: str, provider: str) -> str:
+    source_root_name = {"claude": "projects", "codex": "sessions"}.get(provider)
+    if source_root_name is None:
+        raise ValueError(f"不支持的会话来源: {provider}")
+    return posixpath.normpath(posixpath.join(home, source_root_name))
+
+
+def _remote_path_is_within(path: str, root: str) -> bool:
+    normalized_path = posixpath.normpath(path)
+    normalized_root = posixpath.normpath(root)
+    return normalized_path == normalized_root or normalized_path.startswith(normalized_root.rstrip("/") + "/")
+
+
+def _validate_remote_source_file(sftp, path: str, source_root: str):
+    normalized_path = posixpath.normpath(str(path or ""))
+    normalized_root = posixpath.normpath(str(source_root or ""))
+    if (
+        "\\" in str(path or "")
+        or "\x00" in str(path or "")
+        or not _remote_path_is_within(normalized_path, normalized_root)
+        or normalized_path == normalized_root
+    ):
+        raise ValueError(f"远端会话源文件越界: {path}")
+
+    # Paramiko SFTP clients always expose lstat.  A small stat-only fallback is
+    # kept for lightweight adapters, while real SSH exports take the no-follow
+    # path below.
+    if not callable(getattr(sftp, "lstat", None)):
+        file_attr = sftp.stat(normalized_path)
+        mode = getattr(file_attr, "st_mode", None)
+        if mode is not None and not stat.S_ISREG(mode):
+            raise ValueError(f"远端会话源不是普通文件: {path}")
+        return file_attr
+
+    root_attr = _remote_lstat(sftp, normalized_root)
+    if root_attr is None or _remote_attr_is_link(root_attr) or not _remote_attr_is_dir(root_attr):
+        raise ValueError(f"远端会话源目录不安全: {source_root}")
+
+    relative = posixpath.relpath(normalized_path, normalized_root)
+    current = normalized_root
+    parts = relative.split("/")
+    for part in parts[:-1]:
+        if not _safe_remote_child_name(part):
+            raise ValueError(f"远端会话源路径不安全: {path}")
+        current = posixpath.join(current, part)
+        attr = _remote_lstat(sftp, current)
+        if attr is None or _remote_attr_is_link(attr) or not _remote_attr_is_dir(attr):
+            raise ValueError(f"远端会话源目录包含链接: {current}")
+
+    file_attr = _remote_lstat(sftp, normalized_path)
+    if file_attr is None or _remote_attr_is_link(file_attr) or not _remote_attr_is_file(file_attr):
+        raise ValueError(f"远端会话源不是普通文件: {path}")
+    return file_attr
+
+
+def _remote_export_file_info(sftp, path: str, home: str, provider: str):
+    source_root = _remote_source_root(home, provider)
+    info = _validate_remote_source_file(sftp, path, source_root)
+    relative = _remote_relative_to_home(path, home)
+    _validate_provider_session_path(provider, relative)
+    return relative, info
+
+
+def _validate_open_remote_source(sftp, path: str, source, expected_attr) -> None:
+    if not callable(getattr(sftp, "lstat", None)):
+        return
+    current_attr = _remote_lstat(sftp, path)
+    if current_attr is None or _remote_attr_is_link(current_attr) or not _remote_attr_is_file(current_attr):
+        raise ValueError(f"远端会话源在导出期间变得不安全: {path}")
+    opened_stat = getattr(source, "stat", None)
+    if not callable(opened_stat):
+        return
+    opened_attr = opened_stat()
+    if _remote_attr_is_link(opened_attr) or not _remote_attr_is_file(opened_attr):
+        raise ValueError(f"远端会话源不是普通文件: {path}")
+    expected_inode = getattr(expected_attr, "st_ino", None)
+    current_inode = getattr(current_attr, "st_ino", None)
+    opened_inode = getattr(opened_attr, "st_ino", None)
+    if (
+        expected_inode is not None
+        and current_inode is not None
+        and opened_inode is not None
+        and not (expected_inode == current_inode == opened_inode)
+    ):
+        raise ValueError(f"远端会话源在导出期间发生变化: {path}")
+
+
+def _remote_path_prefixes(path: str) -> list[str]:
+    normalized = posixpath.normpath(path)
+    absolute = normalized.startswith("/")
+    current = "/" if absolute else ""
+    result: list[str] = []
+    for part in normalized.split("/"):
+        if not part:
+            continue
+        current = posixpath.join(current, part) if current else part
+        result.append(current)
+    return result
+
+
+def _prepare_remote_import_destination(sftp, root: str, destination: str) -> bool:
+    root = posixpath.normpath(str(root or ""))
+    destination = posixpath.normpath(str(destination or ""))
+    if (
+        not root
+        or "\\" in root
+        or "\x00" in root
+        or not _remote_path_is_within(destination, root)
+        or destination == root
+    ):
+        raise ValueError(f"远端会话目标路径越界: {destination}")
+
+    for current in _remote_path_prefixes(posixpath.dirname(destination)):
+        attr = _remote_lstat(sftp, current)
+        if attr is None:
+            if not _remote_path_is_within(current, root):
+                raise ValueError(f"远端会话根目录的父目录不存在: {current}")
+            try:
+                sftp.mkdir(current)
+            except Exception as exc:
+                raise ValueError(f"无法创建远端会话目录: {current}") from exc
+            try:
+                sftp.chmod(current, 0o700)
+            except Exception:
+                pass
+            attr = _remote_lstat(sftp, current)
+        if attr is None or _remote_attr_is_link(attr) or not _remote_attr_is_dir(attr):
+            raise ValueError(f"远端会话目录包含链接或不是目录: {current}")
+
+    destination_attr = _remote_lstat(sftp, destination)
+    if destination_attr is None:
+        return False
+    if _remote_attr_is_link(destination_attr) or not _remote_attr_is_file(destination_attr):
+        raise ValueError(f"远端会话目标不是普通文件: {destination}")
+    return True
+
+
+def _commit_remote_temp_file(sftp, temp_path: str, destination: str, *, overwrite: bool) -> bool:
+    if overwrite:
+        ssh_manager._replace_remote_file(sftp, temp_path, destination)
+        return True
+    try:
+        # SFTP v3 rename is create-if-absent; unlike posix-rename it must not
+        # replace an existing destination, closing the initial-check race.
+        sftp.rename(temp_path, destination)
+        return True
+    except Exception:
+        destination_attr = _remote_lstat(sftp, destination)
+        if destination_attr is not None:
+            try:
+                sftp.remove(temp_path)
+            except Exception:
+                pass
+            if _remote_attr_is_link(destination_attr) or not _remote_attr_is_file(destination_attr):
+                raise ValueError(f"远端会话目标在提交时变得不安全: {destination}")
+            return False
+        raise
+
+
 def _safe_archive_path(archive_path: str) -> None:
-    pure = PurePosixPath(archive_path)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
-        raise ValueError(f"不安全的包内路径: {archive_path}")
+    pure = _validated_portable_relative_path(archive_path)
     if not pure.parts or pure.parts[0] != "files":
         raise ValueError(f"不支持的包内路径: {archive_path}")
 
@@ -1221,22 +1996,113 @@ def _package_file_info(bundle: zipfile.ZipFile, archive_path: str) -> zipfile.Zi
     return info
 
 
-def _copy_package_file_atomic(bundle: zipfile.ZipFile, info: zipfile.ZipInfo, destination: Path) -> None:
+def _validate_local_import_destination(root: Path, destination: Path) -> bool:
+    root = _absolute_lexical_path(root)
+    destination = _absolute_lexical_path(destination)
+    try:
+        relative_parent = destination.parent.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"本地会话目标路径越界: {destination}") from exc
+
+    current = root
+    for part in ((), *relative_parent.parts):
+        if part:
+            current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"无法检查本地会话目录: {current}") from exc
+        if not stat.S_ISDIR(info.st_mode) or _path_is_link_or_reparse(current, info):
+            raise ValueError(f"本地会话目录包含链接或重解析点: {current}")
+
+    try:
+        destination_info = destination.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ValueError(f"无法检查本地会话目标: {destination}") from exc
+    if (
+        not stat.S_ISREG(destination_info.st_mode)
+        or _path_is_link_or_reparse(destination, destination_info)
+    ):
+        raise ValueError(f"本地会话目标不是普通文件: {destination}")
+    return True
+
+
+def _prepare_local_import_parent(root: Path, destination: Path) -> bool:
+    existed = _validate_local_import_destination(root, destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    return _validate_local_import_destination(root, destination) or existed
+
+
+def _commit_local_temp_file(temp_path: Path, destination: Path, *, overwrite: bool) -> bool:
+    if overwrite:
+        replace_with_retry(temp_path, destination)
+        return True
+    try:
+        os.link(temp_path, destination)
+    except FileExistsError:
+        return False
+    temp_path.unlink(missing_ok=True)
+    return True
+
+
+def _write_local_bytes_atomic(
+    destination: Path,
+    data: bytes,
+    *,
+    root: Path,
+    overwrite: bool,
+) -> bool:
+    _prepare_local_import_parent(root, destination)
     tmp_path = temp_path_for(destination)
     try:
-        with bundle.open(info, "r") as source, tmp_path.open("wb") as target:
-            shutil.copyfileobj(source, target)
-        replace_with_retry(tmp_path, destination)
+        with tmp_path.open("xb") as target:
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+        _validate_local_import_destination(root, destination)
+        return _commit_local_temp_file(tmp_path, destination, overwrite=overwrite)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
 
 
-def _copy_package_file_to_remote(sftp, bundle: zipfile.ZipFile, info: zipfile.ZipInfo, destination: str, file_mode: int | None = None) -> None:
-    remote_dir = posixpath.dirname(destination)
-    if remote_dir:
-        ssh_manager._ensure_remote_dir(sftp, remote_dir)
+def _copy_package_file_atomic(
+    bundle: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    destination: Path,
+    *,
+    root: Path,
+    overwrite: bool,
+) -> bool:
+    _prepare_local_import_parent(root, destination)
+    tmp_path = temp_path_for(destination)
+    try:
+        with bundle.open(info, "r") as source, tmp_path.open("xb") as target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        _validate_local_import_destination(root, destination)
+        return _commit_local_temp_file(tmp_path, destination, overwrite=overwrite)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_package_file_to_remote(
+    sftp,
+    bundle: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    destination: str,
+    *,
+    root: str,
+    overwrite: bool,
+    file_mode: int | None = None,
+) -> bool:
+    _prepare_remote_import_destination(sftp, root, destination)
     temp_path = f"{destination}.tmp.{uuid.uuid4().hex}"
     try:
         with bundle.open(info, "r") as source, sftp.open(temp_path, "wb") as target:
@@ -1246,12 +2112,15 @@ def _copy_package_file_to_remote(sftp, bundle: zipfile.ZipFile, info: zipfile.Zi
                 sftp.chmod(temp_path, file_mode)
             except Exception:
                 pass
-        ssh_manager._replace_remote_file(sftp, temp_path, destination)
+        _prepare_remote_import_destination(sftp, root, destination)
+        if not _commit_remote_temp_file(sftp, temp_path, destination, overwrite=overwrite):
+            return False
         if file_mode is not None:
             try:
                 sftp.chmod(destination, file_mode)
             except Exception:
                 pass
+        return True
     except Exception:
         try:
             sftp.remove(temp_path)
@@ -1260,10 +2129,16 @@ def _copy_package_file_to_remote(sftp, bundle: zipfile.ZipFile, info: zipfile.Zi
         raise
 
 
-def _write_remote_bytes_atomic(sftp, destination: str, data: bytes, file_mode: int | None = None) -> None:
-    remote_dir = posixpath.dirname(destination)
-    if remote_dir:
-        ssh_manager._ensure_remote_dir(sftp, remote_dir)
+def _write_remote_bytes_atomic(
+    sftp,
+    destination: str,
+    data: bytes,
+    *,
+    root: str,
+    overwrite: bool,
+    file_mode: int | None = None,
+) -> bool:
+    _prepare_remote_import_destination(sftp, root, destination)
     temp_path = f"{destination}.tmp.{uuid.uuid4().hex}"
     try:
         with sftp.open(temp_path, "wb") as handle:
@@ -1273,12 +2148,15 @@ def _write_remote_bytes_atomic(sftp, destination: str, data: bytes, file_mode: i
                 sftp.chmod(temp_path, file_mode)
             except Exception:
                 pass
-        ssh_manager._replace_remote_file(sftp, temp_path, destination)
+        _prepare_remote_import_destination(sftp, root, destination)
+        if not _commit_remote_temp_file(sftp, temp_path, destination, overwrite=overwrite):
+            return False
         if file_mode is not None:
             try:
                 sftp.chmod(destination, file_mode)
             except Exception:
                 pass
+        return True
     except Exception:
         try:
             sftp.remove(temp_path)
@@ -1322,7 +2200,11 @@ def _ensure_unique_package_entries(bundle: zipfile.ZipFile, names: set[str]) -> 
 
 def _read_codex_index(codex_home: Path) -> dict[str, dict[str, Any]]:
     index_path = codex_home / "session_index.jsonl"
-    if not index_path.exists():
+    try:
+        index_info = index_path.lstat()
+    except OSError:
+        return {}
+    if not stat.S_ISREG(index_info.st_mode) or _path_is_link_or_reparse(index_path, index_info):
         return {}
     result: dict[str, dict[str, Any]] = {}
     try:
@@ -1340,7 +2222,11 @@ def _read_codex_index(codex_home: Path) -> dict[str, dict[str, Any]]:
 
 
 def _read_remote_codex_index(sftp, codex_home: str) -> dict[str, dict[str, Any]]:
-    return _parse_codex_index_text(_remote_read_text(sftp, posixpath.join(codex_home, "session_index.jsonl"), missing_ok=True))
+    index_path = posixpath.join(codex_home, "session_index.jsonl")
+    index_attr = _remote_lstat(sftp, index_path)
+    if index_attr is None or _remote_attr_is_link(index_attr) or not _remote_attr_is_file(index_attr):
+        return {}
+    return _parse_codex_index_text(_remote_read_text(sftp, index_path, missing_ok=True))
 
 
 def _parse_codex_index_text(text: str) -> dict[str, dict[str, Any]]:
@@ -1357,36 +2243,60 @@ def _parse_codex_index_text(text: str) -> dict[str, dict[str, Any]]:
 
 def _update_codex_index(codex_home: Path, sessions: list[dict[str, Any]]) -> None:
     index_path = codex_home / "session_index.jsonl"
-    existing = _read_codex_index(codex_home)
-    lines = _codex_index_lines(existing, sessions)
-    if lines:
-        atomic_write_text(index_path, "\n".join(lines) + "\n")
+    payload = _codex_index_append_payload(sessions)
+    if not payload:
+        return
+    with _CODEX_INDEX_APPEND_LOCK:
+        existed = _prepare_local_import_parent(codex_home, index_path)
+        if existed and index_path.stat().st_size:
+            payload = b"\n" + payload
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(index_path, flags, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("无法追加 Codex 会话索引")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
-def _update_remote_codex_index(client, codex_home: str, sessions: list[dict[str, Any]]) -> None:
+def _update_remote_codex_index(sftp, codex_home: str, sessions: list[dict[str, Any]]) -> None:
     index_path = posixpath.join(codex_home, "session_index.jsonl")
-    existing = _parse_codex_index_text(ssh_manager.read_remote_file(client, index_path) or "")
-    lines = _codex_index_lines(existing, sessions)
-    if lines:
-        ssh_manager.write_remote_file(client, index_path, "\n".join(lines) + "\n", file_mode=0o600)
+    payload = _codex_index_append_payload(sessions)
+    if not payload:
+        return
+    existed = _prepare_remote_import_destination(sftp, codex_home, index_path)
+    if existed:
+        payload = b"\n" + payload
+    with sftp.open(index_path, "ab") as handle:
+        handle.write(payload)
+    try:
+        sftp.chmod(index_path, 0o600)
+    except Exception:
+        pass
 
 
-def _codex_index_lines(existing: dict[str, dict[str, Any]], sessions: list[dict[str, Any]]) -> list[str]:
+def _codex_index_append_payload(sessions: list[dict[str, Any]]) -> bytes:
+    lines: list[str] = []
     for session in sessions:
         session_id = str(session.get("session_id") or "")
         if not session_id:
             continue
-        existing[session_id] = {
+        item = {
             "id": session_id,
             "thread_name": session.get("title") or session.get("summary") or session_id,
             "updated_at": session.get("updated_at") or datetime.now(timezone.utc).isoformat(),
         }
-    if not existing:
-        return []
-    return [
-        json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-        for item in sorted(existing.values(), key=lambda value: str(value.get("updated_at") or ""))
-    ]
+        lines.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+    if not lines:
+        return b""
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _remote_listdir_attr(sftp, path: str):
@@ -1397,23 +2307,48 @@ def _remote_listdir_attr(sftp, path: str):
 
 
 def _remote_walk_files(sftp, root: str, suffix: str = "", limit: int = MAX_REMOTE_SESSION_FILES):
-    if not _remote_is_dir(sftp, root):
+    root = posixpath.normpath(str(root or ""))
+    root_attr = _remote_lstat(sftp, root)
+    if root_attr is None or _remote_attr_is_link(root_attr) or not _remote_attr_is_dir(root_attr):
         return
-    pending = [posixpath.normpath(root)]
+    pending = [(root, root_attr)]
+    visited: set[tuple[Any, ...]] = set()
     yielded = 0
     while pending and yielded < limit:
-        current = pending.pop(0)
+        current, current_attr = pending.pop(0)
+        identity = _remote_directory_identity(current, current_attr)
+        if identity in visited:
+            continue
+        visited.add(identity)
         for attr in _remote_listdir_attr(sftp, current):
-            path = posixpath.join(current, attr.filename)
-            if _remote_attr_is_dir(attr) or (not _remote_attr_is_file(attr) and _remote_is_dir(sftp, path)):
-                pending.append(path)
+            filename = str(getattr(attr, "filename", "") or "")
+            if not _safe_remote_child_name(filename):
+                continue
+            path = posixpath.normpath(posixpath.join(current, filename))
+            if not _remote_path_is_within(path, root):
+                continue
+            actual_attr = _remote_lstat(sftp, path, fallback_attr=attr)
+            if actual_attr is None or _remote_attr_is_link(actual_attr):
+                continue
+            if _remote_attr_is_dir(actual_attr):
+                pending.append((path, actual_attr))
+                continue
+            if not _remote_attr_is_file(actual_attr):
                 continue
             if suffix and not path.endswith(suffix):
                 continue
             yielded += 1
-            yield path, attr
+            yield path, actual_attr
             if yielded >= limit:
                 break
+
+
+def _remote_directory_identity(path: str, attr) -> tuple[Any, ...]:
+    device = getattr(attr, "st_dev", None)
+    inode = getattr(attr, "st_ino", None)
+    if device is not None and inode is not None:
+        return ("inode", int(device), int(inode))
+    return ("path", posixpath.normpath(path))
 
 
 def _remote_attr_is_dir(attr) -> bool:

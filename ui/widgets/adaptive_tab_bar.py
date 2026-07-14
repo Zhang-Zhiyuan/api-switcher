@@ -22,6 +22,7 @@ class AdaptiveTabBar(ctk.CTkFrame):
         self._values = list(values)
         self._command = command
         self._selected = ""
+        self._enabled = True
         self._buttons: dict[str, ctk.CTkButton] = {}
         self._column_count = 0
         self._layout_after_id = None
@@ -60,6 +61,12 @@ class AdaptiveTabBar(ctk.CTkFrame):
             self._configure_button(previous, selected=False)
         self._configure_button(value, selected=True)
 
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        state = "normal" if self._enabled else "disabled"
+        for button in self._buttons.values():
+            button.configure(state=state)
+
     def _configure_button(self, value: str, *, selected: bool) -> None:
         self._buttons[value].configure(
             fg_color=COLORS["primary"] if selected else COLORS["surface_alt"],
@@ -69,6 +76,8 @@ class AdaptiveTabBar(ctk.CTkFrame):
         )
 
     def _select_from_user(self, value: str) -> None:
+        if not self._enabled:
+            return
         self.set(value)
         if self._command is not None:
             self._command(value)

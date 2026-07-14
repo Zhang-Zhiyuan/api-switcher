@@ -157,6 +157,30 @@ def test_adaptive_tab_selection_only_restyles_changed_buttons():
     assert bar._buttons["C"].calls == []
 
 
+def test_adaptive_tab_bar_ignores_user_selection_while_disabled():
+    class Button:
+        def __init__(self):
+            self.state = "normal"
+
+        def configure(self, **kwargs):
+            if "state" in kwargs:
+                self.state = kwargs["state"]
+
+    selected = []
+    bar = object.__new__(AdaptiveTabBar)
+    bar._buttons = {name: Button() for name in ("A", "B")}
+    bar._selected = "A"
+    bar._enabled = True
+    bar._command = selected.append
+
+    AdaptiveTabBar.set_enabled(bar, False)
+    AdaptiveTabBar._select_from_user(bar, "B")
+
+    assert bar._selected == "A"
+    assert selected == []
+    assert all(button.state == "disabled" for button in bar._buttons.values())
+
+
 def test_toast_wraplength_respects_physical_screen_and_dpi():
     assert _toast_wraplength(1920, 1.5) == 360
     assert _toast_wraplength(480, 1.5) == 256

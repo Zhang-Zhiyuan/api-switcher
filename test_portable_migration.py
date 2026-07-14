@@ -583,8 +583,172 @@ def test_browser_restore_rejects_size_mismatch_without_profile_leftover(tmp_path
     assert restored_bytes == 0
     assert restored_profiles == set()
     assert any("文件大小校验失败" in item for item in skipped)
-    assert any("没有成功恢复任何浏览器文件" in item for item in skipped)
     assert not target.exists()
+
+
+def test_browser_restore_rejects_reparse_target_without_touching_link_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    target = paths.STORAGE_DIR / "browser_profiles" / "chrome_Linked"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    sentinel = victim / "keep.txt"
+    sentinel.write_text("original", encoding="utf-8")
+
+    real_is_reparse = portable_migration._path_is_reparse_point
+    target.parent.mkdir(parents=True)
+    try:
+        target.symlink_to(victim, target_is_directory=True)
+    except OSError:
+        target.mkdir()
+        monkeypatch.setattr(
+            portable_migration,
+            "_path_is_reparse_point",
+            lambda path: Path(path) == target or real_is_reparse(path),
+        )
+
+    content = b"new login state"
+    browser_data = {
+        "Linked": {
+            "profile": {
+                "name": "Linked",
+                "browser_type": "chrome",
+                "user_data_dir": str(target),
+            },
+            "file_count": 1,
+            "files": [{
+                "path": "Local State",
+                "size": len(content),
+                "compression": "none",
+                "data": base64.b64encode(content).decode("ascii"),
+            }],
+        },
+    }
+
+    restored_files, restored_bytes, skipped, restored_profiles = portable_migration._restore_browser_data(browser_data)
+
+    assert restored_files == 0
+    assert restored_bytes == 0
+    assert not restored_profiles
+    assert any("符号链接或重解析" in item for item in skipped)
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert not (victim / "Local State").exists()
+
+
+def test_browser_restore_invalid_entry_keeps_existing_profile_untouched(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    target = paths.STORAGE_DIR / "browser_profiles" / "chrome_AllOrNothing"
+    target.mkdir(parents=True)
+    sentinel = target / "keep.txt"
+    sentinel.write_text("original", encoding="utf-8")
+    valid_content = b"valid-first-entry"
+    browser_data = {
+        "AllOrNothing": {
+            "profile": {
+                "name": "AllOrNothing",
+                "browser_type": "chrome",
+                "user_data_dir": str(target),
+            },
+            "files": [
+                {
+                    "path": "Default/Network/Cookies",
+                    "size": len(valid_content),
+                    "compression": "none",
+                    "data": base64.b64encode(valid_content).decode("ascii"),
+                },
+                {
+                    "path": "Default/Local Storage/leveldb/000003.log",
+                    "size": 10,
+                    "compression": "none",
+                    "data": "invalid-base64",
+                },
+            ],
+        },
+    }
+
+    restored_files, restored_bytes, skipped, restored_profiles = portable_migration._restore_browser_data(browser_data)
+
+    assert restored_files == 0
+    assert restored_bytes == 0
+    assert not restored_profiles
+    assert any("解码失败" in item for item in skipped)
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert not (target / "Default" / "Network" / "Cookies").exists()
+    assert not list(target.parent.glob("*.import_staging"))
+    assert not list(target.parent.glob("*.import_backup"))
+
+
+def test_browser_restore_stages_profiles_independently(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    root = paths.STORAGE_DIR / "browser_profiles"
+    good_target = root / "chrome_Good"
+    bad_target = root / "chrome_Bad"
+    for target in (good_target, bad_target):
+        target.mkdir(parents=True)
+        (target / "keep.txt").write_text("original", encoding="utf-8")
+
+    good_content = b"good-cookie"
+    browser_data = {
+        "Good": {
+            "profile": {"name": "Good", "browser_type": "chrome", "user_data_dir": str(good_target)},
+            "files": [{
+                "path": "Default/Network/Cookies",
+                "size": len(good_content),
+                "compression": "none",
+                "data": base64.b64encode(good_content).decode("ascii"),
+            }],
+        },
+        "Bad": {
+            "profile": {"name": "Bad", "browser_type": "chrome", "user_data_dir": str(bad_target)},
+            "file_count": 2,
+            "files": [{
+                "path": "Default/Network/Cookies",
+                "size": 3,
+                "compression": "none",
+                "data": base64.b64encode(b"bad").decode("ascii"),
+            }],
+        },
+    }
+
+    restored_files, restored_bytes, skipped, restored_profiles = portable_migration._restore_browser_data(browser_data)
+
+    assert restored_files == 1
+    assert restored_bytes == len(good_content)
+    assert restored_profiles == {"Good"}
+    assert any("Bad: 恢复失败" in item for item in skipped)
+    assert any("文件数量与声明不一致" in item for item in skipped)
+    assert not (good_target / "keep.txt").exists()
+    assert (good_target / "Default" / "Network" / "Cookies").read_bytes() == good_content
+    assert (bad_target / "keep.txt").read_text(encoding="utf-8") == "original"
+    assert not (bad_target / "Default" / "Network" / "Cookies").exists()
+
+
+def test_browser_restore_rejects_duplicate_paths_before_replacing_original(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    target = paths.STORAGE_DIR / "browser_profiles" / "chrome_Duplicate"
+    target.mkdir(parents=True)
+    sentinel = target / "keep.txt"
+    sentinel.write_text("original", encoding="utf-8")
+    encoded = base64.b64encode(b"one").decode("ascii")
+    browser_data = {
+        "Duplicate": {
+            "profile": {"name": "Duplicate", "browser_type": "chrome", "user_data_dir": str(target)},
+            "file_count": 2,
+            "files": [
+                {"path": "Default/Network/Cookies", "size": 3, "compression": "none", "data": encoded},
+                {"path": "default/network/cookies", "size": 3, "compression": "none", "data": encoded},
+            ],
+        },
+    }
+
+    restored_files, restored_bytes, skipped, restored_profiles = portable_migration._restore_browser_data(browser_data)
+
+    assert restored_files == 0
+    assert restored_bytes == 0
+    assert not restored_profiles
+    assert any("重复的浏览器文件路径" in item for item in skipped)
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert not list(target.parent.glob("*.import_staging"))
+    assert not list(target.parent.glob("*.import_backup"))
 
 
 def test_portable_browser_export_keeps_leveldb_log_files(tmp_path, monkeypatch):
@@ -611,6 +775,135 @@ def test_portable_browser_export_keeps_leveldb_log_files(tmp_path, monkeypatch):
     assert browser_data["LogOnly"]["files"][0]["path"].endswith("000003.log")
 
 
+def test_portable_browser_export_only_keeps_default_login_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    source = tmp_path / "source"
+    included = {
+        "Local State": b"encryption-key",
+        "Default/Network/Cookies": b"cookies",
+        "Default/Local Storage/leveldb/data.ldb": b"local-storage",
+        "Default/IndexedDB/site/index.data": b"indexed-db",
+        "Default/Session Storage/session.ldb": b"session-storage",
+        "Default/WebStorage/QuotaManager": b"web-storage",
+        "Default/Storage/ext/state": b"extension-storage",
+        "Default/Service Worker/Database/000003.log": b"service-worker-db",
+        "Default/Preferences": b"preferences",
+        "Default/Secure Preferences": b"secure-preferences",
+        "Default/Login Data": b"login-data",
+    }
+    excluded = {
+        "Default/Cache/cache.bin": b"cache",
+        "Default/Storage/site/CacheStorage/cache/data": b"nested-cache-storage",
+        "Default/WebStorage/site/DawnGraphiteCache/data": b"nested-graphite-cache",
+        "Default/WebStorage/site/DawnWebGPUCache/data": b"nested-webgpu-cache",
+        "Default/IndexedDB/site/ScriptCache/script": b"nested-script-cache",
+        "Default/Local Storage/site/Media Cache/media": b"nested-media-cache",
+        "Default/History": b"history",
+        "Default/Extensions/demo/extension.js": b"extension",
+        "Default/Media History": b"media",
+        "Default/DawnCache/data.bin": b"dawn-cache",
+        "Default/Service Worker/CacheStorage/cache/data": b"service-worker-cache",
+        "Default/Service Worker/ScriptCache/script": b"service-worker-script",
+        "component_crx_cache/component.crx": b"component-cache",
+        "ProvenanceData/1/model.ort": b"rebuildable-model",
+        "Profile 1/Network/Cookies": b"unused-profile",
+        "Other Root File": b"runtime-data",
+    }
+    for relative_path, content in {**included, **excluded}.items():
+        path = source / Path(relative_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    store = {
+        "browser_profiles": [{
+            "name": "Portable",
+            "browser_type": "chrome",
+            "profile_mode": "managed",
+            "user_data_dir": str(source),
+        }],
+    }
+
+    browser_data, skipped, file_count, total_bytes = portable_migration._collect_browser_profile_data(store)
+
+    exported_paths = {
+        entry["path"]
+        for entry in browser_data["Portable"]["files"]
+    }
+    assert exported_paths == set(included)
+    assert file_count == len(included)
+    assert total_bytes == sum(len(content) for content in included.values())
+    assert not skipped
+
+
+@pytest.mark.parametrize("blocked_name", ["source", "Default", "Cookies"])
+def test_portable_browser_export_rejects_reparse_components(tmp_path, monkeypatch, blocked_name):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    source = tmp_path / "source"
+    cookie = source / "Default" / "Network" / "Cookies"
+    cookie.parent.mkdir(parents=True)
+    cookie.write_bytes(b"cookie")
+    original_check = portable_migration._path_is_reparse_point
+
+    def simulated_reparse(path):
+        return Path(path).name == blocked_name or original_check(path)
+
+    monkeypatch.setattr(portable_migration, "_path_is_reparse_point", simulated_reparse)
+    store = {
+        "browser_profiles": [{
+            "name": "Linked",
+            "browser_type": "chrome",
+            "profile_mode": "managed",
+            "user_data_dir": str(source),
+        }],
+    }
+
+    browser_data, skipped, file_count, total_bytes = portable_migration._collect_browser_profile_data(store)
+
+    assert browser_data == {}
+    assert file_count == 0
+    assert total_bytes == 0
+    assert skipped
+    assert store["browser_profiles"] == []
+
+
+def test_portable_browser_export_uses_bounded_read_and_rechecks_actual_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    monkeypatch.setattr(portable_migration, "MAX_BROWSER_FILE_BYTES", 8)
+    source = tmp_path / "source"
+    cookie = source / "Default" / "Network" / "Cookies"
+    cookie.parent.mkdir(parents=True)
+    cookie.write_bytes(b"x")
+    original_open = Path.open
+    read_sizes: list[int] = []
+
+    class GrowingFile(BytesIO):
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return b"x" * 9
+
+    def controlled_open(path, mode="r", *args, **kwargs):
+        if Path(path) == cookie and mode == "rb":
+            return GrowingFile()
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", controlled_open)
+    store = {
+        "browser_profiles": [{
+            "name": "Growing",
+            "browser_type": "chrome",
+            "profile_mode": "managed",
+            "user_data_dir": str(source),
+        }],
+    }
+
+    browser_data, skipped, file_count, total_bytes = portable_migration._collect_browser_profile_data(store)
+
+    assert read_sizes == [portable_migration.MAX_BROWSER_FILE_BYTES + 1]
+    assert browser_data == {}
+    assert file_count == 0
+    assert total_bytes == 0
+    assert any("读取后文件过大" in item for item in skipped)
+
+
 def test_portable_browser_export_does_not_treat_empty_path_as_working_directory():
     store = {
         "browser_profiles": [{
@@ -633,6 +926,10 @@ def test_portable_browser_export_does_not_treat_empty_path_as_working_directory(
 def test_portable_export_rejects_live_profile_store_and_browser_source_paths(tmp_path, monkeypatch):
     profiles_file = tmp_path / "profiles.json"
     profiles_file.write_text("keep-profile-store", encoding="utf-8")
+    profiles_backup = profiles_file.with_suffix(".backup")
+    profiles_backup.write_text("keep-profile-backup", encoding="utf-8")
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
     browser_dir = tmp_path / "browser"
     browser_file = browser_dir / "Default" / "Preferences"
     browser_file.parent.mkdir(parents=True)
@@ -644,25 +941,38 @@ def test_portable_export_rejects_live_profile_store_and_browser_source_paths(tmp
         "profile_mode": "managed",
         "user_data_dir": str(browser_dir),
     }]
+    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:server"}]
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
     monkeypatch.setattr(profile_manager, "_load_store", lambda: store)
+    monkeypatch.setattr(paths, "SECRETS_DIR", secrets_dir)
 
     with pytest.raises(ValueError, match="不能覆盖当前 Profile"):
         portable_migration.export_portable_profiles(profiles_file, "strong-password")
+    with pytest.raises(ValueError, match="不能覆盖当前 Profile"):
+        portable_migration.export_portable_profiles(profiles_backup, "strong-password")
+    with pytest.raises(ValueError, match="密钥存储目录"):
+        portable_migration.export_portable_profiles(secrets_dir / "bundle.asxprofile", "strong-password")
     with pytest.raises(ValueError, match="浏览器 Profile"):
         portable_migration.export_portable_profiles(browser_file, "strong-password")
+    with pytest.raises(ValueError, match="浏览器 Profile"):
+        portable_migration.export_portable_profiles(
+            browser_file,
+            "strong-password",
+            selection={"ssh_profiles": {"Server"}},
+        )
 
     assert profiles_file.read_text(encoding="utf-8") == "keep-profile-store"
+    assert profiles_backup.read_text(encoding="utf-8") == "keep-profile-backup"
     assert browser_file.read_text(encoding="utf-8") == "keep-browser-data"
 
 
 def test_portable_browser_sanitized_name_collisions_get_distinct_directories(tmp_path, monkeypatch):
     source_a = tmp_path / "source_a"
     source_b = tmp_path / "source_b"
-    source_a.mkdir()
-    source_b.mkdir()
-    (source_a / "marker.txt").write_text("FIRST", encoding="utf-8")
-    (source_b / "marker.txt").write_text("SECOND", encoding="utf-8")
+    (source_a / "Default" / "Network").mkdir(parents=True)
+    (source_b / "Default" / "Network").mkdir(parents=True)
+    (source_a / "Default" / "Network" / "marker.txt").write_text("FIRST", encoding="utf-8")
+    (source_b / "Default" / "Network" / "marker.txt").write_text("SECOND", encoding="utf-8")
     monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "export_storage")
     store = {
         "browser_profiles": [
@@ -694,8 +1004,216 @@ def test_portable_browser_sanitized_name_collisions_get_distinct_directories(tmp
     assert not restore_skips
     assert restored_names == {"A/B", "A?B"}
     by_name = {profile["name"]: Path(profile["user_data_dir"]) for profile in profiles}
-    assert (by_name["A/B"] / "marker.txt").read_text(encoding="utf-8") == "FIRST"
-    assert (by_name["A?B"] / "marker.txt").read_text(encoding="utf-8") == "SECOND"
+    assert (by_name["A/B"] / "Default" / "Network" / "marker.txt").read_text(encoding="utf-8") == "FIRST"
+    assert (by_name["A?B"] / "Default" / "Network" / "marker.txt").read_text(encoding="utf-8") == "SECOND"
+
+
+def test_portable_export_selection_filters_profiles_secrets_and_active_names(tmp_path, monkeypatch):
+    browser_keep = tmp_path / "browser_keep"
+    browser_drop = tmp_path / "browser_drop"
+    for source, content in ((browser_keep, b"keep-cookie"), (browser_drop, b"drop-cookie")):
+        cookie = source / "Default" / "Network" / "Cookies"
+        cookie.parent.mkdir(parents=True)
+        cookie.write_bytes(content)
+        (source / "Local State").write_bytes(b"local-state")
+
+    refs = {
+        "claude:keep": "claude-keep-secret",
+        "claude:drop": "claude-drop-secret",
+        "codex:keep": "codex-keep-secret",
+        "codex:drop": "codex-drop-secret",
+        "ssh:keep": "ssh-keep-secret",
+        "ssh:drop": "ssh-drop-secret",
+        "unknown:claude": "must-not-export",
+        "unknown:ssh": "must-not-export",
+    }
+    store = profile_manager._get_default_store()
+    store["unexpected_top_level"] = {"private": "must-not-export"}
+    store["claude_profiles"] = [
+        {
+            "name": "ClaudeKeep",
+            "provider": "custom",
+            "auth_token_ref": "claude:keep",
+            "surprise_ref": "unknown:claude",
+            "unknown_profile_field": "must-not-export",
+        },
+        {"name": "ClaudeDrop", "provider": "custom", "auth_token_ref": "claude:drop"},
+    ]
+    store["codex_profiles"] = [
+        {"name": "CodexKeep", "model_provider": "custom", "api_key_ref": "codex:keep"},
+        {"name": "CodexDrop", "model_provider": "custom", "api_key_ref": "codex:drop"},
+    ]
+    store["ssh_profiles"] = [
+        {"name": "SshKeep", "password_ref": "ssh:keep", "surprise_ref": "unknown:ssh"},
+        {"name": "SshDrop", "password_ref": "ssh:drop"},
+    ]
+    store["browser_profiles"] = [
+        {"name": "BrowserKeep", "browser_type": "chrome", "profile_mode": "managed", "user_data_dir": str(browser_keep)},
+        {"name": "BrowserDrop", "browser_type": "edge", "profile_mode": "managed", "user_data_dir": str(browser_drop)},
+    ]
+    store["active_claude_profile"] = "ClaudeKeep"
+    store["active_codex_profile"] = "CodexDrop"
+    store["active_ssh_profile"] = "SshKeep"
+    store["active_browser_profile"] = "BrowserDrop"
+
+    secret_reads: list[str] = []
+
+    def get_secret(ref: str):
+        secret_reads.append(ref)
+        return refs.get(ref)
+
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "export_storage")
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
+    monkeypatch.setattr(profile_manager, "_load_store", lambda: store)
+    monkeypatch.setattr(security, "get_secret", get_secret)
+    selection = {
+        "claude_profiles": {"ClaudeKeep"},
+        "codex_profiles": {"CodexKeep"},
+        "ssh_profiles": {"SshKeep"},
+        "browser_profiles": {"BrowserKeep"},
+    }
+
+    selected_bundle = tmp_path / "selected.asxprofile"
+    result = portable_migration.export_portable_profiles(
+        selected_bundle,
+        "strong-password",
+        selection=selection,
+    )
+    selected_payload = portable_migration._decrypt_bundle(
+        json.loads(selected_bundle.read_text(encoding="utf-8")),
+        "strong-password",
+    )
+    selected_store = selected_payload["store"]
+
+    assert result.profile_count == 4
+    assert result.secret_count == 3
+    assert secret_reads == sorted({"claude:keep", "codex:keep", "ssh:keep"})
+    assert set(selected_payload["secrets"]) == {"claude:keep", "codex:keep", "ssh:keep"}
+    assert set(selected_payload["browser_data"]) == {"BrowserKeep"}
+    assert "source_path" not in selected_payload["browser_data"]["BrowserKeep"]
+    assert set(selected_store) == {
+        "version",
+        *profile_manager.PROFILE_LIST_KEYS,
+        *profile_manager.ACTIVE_PROFILE_KEYS,
+    }
+    assert "surprise_ref" not in selected_store["claude_profiles"][0]
+    assert "unknown_profile_field" not in selected_store["claude_profiles"][0]
+    assert "surprise_ref" not in selected_store["ssh_profiles"][0]
+    assert [item["name"] for item in selected_store["claude_profiles"]] == ["ClaudeKeep"]
+    assert [item["name"] for item in selected_store["codex_profiles"]] == ["CodexKeep"]
+    assert [item["name"] for item in selected_store["ssh_profiles"]] == ["SshKeep"]
+    assert [item["name"] for item in selected_store["browser_profiles"]] == ["BrowserKeep"]
+    assert selected_store["active_claude_profile"] == "ClaudeKeep"
+    assert selected_store["active_codex_profile"] is None
+    assert selected_store["active_ssh_profile"] == "SshKeep"
+    assert selected_store["active_browser_profile"] is None
+
+    secret_reads.clear()
+    full_bundle = tmp_path / "full.asxprofile"
+    full_result = portable_migration.export_portable_profiles(full_bundle, "strong-password")
+    full_payload = portable_migration._decrypt_bundle(
+        json.loads(full_bundle.read_text(encoding="utf-8")),
+        "strong-password",
+    )
+
+    assert full_result.profile_count == 8
+    assert full_result.secret_count == 6
+    assert set(secret_reads) == set(refs) - {"unknown:claude", "unknown:ssh"}
+    assert set(full_payload["browser_data"]) == {"BrowserKeep", "BrowserDrop"}
+    assert full_payload["store"]["active_codex_profile"] == "CodexDrop"
+    assert full_payload["store"]["active_browser_profile"] == "BrowserDrop"
+
+
+def test_portable_export_selection_rejects_invalid_or_empty_selection(tmp_path, monkeypatch):
+    store = profile_manager._get_default_store()
+    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:server"}]
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
+    monkeypatch.setattr(profile_manager, "_load_store", lambda: store)
+
+    with pytest.raises(ValueError, match="不支持的类型"):
+        portable_migration.export_portable_profiles(
+            tmp_path / "unknown.asxprofile",
+            "strong-password",
+            selection={"unknown": {"Server"}},
+        )
+    with pytest.raises(ValueError, match="没有可导出"):
+        portable_migration.export_portable_profiles(
+            tmp_path / "empty.asxprofile",
+            "strong-password",
+            selection={},
+        )
+
+
+def test_portable_profile_transactions_hold_store_lock_through_write_and_rollback(
+    tmp_path,
+    monkeypatch,
+):
+    class TrackingLock:
+        def __init__(self):
+            self.depth = 0
+            self.enter_count = 0
+
+        def __enter__(self):
+            self.depth += 1
+            self.enter_count += 1
+            return self
+
+        def __exit__(self, _exc_type, _exc_value, _traceback):
+            self.depth -= 1
+
+    lock = TrackingLock()
+    store = profile_manager._get_default_store()
+    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:server"}]
+    profiles_file = tmp_path / "profiles.json"
+    bundle = tmp_path / "profiles.asxprofile"
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr(profile_manager, "_STORE_CACHE_LOCK", lock)
+
+    def load_store():
+        assert lock.depth == 1
+        return store
+
+    def get_secret(_ref):
+        assert lock.depth == 1
+        return None
+
+    original_atomic_write = portable_migration.atomic_write_text
+
+    def locked_atomic_write(*args, **kwargs):
+        assert lock.depth == 1
+        return original_atomic_write(*args, **kwargs)
+
+    monkeypatch.setattr(profile_manager, "_load_store", load_store)
+    monkeypatch.setattr(security, "get_secret", get_secret)
+    monkeypatch.setattr(portable_migration, "atomic_write_text", locked_atomic_write)
+
+    portable_migration.export_portable_profiles(bundle, "strong-password")
+
+    save_seen = False
+    rollback_seen = False
+
+    def save_then_fail(_store):
+        nonlocal save_seen
+        assert lock.depth == 1
+        save_seen = True
+        raise OSError("forced locked save failure")
+
+    def locked_rollback(*_args, **_kwargs):
+        nonlocal rollback_seen
+        assert lock.depth == 1
+        rollback_seen = True
+        return []
+
+    monkeypatch.setattr(profile_manager, "_save_store", save_then_fail)
+    monkeypatch.setattr(portable_migration, "_rollback_portable_import", locked_rollback)
+
+    with pytest.raises(OSError, match="forced locked save failure"):
+        portable_migration.import_portable_profiles(bundle, "strong-password")
+
+    assert save_seen
+    assert rollback_seen
+    assert lock.enter_count == 2
+    assert lock.depth == 0
 
 
 def test_portable_payload_decompression_is_bounded(monkeypatch):
@@ -825,7 +1343,7 @@ def test_portable_browser_restore_surfaces_failed_original_directory_rollback(tm
                 "path": "Default/new.txt",
                 "size": 3,
                 "compression": "none",
-                "data": "not-valid-base64",
+                "data": base64.b64encode(b"new").decode("ascii"),
             }],
         },
     }
@@ -835,7 +1353,7 @@ def test_portable_browser_restore_surfaces_failed_original_directory_rollback(tm
     def fail_restore_move(source, destination):
         nonlocal move_calls
         move_calls += 1
-        if move_calls == 2:
+        if move_calls in {2, 3}:
             raise OSError("forced rollback move failure")
         return original_move(source, destination)
 
@@ -862,6 +1380,59 @@ def test_portable_browser_restore_surfaces_failed_original_directory_rollback(tm
 def test_portable_browser_relative_path_rejects_windows_escape_forms(relative_path):
     with pytest.raises(ValueError, match="非法浏览器文件路径"):
         portable_migration._safe_browser_relative_path(relative_path)
+
+
+def test_portable_import_rejects_package_inside_browser_target_before_mutation(tmp_path, monkeypatch):
+    storage_dir = tmp_path / "storage"
+    monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
+    target = storage_dir / "browser_profiles" / "chrome_InsideTarget"
+    target.mkdir(parents=True)
+    sentinel = target / "keep.txt"
+    sentinel.write_text("original", encoding="utf-8")
+    profile = BrowserProfile(
+        name="InsideTarget",
+        browser_type="chrome",
+        profile_mode="managed",
+        user_data_dir="ignored-on-import",
+    ).to_dict()
+    content = b"new-cookie"
+    payload = {
+        "payload_version": 1,
+        "store": profile_manager._get_default_store(),
+        "secrets": {},
+        "browser_data": {
+            "InsideTarget": {
+                "profile": profile,
+                "files": [{
+                    "path": "Default/Network/Cookies",
+                    "size": len(content),
+                    "compression": "none",
+                    "data": base64.b64encode(content).decode("ascii"),
+                }],
+            },
+        },
+    }
+    package = target / "inside.asxprofile"
+    package.write_text(
+        json.dumps(portable_migration._encrypt_payload(payload, "strong-password")),
+        encoding="utf-8",
+    )
+
+    def unexpected_mutation(*_args, **_kwargs):
+        raise AssertionError("目标路径校验前不应发生任何导入变更")
+
+    monkeypatch.setattr(portable_migration, "_restore_browser_data", unexpected_mutation)
+    monkeypatch.setattr(profile_manager, "_save_store", unexpected_mutation)
+    monkeypatch.setattr(security, "set_secret", unexpected_mutation)
+
+    with pytest.raises(ValueError, match="待替换的浏览器 Profile"):
+        portable_migration.import_portable_profiles(package, "strong-password")
+
+    assert package.exists()
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert not (target / "Default" / "Network" / "Cookies").exists()
+    assert not list(target.parent.glob("*.import_staging"))
+    assert not list(target.parent.glob("*.import_backup"))
 
 
 def test_portable_import_rolls_back_browser_secret_and_profiles_after_save_failure(
@@ -1389,6 +1960,71 @@ def test_remote_session_export_skips_unreadable_support_file(monkeypatch, tmp_pa
     assert len(manifest["sessions"]) == 1
     assert len(manifest["sessions"][0]["files"]) == 1
     assert manifest["sessions"][0]["files"][0]["main"] is True
+
+
+def test_remote_session_export_uses_actual_size_when_source_shrinks(monkeypatch, tmp_path):
+    remote_path = "/home/test/.codex/sessions/2026/05/01/rollout-shrunk.jsonl"
+    content = json.dumps({
+        "type": "session_meta",
+        "payload": {"id": "shrunk", "cwd": "/workspace"},
+    }).encode("utf-8") + b"\n"
+
+    class ShrinkingSFTP(_SessionSFTP):
+        def stat(self, path: str):
+            attr = super().stat(path)
+            if posixpath.normpath(path) == remote_path:
+                attr.st_size = len(content) + 4096
+            return attr
+
+    sftp = ShrinkingSFTP()
+    sftp.add_file(remote_path, content)
+    _patch_session_ssh(monkeypatch, sftp)
+    [record] = session_migration.list_sessions("codex", ssh_name="gpu")
+    bundle_path = tmp_path / "remote-shrunk.asxsession"
+
+    result = session_migration.export_remote_sessions(
+        "gpu", bundle_path, {record.key}, provider="codex"
+    )
+
+    assert result.session_count == 1
+    assert result.file_count == 1
+    assert result.total_bytes == len(content)
+    with zipfile.ZipFile(bundle_path, "r") as bundle:
+        manifest = json.loads(bundle.read("manifest.json"))
+        [file_entry] = manifest["sessions"][0]["files"]
+        assert file_entry["size"] == len(content)
+        assert bundle.read(file_entry["archive_path"]) == content
+
+
+def test_remote_session_export_skips_grown_source_without_orphan_zip_entry(monkeypatch, tmp_path):
+    remote_path = "/home/test/.codex/sessions/2026/05/01/rollout-grown.jsonl"
+    content = json.dumps({
+        "type": "session_meta",
+        "payload": {"id": "grown", "cwd": "/workspace", "padding": "x" * 100},
+    }).encode("utf-8") + b"\n"
+
+    class GrowingSFTP(_SessionSFTP):
+        def stat(self, path: str):
+            attr = super().stat(path)
+            if posixpath.normpath(path) == remote_path:
+                attr.st_size = 8
+            return attr
+
+    sftp = GrowingSFTP()
+    sftp.add_file(remote_path, content)
+    _patch_session_ssh(monkeypatch, sftp)
+    [record] = session_migration.list_sessions("codex", ssh_name="gpu")
+    bundle_path = tmp_path / "remote-grown.asxsession"
+
+    result = session_migration.export_remote_sessions(
+        "gpu", bundle_path, {record.key}, provider="codex"
+    )
+
+    assert result.session_count == 0
+    assert result.file_count == 0
+    assert result.skipped_keys == [record.key]
+    with zipfile.ZipFile(bundle_path, "r") as bundle:
+        assert bundle.namelist() == ["manifest.json"]
 
 
 def test_remote_session_export_rejects_local_output_inside_live_home(monkeypatch, tmp_path):

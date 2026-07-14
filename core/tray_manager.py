@@ -244,7 +244,9 @@ class TrayManager:
 
     def _on_exit_clicked(self, icon=None, item=None):
         """Handle exit menu item click."""
-        self.stop()
+        # App shutdown owns tray cleanup.  Stopping here first can strand a
+        # hidden window if the app temporarily defers exit for a critical data
+        # transaction such as Profile migration import.
         self.on_exit()
 
     def _toggle_startup(self, icon=None, item=None):
