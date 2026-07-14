@@ -21,7 +21,7 @@ class AdaptiveTabBar(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._values = list(values)
         self._command = command
-        self._selected = self._values[0] if self._values else ""
+        self._selected = ""
         self._buttons: dict[str, ctk.CTkButton] = {}
         self._column_count = 0
         self._layout_after_id = None
@@ -35,29 +35,38 @@ class AdaptiveTabBar(ctk.CTkFrame):
                 corner_radius=6,
                 border_width=1,
                 font=font(11, "bold"),
+                fg_color=COLORS["surface_alt"],
+                hover_color=COLORS["surface_hover"],
+                border_color=COLORS["border_soft"],
+                text_color=COLORS["text"],
                 command=lambda selected=value: self._select_from_user(selected),
             )
             self._buttons[value] = button
 
         self.bind("<Configure>", self._schedule_layout, add="+")
         self.after_idle(self._layout_buttons)
-        self.set(self._selected)
+        if self._values:
+            self.set(self._values[0])
 
     def get(self) -> str:
         return self._selected
 
     def set(self, value: str) -> None:
-        if value not in self._buttons:
+        if value not in self._buttons or value == self._selected:
             return
+        previous = self._selected
         self._selected = value
-        for name, button in self._buttons.items():
-            selected = name == value
-            button.configure(
-                fg_color=COLORS["primary"] if selected else COLORS["surface_alt"],
-                hover_color=COLORS["primary_hover"] if selected else COLORS["surface_hover"],
-                border_color=COLORS["primary"] if selected else COLORS["border_soft"],
-                text_color=COLORS["text"],
-            )
+        if previous in self._buttons:
+            self._configure_button(previous, selected=False)
+        self._configure_button(value, selected=True)
+
+    def _configure_button(self, value: str, *, selected: bool) -> None:
+        self._buttons[value].configure(
+            fg_color=COLORS["primary"] if selected else COLORS["surface_alt"],
+            hover_color=COLORS["primary_hover"] if selected else COLORS["surface_hover"],
+            border_color=COLORS["primary"] if selected else COLORS["border_soft"],
+            text_color=COLORS["text"],
+        )
 
     def _select_from_user(self, value: str) -> None:
         self.set(value)

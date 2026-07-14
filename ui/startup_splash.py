@@ -75,6 +75,10 @@ class StartupSplash:
         while self.visible and time.perf_counter() - self._started_at < min_seconds:
             time.sleep(0.03)
 
+    def remaining_visible_ms(self, min_seconds: float) -> int:
+        remaining = float(min_seconds) - (time.perf_counter() - self._started_at)
+        return max(0, round(remaining * 1000))
+
     def _start_process(self) -> None:
         command = _splash_command()
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0

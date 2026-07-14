@@ -27,6 +27,7 @@ TAB_WARMUP_SCROLL_IDLE_MS = 1000
 TAB_WARMUP_INTERACTION_IDLE_MS = 1800
 TAB_WARMUP_RETRY_MS = 320
 UI_CALLBACK_IDLE_POLL_MS = 16
+UI_CALLBACK_IDLE_POLL_MAX_MS = 96
 UI_CALLBACK_BUSY_POLL_MS = 8
 UI_CALLBACK_BATCH_LIMIT = 4
 UI_CALLBACK_TIME_BUDGET_MS = 5
@@ -127,6 +128,7 @@ class App(ctk.CTk):
         self._ui_thread_id = threading.get_ident()
         self._ui_callback_queue = queue.Queue()
         self._ui_callback_after_id = None
+        self._ui_callback_idle_poll_ms = UI_CALLBACK_IDLE_POLL_MS
         self._tray_hint_shown = False
         self._tray_starting = False
         self._close_dialog = None
@@ -1448,6 +1450,7 @@ class App(ctk.CTk):
         except Exception:
             scroll_active = False
         if self._ui_callback_queue_has_pending() and scroll_active:
+            self._ui_callback_idle_poll_ms = UI_CALLBACK_IDLE_POLL_MS
             self._schedule_ui_callback_pump(delay_ms=UI_CALLBACK_SCROLL_RETRY_MS)
             return
         processed = 0
@@ -1465,9 +1468,21 @@ class App(ctk.CTk):
                 logger.debug("UI callback failed: %s", e, exc_info=True)
             if (time.perf_counter() - started_at) * 1000 >= UI_CALLBACK_TIME_BUDGET_MS:
                 break
-        self._schedule_ui_callback_pump(
-            delay_ms=UI_CALLBACK_BUSY_POLL_MS if self._ui_callback_queue_has_pending() else UI_CALLBACK_IDLE_POLL_MS
-        )
+        pending = self._ui_callback_queue_has_pending()
+        if pending:
+            self._ui_callback_idle_poll_ms = UI_CALLBACK_IDLE_POLL_MS
+            next_delay_ms = UI_CALLBACK_BUSY_POLL_MS
+        elif processed:
+            self._ui_callback_idle_poll_ms = UI_CALLBACK_IDLE_POLL_MS
+            next_delay_ms = UI_CALLBACK_IDLE_POLL_MS
+        else:
+            current_idle_ms = max(
+                UI_CALLBACK_IDLE_POLL_MS,
+                int(self.__dict__.get("_ui_callback_idle_poll_ms", UI_CALLBACK_IDLE_POLL_MS)),
+            )
+            next_delay_ms = min(UI_CALLBACK_IDLE_POLL_MAX_MS, current_idle_ms * 2)
+            self._ui_callback_idle_poll_ms = next_delay_ms
+        self._schedule_ui_callback_pump(delay_ms=next_delay_ms)
 
     def _ui_callback_queue_has_pending(self) -> bool:
         callbacks = getattr(self, "_ui_callback_queue", None)

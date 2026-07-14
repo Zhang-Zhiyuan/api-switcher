@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ui import theme
 from ui.app import MAIN_LAYOUT_COMPACT_MIN_WIDTH, MAIN_LAYOUT_WIDE_MIN_WIDTH, main_layout_mode
-from ui.widgets.adaptive_tab_bar import adaptive_tab_columns
+from ui.widgets.adaptive_tab_bar import AdaptiveTabBar, adaptive_tab_columns
 from ui.widgets.toast import _toast_wraplength
 from ui.startup_splash import _splash_layout
 from ui.dialogs.auto_continue_logs_dialog import _auto_continue_logs_layout
@@ -135,6 +135,26 @@ def test_adaptive_tab_columns_wrap_all_destinations():
     assert adaptive_tab_columns(720, 11) == 6
     assert adaptive_tab_columns(480, 11) == 4
     assert adaptive_tab_columns(80, 11) == 1
+
+
+def test_adaptive_tab_selection_only_restyles_changed_buttons():
+    class Button:
+        def __init__(self):
+            self.calls = []
+
+        def configure(self, **kwargs):
+            self.calls.append(kwargs)
+
+    bar = object.__new__(AdaptiveTabBar)
+    bar._buttons = {name: Button() for name in ("A", "B", "C")}
+    bar._selected = "A"
+
+    AdaptiveTabBar.set(bar, "B")
+    AdaptiveTabBar.set(bar, "B")
+
+    assert len(bar._buttons["A"].calls) == 1
+    assert len(bar._buttons["B"].calls) == 1
+    assert bar._buttons["C"].calls == []
 
 
 def test_toast_wraplength_respects_physical_screen_and_dpi():

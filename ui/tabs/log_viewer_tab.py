@@ -75,6 +75,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._filter_level = 'DEBUG'  # 显示所有级别
         self._poll_after_id = None
         self._log_entries: list[dict] = []
+        self._filtered_entry_count = 0
         self._visible_line_count = 0
         self._responsive_after_id = None
         self._responsive_state = None
@@ -325,15 +326,35 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._append_log_entries([log_entry])
 
     def _append_log_entries(self, log_entries: list[dict]):
-        if log_entries:
-            self._log_entries.extend(dict(entry) for entry in log_entries if isinstance(entry, dict))
-            if len(self._log_entries) > self.MAX_STORED_ENTRIES:
-                self._log_entries = self._log_entries[-self.MAX_STORED_ENTRIES:]
+        previous_filtered_count = self._filtered_entry_count
+        new_entries = [dict(entry) for entry in log_entries if isinstance(entry, dict)]
+        removed_entries = []
+        if new_entries:
+            self._log_entries.extend(new_entries)
+            overflow = len(self._log_entries) - self.MAX_STORED_ENTRIES
+            if overflow > 0:
+                removed_entries = self._log_entries[:overflow]
+                del self._log_entries[:overflow]
 
-        visible_entries, _count_delta = _prepare_log_entries(log_entries, self._filter_level)
-        self._recount_logs()
+        visible_entries, count_delta = _prepare_log_entries(new_entries, self._filter_level)
+        removed_visible, removed_counts = _prepare_log_entries(removed_entries, self._filter_level)
+        for level in LOG_LEVELS:
+            self._log_counts[level] = max(
+                0,
+                self._log_counts[level] + count_delta[level] - removed_counts[level],
+            )
+        self._filtered_entry_count = max(
+            0,
+            self._filtered_entry_count + len(visible_entries) - len(removed_visible),
+        )
+
+        unrendered_prefix = max(0, previous_filtered_count - self.MAX_RENDERED_LINES)
+        if len(removed_visible) > unrendered_prefix:
+            self._render_log_entries()
+            return
 
         if not visible_entries:
+            self._update_render_status()
             return
 
         self._log_text.configure(state="normal")
@@ -350,13 +371,10 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             self._log_text.see("end")
         self._update_render_status()
 
-    def _recount_logs(self):
-        _visible, counts = _prepare_log_entries(self._log_entries, "DEBUG")
-        self._log_counts = counts
-
     def _render_log_entries(self):
         visible_entries, counts = _prepare_log_entries(self._log_entries, self._filter_level)
         self._log_counts = counts
+        self._filtered_entry_count = len(visible_entries)
         render_entries = visible_entries[-self.MAX_RENDERED_LINES:]
 
         self._log_text.configure(state="normal")
@@ -386,7 +404,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         if not hasattr(self, "_render_status_label"):
             return
         if total_visible is None:
-            filtered_total = len(_prepare_log_entries(self._log_entries, self._filter_level)[0])
+            filtered_total = self._filtered_entry_count
         else:
             filtered_total = total_visible
         rendered = min(filtered_total, self.MAX_RENDERED_LINES)
@@ -425,6 +443,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
 
         log_manager.clear_history()
         self._log_entries = []
+        self._filtered_entry_count = 0
         self._visible_line_count = 0
 
         # 重置计数

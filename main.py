@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import argparse
+import threading
 from datetime import datetime
 from argparse import Namespace
 
@@ -9,6 +10,7 @@ from argparse import Namespace
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 logger = logging.getLogger(__name__)
+SPLASH_WINDOW_POLL_MS = 16
 
 
 def parse_args(argv: list[str] | None = None) -> Namespace:
@@ -72,6 +74,29 @@ def flush_usage_session() -> None:
         logger.exception("Failed to flush usage session")
 
 
+def _schedule_startup_splash_close(app, splash, min_visible_seconds: float = 0.45) -> None:
+    """Close the splash after the main window maps without nesting Tk's event loop."""
+
+    def close_when_mapped() -> None:
+        try:
+            if not app.winfo_ismapped():
+                app.after(SPLASH_WINDOW_POLL_MS, close_when_mapped)
+                return
+        except Exception:
+            pass
+        threading.Thread(
+            target=splash.close,
+            name="startup-splash-close",
+            daemon=True,
+        ).start()
+
+    delay_ms = splash.remaining_visible_ms(min_visible_seconds)
+    try:
+        app.after(delay_ms, close_when_mapped)
+    except Exception:
+        threading.Thread(target=splash.close, daemon=True).start()
+
+
 def main(argv: list[str] | None = None):
     args = parse_args(argv)
     if args.splash_child:
@@ -109,15 +134,7 @@ def main(argv: list[str] | None = None):
         app = App(start_minimized=args.start_minimized)
         pulse("即将完成...")
         if splash:
-            if not args.start_minimized:
-                try:
-                    app.update_idletasks()
-                    app.update()
-                except Exception:
-                    logger.exception("Failed to draw main window before closing splash")
-            splash.keep_visible_for(0.45)
-            splash.close()
-            splash = None
+            _schedule_startup_splash_close(app, splash)
         app.mainloop()
     except Exception as e:
         logger.error(f"Application error: {e}", exc_info=True)

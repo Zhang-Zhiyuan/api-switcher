@@ -289,6 +289,25 @@ def test_ui_callback_pump_uses_batch_limit_for_backlog():
     assert after_calls[0][0] == app_module.UI_CALLBACK_BUSY_POLL_MS
 
 
+def test_ui_callback_pump_backs_off_while_idle(monkeypatch):
+    after_calls = []
+
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._ui_callback_queue = queue.Queue()
+    app._ui_callback_after_id = None
+    app._ui_callback_idle_poll_ms = app_module.UI_CALLBACK_IDLE_POLL_MS
+    app.winfo_exists = lambda: True
+    app.after = lambda delay, callback: after_calls.append((delay, callback)) or "after-id"
+
+    monkeypatch.setattr(app_module, "recent_user_scroll", lambda *_args, **_kwargs: False)
+
+    for _ in range(4):
+        app_module.App._drain_ui_callback_queue(app)
+
+    assert [delay for delay, _callback in after_calls] == [32, 64, 96, 96]
+
+
 def test_ui_callback_pump_defers_during_recent_scroll(monkeypatch):
     callbacks = []
     after_calls = []
@@ -679,6 +698,44 @@ def test_disabled_startup_splash_is_noop():
     splash.keep_visible_for(0)
     splash.close()
     assert splash.visible is False
+
+
+def test_startup_splash_close_waits_for_main_window_without_nested_update():
+    class App:
+        def __init__(self):
+            self.mapped = False
+            self.after_calls = []
+
+        def winfo_ismapped(self):
+            return self.mapped
+
+        def after(self, delay, callback):
+            self.after_calls.append((delay, callback))
+            return "after-id"
+
+    class Splash:
+        def __init__(self):
+            self.closed = threading.Event()
+
+        def remaining_visible_ms(self, _seconds):
+            return 125
+
+        def close(self):
+            self.closed.set()
+
+    app = App()
+    splash = Splash()
+
+    main._schedule_startup_splash_close(app, splash)
+
+    assert app.after_calls[0][0] == 125
+    app.after_calls.pop(0)[1]()
+    assert app.after_calls[0][0] == main.SPLASH_WINDOW_POLL_MS
+    assert not splash.closed.is_set()
+
+    app.mapped = True
+    app.after_calls.pop(0)[1]()
+    assert splash.closed.wait(1)
 
 
 def test_startup_splash_is_disabled_for_frozen_executable(monkeypatch):
