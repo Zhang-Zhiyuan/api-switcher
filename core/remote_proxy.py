@@ -946,6 +946,11 @@ def proxy_subscription_node_region(item: ProxySubscriptionNode) -> str:
     return cached or proxy_node_region(item.node)
 
 
+def proxy_subscription_node_is_hong_kong(item: ProxySubscriptionNode) -> bool:
+    """Return whether an automatic fallback candidate is identified as Hong Kong."""
+    return proxy_subscription_node_region(item) == "香港"
+
+
 def describe_proxy_node(node: dict) -> str:
     normalized = _normalize_proxy_node(node)
     return (
@@ -1833,7 +1838,13 @@ def reload_ai_proxy_verified(
     if _probe_summary_all_ok(probe_message):
         return f"{reload_message}；验证通过: {_compact_probe_summary(probe_message)}"
 
-    candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, ProxySubscriptionNode))
+    candidates = tuple(
+        item
+        for item in (candidate_nodes or [])
+        if isinstance(item, ProxySubscriptionNode)
+        and proxy_subscription_node_key(item) != requested_key
+        and not proxy_subscription_node_is_hong_kong(item)
+    )
     if not candidates:
         restore_suffix = _restore_remote_proxy_node_after_failed_update(
             ssh_name,
@@ -1863,8 +1874,6 @@ def reload_ai_proxy_verified(
     ranked = []
     for item in ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
         key = proxy_subscription_node_key(item)
-        if key == requested_key:
-            continue
         result = latencies.get(key)
         latency = proxy_node_latency_ms(result)
         if latency is None or not proxy_node_latency_ok(result):

@@ -508,7 +508,13 @@ def reload_local_ai_proxy_verified(
     if remote_proxy._probe_summary_all_ok(probe_message):
         return f"{reload_message}；验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
 
-    candidates = tuple(item for item in (candidate_nodes or []) if isinstance(item, remote_proxy.ProxySubscriptionNode))
+    candidates = tuple(
+        item
+        for item in (candidate_nodes or [])
+        if isinstance(item, remote_proxy.ProxySubscriptionNode)
+        and remote_proxy.proxy_subscription_node_key(item) != requested_key
+        and not remote_proxy.proxy_subscription_node_is_hong_kong(item)
+    )
     if not candidates:
         restore_suffix = _restore_local_proxy_node_after_failed_update(original_node, requested_node)
         return f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}{restore_suffix}"
@@ -530,8 +536,6 @@ def reload_local_ai_proxy_verified(
     ranked = []
     for item in remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
         key = remote_proxy.proxy_subscription_node_key(item)
-        if key == requested_key:
-            continue
         result = latencies.get(key)
         latency = remote_proxy.proxy_node_latency_ms(result)
         if latency is None or not remote_proxy.proxy_node_latency_ok(result):

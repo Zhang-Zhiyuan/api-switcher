@@ -1645,6 +1645,164 @@ def test_reload_local_ai_proxy_verified_restores_previous_node_when_candidates_f
     assert "验证通过" in message
 
 
+def test_reload_remote_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
+    original = remote_proxy.parse_proxy_node(
+        "{ name: old, type: vless, server: old.example.com, port: 443 }"
+    )
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node(
+            "{ name: failed, type: vless, server: failed.example.com, port: 443 }"
+        ),
+    )
+    hong_kong = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node(
+            "{ name: Hong Kong fastest, type: vless, server: hk.example.com, port: 443 }"
+        ),
+    )
+    safe = remote_proxy.ProxySubscriptionNode(
+        3,
+        remote_proxy.parse_proxy_node(
+            "{ name: US backup, type: vless, server: us.example.com, port: 443 }"
+        ),
+    )
+    reloads = []
+    measured = []
+    probes = iter(
+        [
+            "server: AI 连通性 0/3 可达",
+            "server: AI 连通性 3/3 可达",
+        ]
+    )
+
+    def fake_reload(_server, text, _port=7890):
+        name = remote_proxy.parse_proxy_node(text)["name"]
+        reloads.append(name)
+        return f"reloaded {name}"
+
+    def fake_measure(_server, nodes, **_kwargs):
+        measured.extend(item.node["name"] for item in nodes)
+        key = remote_proxy.proxy_node_key(safe.node)
+        return {key: remote_proxy.ProxyNodeLatencyResult(key, True, latency_ms=40)}
+
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", lambda *_a, **_k: original)
+    monkeypatch.setattr(remote_proxy, "reload_ai_proxy", fake_reload)
+    monkeypatch.setattr(remote_proxy, "probe_ai_proxy", lambda *_a, **_k: next(probes))
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies_on_server", fake_measure)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = remote_proxy.reload_ai_proxy_verified(
+        "server",
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, hong_kong, safe],
+    )
+
+    assert measured == ["US backup"]
+    assert reloads == ["failed", "US backup"]
+    assert "验证通过" in message
+
+
+def test_reload_local_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
+    original = remote_proxy.parse_proxy_node(
+        "{ name: old, type: vless, server: old.example.com, port: 443 }"
+    )
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node(
+            "{ name: failed, type: vless, server: failed.example.com, port: 443 }"
+        ),
+    )
+    hong_kong = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node(
+            "{ name: 香港高速, type: vless, server: hk.example.com, port: 443 }"
+        ),
+    )
+    safe = remote_proxy.ProxySubscriptionNode(
+        3,
+        remote_proxy.parse_proxy_node(
+            "{ name: 日本备用, type: vless, server: jp.example.com, port: 443 }"
+        ),
+    )
+    reloads = []
+    measured = []
+    probes = iter(
+        [
+            "本机 AI 连通性 0/3 可达",
+            "本机 AI 连通性 3/3 可达",
+        ]
+    )
+
+    def fake_reload(text):
+        name = remote_proxy.parse_proxy_node(text)["name"]
+        reloads.append(name)
+        return f"reloaded {name}"
+
+    def fake_measure(nodes, **_kwargs):
+        measured.extend(item.node["name"] for item in nodes)
+        key = remote_proxy.proxy_node_key(safe.node)
+        return {key: remote_proxy.ProxyNodeLatencyResult(key, True, latency_ms=45)}
+
+    monkeypatch.setattr(local_proxy, "_read_local_managed_proxy_node", lambda: original)
+    monkeypatch.setattr(local_proxy, "reload_local_ai_proxy", fake_reload)
+    monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda *_a, **_k: next(probes))
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies", fake_measure)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
+
+    message = local_proxy.reload_local_ai_proxy_verified(
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, hong_kong, safe],
+    )
+
+    assert measured == ["日本备用"]
+    assert reloads == ["failed", "日本备用"]
+    assert "验证通过" in message
+
+
+def test_reload_remote_proxy_does_not_use_hong_kong_when_no_other_fallback(monkeypatch):
+    original = remote_proxy.parse_proxy_node(
+        "{ name: old, type: vless, server: old.example.com, port: 443 }"
+    )
+    requested = remote_proxy.ProxySubscriptionNode(
+        1,
+        remote_proxy.parse_proxy_node(
+            "{ name: failed, type: vless, server: failed.example.com, port: 443 }"
+        ),
+    )
+    hong_kong = remote_proxy.ProxySubscriptionNode(
+        2,
+        remote_proxy.parse_proxy_node(
+            "{ name: HK only, type: vless, server: hk.example.com, port: 443 }"
+        ),
+    )
+    reloads = []
+    probes = iter(["server: AI 连通性 0/3 可达", "server: AI 连通性 3/3 可达"])
+
+    def fake_reload(_server, text, _port=7890):
+        name = remote_proxy.parse_proxy_node(text)["name"]
+        reloads.append(name)
+        return f"reloaded {name}"
+
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", lambda *_a, **_k: original)
+    monkeypatch.setattr(remote_proxy, "reload_ai_proxy", fake_reload)
+    monkeypatch.setattr(remote_proxy, "probe_ai_proxy", lambda *_a, **_k: next(probes))
+    monkeypatch.setattr(
+        remote_proxy,
+        "measure_proxy_node_latencies_on_server",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Hong Kong must not be measured")),
+    )
+
+    message = remote_proxy.reload_ai_proxy_verified(
+        "server",
+        remote_proxy.format_proxy_node(requested.node),
+        [requested, hong_kong],
+    )
+
+    assert reloads == ["failed", "old"]
+    assert "验证失败" in message
+
+
 def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_managed_blocks():
     command = remote_proxy._build_cleanup_command("/home/me", 7890, include_legacy_config=True)
 
