@@ -3,6 +3,7 @@ import errno
 import posixpath
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 import paramiko
 from core import security
@@ -31,12 +32,23 @@ class SSHManager:
             str(profile.password_ref or "").strip(),
         )
 
-    def connect(self, profile: SSHProfile, timeout: int = 10, max_retries: int = 3) -> paramiko.SSHClient:
-        """Establish SSH connection with retry mechanism."""
+    def connect(
+        self,
+        profile: SSHProfile,
+        timeout: int = 10,
+        max_retries: int = 3,
+        *,
+        secret_overrides: Mapping[str, str] | None = None,
+    ) -> paramiko.SSHClient:
+        """Establish SSH connection with optional non-persistent credentials."""
         signature = self._connection_signature(profile)
+        ephemeral_auth = secret_overrides is not None
+        overrides = dict(secret_overrides or {})
+        if any(not isinstance(ref, str) or not isinstance(value, str) for ref, value in overrides.items()):
+            raise ValueError("SSH 临时密钥格式无效")
 
         # Check if already connected
-        if profile.name in self._clients:
+        if not ephemeral_auth and profile.name in self._clients:
             client = self._clients[profile.name]
             try:
                 transport = client.get_transport()
@@ -90,7 +102,10 @@ class SSHManager:
             passphrase = None
             if profile.private_key_passphrase_ref:
                 try:
-                    passphrase = security.get_secret(profile.private_key_passphrase_ref)
+                    if profile.private_key_passphrase_ref in overrides:
+                        passphrase = overrides[profile.private_key_passphrase_ref]
+                    else:
+                        passphrase = security.get_secret(profile.private_key_passphrase_ref)
                 except Exception as e:
                     logger.warning(f"Failed to retrieve key passphrase: {e}")
 
@@ -103,7 +118,10 @@ class SSHManager:
                 raise ValueError("密码认证需要指定密码")
 
             try:
-                password = security.get_secret(profile.password_ref)
+                if profile.password_ref in overrides:
+                    password = overrides[profile.password_ref]
+                else:
+                    password = security.get_secret(profile.password_ref)
                 if not password:
                     raise ValueError("密码为空")
                 connect_kwargs["password"] = password
@@ -115,6 +133,8 @@ class SSHManager:
         # Retry connection with exponential backoff
         last_error = None
         for attempt in range(max_retries):
+            client = None
+            keep_client = False
             try:
                 client = paramiko.SSHClient()
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -127,8 +147,10 @@ class SSHManager:
                 if not transport or not transport.is_active():
                     raise RuntimeError("连接建立后立即失效")
 
-                self._clients[profile.name] = client
-                self._client_signatures[profile.name] = signature
+                if not ephemeral_auth:
+                    self._clients[profile.name] = client
+                    self._client_signatures[profile.name] = signature
+                keep_client = True
                 logger.info(f"Successfully connected to {profile.host} as {profile.username}")
                 return client
 
@@ -155,6 +177,13 @@ class SSHManager:
                     time.sleep(wait_time)
                 else:
                     raise RuntimeError(f"连接失败: {e}") from e
+
+            finally:
+                if client is not None and not keep_client:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
 
         # Should not reach here, but just in case
         raise RuntimeError(f"连接失败: {last_error}")
@@ -407,11 +436,22 @@ class SSHManager:
             logger.error(f"Error executing command: {e}")
             raise RuntimeError(f"执行远程命令失败: {e}") from e
 
-    def test_connection(self, profile: SSHProfile) -> tuple[bool, str]:
+    def test_connection(
+        self,
+        profile: SSHProfile,
+        *,
+        secret_overrides: Mapping[str, str] | None = None,
+    ) -> tuple[bool, str]:
         """Test SSH connection with comprehensive validation."""
+        client = None
         try:
             # Attempt connection
-            client = self.connect(profile, timeout=10, max_retries=2)
+            client = self.connect(
+                profile,
+                timeout=10,
+                max_retries=2,
+                secret_overrides=secret_overrides,
+            )
 
             # Execute test command
             stdout, stderr = self.execute_command(client, "echo 'Connection OK'", timeout=5)
@@ -424,6 +464,12 @@ class SSHManager:
         except Exception as e:
             logger.error(f"Connection test failed: {e}")
             return False, f"连接失败: {e}"
+        finally:
+            if secret_overrides is not None and client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def _ensure_remote_dir(self, sftp, path: str):
         """Ensure remote directory exists with error handling."""

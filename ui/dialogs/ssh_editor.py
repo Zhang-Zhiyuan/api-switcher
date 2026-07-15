@@ -324,7 +324,9 @@ class SSHEditorDialog(ctk.CTkToplevel):
             return
         try:
             data = self._collect_data()
-            profile = self._build_profile(data)
+            plan = self._build_save_plan(data)
+            profile = plan.profile
+            secret_overrides = dict(plan.secret_updates)
         except Exception as e:
             self._test_result.configure(text=f"测试失败: {e}", text_color=COLORS["danger"])
             return
@@ -335,8 +337,10 @@ class SSHEditorDialog(ctk.CTkToplevel):
             from core.ssh_manager import ssh_manager
 
             try:
-                ssh_manager.disconnect(profile.name)
-                success, message = ssh_manager.test_connection(profile)
+                success, message = ssh_manager.test_connection(
+                    profile,
+                    secret_overrides=secret_overrides,
+                )
             except Exception as e:
                 success = False
                 message = f"测试失败: {e}"
@@ -386,18 +390,18 @@ class SSHEditorDialog(ctk.CTkToplevel):
             "remote_codex_dir": self._get_value("remote_codex_dir"),
         }
 
-    def _build_profile(self, data: dict) -> SSHProfile:
-        from core.ssh_profile_builder import build_ssh_profile_from_data
+    def _build_save_plan(self, data: dict):
+        from core.ssh_profile_builder import prepare_ssh_profile_from_data
 
-        return build_ssh_profile_from_data(data, self._profile)
+        return prepare_ssh_profile_from_data(data, self._profile)
 
     def _save(self):
         try:
             data = self._collect_data()
-            profile = self._build_profile(data)
+            plan = self._build_save_plan(data)
 
             if self._on_save:
-                self._on_save(profile, self._profile)
+                self._on_save(plan.profile, self._profile, plan.secret_updates)
             self.destroy()
         except Exception as e:
             self._test_result.configure(text=f"保存失败: {e}", text_color=COLORS["danger"])

@@ -24,6 +24,7 @@ class _Label:
 
 def test_git_snapshot_refresh_runs_off_ui_thread(tmp_path, monkeypatch):
     git_started = threading.Event()
+    release_git = threading.Event()
     diff_started = threading.Event()
     text_updates = []
     actions = []
@@ -36,7 +37,7 @@ def test_git_snapshot_refresh_runs_off_ui_thread(tmp_path, monkeypatch):
 
         def is_git_repo(self):
             git_started.set()
-            time.sleep(0.15)
+            assert release_git.wait(timeout=2)
             return True
 
         def get_recent_commits(self, count=50, auto_only=True):
@@ -86,8 +87,9 @@ def test_git_snapshot_refresh_runs_off_ui_thread(tmp_path, monkeypatch):
     GitSnapshotHistoryDialog._refresh(dialog)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.05
+    assert elapsed < 0.5
     assert git_started.wait(1)
+    release_git.set()
     assert diff_started.wait(1)
     deadline = time.time() + 1
     while not any("file.py" in text for text in text_updates) and time.time() < deadline:

@@ -422,11 +422,23 @@ def _save_store(store: dict, create_backup: bool = True) -> None:
 
             try:
                 atomic_write_text(PROFILES_FILE, content)
-                _cache_store(store)
-                logger.debug(f"Successfully saved profiles to {PROFILES_FILE}")
             except Exception as e:
                 clear_profile_store_cache()
                 raise RuntimeError(f"Failed to save profiles: {e}") from e
+
+            # The disk commit is authoritative.  A cache refresh failure must
+            # not turn a successful atomic write into a reported save failure,
+            # otherwise callers may roll back secrets while the new metadata
+            # is already durable on disk.
+            try:
+                _cache_store(store)
+            except Exception as cache_error:
+                clear_profile_store_cache()
+                logger.warning(
+                    "Profile 已写入磁盘，但内存缓存刷新失败: %s",
+                    cache_error,
+                )
+            logger.debug(f"Successfully saved profiles to {PROFILES_FILE}")
 
         except Exception as e:
             logger.error(f"Error saving profiles store: {e}")
@@ -447,6 +459,27 @@ def _load_profile_list(items: list[dict], cls, label: str) -> list:
         except Exception as e:
             logger.warning(f"Skipping invalid {label} profile at index {idx}: {e}")
     return profiles
+
+
+def _ensure_rename_target_available(
+    profiles: object,
+    new_name: str,
+    previous_name: str | None,
+    operation: str,
+) -> None:
+    """Reject renaming over a different existing profile.
+
+    Saves without ``previous_name`` remain upserts, and saving an edited
+    profile under its unchanged name remains valid.  Only a true rename may
+    not consume another profile's metadata and credentials.
+    """
+    if not previous_name or previous_name == new_name:
+        return
+    if isinstance(profiles, list) and any(
+        isinstance(item, dict) and item.get("name") == new_name
+        for item in profiles
+    ):
+        raise ValueError(f"{operation} 名称已存在: {new_name}")
 
 
 def detect_claude_provider(settings: dict) -> str:
@@ -735,6 +768,12 @@ def save_claude_profile(profile: ClaudeProfile, previous_name: str | None = None
     with _STORE_CACHE_LOCK:
         store = _load_store()
         profiles = store.get("claude_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "Claude Profile",
+        )
         replaced_names = {profile.name}
         if previous_name:
             replaced_names.add(previous_name)
@@ -759,6 +798,22 @@ def save_claude_profile(profile: ClaudeProfile, previous_name: str | None = None
             replaced_refs - _store_secret_refs(store),
             "Claude Profile 更新",
         )
+
+
+def save_claude_profile_with_secrets(
+    profile: ClaudeProfile,
+    secret_updates: dict[str, str],
+    previous_name: str | None = None,
+) -> None:
+    """Save Claude metadata and edited secrets as one in-process transaction."""
+    _save_profile_with_secret_updates(
+        profile,
+        list_key="claude_profiles",
+        secret_updates=secret_updates,
+        operation="Claude Profile",
+        previous_name=previous_name,
+        save_callback=lambda: save_claude_profile(profile, previous_name=previous_name),
+    )
 
 
 def clone_claude_profile(name: str) -> ClaudeProfile:
@@ -1657,6 +1712,12 @@ def save_codex_profile(profile: CodexProfile, previous_name: str | None = None) 
     with _STORE_CACHE_LOCK:
         store = _load_store()
         profiles = store.get("codex_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "Codex Profile",
+        )
         replaced_names = {profile.name}
         if previous_name:
             replaced_names.add(previous_name)
@@ -1681,6 +1742,22 @@ def save_codex_profile(profile: CodexProfile, previous_name: str | None = None) 
             replaced_refs - _store_secret_refs(store),
             "Codex Profile 更新",
         )
+
+
+def save_codex_profile_with_secrets(
+    profile: CodexProfile,
+    secret_updates: dict[str, str],
+    previous_name: str | None = None,
+) -> None:
+    """Save Codex metadata and edited secrets as one in-process transaction."""
+    _save_profile_with_secret_updates(
+        profile,
+        list_key="codex_profiles",
+        secret_updates=secret_updates,
+        operation="Codex Profile",
+        previous_name=previous_name,
+        save_callback=lambda: save_codex_profile(profile, previous_name=previous_name),
+    )
 
 
 def clone_codex_profile(name: str) -> CodexProfile:
@@ -2023,6 +2100,12 @@ def save_browser_profile(profile: BrowserProfile, previous_name: str | None = No
     with _STORE_CACHE_LOCK:
         store = _load_store()
         profiles = store.get("browser_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "浏览器 Profile",
+        )
         replaced_names = {profile.name}
         if previous_name:
             replaced_names.add(previous_name)
@@ -2209,6 +2292,72 @@ def _restore_secret_values(snapshot: dict[str, str | None]) -> list[str]:
     return errors
 
 
+def _save_profile_with_secret_updates(
+    profile: object,
+    *,
+    list_key: str,
+    secret_updates: dict[str, str],
+    operation: str,
+    previous_name: str | None,
+    save_callback,
+) -> None:
+    """Apply secret edits and profile metadata with rollback on save failure.
+
+    UI editors used to update the keyring before writing ``profiles.json``.
+    A disk-write failure therefore reported "save failed" after irreversibly
+    changing the credential referenced by the old Profile.  Snapshot every
+    touched secret with the strict API while holding the Profile store lock,
+    then restore it if either a secret write or metadata save fails.
+    """
+    if not isinstance(secret_updates, dict):
+        raise ValueError("Profile 密钥更新格式无效")
+
+    allowed_refs = _profile_secret_refs(profile, list_key)
+    updates: dict[str, str] = {}
+    for ref, value in secret_updates.items():
+        if ref not in allowed_refs:
+            raise ValueError(f"{operation} 密钥引用不属于当前 Profile: {ref}")
+        if not isinstance(value, str):
+            raise ValueError(f"{operation} 密钥内容无效: {ref}")
+        updates[ref] = value
+
+    with _STORE_CACHE_LOCK:
+        original_store = _load_store()
+        _ensure_rename_target_available(
+            original_store.get(list_key, []),
+            str(getattr(profile, "name", "")),
+            previous_name,
+            operation,
+        )
+        secret_snapshot = {
+            ref: security.get_secret_strict(ref)
+            for ref in sorted(updates)
+        }
+        try:
+            for ref, value in updates.items():
+                security.set_secret(ref, value)
+            save_callback()
+        except Exception as save_error:
+            rollback_errors = _restore_secret_values(secret_snapshot)
+            # Reintroduce the old metadata only after every old secret is back.
+            # Otherwise a failed secret rollback could make the restored
+            # Profile point at a missing or partially updated credential.
+            if not rollback_errors:
+                try:
+                    current_store = _load_store()
+                    if current_store != original_store:
+                        _save_store(original_store, create_backup=False)
+                except Exception as store_restore_error:
+                    clear_profile_store_cache()
+                    rollback_errors.append(f"Profile: {store_restore_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    f"{operation} 保存失败，且自动回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from save_error
+            raise
+
+
 def _delete_profile_with_secrets(
     name: str,
     *,
@@ -2292,6 +2441,12 @@ def save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> N
     with _STORE_CACHE_LOCK:
         store = _load_store()
         profiles = store.get("ssh_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "SSH Profile",
+        )
         replaced_names = {profile.name}
         if previous_name:
             replaced_names.add(previous_name)
@@ -2323,6 +2478,22 @@ def save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> N
         _delete_secrets_best_effort(refs_to_delete, "SSH Profile 更新")
 
     _disconnect_ssh_profiles(replaced_names | {profile.name})
+
+
+def save_ssh_profile_with_secrets(
+    profile: SSHProfile,
+    secret_updates: dict[str, str],
+    previous_name: str | None = None,
+) -> None:
+    """Save SSH metadata and edited secrets as one in-process transaction."""
+    _save_profile_with_secret_updates(
+        profile,
+        list_key="ssh_profiles",
+        secret_updates=secret_updates,
+        operation="SSH Profile",
+        previous_name=previous_name,
+        save_callback=lambda: save_ssh_profile(profile, previous_name=previous_name),
+    )
 
 
 def delete_ssh_profile(name: str) -> None:

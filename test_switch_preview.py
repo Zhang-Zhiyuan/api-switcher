@@ -70,10 +70,18 @@ def test_preview_blocks_missing_codex_api_key(isolated_preview):
 
 def test_account_preview_blocks_missing_snapshot(isolated_preview):
     profile_manager.save_claude_account_profile(
-        ClaudeAccountProfile(name="Broken Claude", credentials_ref="missing:claude", identity="broken")
+        ClaudeAccountProfile(
+            name="Broken Claude",
+            credentials_ref="claude-account:Broken Claude:credentials",
+            identity="broken",
+        )
     )
     profile_manager.save_codex_account_profile(
-        CodexAccountProfile(name="Broken Codex", auth_json_ref="missing:codex", identity="broken")
+        CodexAccountProfile(
+            name="Broken Codex",
+            auth_json_ref="codex-account:Broken Codex:auth_json",
+            identity="broken",
+        )
     )
 
     claude_preview = switch_preview.build_switch_preview("claude_account", "Broken Claude")

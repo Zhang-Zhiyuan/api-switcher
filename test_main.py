@@ -139,6 +139,7 @@ def test_tray_startup_runs_off_ui_thread():
     class SlowTray:
         def __init__(self):
             self.available_entered = threading.Event()
+            self.release_available = threading.Event()
             self.start_called = threading.Event()
 
         def is_running(self):
@@ -146,7 +147,7 @@ def test_tray_startup_runs_off_ui_thread():
 
         def is_available(self):
             self.available_entered.set()
-            time.sleep(0.15)
+            assert self.release_available.wait(timeout=2)
             return True
 
         def start(self):
@@ -161,8 +162,10 @@ def test_tray_startup_runs_off_ui_thread():
     app_module.App._start_tray_icon(app)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.05
+    assert elapsed < 0.5
     assert app.tray_manager.available_entered.wait(1)
+    assert not app.tray_manager.start_called.is_set()
+    app.tray_manager.release_available.set()
     assert app.tray_manager.start_called.wait(1)
 
 
@@ -546,6 +549,7 @@ def test_shutdown_clears_pending_ui_callbacks(monkeypatch):
 
 def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
     build_started = threading.Event()
+    release_build = threading.Event()
     dialog_created = threading.Event()
     preview = object()
     statuses = []
@@ -555,7 +559,7 @@ def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
 
     def build_switch_preview(kind, name):
         build_started.set()
-        time.sleep(0.15)
+        assert release_build.wait(timeout=2)
         captured["build"] = (kind, name)
         return preview
 
@@ -585,8 +589,10 @@ def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
     app_module.App._show_switch_preview(app, "claude_api", "fast-profile", on_confirm=lambda: None)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.05
+    assert elapsed < 0.5
     assert build_started.wait(1)
+    assert not dialog_created.is_set()
+    release_build.set()
     assert dialog_created.wait(1)
     assert captured["build"] == ("claude_api", "fast-profile")
     assert captured["dialog"][0] is app
@@ -691,6 +697,7 @@ def test_force_exit_watchdog_start_failure_does_not_block_graceful_shutdown(monk
 
 def test_lazy_tab_class_load_runs_off_ui_thread(monkeypatch):
     import_started = threading.Event()
+    release_import = threading.Event()
     tab_created = threading.Event()
     captured = {}
 
@@ -717,7 +724,7 @@ def test_lazy_tab_class_load_runs_off_ui_thread(monkeypatch):
     def slow_import_module(name):
         if name == "slow_tab_module":
             import_started.set()
-            time.sleep(0.15)
+            assert release_import.wait(timeout=2)
             return slow_module
         return real_import_module(name)
 
@@ -748,8 +755,10 @@ def test_lazy_tab_class_load_runs_off_ui_thread(monkeypatch):
     app_module.App._schedule_tab_load(app, "Slow", delay_ms=1)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.05
+    assert elapsed < 0.5
     assert import_started.wait(1)
+    assert not tab_created.is_set()
+    release_import.set()
     assert tab_created.wait(1)
     assert app._slow_tab is not None
     assert captured["master"] is app._tab_frames["Slow"]

@@ -927,5 +927,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             )
 
         if self._on_save:
-            self._on_save(data, self._profile)
+            try:
+                self._on_save(data, self._profile)
+            except Exception as e:
+                self._show_error(f"保存失败: {e}")
+                return
         self.destroy()

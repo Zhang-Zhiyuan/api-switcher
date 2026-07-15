@@ -808,14 +808,13 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         profile = next((p for p in profiles if p.name == name), None)
 
         def on_save(data, old_profile):
-            from core import security
-
             token_ref = old_profile.auth_token_ref if old_profile else f"claude:{data['name']}:auth_token"
             primary_api_key_ref = old_profile.primary_api_key_ref if old_profile else None
+            secret_updates = {}
             if data.get("auth_token"):
-                security.set_secret(token_ref, data["auth_token"])
                 primary_api_key_ref = primary_api_key_ref or f"claude:{data['name']}:primary_api_key"
-                security.set_secret(primary_api_key_ref, data["auth_token"])
+                secret_updates[token_ref] = data["auth_token"]
+                secret_updates[primary_api_key_ref] = data["auth_token"]
 
             new_profile = ClaudeProfile(
                 name=data["name"],
@@ -831,8 +830,9 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 provider=data.get("provider", "custom"),
                 custom_provider_name=data.get("custom_provider_name") or None,
             )
-            profile_manager.save_claude_profile(
+            profile_manager.save_claude_profile_with_secrets(
                 new_profile,
+                secret_updates,
                 previous_name=old_profile.name if old_profile else None,
             )
             show_toast(self.winfo_toplevel(), f"已保存 Claude API 配置: {data['name']}")
@@ -844,14 +844,13 @@ class ClaudeTab(ctk.CTkScrollableFrame):
 
     def _create_profile(self):
         def on_save(data, _):
-            from core import security
-
             token_ref = f"claude:{data['name']}:auth_token"
             primary_api_key_ref = None
+            secret_updates = {}
             if data.get("auth_token"):
-                security.set_secret(token_ref, data["auth_token"])
                 primary_api_key_ref = f"claude:{data['name']}:primary_api_key"
-                security.set_secret(primary_api_key_ref, data["auth_token"])
+                secret_updates[token_ref] = data["auth_token"]
+                secret_updates[primary_api_key_ref] = data["auth_token"]
 
             profile = ClaudeProfile(
                 name=data["name"],
@@ -865,7 +864,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 provider=data.get("provider", "custom"),
                 custom_provider_name=data.get("custom_provider_name") or None,
             )
-            profile_manager.save_claude_profile(profile)
+            profile_manager.save_claude_profile_with_secrets(profile, secret_updates)
             show_toast(self.winfo_toplevel(), f"已创建 Claude API 配置: {data['name']}")
             self.refresh()
             self._refresh_shell_state()

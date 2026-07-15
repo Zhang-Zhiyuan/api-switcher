@@ -117,13 +117,120 @@ def test_ssh_test_thread_start_failure_restores_busy_state(monkeypatch):
     dialog._test_btn = _Control()
     dialog._test_result = _Control()
     dialog._collect_data = lambda: {}
-    dialog._build_profile = lambda _data: SimpleNamespace(name="server")
+    dialog._build_save_plan = lambda _data: SimpleNamespace(
+        profile=SimpleNamespace(name="server"),
+        secret_updates={"ssh:server:password": "temporary"},
+    )
 
     SSHEditorDialog._test_connection(dialog)
 
     assert dialog._test_busy is False
     assert dialog._test_btn.configurations[-1] == {"state": "normal", "text": "测试连接"}
     assert dialog._test_result.configurations[-1]["text"] == "无法启动连接测试: thread unavailable"
+
+
+def test_ssh_test_uses_ephemeral_secret_override_without_persisting(monkeypatch):
+    import core.ssh_manager as ssh_core
+    from core import security
+
+    class _ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    captured = {}
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        security,
+        "set_secret",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("测试连接不得写入正式密钥库")
+        ),
+    )
+    monkeypatch.setattr(
+        ssh_core.ssh_manager,
+        "disconnect",
+        lambda _name: (_ for _ in ()).throw(
+            AssertionError("临时测试不得断开已缓存连接")
+        ),
+    )
+
+    def test_connection(profile, *, secret_overrides=None):
+        captured["profile"] = profile
+        captured["secret_overrides"] = secret_overrides
+        return True, "ok"
+
+    monkeypatch.setattr(ssh_core.ssh_manager, "test_connection", test_connection)
+    dialog = object.__new__(SSHEditorDialog)
+    dialog._profile = None
+    dialog._test_busy = False
+    dialog._test_btn = _Control()
+    dialog._test_result = _Control()
+    dialog._collect_data = lambda: {
+        "name": "server",
+        "host": "ssh.example.com",
+        "port": "22",
+        "username": "root",
+        "auth_type": "password",
+        "password": "temporary-password",
+        "private_key_path": "",
+        "key_passphrase": "",
+        "remote_claude_dir": "",
+        "remote_codex_dir": "",
+    }
+    dialog.winfo_exists = lambda: True
+    dialog._safe_after = lambda callback: callback() or True
+
+    SSHEditorDialog._test_connection(dialog)
+
+    assert captured["profile"].password_ref == "ssh:server:password"
+    assert captured["secret_overrides"] == {
+        "ssh:server:password": "temporary-password",
+    }
+    assert dialog._test_busy is False
+
+
+def test_ssh_save_passes_deferred_secrets_to_transaction_callback():
+    profile = SimpleNamespace(name="server")
+    old_profile = SimpleNamespace(name="old-server")
+    secret_updates = {"ssh:server:password": "secret"}
+    saved = []
+    destroyed = []
+    dialog = object.__new__(SSHEditorDialog)
+    dialog._profile = old_profile
+    dialog._collect_data = lambda: {"name": "server"}
+    dialog._build_save_plan = lambda _data: SimpleNamespace(
+        profile=profile,
+        secret_updates=secret_updates,
+    )
+    dialog._on_save = lambda *args: saved.append(args)
+    dialog._test_result = _Control()
+    dialog.destroy = lambda: destroyed.append(True)
+
+    SSHEditorDialog._save(dialog)
+
+    assert saved == [(profile, old_profile, secret_updates)]
+    assert destroyed == [True]
+
+
+def test_profile_save_callback_failure_is_shown_without_closing_dialog():
+    errors = []
+    destroyed = []
+    dialog = object.__new__(ProfileEditorDialog)
+    dialog._profile_type = "claude"
+    dialog._profile = None
+    dialog._collect_data = lambda: {"name": "demo"}
+    dialog._get_secret_value = lambda *_args: "secret"
+    dialog._on_save = lambda *_args: (_ for _ in ()).throw(OSError("disk full"))
+    dialog._show_error = errors.append
+    dialog.destroy = lambda: destroyed.append(True)
+
+    ProfileEditorDialog._save(dialog)
+
+    assert errors == ["保存失败: disk full"]
+    assert destroyed == []
 
 
 def test_profile_model_for_save_uses_loaded_and_bundled_values_deterministically():

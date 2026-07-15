@@ -14,6 +14,7 @@ class _Label:
 
 def test_auto_continue_logs_refresh_runs_off_ui_thread(monkeypatch):
     load_started = threading.Event()
+    release_load = threading.Event()
     applied = threading.Event()
     detail_updates = []
     payloads = []
@@ -22,7 +23,7 @@ def test_auto_continue_logs_refresh_runs_off_ui_thread(monkeypatch):
         assert provider == "claude"
         assert limit == 100
         load_started.set()
-        time.sleep(0.15)
+        assert release_load.wait(timeout=2)
         return ["event"]
 
     def slow_format(provider, limit):
@@ -49,8 +50,10 @@ def test_auto_continue_logs_refresh_runs_off_ui_thread(monkeypatch):
     logs_module.AutoContinueLogsDialog._refresh(dialog)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.05
+    assert elapsed < 0.5
     assert load_started.wait(1)
+    assert not applied.is_set()
+    release_load.set()
     assert applied.wait(1)
     assert payloads == [{"ok": True, "events": ["event"], "diagnostics": "diagnostics", "error": ""}]
     assert any("后台读取自动续跑日志" in text for text in detail_updates)

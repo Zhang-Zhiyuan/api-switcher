@@ -1898,9 +1898,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(side="left")
 
     def _create_server(self):
-        def on_save(profile, _):
-            ssh_manager.ssh_manager.disconnect(profile.name)
-            profile_manager.save_ssh_profile(profile)
+        def on_save(profile, _, secret_updates):
+            profile_manager.save_ssh_profile_with_secrets(profile, secret_updates)
             show_toast(self.winfo_toplevel(), f"已创建: {profile.name}")
             self.refresh()
 
@@ -1909,12 +1908,13 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _edit_server(self, name):
         profile = self._server_profile_by_name(name)
 
-        def on_save(new_profile, old_profile):
+        def on_save(new_profile, old_profile, secret_updates):
             previous_name = old_profile.name if old_profile else None
-            if previous_name:
-                ssh_manager.ssh_manager.disconnect(previous_name)
-            ssh_manager.ssh_manager.disconnect(new_profile.name)
-            profile_manager.save_ssh_profile(new_profile, previous_name=previous_name)
+            profile_manager.save_ssh_profile_with_secrets(
+                new_profile,
+                secret_updates,
+                previous_name=previous_name,
+            )
             show_toast(self.winfo_toplevel(), f"已保存: {new_profile.name}")
             self.refresh()
 

@@ -7,7 +7,7 @@ import pytest
 
 from core import persistent_env, profile_manager, remote_auto_continue, remote_config, remote_git_login, security, sync_manager
 from core.ssh_manager import SSHManager, ssh_manager
-from core.ssh_profile_builder import build_ssh_profile_from_data
+from core.ssh_profile_builder import build_ssh_profile_from_data, prepare_ssh_profile_from_data
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile, SSHProfile
 from ui.tabs.ssh_tab import SSHTab, _format_server_batch_item
 
@@ -18,6 +18,7 @@ def isolated_ssh(tmp_path, monkeypatch):
 
     monkeypatch.setattr(security, "set_secret", lambda key, value: secret_store.__setitem__(key, value or ""))
     monkeypatch.setattr(security, "get_secret", lambda key: secret_store.get(key) if key else None)
+    monkeypatch.setattr(security, "get_secret_strict", lambda key: secret_store.get(key) if key else None)
     monkeypatch.setattr(security, "delete_secret", lambda key: secret_store.pop(key, None) if key else None)
     monkeypatch.setattr(security, "set_secret_json", lambda key, data: secret_store.__setitem__(key, json.dumps(data)))
     monkeypatch.setattr(security, "get_secret_json", lambda key: json.loads(secret_store[key]) if key in secret_store else None)
@@ -83,6 +84,30 @@ def test_ssh_builder_preserves_password_when_editing_metadata(isolated_ssh):
     assert profile.host == "new.example.com"
     assert profile.port == 2200
     assert security.get_secret(profile.password_ref) == "secret-password"
+
+
+def test_ssh_save_plan_defers_secret_write_until_transaction(isolated_ssh):
+    secret_store = isolated_ssh
+    plan = prepare_ssh_profile_from_data({
+        "name": "deferred",
+        "host": "ssh.example.com",
+        "port": "22",
+        "username": "root",
+        "auth_type": "password",
+        "password": "new-password",
+        "private_key_path": "",
+        "key_passphrase": "",
+    })
+    ref = "ssh:deferred:password"
+
+    assert plan.profile.password_ref == ref
+    assert plan.secret_updates == {ref: "new-password"}
+    assert ref not in secret_store
+
+    profile_manager.save_ssh_profile_with_secrets(plan.profile, plan.secret_updates)
+
+    assert secret_store[ref] == "new-password"
+    assert [profile.name for profile in profile_manager.list_ssh_profiles()] == ["deferred"]
 
 
 def test_format_server_batch_item_avoids_duplicate_server_prefix():
@@ -1256,6 +1281,155 @@ def test_ssh_connect_reconnects_when_cached_profile_details_change(isolated_ssh,
     assert client.kwargs["hostname"] == "new.example.com"
     assert manager._clients["remote"] is client
     assert manager._client_signatures["remote"] == manager._connection_signature(new_profile)
+
+
+def test_ssh_connect_uses_secret_override_without_keyring_or_cached_client(
+    isolated_ssh,
+    monkeypatch,
+):
+    import core.ssh_manager as ssh_core
+
+    class _ActiveTransport:
+        def is_active(self):
+            return True
+
+    class _CachedSSHClient:
+        def __init__(self):
+            self.closed = False
+
+        def get_transport(self):
+            return _ActiveTransport()
+
+        def close(self):
+            self.closed = True
+
+    class _EphemeralSSHClient:
+        def __init__(self):
+            self.kwargs = None
+
+        def set_missing_host_key_policy(self, _policy):
+            pass
+
+        def connect(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_transport(self):
+            return _ActiveTransport()
+
+    ref = "ssh:remote:password"
+    profile = SSHProfile(
+        name="remote",
+        host="new.example.com",
+        username="root",
+        auth_type="password",
+        password_ref=ref,
+    )
+    manager = SSHManager()
+    cached_client = _CachedSSHClient()
+    manager._clients[profile.name] = cached_client
+    manager._client_signatures[profile.name] = manager._connection_signature(profile)
+    monkeypatch.setattr(ssh_core.paramiko, "SSHClient", _EphemeralSSHClient)
+    monkeypatch.setattr(
+        security,
+        "get_secret",
+        lambda _ref: (_ for _ in ()).throw(AssertionError("override must bypass keyring")),
+    )
+
+    client = manager.connect(
+        profile,
+        timeout=1,
+        max_retries=1,
+        secret_overrides={ref: "temporary-password"},
+    )
+
+    assert client.kwargs["password"] == "temporary-password"
+    assert manager._clients[profile.name] is cached_client
+    assert cached_client.closed is False
+
+
+def test_ssh_connect_closes_every_failed_retry_client(isolated_ssh, monkeypatch):
+    import core.ssh_manager as ssh_core
+
+    clients = []
+
+    class _FailingSSHClient:
+        def __init__(self):
+            self.closed = False
+            clients.append(self)
+
+        def set_missing_host_key_policy(self, _policy):
+            pass
+
+        def connect(self, **_kwargs):
+            raise OSError("connection refused")
+
+        def close(self):
+            self.closed = True
+
+    ref = "ssh:failed:password"
+    profile = SSHProfile(
+        name="failed",
+        host="ssh.example.com",
+        username="root",
+        auth_type="password",
+        password_ref=ref,
+    )
+    manager = SSHManager()
+    monkeypatch.setattr(ssh_core.paramiko, "SSHClient", _FailingSSHClient)
+    monkeypatch.setattr(ssh_core.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        manager.connect(
+            profile,
+            timeout=1,
+            max_retries=2,
+            secret_overrides={ref: "temporary-password"},
+        )
+
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
+
+
+def test_ssh_connection_test_closes_ephemeral_override_client(monkeypatch):
+    class _Client:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    manager = SSHManager()
+    client = _Client()
+    captured = {}
+    profile = SSHProfile(
+        name="remote",
+        host="ssh.example.com",
+        username="root",
+        auth_type="password",
+        password_ref="ssh:remote:password",
+    )
+
+    def connect(_profile, **kwargs):
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(manager, "connect", connect)
+    monkeypatch.setattr(
+        manager,
+        "execute_command",
+        lambda *_args, **_kwargs: ("Connection OK\n", ""),
+    )
+
+    success, _message = manager.test_connection(
+        profile,
+        secret_overrides={"ssh:remote:password": "temporary-password"},
+    )
+
+    assert success is True
+    assert captured["secret_overrides"] == {
+        "ssh:remote:password": "temporary-password",
+    }
+    assert client.closed is True
 
 
 class _FakeChannel:

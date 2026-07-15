@@ -809,13 +809,12 @@ class CodexTab(ctk.CTkScrollableFrame):
         profile = next((p for p in profiles if p.name == name), None)
 
         def on_save(data, old_profile):
-            from core import security
-
             api_key_ref = old_profile.api_key_ref if old_profile else None
+            secret_updates = {}
 
             if data.get("api_key"):
                 api_key_ref = f"codex:{data['name']}:api_key"
-                security.set_secret(api_key_ref, data["api_key"])
+                secret_updates[api_key_ref] = data["api_key"]
 
             new_profile = CodexProfile(
                 name=data["name"],
@@ -831,8 +830,9 @@ class CodexTab(ctk.CTkScrollableFrame):
                 approval_policy=data.get("approval_policy", "never"),
                 sandbox_mode=data.get("sandbox_mode", "danger-full-access"),
             )
-            profile_manager.save_codex_profile(
+            profile_manager.save_codex_profile_with_secrets(
                 new_profile,
+                secret_updates,
                 previous_name=old_profile.name if old_profile else None,
             )
             show_toast(self.winfo_toplevel(), f"已保存 Codex API 配置: {data['name']}")
@@ -844,13 +844,12 @@ class CodexTab(ctk.CTkScrollableFrame):
 
     def _create_profile(self):
         def on_save(data, _):
-            from core import security
-
             api_key_ref = None
+            secret_updates = {}
 
             if data.get("api_key"):
                 api_key_ref = f"codex:{data['name']}:api_key"
-                security.set_secret(api_key_ref, data["api_key"])
+                secret_updates[api_key_ref] = data["api_key"]
 
             profile = CodexProfile(
                 name=data["name"],
@@ -866,7 +865,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 approval_policy=data.get("approval_policy", "never"),
                 sandbox_mode=data.get("sandbox_mode", "danger-full-access"),
             )
-            profile_manager.save_codex_profile(profile)
+            profile_manager.save_codex_profile_with_secrets(profile, secret_updates)
             show_toast(self.winfo_toplevel(), f"已创建 Codex API 配置: {data['name']}")
             self.refresh()
             self._refresh_shell_state()

@@ -18,6 +18,7 @@ from core.auto_continue.error_recovery_script import generate_error_recovery_scr
 from models.auto_continue import AutoContinueSettings
 
 logger = logging.getLogger(__name__)
+AUTO_CONTINUE_HOOK_TIMEOUT_SECONDS = 30
 
 
 def _is_managed_hook_command(command: str) -> bool:
@@ -244,7 +245,7 @@ class ClaudeProvider(AutoContinueProvider):
         hook_def = {
             "type": "command",
             "command": f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
-            "timeout": 10,
+            "timeout": AUTO_CONTINUE_HOOK_TIMEOUT_SECONDS,
             "statusMessage": "Checking whether Claude should continue"
         }
 

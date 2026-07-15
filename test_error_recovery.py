@@ -1306,7 +1306,7 @@ def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=10,
+        timeout=30,
         check=False,
     )
 
@@ -1329,7 +1329,7 @@ def test_local_stop_hook_outputs_clean_json_and_persists_state(tmp_path):
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=10,
+        timeout=30,
         check=False,
     )
 

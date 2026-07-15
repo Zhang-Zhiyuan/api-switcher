@@ -4,7 +4,7 @@ import threading
 import pytest
 
 from core import atomic_io, profile_manager, security
-from models.profile import BrowserProfile, ClaudeProfile, CodexProfile
+from models.profile import BrowserProfile, ClaudeProfile, CodexProfile, SSHProfile
 
 
 @pytest.fixture()
@@ -78,6 +78,368 @@ def test_concurrent_profile_saves_do_not_lose_updates(
     assert sorted(_store_names("codex_profiles")) == ["First", "Second"]
 
 
+@pytest.mark.parametrize(
+    ("save_profile", "source", "target", "renamed", "list_key"),
+    [
+        (
+            profile_manager.save_claude_profile,
+            ClaudeProfile(
+                name="Source",
+                auth_token_ref="claude:Source:auth_token",
+                base_url="https://source.example",
+            ),
+            ClaudeProfile(
+                name="Target",
+                auth_token_ref="claude:Target:auth_token",
+                base_url="https://target.example",
+            ),
+            ClaudeProfile(
+                name="Target",
+                auth_token_ref="claude:Source:auth_token",
+                base_url="https://renamed.example",
+            ),
+            "claude_profiles",
+        ),
+        (
+            profile_manager.save_codex_profile,
+            CodexProfile(
+                name="Source",
+                api_key_ref="codex:Source:api_key",
+                model="source-model",
+            ),
+            CodexProfile(
+                name="Target",
+                api_key_ref="codex:Target:api_key",
+                model="target-model",
+            ),
+            CodexProfile(
+                name="Target",
+                api_key_ref="codex:Target:api_key",
+                model="renamed-model",
+            ),
+            "codex_profiles",
+        ),
+        (
+            profile_manager.save_ssh_profile,
+            SSHProfile(
+                name="Source",
+                host="source.example",
+                auth_type="password",
+                password_ref="ssh:Source:password",
+            ),
+            SSHProfile(
+                name="Target",
+                host="target.example",
+                auth_type="password",
+                password_ref="ssh:Target:password",
+            ),
+            SSHProfile(
+                name="Target",
+                host="renamed.example",
+                auth_type="password",
+                password_ref="ssh:Target:password",
+            ),
+            "ssh_profiles",
+        ),
+        (
+            profile_manager.save_browser_profile,
+            BrowserProfile(
+                name="Source",
+                browser_type="edge",
+                profile_mode="managed",
+                user_data_dir="C:/profiles/source",
+            ),
+            BrowserProfile(
+                name="Target",
+                browser_type="edge",
+                profile_mode="managed",
+                user_data_dir="C:/profiles/target",
+            ),
+            BrowserProfile(
+                name="Target",
+                browser_type="edge",
+                profile_mode="managed",
+                user_data_dir="C:/profiles/renamed",
+            ),
+            "browser_profiles",
+        ),
+    ],
+)
+def test_profile_rename_refuses_to_overwrite_existing_target(
+    isolated_profile_store,
+    save_profile,
+    source,
+    target,
+    renamed,
+    list_key,
+):
+    save_profile(source)
+    save_profile(target)
+
+    with pytest.raises(ValueError, match="名称已存在: Target"):
+        save_profile(renamed, previous_name="Source")
+
+    assert sorted(_store_names(list_key)) == ["Source", "Target"]
+
+
+def test_secret_transaction_rejects_rename_conflict_before_writing_secret(
+    isolated_profile_store,
+    monkeypatch,
+):
+    secret_store, _deleted_refs = isolated_profile_store
+    source_ref = "codex:Source:api_key"
+    target_ref = "codex:Target:api_key"
+    profile_manager.save_codex_profile(CodexProfile(
+        name="Source",
+        api_key_ref=source_ref,
+        model="source-model",
+    ))
+    profile_manager.save_codex_profile(CodexProfile(
+        name="Target",
+        api_key_ref=target_ref,
+        model="target-model",
+    ))
+    secret_store[source_ref] = "source-secret"
+    secret_store[target_ref] = "target-secret"
+    writes = []
+    monkeypatch.setattr(
+        security,
+        "set_secret",
+        lambda ref, value: writes.append((ref, value)),
+    )
+
+    with pytest.raises(ValueError, match="名称已存在: Target"):
+        profile_manager.save_codex_profile_with_secrets(
+            CodexProfile(
+                name="Target",
+                api_key_ref=target_ref,
+                model="renamed-model",
+            ),
+            {target_ref: "overwriting-secret"},
+            previous_name="Source",
+        )
+
+    assert writes == []
+    assert secret_store[source_ref] == "source-secret"
+    assert secret_store[target_ref] == "target-secret"
+    assert sorted(_store_names("codex_profiles")) == ["Source", "Target"]
+
+
+@pytest.mark.parametrize(
+    ("profile", "save_with_secrets", "list_key", "ref"),
+    [
+        (
+            ClaudeProfile(
+                name="AtomicClaude",
+                auth_token_ref="claude:AtomicClaude:auth_token",
+                base_url="https://atomic.example",
+                provider="custom",
+            ),
+            profile_manager.save_claude_profile_with_secrets,
+            "claude_profiles",
+            "claude:AtomicClaude:auth_token",
+        ),
+        (
+            CodexProfile(
+                name="AtomicCodex",
+                api_key_ref="codex:AtomicCodex:api_key",
+                model_provider="custom",
+            ),
+            profile_manager.save_codex_profile_with_secrets,
+            "codex_profiles",
+            "codex:AtomicCodex:api_key",
+        ),
+        (
+            SSHProfile(
+                name="AtomicSSH",
+                host="ssh.example",
+                auth_type="password",
+                password_ref="ssh:AtomicSSH:password",
+            ),
+            profile_manager.save_ssh_profile_with_secrets,
+            "ssh_profiles",
+            "ssh:AtomicSSH:password",
+        ),
+    ],
+)
+def test_profile_secret_transaction_deletes_new_secret_when_store_save_fails(
+    isolated_profile_store,
+    monkeypatch,
+    profile,
+    save_with_secrets,
+    list_key,
+    ref,
+):
+    secret_store, _deleted_refs = isolated_profile_store
+    monkeypatch.setattr(
+        profile_manager,
+        "_save_store",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        save_with_secrets(profile, {ref: "new-secret"})
+
+    assert ref not in secret_store
+    assert _store_names(list_key) == []
+
+
+def test_profile_secret_transaction_restores_existing_secret_when_store_save_fails(
+    isolated_profile_store,
+    monkeypatch,
+):
+    secret_store, _deleted_refs = isolated_profile_store
+    ref = "codex:Existing:api_key"
+    old_profile = CodexProfile(
+        name="Existing",
+        api_key_ref=ref,
+        model="old-model",
+        model_provider="custom",
+    )
+    profile_manager.save_codex_profile(old_profile)
+    secret_store[ref] = "old-secret"
+    monkeypatch.setattr(
+        profile_manager,
+        "_save_store",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        profile_manager.save_codex_profile_with_secrets(
+            CodexProfile(
+                name="Existing",
+                api_key_ref=ref,
+                model="new-model",
+                model_provider="custom",
+            ),
+            {ref: "new-secret"},
+        )
+
+    assert secret_store[ref] == "old-secret"
+    [saved] = profile_manager.list_codex_profiles()
+    assert saved.model == "old-model"
+
+
+def test_profile_secret_transaction_restores_store_after_post_commit_failure(
+    isolated_profile_store,
+    monkeypatch,
+):
+    secret_store, _deleted_refs = isolated_profile_store
+    ref = "codex:PostCommit:api_key"
+    old_profile = CodexProfile(
+        name="PostCommit",
+        api_key_ref=ref,
+        model="old-model",
+        model_provider="custom",
+    )
+    profile_manager.save_codex_profile(old_profile)
+    secret_store[ref] = "old-secret"
+    original_save = profile_manager._save_store
+    fail_once = True
+
+    def commit_then_fail(store, *args, **kwargs):
+        nonlocal fail_once
+        original_save(store, *args, **kwargs)
+        if fail_once:
+            fail_once = False
+            raise OSError("post-commit failure")
+
+    monkeypatch.setattr(profile_manager, "_save_store", commit_then_fail)
+
+    with pytest.raises(OSError, match="post-commit failure"):
+        profile_manager.save_codex_profile_with_secrets(
+            CodexProfile(
+                name="PostCommit",
+                api_key_ref=ref,
+                model="new-model",
+                model_provider="custom",
+            ),
+            {ref: "new-secret"},
+        )
+
+    assert secret_store[ref] == "old-secret"
+    [saved] = profile_manager.list_codex_profiles()
+    assert saved.model == "old-model"
+
+
+def test_profile_secret_transaction_reports_incomplete_rollback(
+    isolated_profile_store,
+    monkeypatch,
+):
+    secret_store, _deleted_refs = isolated_profile_store
+    ref = "codex:RollbackFailure:api_key"
+    secret_store[ref] = "old-secret"
+
+    def fail_restore(key, value):
+        if key == ref and value == "old-secret":
+            raise OSError("keyring locked")
+        secret_store[key] = value
+
+    monkeypatch.setattr(security, "set_secret", fail_restore)
+    monkeypatch.setattr(
+        profile_manager,
+        "_save_store",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="自动回滚不完整"):
+        profile_manager.save_codex_profile_with_secrets(
+            CodexProfile(
+                name="RollbackFailure",
+                api_key_ref=ref,
+                model_provider="custom",
+            ),
+            {ref: "new-secret"},
+        )
+
+    assert secret_store[ref] == "new-secret"
+    assert _store_names("codex_profiles") == []
+
+
+def test_failed_secret_rollback_keeps_already_committed_new_profile_metadata(
+    isolated_profile_store,
+    monkeypatch,
+):
+    secret_store, _deleted_refs = isolated_profile_store
+    ref = "codex:CommittedRollbackFailure:api_key"
+    old_profile = CodexProfile(
+        name="CommittedRollbackFailure",
+        api_key_ref=ref,
+        model="old-model",
+        model_provider="custom",
+    )
+    profile_manager.save_codex_profile(old_profile)
+    secret_store[ref] = "old-secret"
+    original_save = profile_manager._save_store
+
+    def commit_then_fail(store, *args, **kwargs):
+        original_save(store, *args, **kwargs)
+        raise OSError("post-commit failure")
+
+    def fail_restore(key, value):
+        if key == ref and value == "old-secret":
+            raise OSError("keyring locked")
+        secret_store[key] = value
+
+    monkeypatch.setattr(profile_manager, "_save_store", commit_then_fail)
+    monkeypatch.setattr(security, "set_secret", fail_restore)
+
+    with pytest.raises(RuntimeError, match="自动回滚不完整"):
+        profile_manager.save_codex_profile_with_secrets(
+            CodexProfile(
+                name="CommittedRollbackFailure",
+                api_key_ref=ref,
+                model="new-model",
+                model_provider="custom",
+            ),
+            {ref: "new-secret"},
+        )
+
+    assert secret_store[ref] == "new-secret"
+    stored = json.loads(profile_manager.PROFILES_FILE.read_text(encoding="utf-8"))
+    assert stored["codex_profiles"][0]["model"] == "new-model"
+
+
 def test_committed_profile_save_does_not_report_old_secret_cleanup_as_save_failure(
     isolated_profile_store,
     monkeypatch,
@@ -104,6 +466,34 @@ def test_committed_profile_save_does_not_report_old_secret_cleanup_as_save_failu
     assert saved.model == "new"
     assert saved.api_key_ref == "codex:NewOwner:api_key"
     assert "旧密钥" in caplog.text and "清理失败" in caplog.text
+
+
+def test_profile_cache_failure_does_not_negate_committed_disk_save(
+    isolated_profile_store,
+    monkeypatch,
+    caplog,
+):
+    original_cache = profile_manager._cache_store
+    monkeypatch.setattr(
+        profile_manager,
+        "_cache_store",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("cache unavailable")),
+    )
+
+    profile_manager.save_codex_profile(CodexProfile(
+        name="CacheCommit",
+        api_key_ref="codex:CacheCommit:api_key",
+        model_provider="custom",
+    ))
+
+    stored = json.loads(profile_manager.PROFILES_FILE.read_text(encoding="utf-8"))
+    assert [item["name"] for item in stored["codex_profiles"]] == ["CacheCommit"]
+    assert profile_manager._STORE_CACHE is None
+    assert "已写入磁盘" in caplog.text and "缓存刷新失败" in caplog.text
+
+    monkeypatch.setattr(profile_manager, "_cache_store", original_cache)
+    profile_manager.clear_profile_store_cache()
+    assert [profile.name for profile in profile_manager.list_codex_profiles()] == ["CacheCommit"]
 
 
 def test_corrupt_cross_namespace_profile_ref_is_never_deleted(

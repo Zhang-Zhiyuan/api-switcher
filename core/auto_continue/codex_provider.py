@@ -10,6 +10,7 @@ from core.auto_continue.error_recovery_script import generate_codex_error_recove
 from models.auto_continue import AutoContinueSettings
 
 logger = logging.getLogger(__name__)
+AUTO_CONTINUE_HOOK_TIMEOUT_SECONDS = 30
 
 
 def _is_managed_codex_hook(command: str) -> bool:
@@ -272,7 +273,7 @@ class CodexProvider(AutoContinueProvider):
         hook_def = {
             "type": "command",
             "command": f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
-            "timeout": 10,
+            "timeout": AUTO_CONTINUE_HOOK_TIMEOUT_SECONDS,
             "statusMessage": "Checking whether Codex should continue"
         }
         git_snapshot_on_start = (

@@ -4,6 +4,7 @@ import pytest
 
 from core import api_tester, security
 from core.providers import ProviderRegistry
+from models.profile import ClaudeProfile, CodexProfile
 from ui.dialogs import api_test_result_dialog
 from ui.tabs import claude_tab, codex_tab
 
@@ -182,3 +183,120 @@ def test_api_tab_refresh_thread_start_failure_replaces_loading_state(
 
     assert loading == [True]
     assert errors == ["刷新任务启动失败: thread unavailable"]
+
+
+def _profile_edit_test_tab(tab_class):
+    tab = object.__new__(tab_class)
+    tab.winfo_toplevel = lambda: "root"
+    tab.refresh = lambda: None
+    tab._refresh_shell_state = lambda: None
+    return tab
+
+
+def test_claude_create_and_edit_defer_secrets_to_profile_transaction(monkeypatch):
+    old_profile = ClaudeProfile(
+        name="ClaudeOld",
+        auth_token_ref="claude:ClaudeOld:auth_token",
+        primary_api_key_ref="claude:ClaudeOld:primary_api_key",
+        base_url="https://old.invalid",
+        provider="custom",
+    )
+    transactions = []
+    monkeypatch.setattr(
+        claude_tab.profile_manager,
+        "list_switchable_claude_profiles",
+        lambda: [old_profile],
+    )
+    monkeypatch.setattr(
+        claude_tab.profile_manager,
+        "save_claude_profile_with_secrets",
+        lambda profile, updates, previous_name=None: transactions.append(
+            (profile, updates, previous_name)
+        ),
+    )
+    monkeypatch.setattr(claude_tab, "show_toast", lambda *_args, **_kwargs: None)
+
+    def fake_editor(*_args, **kwargs):
+        editing = kwargs.get("profile") is not None
+        kwargs["on_save"]({
+            "name": "ClaudeRenamed" if editing else "ClaudeNew",
+            "auth_token": "edited-secret" if editing else "new-secret",
+            "base_url": "https://new.invalid",
+            "model": "claude-test",
+            "effort_level": "high",
+            "permissions_mode": "default",
+            "skip_dangerous_prompt": False,
+            "provider": "custom",
+            "custom_provider_name": None,
+        }, kwargs.get("profile"))
+
+    monkeypatch.setattr(claude_tab, "ProfileEditorDialog", fake_editor)
+    tab = _profile_edit_test_tab(claude_tab.ClaudeTab)
+
+    claude_tab.ClaudeTab._edit_profile(tab, "ClaudeOld")
+    claude_tab.ClaudeTab._create_profile(tab)
+
+    assert transactions[0][1] == {
+        "claude:ClaudeOld:auth_token": "edited-secret",
+        "claude:ClaudeOld:primary_api_key": "edited-secret",
+    }
+    assert transactions[0][2] == "ClaudeOld"
+    assert transactions[1][1] == {
+        "claude:ClaudeNew:auth_token": "new-secret",
+        "claude:ClaudeNew:primary_api_key": "new-secret",
+    }
+    assert transactions[1][2] is None
+
+
+def test_codex_create_and_edit_defer_secrets_to_profile_transaction(monkeypatch):
+    old_profile = CodexProfile(
+        name="CodexOld",
+        api_key_ref="codex:CodexOld:api_key",
+        model_provider="custom",
+    )
+    transactions = []
+    monkeypatch.setattr(
+        codex_tab.profile_manager,
+        "list_switchable_codex_profiles",
+        lambda: [old_profile],
+    )
+    monkeypatch.setattr(
+        codex_tab.profile_manager,
+        "save_codex_profile_with_secrets",
+        lambda profile, updates, previous_name=None: transactions.append(
+            (profile, updates, previous_name)
+        ),
+    )
+    monkeypatch.setattr(codex_tab, "show_toast", lambda *_args, **_kwargs: None)
+
+    def fake_editor(*_args, **kwargs):
+        editing = kwargs.get("profile") is not None
+        kwargs["on_save"]({
+            "name": "CodexRenamed" if editing else "CodexNew",
+            "api_key": "edited-secret" if editing else "new-secret",
+            "model": "codex-test",
+            "model_provider": "custom",
+            "model_reasoning_effort": "high",
+            "custom_base_url": "https://new.invalid/v1",
+            "custom_name": "Custom",
+            "custom_wire_api": "responses",
+            "custom_env_key": "OPENAI_API_KEY",
+            "custom_requires_openai_auth": False,
+            "approval_policy": "never",
+            "sandbox_mode": "danger-full-access",
+        }, kwargs.get("profile"))
+
+    monkeypatch.setattr(codex_tab, "ProfileEditorDialog", fake_editor)
+    tab = _profile_edit_test_tab(codex_tab.CodexTab)
+
+    codex_tab.CodexTab._edit_profile(tab, "CodexOld")
+    codex_tab.CodexTab._create_profile(tab)
+
+    assert transactions[0][1] == {
+        "codex:CodexRenamed:api_key": "edited-secret",
+    }
+    assert transactions[0][2] == "CodexOld"
+    assert transactions[1][1] == {
+        "codex:CodexNew:api_key": "new-secret",
+    }
+    assert transactions[1][2] is None
