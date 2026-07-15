@@ -52,6 +52,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._initial_refresh_after_id = None
         self._responsive_after_id = None
         self._responsive_state = None
+        self._profile_tests_inflight: set[str] = set()
+        self._profile_test_buttons: dict[str, object] = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -251,6 +253,8 @@ class ClaudeTab(ctk.CTkScrollableFrame):
     def destroy(self):
         self._destroyed = True
         self._refresh_generation += 1
+        self._profile_tests_inflight.clear()
+        self._profile_test_buttons.clear()
         if self._responsive_after_id is not None:
             try:
                 self.after_cancel(self._responsive_after_id)
@@ -446,7 +450,10 @@ class ClaudeTab(ctk.CTkScrollableFrame):
 
             run_on_ui_thread(self, finish)
 
-        threading.Thread(target=worker, name="claude-tab-refresh", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="claude-tab-refresh", daemon=True).start()
+        except Exception as exc:
+            self._show_refresh_error(f"刷新任务启动失败: {exc}")
 
     def _is_alive(self) -> bool:
         if self._destroyed:
@@ -604,6 +611,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 border_color=COLORS["success"] if is_active else COLORS["border_soft"],
             )
             card.pack(fill="x", pady=5)
+            self._register_profile_test_button(profile.name, card)
         if end >= len(profiles):
             self._profile_render_after_id = None
             return
@@ -678,48 +686,122 @@ class ClaudeTab(ctk.CTkScrollableFrame):
 
         self._show_switch_preview("claude_account", name, perform_switch)
 
+    def _register_profile_test_button(self, name: str, card) -> None:
+        """Keep the rendered test button in sync with an in-flight request."""
+
+        pending = [card]
+        while pending:
+            widget = pending.pop()
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                continue
+            pending.extend(children)
+            for child in children:
+                try:
+                    if child.cget("text") == "测试":
+                        self._profile_test_buttons[name] = child
+                        self._set_profile_test_busy(name, name in self._profile_tests_inflight)
+                        return
+                except Exception:
+                    continue
+
+    def _set_profile_test_busy(self, name: str, busy: bool) -> None:
+        button = getattr(self, "_profile_test_buttons", {}).get(name)
+        if button is None:
+            return
+        try:
+            button.configure(state="disabled" if busy else "normal", text="测试中" if busy else "测试")
+        except Exception:
+            # The card may have been replaced by a concurrent refresh.
+            getattr(self, "_profile_test_buttons", {}).pop(name, None)
+
+    def _finish_profile_test(self, name: str) -> None:
+        getattr(self, "_profile_tests_inflight", set()).discard(name)
+        self._set_profile_test_busy(name, False)
+
     def _test_profile(self, name):
-        profiles = profile_manager.list_switchable_claude_profiles()
-        profile = next((p for p in profiles if p.name == name), None)
+        inflight = getattr(self, "_profile_tests_inflight", None)
+        if inflight is None:
+            inflight = self._profile_tests_inflight = set()
+        if name in inflight:
+            show_toast(self.winfo_toplevel(), f"正在测试: {name}，请勿重复点击")
+            return
+
+        try:
+            profiles = profile_manager.list_switchable_claude_profiles()
+        except Exception as exc:
+            show_toast(self.winfo_toplevel(), f"读取 API 配置失败: {exc}", is_error=True)
+            return
+        profile = next((p for p in (profiles or ()) if p.name == name), None)
         if not profile:
             show_toast(self.winfo_toplevel(), f"未找到 API 配置: {name}", is_error=True)
             return
 
-        from core import security
+        try:
+            from core import security
 
-        api_key = (
-            security.get_secret(profile.auth_token_ref)
-            or security.get_secret(getattr(profile, "primary_api_key_ref", None))
-            or ""
-        )
+            api_key = (
+                security.get_secret(profile.auth_token_ref)
+                or security.get_secret(getattr(profile, "primary_api_key_ref", None))
+                or ""
+            )
+        except Exception as exc:
+            show_toast(self.winfo_toplevel(), f"读取 Auth Token 失败: {exc}", is_error=True)
+            return
         if not api_key:
             show_toast(self.winfo_toplevel(), "该 API 配置没有可用 Auth Token", is_error=True)
             return
 
-        show_toast(self.winfo_toplevel(), f"正在测试: {name}")
+        inflight.add(name)
+        self._set_profile_test_busy(name, True)
+        try:
+            show_toast(self.winfo_toplevel(), f"正在测试: {name}")
+        except Exception:
+            # A toast must never prevent the already prepared worker from
+            # starting or leave its button disabled indefinitely.
+            pass
 
         def run_test():
-            from core.api_tester import APITester
-            from core.api_tester import TestResult
-            from ui.dialogs.api_test_result_dialog import APITestResultDialog
-
             try:
-                result = APITester.test_claude_api(api_key, profile.base_url, profile.model)
+                from core.api_tester import APITester, TestResult
+
+                try:
+                    result = APITester.test_claude_api(api_key, profile.base_url, profile.model)
+                except Exception as exc:
+                    result = TestResult(
+                        False,
+                        f"测试失败: {type(exc).__name__}",
+                        error_details=str(exc)[:400],
+                    )
+                load_error = None
             except Exception as exc:
-                result = TestResult(
-                    False,
-                    f"测试失败: {type(exc).__name__}",
-                    error_details=str(exc)[:400],
-                )
+                result = None
+                load_error = exc
 
             def show_result():
-                if self.winfo_exists():
+                self._finish_profile_test(name)
+                if not self._is_alive():
+                    return
+                if load_error is not None:
+                    show_toast(self.winfo_toplevel(), f"测试组件加载失败: {load_error}", is_error=True)
+                    return
+                try:
+                    from ui.dialogs.api_test_result_dialog import APITestResultDialog
+
                     APITestResultDialog(self.winfo_toplevel(), result, name)
+                except Exception as exc:
+                    show_toast(self.winfo_toplevel(), f"显示测试结果失败: {exc}", is_error=True)
 
-            run_on_ui_thread(self, show_result)
+            if not run_on_ui_thread(self, show_result):
+                # No Tk calls here: dispatch failure commonly means the tab was destroyed.
+                inflight.discard(name)
 
-        import threading
-        threading.Thread(target=run_test, daemon=True).start()
+        try:
+            threading.Thread(target=run_test, name=f"claude-api-test-{name}", daemon=True).start()
+        except Exception as exc:
+            self._finish_profile_test(name)
+            show_toast(self.winfo_toplevel(), f"无法启动测试任务: {exc}", is_error=True)
 
     def _edit_profile(self, name):
         profiles = profile_manager.list_switchable_claude_profiles()

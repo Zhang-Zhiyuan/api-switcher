@@ -46,6 +46,42 @@ ACTIVE_PROFILE_KEYS = (
     "active_browser_profile",
 )
 
+# Only these model fields are allowed to own app-managed secrets.  Do not infer
+# ownership from arbitrary ``*_ref`` keys loaded from disk: unknown fields may
+# come from a newer/corrupt store and must never authorize secret deletion.
+PROFILE_SECRET_REF_FIELDS = {
+    "claude_profiles": ("auth_token_ref", "primary_api_key_ref"),
+    "codex_profiles": ("api_key_ref",),
+    "claude_account_profiles": ("credentials_ref",),
+    "codex_account_profiles": ("auth_json_ref",),
+    "ssh_profiles": ("password_ref", "private_key_passphrase_ref"),
+    "browser_profiles": (),
+}
+
+# App-owned secret namespaces for each schema field.  Profile renames in older
+# versions may leave the owner portion unchanged, so validate namespace and
+# field suffix without requiring it to equal the current profile name.
+PROFILE_SECRET_REF_SHAPES = {
+    "claude_profiles": {
+        "auth_token_ref": ("claude:", ":auth_token"),
+        "primary_api_key_ref": ("claude:", ":primary_api_key"),
+    },
+    "codex_profiles": {
+        "api_key_ref": ("codex:", ":api_key"),
+    },
+    "claude_account_profiles": {
+        "credentials_ref": ("claude-account:", ":credentials"),
+    },
+    "codex_account_profiles": {
+        "auth_json_ref": ("codex-account:", ":auth_json"),
+    },
+    "ssh_profiles": {
+        "password_ref": ("ssh:", ":password"),
+        "private_key_passphrase_ref": ("ssh:", ":key_passphrase"),
+    },
+}
+MAX_PROFILE_SECRET_REF_LENGTH = 512
+
 
 def _get_default_store() -> dict:
     """Return default empty store structure."""
@@ -189,6 +225,28 @@ def _normalize_store(store: dict) -> bool:
         if "custom_provider_name" not in profile:
             profile["custom_provider_name"] = None
             changed = True
+
+    # A damaged or hand-edited store must not let one feature borrow another
+    # feature's secret namespace.  Clear the unsafe reference while preserving
+    # the rest of the profile so the user can repair its credentials in the UI.
+    for list_key, field_shapes in PROFILE_SECRET_REF_SHAPES.items():
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            for field_name in field_shapes:
+                ref = profile.get(field_name)
+                if ref and not _is_valid_profile_secret_ref(list_key, field_name, ref):
+                    logger.warning(
+                        "Ignoring invalid secret reference in %s.%s for profile %r",
+                        list_key,
+                        field_name,
+                        profile.get("name"),
+                    )
+                    profile[field_name] = None
+                    changed = True
 
     return changed
 
@@ -486,9 +544,10 @@ def get_active_claude_name() -> str | None:
 
 
 def set_active_claude(name: str | None) -> None:
-    store = _load_store()
-    store["active_claude_profile"] = name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_claude_profile"] = name
+        _save_store(store)
 
 
 def _claude_env(settings: dict) -> dict:
@@ -673,97 +732,103 @@ def _pick_claude_import_name(settings: dict, config: dict) -> str:
 
 
 def save_claude_profile(profile: ClaudeProfile, previous_name: str | None = None) -> None:
-    store = _load_store()
-    profiles = store.get("claude_profiles", [])
-    replaced_names = {profile.name}
-    if previous_name:
-        replaced_names.add(previous_name)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("claude_profiles", [])
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
 
-    replaced_refs: set[str] = set()
-    for existing in profiles:
-        if isinstance(existing, dict) and existing.get("name") in replaced_names:
-            replaced_refs.update(_profile_secret_refs(existing))
+        replaced_refs: set[str] = set()
+        for existing in profiles:
+            if isinstance(existing, dict) and existing.get("name") in replaced_names:
+                replaced_refs.update(_profile_secret_refs(existing, "claude_profiles"))
 
-    new_refs = _profile_secret_refs(profile)
-    profiles = [
-        p for p in profiles
-        if isinstance(p, dict) and p.get("name") not in replaced_names
-    ]
-    profiles.append(profile.to_dict())
-    store["claude_profiles"] = profiles
-    if previous_name and store.get("active_claude_profile") == previous_name:
-        store["active_claude_profile"] = profile.name
-    _save_store(store)
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["claude_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("claude_profiles",))
+        if previous_name and store.get("active_claude_profile") == previous_name:
+            store["active_claude_profile"] = profile.name
+        _save_store(store)
 
-    for ref in replaced_refs - new_refs:
-        security.delete_secret(ref)
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Claude Profile 更新",
+        )
 
 
 def clone_claude_profile(name: str) -> ClaudeProfile:
-    profiles = list_claude_profiles()
-    source = next((p for p in profiles if p.name == name), None)
-    if not source:
-        raise ValueError(f"Claude profile '{name}' not found")
+    with _STORE_CACHE_LOCK:
+        profiles = list_claude_profiles()
+        source = next((p for p in profiles if p.name == name), None)
+        if not source:
+            raise ValueError(f"Claude profile '{name}' not found")
 
-    new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
-    token_ref = f"claude:{new_name}:auth_token"
-    primary_ref = f"claude:{new_name}:primary_api_key"
+        new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
+        token_ref = f"claude:{new_name}:auth_token"
+        primary_ref = f"claude:{new_name}:primary_api_key"
 
-    token_value = (
-        security.get_secret(source.auth_token_ref)
-        or security.get_secret(getattr(source, "primary_api_key_ref", None))
-        or ""
-    )
-    primary_value = security.get_secret(getattr(source, "primary_api_key_ref", None)) or ""
-    if token_value:
-        security.set_secret(token_ref, token_value)
-    if primary_value:
-        security.set_secret(primary_ref, primary_value)
+        token_value = (
+            security.get_secret_strict(source.auth_token_ref)
+            or security.get_secret_strict(getattr(source, "primary_api_key_ref", None))
+            or ""
+        )
+        primary_value = security.get_secret_strict(
+            getattr(source, "primary_api_key_ref", None)
+        ) or ""
+        changes = {
+            ref: value
+            for ref, value in ((token_ref, token_value), (primary_ref, primary_value))
+            if value
+        }
+        secret_snapshot = {
+            ref: security.get_secret_strict(ref)
+            for ref in changes
+        }
 
-    cloned = ClaudeProfile(
-        name=new_name,
-        auth_token_ref=token_ref,
-        primary_api_key_ref=primary_ref if primary_value else None,
-        base_url=source.base_url,
-        model=source.model,
-        effort_level=source.effort_level,
-        permissions_mode=source.permissions_mode,
-        skip_dangerous_prompt=source.skip_dangerous_prompt,
-        permissions_allow=list(source.permissions_allow or []),
-        additional_directories=list(source.additional_directories or []),
-        provider=source.provider,
-        custom_provider_name=source.custom_provider_name,
-    )
-    save_claude_profile(cloned)
-    return cloned
+        cloned = ClaudeProfile(
+            name=new_name,
+            auth_token_ref=token_ref,
+            primary_api_key_ref=primary_ref if primary_value else None,
+            base_url=source.base_url,
+            model=source.model,
+            effort_level=source.effort_level,
+            permissions_mode=source.permissions_mode,
+            skip_dangerous_prompt=source.skip_dangerous_prompt,
+            permissions_allow=list(source.permissions_allow or []),
+            additional_directories=list(source.additional_directories or []),
+            provider=source.provider,
+            custom_provider_name=source.custom_provider_name,
+        )
+        try:
+            for ref, value in changes.items():
+                security.set_secret(ref, value)
+            save_claude_profile(cloned)
+        except Exception as clone_error:
+            rollback_errors = _restore_secret_values(secret_snapshot)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Claude Profile 克隆失败，且密钥回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from clone_error
+            raise
+        return cloned
 
 
 def delete_claude_profile(name: str) -> None:
-    store = _load_store()
-    profile_refs = set()
-    for profile in store.get("claude_profiles", []):
-        if isinstance(profile, dict) and profile.get("name") == name:
-            profile_refs.update(
-                value
-                for key, value in profile.items()
-                if key.endswith("_ref") and isinstance(value, str) and value
-            )
-            break
-
-    for ref in profile_refs:
-        security.delete_secret(ref)
-
-    # Clean up legacy/conventional key names too.
-    for suffix in ["auth_token", "primary_api_key"]:
-        security.delete_secret(f"claude:{name}:{suffix}")
-
-    store["claude_profiles"] = [
-        p for p in store["claude_profiles"]
-        if isinstance(p, dict) and p.get("name") != name
-    ]
-    if store.get("active_claude_profile") == name:
-        store["active_claude_profile"] = None
-    _save_store(store)
+    _delete_profile_with_secrets(
+        name,
+        list_key="claude_profiles",
+        active_key="active_claude_profile",
+        conventional_refs={
+            f"claude:{name}:auth_token",
+            f"claude:{name}:primary_api_key",
+        },
+    )
 
 
 # --- Claude Official Account CRUD ---
@@ -778,18 +843,31 @@ def get_active_claude_account_name() -> str | None:
 
 
 def set_active_claude_account(name: str | None) -> None:
-    store = _load_store()
-    store["active_claude_account"] = name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_claude_account"] = name
+        _save_store(store)
 
 
 def save_claude_account_profile(profile: ClaudeAccountProfile) -> None:
-    store = _load_store()
-    profiles = store.get("claude_account_profiles", [])
-    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
-    profiles.append(profile.to_dict())
-    store["claude_account_profiles"] = profiles
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("claude_account_profiles", [])
+        replaced_refs = {
+            ref
+            for item in profiles
+            if isinstance(item, dict) and item.get("name") == profile.name
+            for ref in _profile_secret_refs(item, "claude_account_profiles")
+        }
+        profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+        profiles.append(profile.to_dict())
+        store["claude_account_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("claude_account_profiles",))
+        _save_store(store)
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Claude 账号快照更新",
+        )
 
 
 def get_claude_account_credentials(profile: ClaudeAccountProfile) -> dict | None:
@@ -905,25 +983,12 @@ def import_current_claude_account() -> ClaudeAccountProfile | None:
 
 
 def delete_claude_account_profile(name: str) -> None:
-    store = _load_store()
-    profile_refs = set()
-    for profile in store.get("claude_account_profiles", []):
-        if isinstance(profile, dict) and profile.get("name") == name:
-            ref = profile.get("credentials_ref")
-            if isinstance(ref, str) and ref:
-                profile_refs.add(ref)
-            break
-    for ref in profile_refs:
-        security.delete_secret(ref)
-    security.delete_secret(f"claude-account:{name}:credentials")
-
-    store["claude_account_profiles"] = [
-        p for p in store.get("claude_account_profiles", [])
-        if isinstance(p, dict) and p.get("name") != name
-    ]
-    if store.get("active_claude_account") == name:
-        store["active_claude_account"] = None
-    _save_store(store)
+    _delete_profile_with_secrets(
+        name,
+        list_key="claude_account_profiles",
+        active_key="active_claude_account",
+        conventional_refs={f"claude-account:{name}:credentials"},
+    )
 
 
 def get_current_claude_account_name() -> str | None:
@@ -989,9 +1054,10 @@ def get_active_codex_name() -> str | None:
 
 
 def set_active_codex(name: str | None) -> None:
-    store = _load_store()
-    store["active_codex_profile"] = name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_codex_profile"] = name
+        _save_store(store)
 
 
 def _codex_auth_mode(auth: dict) -> str:
@@ -1588,90 +1654,94 @@ def _pick_codex_import_name(config: dict, auth: dict) -> str:
 
 
 def save_codex_profile(profile: CodexProfile, previous_name: str | None = None) -> None:
-    store = _load_store()
-    profiles = store.get("codex_profiles", [])
-    replaced_names = {profile.name}
-    if previous_name:
-        replaced_names.add(previous_name)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("codex_profiles", [])
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
 
-    replaced_refs: set[str] = set()
-    for existing in profiles:
-        if isinstance(existing, dict) and existing.get("name") in replaced_names:
-            replaced_refs.update(_profile_secret_refs(existing))
+        replaced_refs: set[str] = set()
+        for existing in profiles:
+            if isinstance(existing, dict) and existing.get("name") in replaced_names:
+                replaced_refs.update(_profile_secret_refs(existing, "codex_profiles"))
 
-    new_refs = _profile_secret_refs(profile)
-    profiles = [
-        p for p in profiles
-        if isinstance(p, dict) and p.get("name") not in replaced_names
-    ]
-    profiles.append(profile.to_dict())
-    store["codex_profiles"] = profiles
-    if previous_name and store.get("active_codex_profile") == previous_name:
-        store["active_codex_profile"] = profile.name
-    _save_store(store)
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["codex_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("codex_profiles",))
+        if previous_name and store.get("active_codex_profile") == previous_name:
+            store["active_codex_profile"] = profile.name
+        _save_store(store)
 
-    for ref in replaced_refs - new_refs:
-        security.delete_secret(ref)
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Codex Profile 更新",
+        )
 
 
 def clone_codex_profile(name: str) -> CodexProfile:
-    profiles = list_codex_profiles()
-    source = next((p for p in profiles if p.name == name), None)
-    if not source:
-        raise ValueError(f"Codex profile '{name}' not found")
+    with _STORE_CACHE_LOCK:
+        profiles = list_codex_profiles()
+        source = next((p for p in profiles if p.name == name), None)
+        if not source:
+            raise ValueError(f"Codex profile '{name}' not found")
 
-    new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
-    api_key_ref = None
-    api_key = security.get_secret(source.api_key_ref) or ""
-    if api_key:
-        api_key_ref = f"codex:{new_name}:api_key"
-        security.set_secret(api_key_ref, api_key)
+        new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
+        api_key = security.get_secret_strict(source.api_key_ref) or ""
+        api_key_ref = f"codex:{new_name}:api_key" if api_key else None
+        secret_snapshot = (
+            {api_key_ref: security.get_secret_strict(api_key_ref)}
+            if api_key_ref
+            else {}
+        )
 
-    cloned = CodexProfile(
-        name=new_name,
-        api_key_ref=api_key_ref,
-        model=source.model,
-        model_provider=source.model_provider,
-        model_reasoning_effort=source.model_reasoning_effort,
-        approval_policy=source.approval_policy,
-        sandbox_mode=source.sandbox_mode,
-        custom_base_url=source.custom_base_url,
-        custom_name=source.custom_name,
-        custom_wire_api=source.custom_wire_api,
-        custom_env_key=source.custom_env_key,
-        custom_requires_openai_auth=source.custom_requires_openai_auth,
-        disable_response_storage=source.disable_response_storage,
-    )
-    save_codex_profile(cloned)
-    return cloned
+        cloned = CodexProfile(
+            name=new_name,
+            api_key_ref=api_key_ref,
+            model=source.model,
+            model_provider=source.model_provider,
+            model_reasoning_effort=source.model_reasoning_effort,
+            approval_policy=source.approval_policy,
+            sandbox_mode=source.sandbox_mode,
+            custom_base_url=source.custom_base_url,
+            custom_name=source.custom_name,
+            custom_wire_api=source.custom_wire_api,
+            custom_env_key=source.custom_env_key,
+            custom_requires_openai_auth=source.custom_requires_openai_auth,
+            disable_response_storage=source.disable_response_storage,
+        )
+        try:
+            if api_key_ref:
+                security.set_secret(api_key_ref, api_key)
+            save_codex_profile(cloned)
+        except Exception as clone_error:
+            rollback_errors = _restore_secret_values(secret_snapshot)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Codex Profile 克隆失败，且密钥回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from clone_error
+            raise
+        return cloned
 
 
 def delete_codex_profile(name: str) -> None:
-    store = _load_store()
-    profile_refs = set()
-    for profile in store.get("codex_profiles", []):
-        if isinstance(profile, dict) and profile.get("name") == name:
-            profile_refs.update(
-                value
-                for key, value in profile.items()
-                if key.endswith("_ref") and isinstance(value, str) and value
-            )
-            break
-
-    for ref in profile_refs:
-        security.delete_secret(ref)
-
-    # Clean up legacy/conventional key names too.
-    for suffix in ["api_key", "openai_auth_key", "oauth_tokens", "oauth_meta", "auth_data"]:
-        security.delete_secret(f"codex:{name}:{suffix}")
-
-    store["codex_profiles"] = [
-        p for p in store["codex_profiles"]
-        if isinstance(p, dict) and p.get("name") != name
-    ]
-    if store.get("active_codex_profile") == name:
-        store["active_codex_profile"] = None
-    _save_store(store)
+    _delete_profile_with_secrets(
+        name,
+        list_key="codex_profiles",
+        active_key="active_codex_profile",
+        conventional_refs={
+            f"codex:{name}:api_key",
+            f"codex:{name}:openai_auth_key",
+            f"codex:{name}:oauth_tokens",
+            f"codex:{name}:oauth_meta",
+            f"codex:{name}:auth_data",
+        },
+    )
 
 
 # --- Codex Official Account CRUD ---
@@ -1686,18 +1756,31 @@ def get_active_codex_account_name() -> str | None:
 
 
 def set_active_codex_account(name: str | None) -> None:
-    store = _load_store()
-    store["active_codex_account"] = name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_codex_account"] = name
+        _save_store(store)
 
 
 def save_codex_account_profile(profile: CodexAccountProfile) -> None:
-    store = _load_store()
-    profiles = store.get("codex_account_profiles", [])
-    profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
-    profiles.append(profile.to_dict())
-    store["codex_account_profiles"] = profiles
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("codex_account_profiles", [])
+        replaced_refs = {
+            ref
+            for item in profiles
+            if isinstance(item, dict) and item.get("name") == profile.name
+            for ref in _profile_secret_refs(item, "codex_account_profiles")
+        }
+        profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+        profiles.append(profile.to_dict())
+        store["codex_account_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("codex_account_profiles",))
+        _save_store(store)
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Codex 账号快照更新",
+        )
 
 
 def get_codex_account_auth(profile: CodexAccountProfile) -> dict | None:
@@ -1812,25 +1895,12 @@ def import_current_codex_account() -> CodexAccountProfile | None:
 
 
 def delete_codex_account_profile(name: str) -> None:
-    store = _load_store()
-    profile_refs = set()
-    for profile in store.get("codex_account_profiles", []):
-        if isinstance(profile, dict) and profile.get("name") == name:
-            ref = profile.get("auth_json_ref")
-            if isinstance(ref, str) and ref:
-                profile_refs.add(ref)
-            break
-    for ref in profile_refs:
-        security.delete_secret(ref)
-    security.delete_secret(f"codex-account:{name}:auth_json")
-
-    store["codex_account_profiles"] = [
-        p for p in store.get("codex_account_profiles", [])
-        if isinstance(p, dict) and p.get("name") != name
-    ]
-    if store.get("active_codex_account") == name:
-        store["active_codex_account"] = None
-    _save_store(store)
+    _delete_profile_with_secrets(
+        name,
+        list_key="codex_account_profiles",
+        active_key="active_codex_account",
+        conventional_refs={f"codex-account:{name}:auth_json"},
+    )
 
 
 def get_current_codex_account_name() -> str | None:
@@ -1943,37 +2013,40 @@ def get_browser_profiles_summary() -> dict:
 
 
 def set_active_browser(name: str) -> None:
-    store = _load_store()
-    store["active_browser_profile"] = name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_browser_profile"] = name
+        _save_store(store)
 
 
 def save_browser_profile(profile: BrowserProfile, previous_name: str | None = None) -> None:
-    store = _load_store()
-    profiles = store.get("browser_profiles", [])
-    replaced_names = {profile.name}
-    if previous_name:
-        replaced_names.add(previous_name)
-    profiles = [
-        p for p in profiles
-        if isinstance(p, dict) and p.get("name") not in replaced_names
-    ]
-    profiles.append(profile.to_dict())
-    store["browser_profiles"] = profiles
-    if previous_name and store.get("active_browser_profile") == previous_name:
-        store["active_browser_profile"] = profile.name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("browser_profiles", [])
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["browser_profiles"] = profiles
+        if previous_name and store.get("active_browser_profile") == previous_name:
+            store["active_browser_profile"] = profile.name
+        _save_store(store)
 
 
 def delete_browser_profile(name: str) -> None:
-    store = _load_store()
-    store["browser_profiles"] = [
-        p for p in store.get("browser_profiles", [])
-        if isinstance(p, dict) and p.get("name") != name
-    ]
-    if store.get("active_browser_profile") == name:
-        store["active_browser_profile"] = None
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["browser_profiles"] = [
+            p for p in store.get("browser_profiles", [])
+            if isinstance(p, dict) and p.get("name") != name
+        ]
+        if store.get("active_browser_profile") == name:
+            store["active_browser_profile"] = None
+        _save_store(store)
 
 
 def list_ssh_profiles() -> list[SSHProfile]:
@@ -1994,9 +2067,10 @@ def get_ssh_profiles_summary() -> dict:
 
 
 def set_active_ssh(name: str) -> None:
-    store = _load_store()
-    store["active_ssh_profile"] = name
-    _save_store(store)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_ssh_profile"] = name
+        _save_store(store)
 
 
 def _disconnect_ssh_profiles(names: set[str]) -> None:
@@ -2012,76 +2086,254 @@ def _disconnect_ssh_profiles(names: set[str]) -> None:
         logger.debug(f"Failed to disconnect SSH profiles after profile update: {e}")
 
 
-def _profile_secret_refs(profile: object) -> set[str]:
+def _profile_secret_refs(profile: object, list_key: str | None = None) -> set[str]:
+    """Return only schema-owned secret references for a profile.
+
+    Dictionaries require their profile-list key so unknown ``*_ref`` fields
+    cannot gain secret ownership merely by being present in profiles.json.
+    Dataclass instances can be identified safely from their concrete type.
+    """
+    if list_key is None:
+        if isinstance(profile, ClaudeProfile):
+            list_key = "claude_profiles"
+        elif isinstance(profile, CodexProfile):
+            list_key = "codex_profiles"
+        elif isinstance(profile, ClaudeAccountProfile):
+            list_key = "claude_account_profiles"
+        elif isinstance(profile, CodexAccountProfile):
+            list_key = "codex_account_profiles"
+        elif isinstance(profile, SSHProfile):
+            list_key = "ssh_profiles"
+        elif isinstance(profile, BrowserProfile):
+            list_key = "browser_profiles"
+
+    ref_fields = PROFILE_SECRET_REF_FIELDS.get(list_key or "", ())
     if hasattr(profile, "to_dict"):
         data = profile.to_dict()
     elif isinstance(profile, dict):
         data = profile
     else:
         data = {}
-    return {
-        value
-        for key, value in data.items()
-        if key.endswith("_ref") and isinstance(value, str) and value
-    }
+    refs: set[str] = set()
+    for field_name in ref_fields:
+        ref = data.get(field_name)
+        if not isinstance(ref, str) or not ref:
+            continue
+        if _is_valid_profile_secret_ref(list_key or "", field_name, ref):
+            refs.add(ref)
+        else:
+            logger.warning(
+                "Ignoring invalid secret reference in %s.%s",
+                list_key or "unknown profile",
+                field_name,
+            )
+    return refs
+
+
+def _is_valid_profile_secret_ref(list_key: str, field_name: str, ref: object) -> bool:
+    shape = PROFILE_SECRET_REF_SHAPES.get(list_key, {}).get(field_name)
+    if shape is None or not isinstance(ref, str) or len(ref) > MAX_PROFILE_SECRET_REF_LENGTH:
+        return False
+    prefix, suffix = shape
+    if (
+        not ref.startswith(prefix)
+        or not ref.endswith(suffix)
+        or len(ref) <= len(prefix) + len(suffix)
+    ):
+        return False
+    owner = ref[len(prefix):-len(suffix)]
+    return bool(
+        owner
+        and owner == owner.strip()
+        and not any(ord(char) < 32 or ord(char) == 127 for char in owner)
+    )
+
+
+def validate_profile_secret_refs(
+    store: dict,
+    *,
+    list_keys: tuple[str, ...] | None = None,
+) -> None:
+    """Reject profile secret references outside their schema-owned namespace."""
+    selected_keys = list_keys or tuple(PROFILE_SECRET_REF_SHAPES)
+    for list_key in selected_keys:
+        field_shapes = PROFILE_SECRET_REF_SHAPES.get(list_key, {})
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_name = str(profile.get("name") or "")
+            for field_name in field_shapes:
+                ref = profile.get(field_name)
+                if ref is None or ref == "":
+                    continue
+                if not _is_valid_profile_secret_ref(list_key, field_name, ref):
+                    raise ValueError(
+                        f"Profile {profile_name} 的密钥引用不属于字段 {field_name}"
+                    )
+
+
+def _store_secret_refs(store: dict) -> set[str]:
+    refs: set[str] = set()
+    for list_key in PROFILE_LIST_KEYS:
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if isinstance(profile, dict):
+                refs.update(_profile_secret_refs(profile, list_key))
+    return refs
+
+
+def _delete_secrets_best_effort(refs: set[str], operation: str) -> None:
+    """Clean obsolete secrets without reporting a committed save as failed."""
+    for ref in sorted(refs):
+        try:
+            security.delete_secret(ref)
+        except Exception as exc:
+            logger.warning("%s已保存，但旧密钥 %s 清理失败: %s", operation, ref, exc)
+
+
+def _restore_secret_values(snapshot: dict[str, str | None]) -> list[str]:
+    errors: list[str] = []
+    for ref, previous_value in snapshot.items():
+        try:
+            if previous_value is None:
+                security.delete_secret(ref)
+            else:
+                security.set_secret(ref, previous_value)
+        except Exception as exc:
+            errors.append(f"{ref}: {exc}")
+    return errors
+
+
+def _delete_profile_with_secrets(
+    name: str,
+    *,
+    list_key: str,
+    active_key: str,
+    conventional_refs: set[str] | None = None,
+) -> bool:
+    """Delete one profile and its now-unreferenced secrets transactionally.
+
+    The profile store is committed before secrets are removed.  If a secret
+    backend reports a deletion failure, the previous secret values and profile
+    store are restored.  Unknown fields never participate in secret ownership.
+    """
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            profiles = []
+        removed_profiles = [
+            profile
+            for profile in profiles
+            if isinstance(profile, dict) and profile.get("name") == name
+        ]
+        if not removed_profiles:
+            return False
+
+        original_store = _clone_store(store)
+        candidate_refs = set(conventional_refs or ())
+        for profile in removed_profiles:
+            candidate_refs.update(_profile_secret_refs(profile, list_key))
+
+        store[list_key] = [
+            profile
+            for profile in profiles
+            if not (isinstance(profile, dict) and profile.get("name") == name)
+        ]
+        if store.get(active_key) == name:
+            store[active_key] = None
+
+        refs_to_delete = candidate_refs - _store_secret_refs(store)
+        secret_snapshot = {
+            ref: security.get_secret_strict(ref)
+            for ref in sorted(refs_to_delete)
+        }
+
+        # Atomic store writes guarantee that a failed save leaves the old
+        # profile references in place, so no secret may be removed beforehand.
+        _save_store(store)
+
+        try:
+            for ref in sorted(refs_to_delete):
+                security.delete_secret(ref)
+        except Exception as delete_error:
+            rollback_errors: list[str] = []
+            for ref, previous_value in secret_snapshot.items():
+                if previous_value is None:
+                    continue
+                try:
+                    security.set_secret(ref, previous_value)
+                except Exception as restore_error:
+                    rollback_errors.append(f"密钥 {ref}: {restore_error}")
+
+            # Reintroduce profile references only after every previously
+            # present secret has been restored successfully.
+            if not rollback_errors:
+                try:
+                    _save_store(original_store, create_backup=False)
+                except Exception as restore_error:
+                    clear_profile_store_cache()
+                    rollback_errors.append(f"Profile: {restore_error}")
+
+            if rollback_errors:
+                details = "；".join(rollback_errors)
+                raise RuntimeError(f"Profile 删除失败，且自动回滚不完整: {details}") from delete_error
+            raise
+
+        return True
 
 
 def save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> None:
-    store = _load_store()
-    profiles = store.get("ssh_profiles", [])
-    replaced_names = {profile.name}
-    if previous_name:
-        replaced_names.add(previous_name)
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("ssh_profiles", [])
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
 
-    replaced_refs: set[str] = set()
-    for existing in profiles:
-        if isinstance(existing, dict) and existing.get("name") in replaced_names:
-            replaced_refs.update(_profile_secret_refs(existing))
+        replaced_refs: set[str] = set()
+        for existing in profiles:
+            if isinstance(existing, dict) and existing.get("name") in replaced_names:
+                replaced_refs.update(_profile_secret_refs(existing, "ssh_profiles"))
 
-    new_refs = _profile_secret_refs(profile)
-    profiles = [
-        p for p in profiles
-        if isinstance(p, dict) and p.get("name") not in replaced_names
-    ]
-    profiles.append(profile.to_dict())
-    store["ssh_profiles"] = profiles
-    if previous_name and store.get("active_ssh_profile") == previous_name:
-        store["active_ssh_profile"] = profile.name
-    _save_store(store)
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["ssh_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("ssh_profiles",))
+        if previous_name and store.get("active_ssh_profile") == previous_name:
+            store["active_ssh_profile"] = profile.name
+        _save_store(store)
+
+        remaining_refs = _store_secret_refs(store)
+        refs_to_delete = replaced_refs - remaining_refs
+        if previous_name and previous_name != profile.name:
+            refs_to_delete.update({
+                ref
+                for suffix in ("password", "key_passphrase")
+                if (ref := f"ssh:{previous_name}:{suffix}") not in remaining_refs
+            })
+        _delete_secrets_best_effort(refs_to_delete, "SSH Profile 更新")
 
     _disconnect_ssh_profiles(replaced_names | {profile.name})
 
-    for ref in replaced_refs - new_refs:
-        security.delete_secret(ref)
-
-    if previous_name and previous_name != profile.name:
-        for suffix in ["password", "key_passphrase"]:
-            ref = f"ssh:{previous_name}:{suffix}"
-            if ref not in new_refs:
-                security.delete_secret(ref)
-
 
 def delete_ssh_profile(name: str) -> None:
-    store = _load_store()
-    _disconnect_ssh_profiles({name})
-
-    profile_refs = set()
-    for profile in store.get("ssh_profiles", []):
-        if isinstance(profile, dict) and profile.get("name") == name:
-            profile_refs.update(_profile_secret_refs(profile))
-            break
-
-    for ref in profile_refs:
-        security.delete_secret(ref)
-
-    # Clean up legacy/conventional key names too.
-    for suffix in ["password", "key_passphrase"]:
-        security.delete_secret(f"ssh:{name}:{suffix}")
-
-    store["ssh_profiles"] = [
-        p for p in store.get("ssh_profiles", [])
-        if isinstance(p, dict) and p.get("name") != name
-    ]
-    if store.get("active_ssh_profile") == name:
-        store["active_ssh_profile"] = None
-    _save_store(store)
+    deleted = _delete_profile_with_secrets(
+        name,
+        list_key="ssh_profiles",
+        active_key="active_ssh_profile",
+        conventional_refs={
+            f"ssh:{name}:password",
+            f"ssh:{name}:key_passphrase",
+        },
+    )
+    if deleted:
+        _disconnect_ssh_profiles({name})

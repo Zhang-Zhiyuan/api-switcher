@@ -595,6 +595,100 @@ def test_switch_preview_build_runs_off_ui_thread(monkeypatch):
     assert statuses[-1] == "切换预览已打开"
 
 
+def test_tab_loader_thread_start_failure_clears_loading_state(monkeypatch):
+    class BrokenThread:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def start():
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(app_module.threading, "Thread", BrokenThread)
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._tab_specs = {"Broken": ("_broken_tab", "broken", "BrokenTab", False)}
+    app._tab_class_loading = set()
+    app._tab_load_generations = {}
+    app._broken_tab = None
+    errors = []
+    app._show_tab_error = lambda label, error: errors.append((label, str(error)))
+
+    app_module.App._load_tab_class_async(app, "Broken")
+
+    assert app._tab_class_loading == set()
+    assert errors == [("Broken", "thread unavailable")]
+
+
+def test_app_worker_start_failures_restore_state(monkeypatch):
+    class BrokenThread:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def start():
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(app_module.threading, "Thread", BrokenThread)
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._tray_starting = False
+    app._quick_switch_loading = False
+    app._quick_switch_reload_pending = True
+    app._quick_switch_load_generation = 0
+    app._switch_preview_generation = 0
+    statuses = []
+    cancelled = []
+    app._set_app_status = lambda message: statuses.append(message)
+
+    app_module.App._start_tray_icon(app)
+    assert app._tray_starting is False
+
+    app_module.App._run_quick_switch_profile_load(app)
+    assert app._quick_switch_loading is False
+    assert app._quick_switch_reload_pending is False
+
+    app_module.App._show_switch_preview(
+        app,
+        "claude_api",
+        "Profile A",
+        on_confirm=lambda: None,
+        on_cancel=lambda: cancelled.append(True),
+    )
+    assert cancelled == [True]
+    assert any("快速切换配置加载任务启动失败" in status for status in statuses)
+    assert any("切换预览启动失败" in status for status in statuses)
+
+
+def test_force_exit_watchdog_start_failure_does_not_block_graceful_shutdown(monkeypatch):
+    class BrokenTimer:
+        def __init__(self, _delay, _callback):
+            self.daemon = False
+
+        def start(self):
+            raise RuntimeError("timer unavailable")
+
+    monkeypatch.setattr(app_module.threading, "Timer", BrokenTimer)
+    app = object.__new__(app_module.App)
+    app._exit_requested = False
+    app._force_exit_timer_started = False
+    app._active_critical_operation_label = lambda: ""
+    shutdown = []
+    quit_calls = []
+    destroy_calls = []
+    app._shutdown_runtime_resources = lambda: shutdown.append(True)
+    app.quit = lambda: quit_calls.append(True)
+    app.destroy = lambda: destroy_calls.append(True)
+
+    app_module.App._exit_app_now(app)
+
+    assert app._exit_requested is True
+    assert app._force_exit_timer_started is False
+    assert shutdown == [True]
+    assert quit_calls == [True]
+    assert destroy_calls == [True]
+
+
 def test_lazy_tab_class_load_runs_off_ui_thread(monkeypatch):
     import_started = threading.Event()
     tab_created = threading.Event()

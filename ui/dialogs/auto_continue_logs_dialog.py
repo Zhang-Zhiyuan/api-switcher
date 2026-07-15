@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
 from ui.theme import COLORS, button_style, card_frame_kwargs, center_window, combo_style, font, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.toast import show_toast
 
 if TYPE_CHECKING:
     from core.auto_continue.diagnostics import AutoContinueLogEvent
+
+logger = logging.getLogger(__name__)
 
 
 def _load_auto_continue_events(provider: str, limit: int):
@@ -307,12 +311,17 @@ class AutoContinueLogsDialog(ctk.CTkToplevel):
                 except Exception as exc:
                     self._apply_refresh_error(str(exc))
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
-        threading.Thread(target=worker, name=f"auto-continue-logs-{self.provider}", daemon=True).start()
+        try:
+            threading.Thread(
+                target=worker,
+                name=f"auto-continue-logs-{self.provider}",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            logger.error("Failed to start auto-continue log refresh: %s", exc, exc_info=True)
+            self._apply_refresh_error(str(exc))
 
     def _apply_refresh_payload(self, payload: dict):
         if not payload.get("ok"):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from ui.ui_dispatch import run_on_ui_thread
 
 
@@ -74,3 +76,52 @@ def test_run_on_ui_thread_reports_failed_dispatch():
             return False
 
     assert run_on_ui_thread(_BrokenWidget(), lambda: None) is False
+
+
+def test_run_on_ui_thread_finds_master_dispatch_without_tk_calls_from_worker():
+    top = _TopLevel()
+
+    class _Child:
+        master = top
+
+        @staticmethod
+        def winfo_toplevel():
+            raise AssertionError("worker must not call winfo_toplevel")
+
+        @staticmethod
+        def after(*_args):
+            raise AssertionError("worker must not call Tk.after")
+
+    results = []
+
+    def worker():
+        results.append(run_on_ui_thread(_Child(), lambda: None))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert results == [True]
+    assert len(top.callbacks) == 1
+
+
+def test_run_on_ui_thread_refuses_unsafe_worker_fallback_without_dispatch():
+    class _Orphan:
+        @staticmethod
+        def winfo_toplevel():
+            raise AssertionError("worker must not call winfo_toplevel")
+
+        @staticmethod
+        def after(*_args):
+            raise AssertionError("worker must not call Tk.after")
+
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(run_on_ui_thread(_Orphan(), lambda: None))
+    )
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert results == [False]

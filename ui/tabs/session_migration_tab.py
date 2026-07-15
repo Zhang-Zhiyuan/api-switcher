@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 SESSION_MIGRATION_WIDE_MIN_WIDTH = 1000
 SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH = 620
+SESSION_IMPORT_CRITICAL_KEY = "session-package-import"
+SESSION_TRANSFER_CRITICAL_KEY = "session-direct-transfer"
 
 
 def _session_migration_layout(width: int) -> tuple[str, int]:
@@ -118,6 +120,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._compact_export_checkbox = None
         self._session_operation_lock = threading.Lock()
         self._session_operation_in_progress = False
+        self._session_critical_key = ""
+        self._session_critical_end = None
+        self._session_critical_abandon = None
         self._build_ui()
 
     def destroy(self):
@@ -142,9 +147,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         dispatch = getattr(self, "_ui_dispatch", None)
         try:
             if callable(dispatch):
-                dispatch(callback)
-            else:
-                self.after(0, callback)
+                return dispatch(callback) is not False
+            self.after(0, callback)
         except Exception:
             logger.exception("Failed to schedule session migration UI callback")
             return False
@@ -159,7 +163,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             except Exception:
                 pass
 
-    def _begin_session_operation(self) -> bool:
+    def _begin_session_operation(self, *, critical_key: str = "", critical_label: str = "") -> bool:
         operation_lock = getattr(self, "_session_operation_lock", None)
         if operation_lock is None:
             operation_lock = threading.Lock()
@@ -167,6 +171,52 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         if not operation_lock.acquire(blocking=False):
             show_toast(self.winfo_toplevel(), "会话迁移任务正在处理，请稍候", is_error=True)
             return False
+
+        def release_operation_lock() -> None:
+            try:
+                operation_lock.release()
+            except RuntimeError:
+                pass
+
+        critical_key = str(critical_key or "").strip()
+        critical_label = str(critical_label or "").strip() or "会话迁移关键操作"
+        critical_end = None
+        critical_abandon = None
+        if critical_key:
+            try:
+                top = self.winfo_toplevel()
+                begin_critical = getattr(top, "_begin_critical_operation", None)
+                critical_end = getattr(top, "_end_critical_operation", None)
+                critical_abandon = getattr(top, "_abandon_critical_operation", None)
+                if not callable(begin_critical) or not callable(critical_end) or not callable(critical_abandon):
+                    raise RuntimeError("应用缺少完整的关键操作生命周期接口")
+                if not begin_critical(critical_key, critical_label):
+                    release_operation_lock()
+                    try:
+                        show_toast(
+                            top,
+                            "当前有关键数据操作正在进行，请稍候",
+                            is_error=True,
+                        )
+                    except Exception:
+                        logger.exception("Failed to show rejected session migration toast")
+                    return False
+            except Exception as exc:
+                release_operation_lock()
+                logger.error("Failed to begin session migration critical operation: %s", exc, exc_info=True)
+                try:
+                    show_toast(
+                        self.winfo_toplevel(),
+                        f"无法启动会话迁移关键操作: {exc}",
+                        is_error=True,
+                    )
+                except Exception:
+                    logger.exception("Failed to show session migration critical-operation error")
+                return False
+
+        self._session_critical_key = critical_key
+        self._session_critical_end = critical_end
+        self._session_critical_abandon = critical_abandon
         self._set_session_operation_busy(True)
         return True
 
@@ -180,6 +230,16 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 operation_lock.release()
             except RuntimeError:
                 logger.exception("Session migration operation lock was already released")
+        critical_key = getattr(self, "_session_critical_key", "")
+        critical_end = getattr(self, "_session_critical_end", None)
+        self._session_critical_key = ""
+        self._session_critical_end = None
+        self._session_critical_abandon = None
+        if critical_key and callable(critical_end):
+            try:
+                critical_end(critical_key)
+            except Exception:
+                logger.exception("Failed to end session migration critical operation")
 
     def _abandon_session_operation(self) -> None:
         """Release the operation guard when no UI callback can be scheduled."""
@@ -191,6 +251,16 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 operation_lock.release()
             except RuntimeError:
                 logger.exception("Session migration operation lock was already released")
+        critical_key = getattr(self, "_session_critical_key", "")
+        critical_abandon = getattr(self, "_session_critical_abandon", None)
+        self._session_critical_key = ""
+        self._session_critical_end = None
+        self._session_critical_abandon = None
+        if critical_key and callable(critical_abandon):
+            try:
+                critical_abandon(critical_key)
+            except Exception:
+                logger.exception("Failed to abandon session migration critical operation")
 
     def _build_ui(self):
         self._header = ctk.CTkFrame(self, fg_color="transparent")
@@ -548,7 +618,31 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="session-migration-refresh", daemon=True).start()
+        except Exception as exc:
+            self._show_refresh_start_error(str(exc))
+
+    def _show_refresh_start_error(self, message: str) -> None:
+        """Replace the loading placeholder when no refresh worker can start."""
+
+        self._records = []
+        for widget in self._cards_frame.winfo_children():
+            widget.destroy()
+        if self._stats_label:
+            self._stats_label.configure(text="会话读取任务启动失败")
+        EmptyState(
+            self._cards_frame,
+            "会话读取任务启动失败",
+            str(message or "无法创建后台任务"),
+            "重试",
+            self.refresh,
+        ).pack(fill="x", pady=(12, 4))
+        show_toast(
+            self.winfo_toplevel(),
+            f"无法启动会话读取任务: {message}",
+            is_error=True,
+        )
 
     def _render_records(self):
         if not self._cards_frame:
@@ -1002,7 +1096,10 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         target_ssh_name: str,
         target_project_path: str | None = None,
     ) -> None:
-        if not self._begin_session_operation():
+        if not self._begin_session_operation(
+            critical_key=SESSION_IMPORT_CRITICAL_KEY,
+            critical_label="正在导入会话迁移包",
+        ):
             return
         target_label = self._endpoint_label(target_ssh_name)
         if self._stats_label:
@@ -1111,7 +1208,10 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         )
 
     def _run_transfer_task(self, source_ssh_name: str, target_ssh_name: str):
-        if not self._begin_session_operation():
+        if not self._begin_session_operation(
+            critical_key=SESSION_TRANSFER_CRITICAL_KEY,
+            critical_label="正在迁移选中会话",
+        ):
             return
         selected_keys = set(self._selected_keys)
         provider_filter = self._provider_filter

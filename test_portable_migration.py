@@ -1018,12 +1018,12 @@ def test_portable_export_selection_filters_profiles_secrets_and_active_names(tmp
         (source / "Local State").write_bytes(b"local-state")
 
     refs = {
-        "claude:keep": "claude-keep-secret",
-        "claude:drop": "claude-drop-secret",
-        "codex:keep": "codex-keep-secret",
-        "codex:drop": "codex-drop-secret",
-        "ssh:keep": "ssh-keep-secret",
-        "ssh:drop": "ssh-drop-secret",
+        "claude:ClaudeKeep:auth_token": "claude-keep-secret",
+        "claude:ClaudeDrop:auth_token": "claude-drop-secret",
+        "codex:CodexKeep:api_key": "codex-keep-secret",
+        "codex:CodexDrop:api_key": "codex-drop-secret",
+        "ssh:SshKeep:password": "ssh-keep-secret",
+        "ssh:SshDrop:password": "ssh-drop-secret",
         "unknown:claude": "must-not-export",
         "unknown:ssh": "must-not-export",
     }
@@ -1033,19 +1033,19 @@ def test_portable_export_selection_filters_profiles_secrets_and_active_names(tmp
         {
             "name": "ClaudeKeep",
             "provider": "custom",
-            "auth_token_ref": "claude:keep",
+            "auth_token_ref": "claude:ClaudeKeep:auth_token",
             "surprise_ref": "unknown:claude",
             "unknown_profile_field": "must-not-export",
         },
-        {"name": "ClaudeDrop", "provider": "custom", "auth_token_ref": "claude:drop"},
+        {"name": "ClaudeDrop", "provider": "custom", "auth_token_ref": "claude:ClaudeDrop:auth_token"},
     ]
     store["codex_profiles"] = [
-        {"name": "CodexKeep", "model_provider": "custom", "api_key_ref": "codex:keep"},
-        {"name": "CodexDrop", "model_provider": "custom", "api_key_ref": "codex:drop"},
+        {"name": "CodexKeep", "model_provider": "custom", "api_key_ref": "codex:CodexKeep:api_key"},
+        {"name": "CodexDrop", "model_provider": "custom", "api_key_ref": "codex:CodexDrop:api_key"},
     ]
     store["ssh_profiles"] = [
-        {"name": "SshKeep", "password_ref": "ssh:keep", "surprise_ref": "unknown:ssh"},
-        {"name": "SshDrop", "password_ref": "ssh:drop"},
+        {"name": "SshKeep", "password_ref": "ssh:SshKeep:password", "surprise_ref": "unknown:ssh"},
+        {"name": "SshDrop", "password_ref": "ssh:SshDrop:password"},
     ]
     store["browser_profiles"] = [
         {"name": "BrowserKeep", "browser_type": "chrome", "profile_mode": "managed", "user_data_dir": str(browser_keep)},
@@ -1087,8 +1087,13 @@ def test_portable_export_selection_filters_profiles_secrets_and_active_names(tmp
 
     assert result.profile_count == 4
     assert result.secret_count == 3
-    assert secret_reads == sorted({"claude:keep", "codex:keep", "ssh:keep"})
-    assert set(selected_payload["secrets"]) == {"claude:keep", "codex:keep", "ssh:keep"}
+    selected_refs = {
+        "claude:ClaudeKeep:auth_token",
+        "codex:CodexKeep:api_key",
+        "ssh:SshKeep:password",
+    }
+    assert secret_reads == sorted(selected_refs)
+    assert set(selected_payload["secrets"]) == selected_refs
     assert set(selected_payload["browser_data"]) == {"BrowserKeep"}
     assert "source_path" not in selected_payload["browser_data"]["BrowserKeep"]
     assert set(selected_store) == {
@@ -1126,7 +1131,7 @@ def test_portable_export_selection_filters_profiles_secrets_and_active_names(tmp
 
 def test_portable_export_selection_rejects_invalid_or_empty_selection(tmp_path, monkeypatch):
     store = profile_manager._get_default_store()
-    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:server"}]
+    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:Server:password"}]
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
     monkeypatch.setattr(profile_manager, "_load_store", lambda: store)
 
@@ -1163,7 +1168,7 @@ def test_portable_profile_transactions_hold_store_lock_through_write_and_rollbac
 
     lock = TrackingLock()
     store = profile_manager._get_default_store()
-    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:server"}]
+    store["ssh_profiles"] = [{"name": "Server", "password_ref": "ssh:Server:password"}]
     profiles_file = tmp_path / "profiles.json"
     bundle = tmp_path / "profiles.asxprofile"
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
@@ -1185,6 +1190,7 @@ def test_portable_profile_transactions_hold_store_lock_through_write_and_rollbac
 
     monkeypatch.setattr(profile_manager, "_load_store", load_store)
     monkeypatch.setattr(security, "get_secret", get_secret)
+    monkeypatch.setattr(security, "get_secret_strict", get_secret)
     monkeypatch.setattr(portable_migration, "atomic_write_text", locked_atomic_write)
 
     portable_migration.export_portable_profiles(bundle, "strong-password")
@@ -1303,7 +1309,7 @@ def test_portable_browser_restore_does_not_delete_original_when_initial_move_fai
                 "user_data_dir": str(target),
             },
             "files": [{
-                "path": "Default/new.txt",
+                "path": "Default/Preferences",
                 "size": 3,
                 "compression": "none",
                 "data": base64.b64encode(b"new").decode("ascii"),
@@ -1340,7 +1346,7 @@ def test_portable_browser_restore_surfaces_failed_original_directory_rollback(tm
                 "user_data_dir": str(target),
             },
             "files": [{
-                "path": "Default/new.txt",
+                "path": "Default/Preferences",
                 "size": 3,
                 "compression": "none",
                 "data": base64.b64encode(b"new").decode("ascii"),
@@ -1380,6 +1386,58 @@ def test_portable_browser_restore_surfaces_failed_original_directory_rollback(tm
 def test_portable_browser_relative_path_rejects_windows_escape_forms(relative_path):
     with pytest.raises(ValueError, match="非法浏览器文件路径"):
         portable_migration._safe_browser_relative_path(relative_path)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "Default/Cache/cache.bin",
+        "Default/History",
+        "Default/Extensions/attacker/manifest.json",
+        "Default/Service Worker/CacheStorage/cache/data",
+        "Default/WebStorage/site/DawnWebGPUCache/data",
+        "Default/arbitrary-runtime.log",
+    ],
+)
+def test_portable_browser_restore_rejects_paths_outside_export_allowlist(
+    relative_path,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(paths, "STORAGE_DIR", tmp_path / "storage")
+    target = paths.STORAGE_DIR / "browser_profiles" / "chrome_PathAudit"
+    target.mkdir(parents=True)
+    sentinel = target / "keep.txt"
+    sentinel.write_text("original", encoding="utf-8")
+    content = b"must-not-install"
+    browser_data = {
+        "PathAudit": {
+            "profile": {
+                "name": "PathAudit",
+                "browser_type": "chrome",
+                "user_data_dir": str(target),
+            },
+            "file_count": 1,
+            "files": [{
+                "path": relative_path,
+                "size": len(content),
+                "compression": "none",
+                "data": base64.b64encode(content).decode("ascii"),
+            }],
+        },
+    }
+
+    restored_files, restored_bytes, skipped, restored_profiles = (
+        portable_migration._restore_browser_data(browser_data)
+    )
+
+    assert restored_files == 0
+    assert restored_bytes == 0
+    assert not restored_profiles
+    assert any("不在迁移白名单" in item for item in skipped)
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert not list(target.parent.glob("*.import_staging"))
+    assert not list(target.parent.glob("*.import_backup"))
 
 
 def test_portable_import_rejects_package_inside_browser_target_before_mutation(tmp_path, monkeypatch):
@@ -1451,6 +1509,7 @@ def test_portable_import_rolls_back_browser_secret_and_profiles_after_save_failu
         "claude:Existing:auth_token": "existing-secret",
     }
     monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
     monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
     monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
 
@@ -1495,7 +1554,7 @@ def test_portable_import_rolls_back_browser_secret_and_profiles_after_save_failu
             "ImportedBrowser": {
                 "profile": browser_profile,
                 "files": [{
-                    "path": "Default/imported.txt",
+                    "path": "Default/Preferences",
                     "size": len(imported_data),
                     "compression": "zlib",
                     "data": base64.b64encode(zlib.compress(imported_data)).decode("ascii"),
@@ -1522,7 +1581,7 @@ def test_portable_import_rolls_back_browser_secret_and_profiles_after_save_failu
 
     assert profiles_file.read_bytes() == profiles_before
     assert sentinel.read_text(encoding="utf-8") == "original-browser-data"
-    assert not (target / "Default" / "imported.txt").exists()
+    assert not (target / "Default" / "Preferences").exists()
     assert not list(target.parent.glob("*.import_backup"))
     assert secret_values["claude:Imported:auth_token"] == "old-secret"
     assert {profile.name for profile in profile_manager.list_claude_profiles()} == {"Existing"}
@@ -1541,6 +1600,7 @@ def test_portable_import_does_not_overwrite_unreferenced_secret(tmp_path, monkey
     unrelated_ref = "claude:Existing:auth_token"
     secret_values = {unrelated_ref: "keep-existing-secret"}
     monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
     monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
     monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
 
@@ -1600,6 +1660,7 @@ def test_portable_import_rejects_ref_owned_by_unreplaced_profile(tmp_path, monke
     shared_ref = "claude:Existing:auth_token"
     secret_values = {shared_ref: "keep-existing-secret"}
     monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
     monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
     monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
     profile_manager._save_store(profile_manager._get_default_store())
@@ -1646,6 +1707,7 @@ def test_portable_import_allows_same_name_profile_to_replace_its_secret(tmp_path
     shared_ref = "claude:Same:auth_token"
     secret_values = {shared_ref: "old-secret"}
     monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
     monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
     monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
     profile_manager._save_store(profile_manager._get_default_store())
@@ -1679,6 +1741,317 @@ def test_portable_import_allows_same_name_profile_to_replace_its_secret(tmp_path
     assert secret_values[shared_ref] == "new-secret"
     assert profile_manager.list_claude_profiles()[0].model == "new-model"
     profile_manager.clear_profile_store_cache()
+
+
+def test_portable_import_clears_stale_same_name_secret_missing_from_source(
+    tmp_path,
+    monkeypatch,
+):
+    storage_dir = tmp_path / "storage"
+    profiles_file = storage_dir / "profiles.json"
+    monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
+    monkeypatch.setattr(paths, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    profile_manager.clear_profile_store_cache()
+
+    shared_ref = "claude:SameMissing:auth_token"
+    secret_values = {shared_ref: "old-secret-that-must-not-survive"}
+    monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
+    monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
+    profile_manager._save_store(profile_manager._get_default_store())
+    profile_manager.save_claude_profile(ClaudeProfile(
+        name="SameMissing",
+        auth_token_ref=shared_ref,
+        base_url="https://old.example.test",
+        model="old-model",
+        provider="custom",
+    ))
+
+    imported_store = profile_manager._get_default_store()
+    imported_store["claude_profiles"] = [ClaudeProfile(
+        name="SameMissing",
+        auth_token_ref=shared_ref,
+        base_url="https://new.example.test",
+        model="new-model",
+        provider="custom",
+    ).to_dict()]
+    package = tmp_path / "same-name-missing-secret.asxprofile"
+    package.write_text(json.dumps(portable_migration._encrypt_payload({
+        "payload_version": 1,
+        "store": imported_store,
+        "secrets": {},
+        "missing_secret_refs": [shared_ref],
+        "browser_data": {},
+    }, "strong-password")), encoding="utf-8")
+
+    result = portable_migration.import_portable_profiles(package, "strong-password")
+
+    assert shared_ref not in secret_values
+    assert result.secret_count == 0
+    assert any(
+        item == f"{shared_ref} (源包缺少密钥，已清除本机旧值)"
+        for item in result.skipped_secret_refs
+    )
+    assert profile_manager.list_claude_profiles()[0].model == "new-model"
+    profile_manager.clear_profile_store_cache()
+
+
+def test_portable_missing_secret_clear_rolls_back_after_profile_save_failure(
+    tmp_path,
+    monkeypatch,
+):
+    storage_dir = tmp_path / "storage"
+    profiles_file = storage_dir / "profiles.json"
+    monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
+    monkeypatch.setattr(paths, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    profile_manager.clear_profile_store_cache()
+
+    shared_ref = "claude:MissingRollback:auth_token"
+    secret_values = {shared_ref: "old-secret"}
+    monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
+    monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
+    profile_manager._save_store(profile_manager._get_default_store())
+    profile_manager.save_claude_profile(ClaudeProfile(
+        name="MissingRollback",
+        auth_token_ref=shared_ref,
+        base_url="https://old.example.test",
+        model="old-model",
+        provider="custom",
+    ))
+
+    imported_store = profile_manager._get_default_store()
+    imported_store["claude_profiles"] = [ClaudeProfile(
+        name="MissingRollback",
+        auth_token_ref=shared_ref,
+        base_url="https://new.example.test",
+        model="new-model",
+        provider="custom",
+    ).to_dict()]
+    package = tmp_path / "missing-secret-rollback.asxprofile"
+    package.write_text(json.dumps(portable_migration._encrypt_payload({
+        "payload_version": 1,
+        "store": imported_store,
+        "secrets": {},
+        "browser_data": {},
+    }, "strong-password")), encoding="utf-8")
+
+    original_save = profile_manager._save_store
+
+    def fail_imported_save(store, *args, **kwargs):
+        imported_profiles = store.get("claude_profiles", [])
+        if any(item.get("model") == "new-model" for item in imported_profiles):
+            raise OSError("forced missing-secret save failure")
+        return original_save(store, *args, **kwargs)
+
+    monkeypatch.setattr(profile_manager, "_save_store", fail_imported_save)
+
+    with pytest.raises(OSError, match="forced missing-secret save failure"):
+        portable_migration.import_portable_profiles(package, "strong-password")
+
+    assert secret_values[shared_ref] == "old-secret"
+    profile_manager.clear_profile_store_cache()
+    assert profile_manager.list_claude_profiles()[0].model == "old-model"
+
+
+def test_portable_import_removes_obsolete_replaced_profile_secret(
+    tmp_path,
+    monkeypatch,
+):
+    storage_dir = tmp_path / "storage"
+    profiles_file = storage_dir / "profiles.json"
+    monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
+    monkeypatch.setattr(paths, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    profile_manager.clear_profile_store_cache()
+
+    old_ref = "ssh:Same:password"
+    secret_values = {old_ref: "old-password"}
+    monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
+    monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
+    profile_manager._save_store(profile_manager._get_default_store())
+    profile_manager.save_ssh_profile(SSHProfile(
+        name="Same",
+        host="old.example.test",
+        auth_type="password",
+        password_ref=old_ref,
+    ))
+
+    imported_store = profile_manager._get_default_store()
+    imported_store["ssh_profiles"] = [SSHProfile(
+        name="Same",
+        host="new.example.test",
+        auth_type="key",
+        private_key_path="C:/keys/id_ed25519",
+    ).to_dict()]
+    package = tmp_path / "obsolete-secret.asxprofile"
+    package.write_text(json.dumps(portable_migration._encrypt_payload({
+        "payload_version": 1,
+        "store": imported_store,
+        "secrets": {},
+        "browser_data": {},
+    }, "strong-password")), encoding="utf-8")
+
+    portable_migration.import_portable_profiles(package, "strong-password")
+
+    assert old_ref not in secret_values
+    [profile] = profile_manager.list_ssh_profiles()
+    assert profile.host == "new.example.test"
+    assert profile.auth_type == "key"
+    profile_manager.clear_profile_store_cache()
+
+
+def test_portable_obsolete_secret_delete_rolls_back_after_profile_save_failure(
+    tmp_path,
+    monkeypatch,
+):
+    storage_dir = tmp_path / "storage"
+    profiles_file = storage_dir / "profiles.json"
+    monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
+    monkeypatch.setattr(paths, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    profile_manager.clear_profile_store_cache()
+
+    old_ref = "ssh:Rollback:password"
+    secret_values = {old_ref: "old-password"}
+    deleted_refs: list[str] = []
+    monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
+
+    def delete_secret(ref):
+        deleted_refs.append(ref)
+        secret_values.pop(ref, None)
+
+    monkeypatch.setattr(security, "delete_secret", delete_secret)
+    profile_manager._save_store(profile_manager._get_default_store())
+    profile_manager.save_ssh_profile(SSHProfile(
+        name="Rollback",
+        host="old.example.test",
+        auth_type="password",
+        password_ref=old_ref,
+    ))
+    profiles_before = profiles_file.read_bytes()
+
+    imported_store = profile_manager._get_default_store()
+    imported_store["ssh_profiles"] = [SSHProfile(
+        name="Rollback",
+        host="new.example.test",
+        auth_type="key",
+        private_key_path="C:/keys/id_ed25519",
+    ).to_dict()]
+    package = tmp_path / "obsolete-secret-rollback.asxprofile"
+    package.write_text(json.dumps(portable_migration._encrypt_payload({
+        "payload_version": 1,
+        "store": imported_store,
+        "secrets": {},
+        "browser_data": {},
+    }, "strong-password")), encoding="utf-8")
+
+    original_save = profile_manager._save_store
+
+    def save_then_fail(store, *args, **kwargs):
+        original_save(store, *args, **kwargs)
+        if any(
+            item.get("host") == "new.example.test"
+            for item in store.get("ssh_profiles", [])
+        ):
+            raise OSError("forced obsolete-secret save failure")
+
+    monkeypatch.setattr(profile_manager, "_save_store", save_then_fail)
+
+    with pytest.raises(OSError, match="forced obsolete-secret save failure"):
+        portable_migration.import_portable_profiles(package, "strong-password")
+
+    assert old_ref in deleted_refs
+    assert secret_values[old_ref] == "old-password"
+    assert profiles_file.read_bytes() == profiles_before
+    profile_manager.clear_profile_store_cache()
+    assert profile_manager.list_ssh_profiles()[0].host == "old.example.test"
+
+
+def test_portable_import_rejects_cross_namespace_ref_before_overwriting_unowned_secret(
+    tmp_path,
+    monkeypatch,
+):
+    storage_dir = tmp_path / "storage"
+    profiles_file = storage_dir / "profiles.json"
+    monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
+    monkeypatch.setattr(paths, "PROFILES_FILE", profiles_file)
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    profile_manager.clear_profile_store_cache()
+    profile_manager._save_store(profile_manager._get_default_store())
+
+    unowned_ref = "network-diagnostics:audit:0"
+    secret_values = {unowned_ref: "unrelated-local-secret"}
+    monkeypatch.setattr(security, "get_secret", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "get_secret_strict", lambda ref: secret_values.get(ref))
+    monkeypatch.setattr(security, "set_secret", lambda ref, value: secret_values.__setitem__(ref, value))
+    monkeypatch.setattr(security, "delete_secret", lambda ref: secret_values.pop(ref, None))
+
+    imported_store = profile_manager._get_default_store()
+    imported_store["claude_profiles"] = [ClaudeProfile(
+        name="Collision",
+        auth_token_ref=unowned_ref,
+        base_url="https://collision.example.test",
+        provider="custom",
+    ).to_dict()]
+    package = tmp_path / "unowned-missing-secret.asxprofile"
+    package.write_text(json.dumps(portable_migration._encrypt_payload({
+        "payload_version": 1,
+        "store": imported_store,
+        "secrets": {unowned_ref: "attacker-controlled-secret"},
+        "browser_data": {},
+    }, "strong-password")), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="密钥引用不属于字段 auth_token_ref"):
+        portable_migration.import_portable_profiles(package, "strong-password")
+
+    assert secret_values[unowned_ref] == "unrelated-local-secret"
+    assert profile_manager.list_claude_profiles() == []
+    profile_manager.clear_profile_store_cache()
+
+
+@pytest.mark.parametrize(
+    ("list_key", "profile"),
+    [
+        (
+            "claude_profiles",
+            {"name": "Claude", "auth_token_ref": "network-diagnostics:proxycheck:0"},
+        ),
+        (
+            "claude_profiles",
+            {"name": "Claude", "primary_api_key_ref": "claude:Owner:auth_token"},
+        ),
+        (
+            "codex_profiles",
+            {"name": "Codex", "api_key_ref": "claude:Owner:auth_token"},
+        ),
+        (
+            "ssh_profiles",
+            {"name": "SSH", "password_ref": "ssh:Owner:key_passphrase"},
+        ),
+        (
+            "ssh_profiles",
+            {"name": "SSH", "private_key_passphrase_ref": "ssh:Owner:password"},
+        ),
+    ],
+)
+def test_portable_secret_ref_fields_reject_cross_namespace_or_cross_field_refs(
+    list_key,
+    profile,
+):
+    store = profile_manager._get_default_store()
+    store[list_key] = [profile]
+
+    with pytest.raises(ValueError, match="密钥引用不属于字段"):
+        portable_migration._validate_portable_secret_refs(store)
 
 
 class _RemoteAttr:

@@ -111,6 +111,11 @@ _PORTABLE_SECRET_REF_FIELDS = {
     "codex_profiles": ("api_key_ref",),
     "ssh_profiles": ("password_ref", "private_key_passphrase_ref"),
 }
+_PORTABLE_SECRET_PROFILE_LIST_KEYS = (
+    "claude_profiles",
+    "codex_profiles",
+    "ssh_profiles",
+)
 
 
 @dataclass
@@ -313,6 +318,14 @@ def _collect_secret_refs_from_store(store: dict[str, Any]) -> set[str]:
                 if isinstance(value, str) and value:
                     refs.add(value)
     return refs
+
+
+def _validate_portable_secret_refs(store: dict[str, Any]) -> None:
+    """Reject secret references that cross profile/field namespaces."""
+    profile_manager.validate_profile_secret_refs(
+        store,
+        list_keys=_PORTABLE_SECRET_PROFILE_LIST_KEYS,
+    )
 
 
 def _collect_unreplaced_profile_secret_refs(
@@ -913,6 +926,8 @@ def _decode_browser_file_entry(
     if not isinstance(file_entry, dict):
         raise ValueError("异常文件条目")
     rel_path = _safe_browser_relative_path(str(file_entry.get("path") or ""))
+    if _should_skip_browser_relative_path(rel_path):
+        raise ValueError(f"{rel_path}: 浏览器文件路径不在迁移白名单内")
     declared_size = file_entry.get("size")
     if declared_size is None:
         raise ValueError(f"{rel_path}: 文件大小元数据缺失")
@@ -1172,6 +1187,7 @@ def _export_portable_profiles_locked(
         raise ValueError("选择中没有可导出的 Profile")
     # Protect every live browser source even when that profile was not chosen.
     _validate_portable_export_path(path, full_store)
+    _validate_portable_secret_refs(store)
     browser_data, skipped_browser_files, browser_file_count, browser_bytes = _collect_browser_profile_data(store)
     _clear_unavailable_active_profiles(store)
     if selection is not None and _count_profiles(store) == 0:
@@ -1248,6 +1264,7 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
     _validate_portable_import_path(path, browser_data)
     imported_store["browser_profiles"] = browser_profiles
     imported_store = _sanitize_portable_store(imported_store)
+    _validate_portable_secret_refs(imported_store)
 
     secrets = payload.get("secrets", {})
     if not isinstance(secrets, dict):
@@ -1274,9 +1291,13 @@ def _import_portable_profiles_locked(
 ) -> PortableImportResult:
     allowed_secret_refs = _collect_secret_refs_from_store(imported_store)
     existing_store = profile_manager._load_store()
+    existing_secret_refs = _collect_secret_refs_from_store(existing_store)
+    retained_secret_refs = _collect_unreplaced_profile_secret_refs(
+        existing_store,
+        imported_store,
+    )
     conflicting_refs = sorted(
-        allowed_secret_refs
-        & _collect_unreplaced_profile_secret_refs(existing_store, imported_store)
+        allowed_secret_refs & retained_secret_refs
     )
     if conflicting_refs:
         details = ", ".join(conflicting_refs[:3])
@@ -1296,11 +1317,39 @@ def _import_portable_profiles_locked(
             continue
         valid_secrets.append((ref, value))
 
+    valid_secret_refs = {ref for ref, _value in valid_secrets}
+    missing_secret_refs = allowed_secret_refs - valid_secret_refs
+    skipped.extend(
+        f"{ref} (源包缺少密钥，已清除本机旧值)"
+        for ref in sorted(missing_secret_refs)
+    )
+
+    replaceable_secret_refs = existing_secret_refs - retained_secret_refs
+    obsolete_secret_refs = replaceable_secret_refs - allowed_secret_refs
+    secret_refs_to_delete = missing_secret_refs | obsolete_secret_refs
+
     profile_snapshot = _snapshot_file(profile_manager.PROFILES_FILE)
     secret_snapshot = {
-        ref: security.get_secret(ref)
-        for ref, _value in sorted(valid_secrets)
+        ref: security.get_secret_strict(ref)
+        for ref in sorted(valid_secret_refs | secret_refs_to_delete)
     }
+    unowned_local_collisions = sorted(
+        ref
+        for ref, previous_value in secret_snapshot.items()
+        if (
+            ref in missing_secret_refs
+            and previous_value is not None
+            and ref not in replaceable_secret_refs
+        )
+    )
+    if unowned_local_collisions:
+        details = ", ".join(unowned_local_collisions[:3])
+        suffix = (
+            f" 等 {len(unowned_local_collisions)} 项"
+            if len(unowned_local_collisions) > 3
+            else ""
+        )
+        raise ValueError(f"迁移包的密钥引用与本机未归属密钥冲突: {details}{suffix}")
     browser_snapshots: list[_BrowserRestoreSnapshot] = []
     browser_file_count = 0
     browser_bytes = 0
@@ -1353,12 +1402,10 @@ def _import_portable_profiles_locked(
         new_store["version"] = max(_store_version(existing_store), _store_version(imported_store))
 
         for ref, value in valid_secrets:
-            try:
-                security.set_secret(ref, value)
-            except Exception as e:
-                skipped.append(f"{ref} ({e})")
-                continue
+            security.set_secret(ref, value)
             restored += 1
+        for ref in sorted(secret_refs_to_delete):
+            security.delete_secret(ref)
 
         profile_manager._normalize_store(new_store)
         profile_manager._save_store(new_store)

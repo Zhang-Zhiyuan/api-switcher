@@ -52,6 +52,7 @@ def test_critical_operation_disables_navigation_and_restores_exact_widget_states
     assert [button.state for button in app._global_action_buttons] == ["disabled", "disabled"]
     assert app.claude_switch.state == "disabled"
     assert app.codex_switch.state == "disabled"
+    assert app.statuses[-1] == "正在导入，请勿退出程序"
     assert app_module.App._begin_critical_operation(app, "other", "其他操作") is False
 
     app_module.App._end_critical_operation(app, "import")
@@ -60,6 +61,7 @@ def test_critical_operation_disables_navigation_and_restores_exact_widget_states
     assert [button.state for button in app._global_action_buttons] == ["normal", "normal"]
     assert app.claude_switch.state == "readonly"
     assert app.codex_switch.state == "disabled"
+    assert app.statuses[-1] == "关键数据操作已完成"
 
 
 def test_exit_is_deferred_while_critical_import_is_active(monkeypatch):

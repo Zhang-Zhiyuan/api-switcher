@@ -1,3 +1,4 @@
+import logging
 import threading
 
 import customtkinter as ctk
@@ -15,6 +16,9 @@ PROFILE_RENDER_BATCH_DELAY_MS = 8
 INITIAL_REFRESH_DELAY_MS = 900
 SCROLL_IDLE_RENDER_MS = 850
 SCROLL_RETRY_RENDER_MS = 260
+BROWSER_CLEANUP_CRITICAL_KEY = "browser-profile-cleanup"
+
+logger = logging.getLogger(__name__)
 
 
 def _browser_tab_layout(width: int) -> tuple[bool, int, int]:
@@ -22,6 +26,62 @@ def _browser_tab_layout(width: int) -> tuple[bool, int, int]:
 
     available = max(1, int(width))
     return available < 760, (4 if available >= 760 else 2), (5 if available >= 760 else (3 if available >= 520 else 2))
+
+
+def _browser_card_action_columns(width: int) -> int:
+    """Wrap card actions before they overflow the supported 480px window."""
+
+    available = max(1, int(width))
+    if available >= 760:
+        return 6
+    if available >= 520:
+        return 4
+    return 2
+
+
+def _bind_browser_card_action_grid(container, buttons) -> None:
+    """Lay card actions out in a DPI-aware wrapping grid."""
+
+    widgets = tuple(buttons)
+    if not widgets:
+        return
+    state = {"columns": 0}
+
+    def apply_layout(event=None):
+        try:
+            width = int(getattr(event, "width", 0) or container.winfo_width())
+            try:
+                scaling = float(container._get_widget_scaling())
+            except (AttributeError, TypeError, ValueError):
+                scaling = 1.0
+            if scaling > 0:
+                width = round(width / scaling)
+            columns = min(len(widgets), _browser_card_action_columns(width))
+            if columns == state["columns"]:
+                return
+            previous = state["columns"]
+            state["columns"] = columns
+            for column in range(max(previous, columns)):
+                container.grid_columnconfigure(
+                    column,
+                    weight=1 if column < columns else 0,
+                    minsize=0,
+                    uniform="browser-card-actions" if column < columns else "",
+                )
+            for index, button in enumerate(widgets):
+                column = index % columns
+                button.grid(
+                    row=index // columns,
+                    column=column,
+                    sticky="ew",
+                    padx=(0 if column == 0 else 6, 0),
+                    pady=(0, 5),
+                )
+        except Exception:
+            return
+
+    container.bind("<Configure>", apply_layout, add="+")
+    apply_layout()
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -140,6 +200,8 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._filter_label = None
         self._bulk_bar = None
         self._bulk_buttons = []
+        self._card_cleanup_buttons = []
+        self._cleanup_inflight = False
         self._build_ui()
 
     def destroy(self):
@@ -380,21 +442,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
                     if not self.winfo_exists() or generation != self._refresh_generation:
                         return
                     if not payload["ok"]:
-                        self._has_profile_cache = False
-                        self._cached_profiles = ()
-                        self._cached_active = ""
-                        self._cached_diagnoses = {}
-                        for w in self._cards_frame.winfo_children():
-                            w.destroy()
-                        if self._stats_label:
-                            self._stats_label.configure(text="浏览器 Profile 诊断失败")
-                        EmptyState(
-                            self._cards_frame,
-                            "浏览器 Profile 诊断失败",
-                            payload["error"] or "请稍后重试。",
-                            "重新诊断",
-                            self.refresh,
-                        ).pack(fill="x", pady=(12, 4))
+                        self._show_diagnostics_error(payload["error"])
                         return
                     self._cached_profiles = tuple(payload["profiles"])
                     self._cached_active = payload["active"]
@@ -406,7 +454,27 @@ class BrowserTab(ctk.CTkScrollableFrame):
 
             run_on_ui_thread(self, finish)
 
-        threading.Thread(target=worker, name="browser-profile-diagnostics", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="browser-profile-diagnostics", daemon=True).start()
+        except Exception as exc:
+            self._show_diagnostics_error(f"诊断任务启动失败: {exc}")
+
+    def _show_diagnostics_error(self, message: str) -> None:
+        self._has_profile_cache = False
+        self._cached_profiles = ()
+        self._cached_active = ""
+        self._cached_diagnoses = {}
+        for widget in self._cards_frame.winfo_children():
+            widget.destroy()
+        if self._stats_label:
+            self._stats_label.configure(text="浏览器 Profile 诊断失败")
+        EmptyState(
+            self._cards_frame,
+            "浏览器 Profile 诊断失败",
+            str(message or "请稍后重试。"),
+            "重新诊断",
+            self.refresh,
+        ).pack(fill="x", pady=(12, 4))
 
     def _cancel_profile_render(self):
         self._profile_render_generation += 1
@@ -456,6 +524,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
         self._cancel_profile_render()
         profiles = tuple(profiles or ())
         diagnoses = dict(diagnoses or {})
+        self._card_cleanup_buttons.clear()
         for w in self._cards_frame.winfo_children():
             w.destroy()
 
@@ -613,25 +682,94 @@ class BrowserTab(ctk.CTkScrollableFrame):
             info_label.pack(fill="x")
             bind_wraplength(info_frame, info_label, padding=4)
 
-        btn_frame = ctk.CTkFrame(card, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=14, pady=(0, 12))
-
-        btn_row1 = ctk.CTkFrame(btn_frame, fg_color="transparent")
-        btn_row1.pack(fill="x", pady=(0, 4))
-        ctk.CTkButton(btn_row1, text="启动 ChatGPT", width=96, command=lambda prof=p: self._launch(prof, "chatgpt"), **button_style("primary", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row1, text="启动 Claude", width=96, command=lambda prof=p: self._launch(prof, "claude"), **button_style("accent", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row1, text="清理 GPT", width=76, command=lambda prof=p: self._clear_sites(prof, "chatgpt"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row1, text="清理 Claude", width=86, command=lambda prof=p: self._clear_sites(prof, "claude"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row1, text="清理两者", width=86, command=lambda prof=p: self._clear_sites(prof, "both"), **button_style("warning", compact=True)).pack(side="left", padx=(0, 6))
+        actions_frame = ctk.CTkFrame(card, fg_color="transparent")
+        actions_frame.pack(fill="x", padx=14, pady=(0, 7))
+        action_buttons = [
+            ctk.CTkButton(
+                actions_frame,
+                text="启动 ChatGPT",
+                width=1,
+                command=lambda prof=p: self._launch(prof, "chatgpt"),
+                **button_style("primary", compact=True),
+            ),
+            ctk.CTkButton(
+                actions_frame,
+                text="启动 Claude",
+                width=1,
+                command=lambda prof=p: self._launch(prof, "claude"),
+                **button_style("accent", compact=True),
+            ),
+        ]
+        clear_gpt_button = ctk.CTkButton(
+            actions_frame,
+            text="清理 GPT",
+            width=1,
+            command=lambda prof=p: self._clear_sites(prof, "chatgpt"),
+            **button_style("warning", compact=True),
+        )
+        action_buttons.append(clear_gpt_button)
+        self._track_cleanup_button(clear_gpt_button)
+        clear_claude_button = ctk.CTkButton(
+            actions_frame,
+            text="清理 Claude",
+            width=1,
+            command=lambda prof=p: self._clear_sites(prof, "claude"),
+            **button_style("warning", compact=True),
+        )
+        action_buttons.append(clear_claude_button)
+        self._track_cleanup_button(clear_claude_button)
+        clear_both_button = ctk.CTkButton(
+            actions_frame,
+            text="清理两者",
+            width=1,
+            command=lambda prof=p: self._clear_sites(prof, "both"),
+            **button_style("warning", compact=True),
+        )
+        action_buttons.append(clear_both_button)
+        self._track_cleanup_button(clear_both_button)
         if can_full_reset:
-            ctk.CTkButton(btn_row1, text="整目录清理", width=96, command=lambda prof=p: self._full_reset(prof), **button_style("danger", compact=True)).pack(side="left", padx=(0, 6))
-
-        btn_row2 = ctk.CTkFrame(btn_frame, fg_color="transparent")
-        btn_row2.pack(fill="x")
-        ctk.CTkButton(btn_row2, text="打开目录", width=78, command=lambda prof=p: self._open_dir(prof), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row2, text="复制", width=58, command=lambda prof=p: self._clone_profile(prof), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row2, text="编辑", width=58, command=lambda name=p.name: self._edit_profile(name), **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn_row2, text="删除", width=58, command=lambda name=p.name: self._delete_profile(name), **button_style("danger", compact=True)).pack(side="left")
+            full_reset_button = ctk.CTkButton(
+                actions_frame,
+                text="整目录清理",
+                width=1,
+                command=lambda prof=p: self._full_reset(prof),
+                **button_style("danger", compact=True),
+            )
+            action_buttons.append(full_reset_button)
+            self._track_cleanup_button(full_reset_button)
+        action_buttons.extend(
+            (
+                ctk.CTkButton(
+                    actions_frame,
+                    text="打开目录",
+                    width=1,
+                    command=lambda prof=p: self._open_dir(prof),
+                    **button_style("secondary", compact=True),
+                ),
+                ctk.CTkButton(
+                    actions_frame,
+                    text="复制",
+                    width=1,
+                    command=lambda prof=p: self._clone_profile(prof),
+                    **button_style("secondary", compact=True),
+                ),
+                ctk.CTkButton(
+                    actions_frame,
+                    text="编辑",
+                    width=1,
+                    command=lambda name=p.name: self._edit_profile(name),
+                    **button_style("secondary", compact=True),
+                ),
+                ctk.CTkButton(
+                    actions_frame,
+                    text="删除",
+                    width=1,
+                    command=lambda name=p.name: self._delete_profile(name),
+                    **button_style("danger", compact=True),
+                ),
+            )
+        )
+        _bind_browser_card_action_grid(actions_frame, action_buttons)
 
     def _on_filter_change(self, value: str):
         self._filter_mode = self.FILTER_OPTIONS.get(value, "all")
@@ -677,59 +815,209 @@ class BrowserTab(ctk.CTkScrollableFrame):
         else:
             self.refresh()
 
+    def _track_cleanup_button(self, button) -> None:
+        self._card_cleanup_buttons.append(button)
+        try:
+            button.configure(state="disabled" if self._cleanup_inflight else "normal")
+        except Exception:
+            pass
+
+    def _set_cleanup_controls_busy(self, busy: bool) -> None:
+        # The first two bulk controls only change selection and remain available.
+        buttons = list(getattr(self, "_bulk_buttons", [])[2:])
+        buttons.extend(getattr(self, "_card_cleanup_buttons", []))
+        for button in buttons:
+            try:
+                button.configure(state="disabled" if busy else "normal")
+            except Exception:
+                # Refreshes may destroy a card while a worker is finishing.
+                continue
+
+    def _cleanup_is_busy(self) -> bool:
+        return bool(getattr(self, "_cleanup_inflight", False))
+
+    def _begin_cleanup(self) -> bool:
+        if self._cleanup_is_busy():
+            self._toast("已有浏览器数据清理任务正在进行，请稍候")
+            return False
+        self._cleanup_inflight = True
+        self._set_cleanup_controls_busy(True)
+        return True
+
+    def _finish_cleanup(self) -> None:
+        self._cleanup_inflight = False
+        self._set_cleanup_controls_busy(False)
+
+    def _is_alive(self) -> bool:
+        if getattr(self, "_destroyed", False):
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _start_cleanup_task(self, worker, on_complete, *, thread_name: str) -> bool:
+        """Run destructive browser cleanup off Tk and apply its result on Tk."""
+
+        if not self._begin_cleanup():
+            return False
+
+        try:
+            top = self.winfo_toplevel()
+            critical_begin = getattr(top, "_begin_critical_operation", None)
+            critical_end = getattr(top, "_end_critical_operation", None)
+            critical_abandon = getattr(top, "_abandon_critical_operation", None)
+            if not all(callable(callback) for callback in (critical_begin, critical_end, critical_abandon)):
+                raise RuntimeError("应用关键操作保护不可用")
+            critical_started = bool(
+                critical_begin(BROWSER_CLEANUP_CRITICAL_KEY, "正在清理浏览器 Profile 数据")
+            )
+        except Exception as exc:
+            logger.error("Failed to enter browser-cleanup critical operation: %s", exc, exc_info=True)
+            self._finish_cleanup()
+            self._toast(f"无法开始浏览器数据清理: {exc}", is_error=True)
+            return False
+        if not critical_started:
+            self._finish_cleanup()
+            self._toast("当前有关键数据操作正在进行，请稍候再清理", is_error=True)
+            return False
+
+        def end_critical_operation() -> None:
+            try:
+                critical_end(BROWSER_CLEANUP_CRITICAL_KEY)
+            except Exception as exc:
+                logger.error("Failed to end browser-cleanup critical operation: %s", exc, exc_info=True)
+
+        def abandon_critical_operation() -> None:
+            try:
+                critical_abandon(BROWSER_CLEANUP_CRITICAL_KEY)
+            except Exception as exc:
+                logger.error("Failed to abandon browser-cleanup critical operation: %s", exc, exc_info=True)
+
+        def run_worker():
+            try:
+                result = worker()
+                error = None
+            except Exception as exc:
+                result = None
+                error = exc
+
+            def apply_result():
+                try:
+                    if self._is_alive():
+                        try:
+                            on_complete(result, error)
+                        except Exception as exc:
+                            self._toast(f"处理清理结果失败: {exc}", is_error=True)
+                finally:
+                    try:
+                        self._finish_cleanup()
+                    finally:
+                        end_critical_operation()
+
+            try:
+                # Dispatch through the captured App, so a tab rebuild does not
+                # strand the App-level critical-operation UI in its busy state.
+                dispatched = run_on_ui_thread(
+                    top,
+                    apply_result,
+                    logger=logger,
+                    context="browser-cleanup result",
+                )
+            except Exception as exc:
+                logger.error("Failed to dispatch browser-cleanup result: %s", exc, exc_info=True)
+                dispatched = False
+            if not dispatched:
+                # Dispatch failure usually means the tab has gone away. Only
+                # release Python state here; never touch Tk from this worker.
+                self._cleanup_inflight = False
+                abandon_critical_operation()
+
+        try:
+            threading.Thread(target=run_worker, name=thread_name, daemon=True).start()
+        except Exception as exc:
+            try:
+                self._finish_cleanup()
+            finally:
+                end_critical_operation()
+            self._toast(f"无法启动后台清理任务: {exc}", is_error=True)
+            return False
+        return True
+
     def _bulk_clear_sites(self, scope: str):
         if not self._selected_names:
             self._toast("请先选择至少一个 Profile", is_error=True)
             return
+        if self._cleanup_is_busy():
+            self._toast("已有浏览器数据清理任务正在进行，请稍候")
+            return
 
         label = {"chatgpt": "ChatGPT", "claude": "Claude", "both": "ChatGPT 与 Claude"}[scope]
+        selected_names = tuple(sorted(self._selected_names))
 
         def do_bulk_clear():
-            profiles = {p.name: p for p in profile_manager.list_browser_profiles()}
-            success = 0
-            shared_cleared = 0
-            shared_preserved = 0
-            failures: list[str] = []
-            for name in sorted(self._selected_names):
-                profile = profiles.get(name)
-                if not profile:
-                    failures.append(f"{name}: Profile 不存在")
-                    continue
-                try:
-                    if browser_data_manager.clear_site_data(profile, scope):
-                        shared_cleared += 1
-                    else:
-                        shared_preserved += 1
-                    success += 1
-                except Exception as e:
-                    failures.append(f"{name}: {e}")
+            def worker():
+                profiles = {p.name: p for p in profile_manager.list_browser_profiles()}
+                success = 0
+                shared_cleared = 0
+                shared_preserved = 0
+                failures: list[str] = []
+                for name in selected_names:
+                    profile = profiles.get(name)
+                    if not profile:
+                        failures.append(f"{name}: Profile 不存在")
+                        continue
+                    try:
+                        if browser_data_manager.clear_site_data(profile, scope):
+                            shared_cleared += 1
+                        else:
+                            shared_preserved += 1
+                        success += 1
+                    except Exception as exc:
+                        failures.append(f"{name}: {exc}")
+                return {
+                    "success": success,
+                    "shared_cleared": shared_cleared,
+                    "shared_preserved": shared_preserved,
+                    "failures": failures,
+                }
 
-            if failures:
-                self._toast(f"已清理 {success} 个，失败 {len(failures)} 个")
-                BulkOperationResultDialog(
-                    self.winfo_toplevel(),
-                    title="批量清理结果",
-                    success_count=success,
-                    failure_items=failures,
-                    success_label=(
-                        f"目标站点: {label}；共享存储已清 {shared_cleared} 个，"
-                        f"外部/非托管 Profile 保留 {shared_preserved} 个"
-                    ),
-                )
-            else:
-                self._toast(
-                    f"已清理 {success} 个 Profile 的 {label} 站点数据；"
-                    f"共享存储已清 {shared_cleared} 个，保留 {shared_preserved} 个"
-                )
+            def finish(result, error):
+                if error is not None:
+                    self._toast(f"批量清理失败: {error}", is_error=True)
+                    return
+                failures = result["failures"]
+                if failures:
+                    self._toast(f"已清理 {result['success']} 个，失败 {len(failures)} 个")
+                    BulkOperationResultDialog(
+                        self.winfo_toplevel(),
+                        title="批量清理结果",
+                        success_count=result["success"],
+                        failure_items=failures,
+                        success_label=(
+                            f"目标站点: {label}；共享存储已清 {result['shared_cleared']} 个，"
+                            f"外部/非托管 Profile 保留 {result['shared_preserved']} 个"
+                        ),
+                    )
+                else:
+                    self._toast(
+                        f"已清理 {result['success']} 个 Profile 的 {label} 站点数据；"
+                        f"共享存储已清 {result['shared_cleared']} 个，保留 {result['shared_preserved']} 个"
+                    )
+                self.refresh()
 
-            self.refresh()
+            self._start_cleanup_task(worker, finish, thread_name="browser-bulk-site-cleanup")
 
-        profiles_by_name = {p.name: p for p in profile_manager.list_browser_profiles()}
-        preserved_count = sum(
-            1
-            for name in self._selected_names
-            if name in profiles_by_name and not browser_data_manager.can_clear_shared_storage(profiles_by_name[name])[0]
-        )
+        try:
+            profiles_by_name = {p.name: p for p in profile_manager.list_browser_profiles()}
+            preserved_count = sum(
+                1
+                for name in selected_names
+                if name in profiles_by_name and not browser_data_manager.can_clear_shared_storage(profiles_by_name[name])[0]
+            )
+        except Exception as exc:
+            self._toast(f"读取浏览器 Profile 失败: {exc}", is_error=True)
+            return
         storage_note = (
             f"\n其中 {preserved_count} 个外部/非托管 Profile 只清 Cookies 与按域 IndexedDB，"
             "会保留 Local/Session Storage、Service Worker 和缓存。"
@@ -740,7 +1028,7 @@ class BrowserTab(ctk.CTkScrollableFrame):
             self.winfo_toplevel(),
             title="批量清理站点数据",
             message=(
-                f"将清理所选 {len(self._selected_names)} 个 Profile 中 {label} 的站点数据和登录态。"
+                f"将清理所选 {len(selected_names)} 个 Profile 中 {label} 的站点数据和登录态。"
                 f"{storage_note}\n请先关闭相关浏览器后继续。"
             ),
             on_confirm=do_bulk_clear,
@@ -808,14 +1096,23 @@ class BrowserTab(ctk.CTkScrollableFrame):
             self._toast(f"启动失败: {e}", is_error=True)
 
     def _clear_sites(self, profile, scope: str):
+        if self._cleanup_is_busy():
+            self._toast("已有浏览器数据清理任务正在进行，请稍候")
+            return
+
         def do_clear():
-            try:
-                shared_cleared = browser_data_manager.clear_site_data(profile, scope)
+            def worker():
+                return browser_data_manager.clear_site_data(profile, scope)
+
+            def finish(shared_cleared, error):
+                if error is not None:
+                    self._toast(f"清理失败: {error}", is_error=True)
+                    return
                 label = {"chatgpt": "ChatGPT", "claude": "Claude", "both": "ChatGPT 与 Claude"}[scope]
                 suffix = "共享存储已清" if shared_cleared else "外部/非托管 Profile 的共享存储已保留"
                 self._toast(f"已清理 {label} 站点数据；{suffix}")
-            except Exception as e:
-                self._toast(f"清理失败: {e}", is_error=True)
+
+            self._start_cleanup_task(worker, finish, thread_name="browser-site-cleanup")
 
         label = {"chatgpt": "ChatGPT", "claude": "Claude", "both": "ChatGPT 与 Claude"}[scope]
         clear_shared, shared_reason = browser_data_manager.can_clear_shared_storage(profile)
@@ -841,12 +1138,22 @@ class BrowserTab(ctk.CTkScrollableFrame):
         )
 
     def _full_reset(self, profile):
+        if self._cleanup_is_busy():
+            self._toast("已有浏览器数据清理任务正在进行，请稍候")
+            return
+
         def do_reset():
-            try:
+            def worker():
                 browser_data_manager.full_reset(profile)
+                return True
+
+            def finish(_result, error):
+                if error is not None:
+                    self._toast(f"整目录清理失败: {error}", is_error=True)
+                    return
                 self._toast("已完成整目录清理")
-            except Exception as e:
-                self._toast(f"整目录清理失败: {e}", is_error=True)
+
+            self._start_cleanup_task(worker, finish, thread_name="browser-full-reset")
 
         DangerConfirmDialog(
             self.winfo_toplevel(),

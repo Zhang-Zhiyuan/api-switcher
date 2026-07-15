@@ -79,7 +79,8 @@ def test_git_snapshot_refresh_runs_off_ui_thread(tmp_path, monkeypatch):
     dialog._set_actions_enabled = lambda enabled: actions.append(enabled)
     dialog._set_text = lambda text: text_updates.append(text)
     dialog.winfo_exists = lambda: True
-    dialog.after = lambda _delay, callback: callback()
+    dialog._run_on_ui_thread = lambda callback: callback()
+    dialog.after = lambda *_args: (_ for _ in ()).throw(AssertionError("worker must not call Tk.after"))
 
     started_at = time.perf_counter()
     GitSnapshotHistoryDialog._refresh(dialog)
@@ -97,3 +98,30 @@ def test_git_snapshot_refresh_runs_off_ui_thread(tmp_path, monkeypatch):
     assert True in actions
     assert any("正在后台读取 Git 快照" in text for text in text_updates)
     assert any("file.py" in text for text in text_updates)
+
+
+def test_git_snapshot_thread_start_failure_reports_error(tmp_path, monkeypatch):
+    class BrokenThread:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def start():
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr("ui.dialogs.git_snapshot_history_dialog.threading.Thread", BrokenThread)
+    dialog = object.__new__(GitSnapshotHistoryDialog)
+    dialog._refresh_generation = 0
+    dialog._project_var = _Var(str(tmp_path))
+    dialog._count_var = _Var("50")
+    dialog._auto_only_var = _Var(True)
+    dialog._selected_hash = ""
+    dialog._status_label = _Label()
+    dialog._set_actions_enabled = lambda _enabled: None
+    dialog._set_text = lambda _text: None
+    errors = []
+    dialog._apply_refresh_error = lambda message, status="": errors.append((message, status))
+
+    GitSnapshotHistoryDialog._refresh(dialog)
+
+    assert errors == [("读取 Git 快照失败: thread unavailable", "启动失败")]

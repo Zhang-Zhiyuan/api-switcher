@@ -182,13 +182,17 @@ class ErrorStatsDialog(ctk.CTkToplevel):
         self.detail_text.configure(state="disabled")
 
         # 在后台线程加载
-        thread = threading.Thread(
-            target=self._load_stats_thread,
-            args=(days, generation),
-            name=f"{self.provider}-error-stats-load",
-            daemon=True,
-        )
-        thread.start()
+        try:
+            thread = threading.Thread(
+                target=self._load_stats_thread,
+                args=(days, generation),
+                name=f"{self.provider}-error-stats-load",
+                daemon=True,
+            )
+            thread.start()
+        except Exception as exc:
+            logger.error("Failed to start error statistics worker: %s", exc, exc_info=True)
+            self._display_error(str(exc))
 
     def _load_stats_thread(self, days: int, generation: int):
         """后台线程加载统计数据"""

@@ -1,5 +1,6 @@
 import customtkinter as ctk
 
+from ui.dialogs.confirm_dialog import _bind_two_button_footer
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, input_style
 
 
@@ -11,15 +12,22 @@ class PasswordDialog(ctk.CTkToplevel):
         self.title(title)
         self.geometry("480x310" if confirm_password else "480x250")
         self.minsize(420, 230)
-        self.resizable(True, False)
+        self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.grab_set()
 
         self._on_confirm = on_confirm
         self._confirm_password = confirm_password
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=20, pady=(18, 12))
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(side="bottom", fill="x", padx=20, pady=(6, 18))
+
+        body = ctk.CTkScrollableFrame(
+            self,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        body.pack(fill="both", expand=True, padx=14, pady=(12, 0))
 
         ctk.CTkLabel(
             body,
@@ -38,35 +46,45 @@ class PasswordDialog(ctk.CTkToplevel):
         message_label.pack(fill="x", anchor="w", pady=(0, 12))
         bind_wraplength(body, message_label, padding=4, min_width=280, max_width=560)
 
-        self._password = ctk.CTkEntry(body, show="*", placeholder_text="迁移密码", **input_style())
+        self._password = ctk.CTkEntry(
+            body,
+            width=1,
+            show="*",
+            placeholder_text="迁移密码",
+            **input_style(),
+        )
         self._password.pack(fill="x", pady=(0, 8))
         self._password.focus_set()
 
         self._password_confirm = None
         if confirm_password:
-            self._password_confirm = ctk.CTkEntry(body, show="*", placeholder_text="再次输入迁移密码", **input_style())
+            self._password_confirm = ctk.CTkEntry(
+                body,
+                width=1,
+                show="*",
+                placeholder_text="再次输入迁移密码",
+                **input_style(),
+            )
             self._password_confirm.pack(fill="x", pady=(0, 8))
 
         self._error = ctk.CTkLabel(body, text="", text_color=COLORS["danger"], font=font(12), anchor="w")
         self._error.pack(fill="x")
 
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=20, pady=(0, 18))
-
-        ctk.CTkButton(
+        cancel_button = ctk.CTkButton(
             btn_frame,
             text="取消",
-            width=84,
+            width=1,
             command=self.destroy,
             **button_style("secondary"),
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(
+        )
+        confirm_button = ctk.CTkButton(
             btn_frame,
             text="确定",
-            width=84,
+            width=1,
             command=self._confirm,
             **button_style("primary"),
-        ).pack(side="right")
+        )
+        _bind_two_button_footer(btn_frame, confirm_button, cancel_button)
 
         self.bind("<Return>", lambda _event: self._confirm())
         center_window(self, master)

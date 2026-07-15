@@ -1,6 +1,7 @@
 import customtkinter as ctk
 from ui.widgets.masked_entry import MaskedEntry
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
+from ui.ui_dispatch import run_on_ui_thread
 from core.providers import ProviderRegistry
 
 
@@ -17,6 +18,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self.configure(fg_color=COLORS["app_bg"])
         self.grab_set()
 
+        self._destroyed = False
+        self._ui_dispatch = getattr(master, "_run_on_ui_thread", None)
         self._on_save = on_save
         self._profile = profile
         self._profile_type = profile_type
@@ -94,6 +97,10 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
+
+    def destroy(self):
+        self._destroyed = True
+        super().destroy()
 
     def _add_field(self, parent, label, key, value="", field_type="entry"):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -663,8 +670,12 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             # Show result dialog in main thread
             self._safe_after(lambda: self._apply_test_result(result, data.get("name", "")))
 
-        thread = threading.Thread(target=run_test, name="api-profile-test", daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=run_test, name="api-profile-test", daemon=True)
+            thread.start()
+        except Exception as exc:
+            self._set_test_busy(False)
+            self._show_error(f"无法启动连接测试: {exc}")
 
     def _set_test_busy(self, busy: bool) -> None:
         self._test_busy = busy
@@ -694,13 +705,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._show_status("")
         APITestResultDialog(self, result, profile_name)
 
-    def _safe_after(self, callback) -> None:
+    def _safe_after(self, callback) -> bool:
         """Schedule UI work from a background thread if the dialog still exists."""
-        try:
-            if self.winfo_exists():
-                self.after(0, callback)
-        except Exception:
-            pass
+        return run_on_ui_thread(self, callback)
 
     def _refresh_models(self):
         """Refresh model list from provider API, falling back to bundled presets."""
@@ -756,7 +763,11 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 )
             self._safe_after(lambda: self._handle_model_refresh_result(result, fallback_models, provider))
 
-        threading.Thread(target=run_refresh, name="api-model-refresh", daemon=True).start()
+        try:
+            threading.Thread(target=run_refresh, name="api-model-refresh", daemon=True).start()
+        except Exception as exc:
+            self._set_refresh_busy(False)
+            self._show_error(f"无法启动模型刷新: {exc}")
 
     def _set_refresh_busy(self, busy: bool) -> None:
         self._refresh_busy = busy
@@ -822,20 +833,44 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             details = f": {result.error_details}" if result.error_details else ""
             self._show_error(f"刷新模型失败。{result.message}{details}")
 
-    def _resolve_latest_model_for_save(self, api_key: str, base_url: str, provider, is_codex: bool) -> str:
-        from core.api_tester import APITester
+    def _model_for_save(self, provider, is_codex: bool) -> str:
+        """Choose an already-loaded or bundled model without blocking Tk on I/O."""
 
-        try:
-            result = (
-                APITester.fetch_openai_models(api_key, base_url, timeout=12)
-                if is_codex
-                else APITester.fetch_claude_models(api_key, base_url, timeout=12)
-            )
-            if result.success:
-                return result.latest_model or result.recommended_model or ""
-        except Exception:
-            pass
-        return (provider.default_model if provider else "") or ("gpt-5.5" if is_codex else "claude-sonnet-4")
+        loaded_models: list[str] = []
+        model_field = self._fields.get("model")
+        if model_field:
+            try:
+                values = model_field[0].cget("values")
+            except Exception:
+                values = ()
+            if isinstance(values, str):
+                values = (values,)
+            try:
+                for value in values:
+                    if value is None:
+                        continue
+                    normalized = str(value).strip()
+                    if normalized and normalized not in loaded_models:
+                        loaded_models.append(normalized)
+            except TypeError:
+                loaded_models = []
+
+        provider_default = str(getattr(provider, "default_model", "") or "").strip()
+        if provider_default and provider_default in loaded_models:
+            return provider_default
+        if loaded_models:
+            return loaded_models[0]
+        if provider_default:
+            return provider_default
+
+        supported_models = getattr(provider, "supported_models", ()) or ()
+        for model in supported_models:
+            if model is None:
+                continue
+            normalized = str(model).strip()
+            if normalized:
+                return normalized
+        return "gpt-5.5" if is_codex else "claude-sonnet-4"
 
     def _save(self):
         data = self._collect_data()
@@ -856,12 +891,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             provider = ProviderRegistry.get_provider_by_display_name(provider_display_name)
             if provider:
                 data["provider"] = provider.name
-            api_key = self._get_secret_value("auth_token", getattr(self._profile, "auth_token_ref", None))
-            base_url = data.get("base_url") or (provider.base_url_for_claude() if provider else "")
             if not data.get("model"):
-                self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
-                self.update_idletasks()
-                data["model"] = self._resolve_latest_model_for_save(api_key, base_url, provider, is_codex=False)
+                data["model"] = self._model_for_save(provider, is_codex=False)
             if not data.get("model"):
                 self._show_error("无法自动选择模型，请手动填写模型名称")
                 return
@@ -884,16 +915,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             if not data.get("custom_base_url"):
                 self._show_error("第三方或自定义 Provider 需要 API 端点")
                 return
-            api_key = self._get_secret_value("api_key", getattr(self._profile, "api_key_ref", None))
             if not data.get("model"):
-                self._show_status("模型为空，正在从接口模型列表选择最新模型...", "warning")
-                self.update_idletasks()
-                data["model"] = self._resolve_latest_model_for_save(
-                    api_key,
-                    data["custom_base_url"],
-                    provider,
-                    is_codex=True,
-                )
+                data["model"] = self._model_for_save(provider, is_codex=True)
             if not data.get("model"):
                 self._show_error("无法自动选择模型，请手动填写模型名称")
                 return

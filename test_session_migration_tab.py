@@ -1,6 +1,8 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from ui.tabs.session_migration_tab import (
     SESSION_MIGRATION_THREE_ACTION_COLUMNS_MIN_WIDTH,
     SESSION_MIGRATION_WIDE_MIN_WIDTH,
@@ -30,6 +32,24 @@ class _ControlledThread:
 
     def start(self):
         self.started = True
+
+
+class _CriticalTop:
+    def __init__(self, allow=True):
+        self.allow = allow
+        self.begun = []
+        self.ended = []
+        self.abandoned = []
+
+    def _begin_critical_operation(self, key, label):
+        self.begun.append((key, label))
+        return self.allow
+
+    def _end_critical_operation(self, key):
+        self.ended.append(key)
+
+    def _abandon_critical_operation(self, key):
+        self.abandoned.append(key)
 
 
 def test_session_record_summary_counts_visible_selection_and_size():
@@ -190,6 +210,49 @@ def test_session_migration_refresh_defers_when_inactive(monkeypatch):
     assert tab._deferred_refresh_pending is True
 
 
+def test_session_migration_refresh_thread_start_failure_replaces_loading_state(monkeypatch):
+    class Frame:
+        def winfo_children(self):
+            return []
+
+    class Label(_ConfigRecorder):
+        def pack(self, **_kwargs):
+            return self
+
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    tab = object.__new__(SessionMigrationTab)
+    tab._initial_refresh_after_id = "initial"
+    tab._destroyed = False
+    tab._deferred_refresh_pending = False
+    tab._cards_frame = Frame()
+    tab._stats_label = Label()
+    tab._refresh_generation = 0
+    tab._provider_filter = "all"
+    tab._cancel_inactive_clear = lambda: None
+    tab._refresh_location_options = lambda: None
+    tab._cancel_record_render = lambda: None
+    tab._cancel_deferred_render = lambda: None
+    tab._current_source_ssh_name = lambda: ""
+    tab._endpoint_label = lambda _ssh_name: "本机"
+    errors = []
+    tab._show_refresh_start_error = errors.append
+    monkeypatch.setattr("ui.tabs.session_migration_tab.is_active_tab", lambda _widget: True)
+    monkeypatch.setattr("ui.tabs.session_migration_tab.recent_user_scroll", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("ui.tabs.session_migration_tab.font", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("ui.tabs.session_migration_tab.ctk.CTkLabel", lambda *_args, **_kwargs: Label())
+    monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", FailingThread)
+
+    SessionMigrationTab.refresh(tab)
+
+    assert errors == ["thread unavailable"]
+
+
 def test_session_import_runs_in_worker_and_finishes_on_ui_callback(monkeypatch):
     _ControlledThread.instances.clear()
     monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", _ControlledThread)
@@ -200,7 +263,8 @@ def test_session_import_runs_in_worker_and_finishes_on_ui_callback(monkeypatch):
     tab._session_operation_in_progress = False
     tab._header_action_buttons = [_ConfigRecorder() for _ in range(5)]
     tab._stats_label = _ConfigRecorder()
-    tab.winfo_toplevel = lambda: "top"
+    top = _CriticalTop()
+    tab.winfo_toplevel = lambda: top
     tab.winfo_exists = lambda: True
     callbacks = []
     tab._run_on_ui_thread = lambda callback: callbacks.append(callback) or True
@@ -223,6 +287,8 @@ def test_session_import_runs_in_worker_and_finishes_on_ui_callback(monkeypatch):
     thread = _ControlledThread.instances[0]
     assert thread.started is True
     assert thread.name == "session-package-import"
+    assert top.begun == [("session-package-import", "正在导入会话迁移包")]
+    assert top.ended == []
 
     thread.target()
 
@@ -236,6 +302,177 @@ def test_session_import_runs_in_worker_and_finishes_on_ui_callback(monkeypatch):
     assert shown == [result]
     assert tab._session_operation_in_progress is False
     assert [button.configurations[-1]["state"] for button in tab._header_action_buttons[:4]] == ["normal"] * 4
+    assert top.ended == ["session-package-import"]
+    assert top.abandoned == []
+
+
+def test_session_import_abandons_critical_operation_when_ui_dispatch_rejects(monkeypatch):
+    _ControlledThread.instances.clear()
+    monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", _ControlledThread)
+
+    top = _CriticalTop()
+    tab = object.__new__(SessionMigrationTab)
+    tab._destroyed = False
+    tab._session_operation_lock = threading.Lock()
+    tab._session_operation_in_progress = False
+    tab._header_action_buttons = []
+    tab._stats_label = None
+    tab.winfo_toplevel = lambda: top
+    tab._run_on_ui_thread = lambda _callback: False
+    tab._import_package_to_endpoint = lambda *_args: SimpleNamespace(session_count=1, file_count=1)
+
+    SessionMigrationTab._start_import_task(tab, "in.asxsession", "")
+    _ControlledThread.instances[0].target()
+
+    assert tab._session_operation_in_progress is False
+    assert top.begun == [("session-package-import", "正在导入会话迁移包")]
+    assert top.ended == []
+    assert top.abandoned == ["session-package-import"]
+
+
+def test_session_direct_transfer_uses_critical_operation_until_ui_finish(monkeypatch):
+    _ControlledThread.instances.clear()
+    monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", _ControlledThread)
+    toasts = []
+    monkeypatch.setattr(
+        "ui.tabs.session_migration_tab.show_toast",
+        lambda top, message, **kwargs: toasts.append((top, message, kwargs)),
+    )
+
+    top = _CriticalTop()
+    callbacks = []
+    tab = object.__new__(SessionMigrationTab)
+    tab._destroyed = False
+    tab._session_operation_lock = threading.Lock()
+    tab._session_operation_in_progress = False
+    tab._header_action_buttons = []
+    tab._stats_label = None
+    tab._selected_keys = {"claude:one"}
+    tab._provider_filter = "claude"
+    tab.winfo_toplevel = lambda: top
+    tab.winfo_exists = lambda: True
+    tab._run_on_ui_thread = lambda callback: callbacks.append(callback) or True
+    tab._export_current_selection_to_package = lambda *_args, **_kwargs: SimpleNamespace()
+    imported = SimpleNamespace(
+        session_count=1,
+        file_count=2,
+        skipped_existing=0,
+        skipped_invalid=0,
+    )
+    tab._import_package_to_endpoint = lambda *_args: imported
+    refreshed = []
+    tab.refresh = lambda: refreshed.append(True)
+
+    SessionMigrationTab._run_transfer_task(tab, "", "server-a")
+
+    assert top.begun == [("session-direct-transfer", "正在迁移选中会话")]
+    assert len(_ControlledThread.instances) == 1
+    _ControlledThread.instances[0].target()
+    assert top.ended == []
+    assert len(callbacks) == 1
+
+    callbacks[0]()
+
+    assert tab._session_operation_in_progress is False
+    assert top.ended == ["session-direct-transfer"]
+    assert top.abandoned == []
+    assert refreshed == [True]
+    assert toasts == [(top, "会话已迁移到目标: 1 个会话, 2 个文件", {})]
+
+
+def test_session_direct_transfer_abandons_critical_operation_when_ui_dispatch_rejects(monkeypatch):
+    _ControlledThread.instances.clear()
+    monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", _ControlledThread)
+
+    top = _CriticalTop()
+    tab = object.__new__(SessionMigrationTab)
+    tab._destroyed = False
+    tab._session_operation_lock = threading.Lock()
+    tab._session_operation_in_progress = False
+    tab._header_action_buttons = []
+    tab._stats_label = None
+    tab._selected_keys = {"claude:one"}
+    tab._provider_filter = "claude"
+    tab.winfo_toplevel = lambda: top
+    tab._run_on_ui_thread = lambda _callback: False
+    tab._export_current_selection_to_package = lambda *_args, **_kwargs: SimpleNamespace()
+    tab._import_package_to_endpoint = lambda *_args: SimpleNamespace(session_count=1, file_count=1)
+
+    SessionMigrationTab._run_transfer_task(tab, "", "server-a")
+    tab.winfo_toplevel = lambda: (_ for _ in ()).throw(
+        AssertionError("transfer worker must use the captured critical callbacks")
+    )
+    _ControlledThread.instances[0].target()
+
+    assert tab._session_operation_in_progress is False
+    assert top.begun == [("session-direct-transfer", "正在迁移选中会话")]
+    assert top.ended == []
+    assert top.abandoned == ["session-direct-transfer"]
+    assert tab._session_operation_lock.acquire(blocking=False) is True
+    tab._session_operation_lock.release()
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_key", "expected_label"),
+    [
+        ("import", "session-package-import", "正在导入会话迁移包"),
+        ("transfer", "session-direct-transfer", "正在迁移选中会话"),
+    ],
+)
+def test_session_critical_rejection_does_not_start_worker_or_hold_local_lock(
+    monkeypatch,
+    operation,
+    expected_key,
+    expected_label,
+):
+    class UnexpectedThread:
+        def __init__(self, **_kwargs):
+            raise AssertionError("critical rejection must not create a worker")
+
+    monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", UnexpectedThread)
+    monkeypatch.setattr("ui.tabs.session_migration_tab.show_toast", lambda *_args, **_kwargs: None)
+
+    top = _CriticalTop(allow=False)
+    tab = object.__new__(SessionMigrationTab)
+    tab._session_operation_lock = threading.Lock()
+    tab._session_operation_in_progress = False
+    tab._header_action_buttons = []
+    tab._stats_label = None
+    tab._selected_keys = {"claude:one"}
+    tab._provider_filter = "claude"
+    tab.winfo_toplevel = lambda: top
+
+    if operation == "import":
+        SessionMigrationTab._start_import_task(tab, "in.asxsession", "")
+    else:
+        SessionMigrationTab._run_transfer_task(tab, "", "server-a")
+
+    assert tab._session_operation_in_progress is False
+    assert top.begun == [(expected_key, expected_label)]
+    assert top.ended == []
+    assert top.abandoned == []
+    assert tab._session_operation_lock.acquire(blocking=False) is True
+    tab._session_operation_lock.release()
+
+
+def test_session_critical_rejection_tolerates_toast_failure_and_releases_lock(monkeypatch):
+    top = _CriticalTop(allow=False)
+    tab = object.__new__(SessionMigrationTab)
+    tab._session_operation_lock = threading.Lock()
+    tab._session_operation_in_progress = False
+    tab._header_action_buttons = []
+    tab._stats_label = None
+    tab.winfo_toplevel = lambda: top
+    monkeypatch.setattr(
+        "ui.tabs.session_migration_tab.show_toast",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("toast unavailable")),
+    )
+
+    SessionMigrationTab._start_import_task(tab, "in.asxsession", "")
+
+    assert tab._session_operation_in_progress is False
+    assert tab._session_operation_lock.acquire(blocking=False) is True
+    tab._session_operation_lock.release()
 
 
 def test_session_operation_mutex_rejects_second_task(monkeypatch):
@@ -316,7 +553,8 @@ def test_session_import_thread_start_failure_restores_operation_state(monkeypatc
     tab._session_operation_in_progress = False
     tab._header_action_buttons = [_ConfigRecorder() for _ in range(5)]
     tab._stats_label = _ConfigRecorder()
-    tab.winfo_toplevel = lambda: "top"
+    top = _CriticalTop()
+    tab.winfo_toplevel = lambda: top
     stats_updates = []
     tab._update_stats_label = lambda: stats_updates.append(True)
 
@@ -327,8 +565,55 @@ def test_session_import_thread_start_failure_restores_operation_state(monkeypatc
     assert [button.configurations[-1]["state"] for button in tab._header_action_buttons[:4]] == ["normal"] * 4
     assert toasts == [
         (
-            "top",
+            top,
             "无法启动导入任务: thread unavailable",
+            {"is_error": True},
+        )
+    ]
+    assert top.begun == [("session-package-import", "正在导入会话迁移包")]
+    assert top.ended == ["session-package-import"]
+    assert top.abandoned == []
+
+
+def test_session_transfer_thread_start_failure_restores_critical_and_local_state(monkeypatch):
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr("ui.tabs.session_migration_tab.threading.Thread", FailingThread)
+    toasts = []
+    monkeypatch.setattr(
+        "ui.tabs.session_migration_tab.show_toast",
+        lambda top, message, **kwargs: toasts.append((top, message, kwargs)),
+    )
+
+    top = _CriticalTop()
+    tab = object.__new__(SessionMigrationTab)
+    tab._session_operation_lock = threading.Lock()
+    tab._session_operation_in_progress = False
+    tab._header_action_buttons = [_ConfigRecorder() for _ in range(5)]
+    tab._stats_label = _ConfigRecorder()
+    tab._selected_keys = {"claude:one"}
+    tab._provider_filter = "claude"
+    tab.winfo_toplevel = lambda: top
+    stats_updates = []
+    tab._update_stats_label = lambda: stats_updates.append(True)
+
+    SessionMigrationTab._run_transfer_task(tab, "", "server-a")
+
+    assert tab._session_operation_in_progress is False
+    assert stats_updates == [True]
+    assert [button.configurations[-1]["state"] for button in tab._header_action_buttons[:4]] == ["normal"] * 4
+    assert top.begun == [("session-direct-transfer", "正在迁移选中会话")]
+    assert top.ended == ["session-direct-transfer"]
+    assert top.abandoned == []
+    assert toasts == [
+        (
+            top,
+            "无法启动迁移任务: thread unavailable",
             {"is_error": True},
         )
     ]

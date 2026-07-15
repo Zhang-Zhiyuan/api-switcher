@@ -6,6 +6,7 @@ import threading
 import logging
 from typing import Optional
 from ui.theme import COLORS, button_style, center_window, font, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +119,16 @@ class HealthCheckDialog(ctk.CTkToplevel):
         self.status_label.configure(text="正在进行健康检查，请稍候...")
 
         # 在后台线程执行检查
-        thread = threading.Thread(target=self._run_check, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=self._run_check, name="health-check", daemon=True)
+            thread.start()
+        except Exception as exc:
+            self.is_checking = False
+            self.check_button.configure(state="normal", text="重新检查")
+            self.export_button.configure(state="normal")
+            self.status_label.configure(text="健康检查启动失败")
+            logger.error("Failed to start health check worker: %s", exc, exc_info=True)
+            self._display_error(str(exc))
 
     def _run_check(self):
         """执行健康检查（后台线程）"""
@@ -144,11 +153,7 @@ class HealthCheckDialog(ctk.CTkToplevel):
 
     def _safe_after(self, callback) -> None:
         """Schedule UI work from a background thread if the dialog still exists."""
-        try:
-            if self.winfo_exists():
-                self.after(0, callback)
-        except Exception:
-            pass
+        run_on_ui_thread(self, callback, logger, "health check refresh")
 
     def _finish_check(self) -> None:
         if not self.winfo_exists():

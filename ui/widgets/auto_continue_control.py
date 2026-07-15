@@ -14,6 +14,58 @@ training_prompt_template_by_key = LazyAttribute("models.auto_continue", "trainin
 auto_continue_manager = LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
 
 
+def _auto_continue_layout(width: int) -> tuple[int, int, int]:
+    """Return state-chip, action-button and switch columns for ``width``."""
+
+    width = max(1, int(width))
+    if width < 340:
+        return 1, 2, 1
+    if width < 520:
+        return 2, 3, 2
+    if width < 720:
+        return 3, 4, 2
+    return 3, 7, 3
+
+
+def _bind_responsive_grid(container, items, column_selector) -> None:
+    """Lay widgets out in a wrapping grid without forcing horizontal growth."""
+
+    widgets = tuple(item for item in items if item is not None)
+    if not widgets:
+        return
+    state = {"columns": 0}
+
+    def apply_layout(event=None):
+        try:
+            width = int(getattr(event, "width", 0) or container.winfo_width())
+            columns = max(1, min(len(widgets), int(column_selector(width))))
+            if columns == state["columns"]:
+                return
+            previous = state["columns"]
+            state["columns"] = columns
+            for column in range(max(previous, columns)):
+                container.grid_columnconfigure(
+                    column,
+                    weight=1 if column < columns else 0,
+                    minsize=0,
+                )
+            for index, widget in enumerate(widgets):
+                column = index % columns
+                widget.grid(
+                    row=index // columns,
+                    column=column,
+                    columnspan=1,
+                    sticky="ew",
+                    padx=(0 if column == 0 else 4, 0),
+                    pady=(0, 4),
+                )
+        except Exception:
+            return
+
+    container.bind("<Configure>", apply_layout, add="+")
+    apply_layout()
+
+
 class AutoContinueControl(ctk.CTkFrame):
     """Control widget for auto-continue functionality."""
 
@@ -79,12 +131,33 @@ class AutoContinueControl(ctk.CTkFrame):
         state_row.pack(fill="x", pady=(0, 3))
         state_row_extra = ctk.CTkFrame(state_summary, fg_color="transparent")
         state_row_extra.pack(fill="x")
-        self._create_state_chip(state_row, "stop", "Stop续跑", width=92)
-        self._create_state_chip(state_row, "git", "Git快照", width=92)
-        self._create_state_chip(state_row, "recovery", "API恢复", width=92)
-        self._create_state_chip(state_row_extra, "training", "训练续跑", width=92)
+        primary_chips = [
+            self._create_state_chip(state_row, "stop", "Stop续跑", width=92),
+            self._create_state_chip(state_row, "git", "Git快照", width=92),
+            self._create_state_chip(state_row, "recovery", "API恢复", width=92),
+        ]
+        extra_chips = [
+            self._create_state_chip(state_row_extra, "training", "训练续跑", width=92)
+        ]
         if self.provider.lower() == "claude":
-            self._create_state_chip(state_row_extra, "permission", "权限自动确认", width=108)
+            extra_chips.append(
+                self._create_state_chip(
+                    state_row_extra,
+                    "permission",
+                    "权限自动确认",
+                    width=108,
+                )
+            )
+        _bind_responsive_grid(
+            state_row,
+            primary_chips,
+            lambda width: _auto_continue_layout(width)[0],
+        )
+        _bind_responsive_grid(
+            state_row_extra,
+            extra_chips,
+            lambda width: _auto_continue_layout(width)[0],
+        )
 
         # Controls
         controls = ctk.CTkFrame(self, fg_color="transparent")
@@ -94,64 +167,74 @@ class AutoContinueControl(ctk.CTkFrame):
         self._toggle_btn = ctk.CTkButton(
             controls,
             text="启用 Stop",
-            width=92,
+            width=1,
             command=self._toggle,
             **button_style("primary", compact=True),
         )
-        self._toggle_btn.pack(side="left", padx=(0, 5))
 
-        ctk.CTkButton(
+        repair_btn = ctk.CTkButton(
             controls,
             text="修复",
-            width=58,
+            width=1,
             command=self._repair,
             **button_style("warning", compact=True),
-        ).pack(side="left", padx=(0, 5))
+        )
 
         # Settings button
-        ctk.CTkButton(
+        settings_btn = ctk.CTkButton(
             controls,
             text="设置",
-            width=60,
+            width=1,
             command=self._show_settings,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(0, 5))
+        )
 
         # Error stats button
-        ctk.CTkButton(
+        error_stats_btn = ctk.CTkButton(
             controls,
             text="错误统计",
-            width=80,
+            width=1,
             command=self._show_error_stats,
             **button_style("accent", compact=True),
-        ).pack(side="left", padx=(0, 5))
+        )
 
-        ctk.CTkButton(
+        logs_btn = ctk.CTkButton(
             controls,
             text="续跑日志",
-            width=80,
+            width=1,
             command=self._show_auto_continue_logs,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(0, 5))
+        )
 
-        ctk.CTkButton(
+        history_btn = ctk.CTkButton(
             controls,
             text="Git历史",
-            width=76,
+            width=1,
             command=self._show_git_history,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(0, 5))
-
-        ctk.CTkFrame(controls, fg_color="transparent").pack(side="left", fill="x", expand=True)
+        )
 
         # Uninstall button
-        ctk.CTkButton(
+        uninstall_btn = ctk.CTkButton(
             controls,
             text="卸载 Hook",
-            width=78,
+            width=1,
             command=self._uninstall,
             **button_style("danger", compact=True),
-        ).pack(side="left")
+        )
+        _bind_responsive_grid(
+            controls,
+            (
+                self._toggle_btn,
+                repair_btn,
+                settings_btn,
+                error_stats_btn,
+                logs_btn,
+                history_btn,
+                uninstall_btn,
+            ),
+            lambda width: _auto_continue_layout(width)[1],
+        )
 
         quick = ctk.CTkFrame(self, fg_color="transparent")
         quick.pack(fill="x", padx=10, pady=(0, 4))
@@ -166,10 +249,6 @@ class AutoContinueControl(ctk.CTkFrame):
         feature_row.pack(fill="x")
         feature_row_extra = ctk.CTkFrame(quick, fg_color="transparent")
         feature_row_extra.pack(fill="x", pady=(2, 0))
-        for row_frame in (feature_row, feature_row_extra):
-            for column in range(3):
-                row_frame.grid_columnconfigure(column, weight=0)
-
         self._auto_continue_var = ctk.BooleanVar(value=False)
         self._auto_continue_switch = ctk.CTkSwitch(
             feature_row,
@@ -180,8 +259,6 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._auto_continue_switch.grid(row=0, column=0, sticky="w", padx=(0, 14), pady=(0, 4))
-
         self._training_auto_continue_var = ctk.BooleanVar(value=False)
         self._training_auto_continue_switch = ctk.CTkSwitch(
             feature_row_extra,
@@ -192,8 +269,6 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["accent"],
             button_color=COLORS["text"],
         )
-        self._training_auto_continue_switch.grid(row=0, column=0, sticky="w", padx=(0, 14), pady=(0, 4))
-
         self._git_snapshot_var = ctk.BooleanVar(value=True)
         self._git_snapshot_switch = ctk.CTkSwitch(
             feature_row,
@@ -204,8 +279,6 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_switch.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=(0, 4))
-
         self._error_recovery_var = ctk.BooleanVar(value=False)
         self._error_recovery_switch = ctk.CTkSwitch(
             feature_row,
@@ -216,8 +289,6 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._error_recovery_switch.grid(row=0, column=2, sticky="w", padx=(0, 14), pady=(0, 4))
-
         self._permission_auto_approve_var = None
         self._permission_auto_approve_switch = None
         if self.provider.lower() == "claude":
@@ -231,7 +302,23 @@ class AutoContinueControl(ctk.CTkFrame):
                 progress_color=COLORS["warning"],
                 button_color=COLORS["text"],
             )
-            self._permission_auto_approve_switch.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=(0, 4))
+        _bind_responsive_grid(
+            feature_row,
+            (
+                self._auto_continue_switch,
+                self._git_snapshot_switch,
+                self._error_recovery_switch,
+            ),
+            lambda width: _auto_continue_layout(width)[2],
+        )
+        _bind_responsive_grid(
+            feature_row_extra,
+            (
+                self._training_auto_continue_switch,
+                self._permission_auto_approve_switch,
+            ),
+            lambda width: _auto_continue_layout(width)[2],
+        )
 
         detail = ctk.CTkFrame(self, fg_color="transparent")
         detail.pack(fill="x", padx=10, pady=(0, 4))
@@ -244,9 +331,6 @@ class AutoContinueControl(ctk.CTkFrame):
 
         git_row = ctk.CTkFrame(detail, fg_color="transparent")
         git_row.pack(fill="x")
-        for column in range(3):
-            git_row.grid_columnconfigure(column, weight=0)
-
         self._git_snapshot_on_start_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_start_switch = ctk.CTkSwitch(
             git_row,
@@ -257,8 +341,6 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_on_start_switch.grid(row=0, column=0, sticky="w", padx=(0, 14), pady=(0, 4))
-
         self._git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
         self._git_snapshot_on_recovery_switch = ctk.CTkSwitch(
             git_row,
@@ -269,8 +351,6 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["success"],
             button_color=COLORS["text"],
         )
-        self._git_snapshot_on_recovery_switch.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=(0, 4))
-
         self._git_auto_push_var = ctk.BooleanVar(value=False)
         self._git_auto_push_switch = ctk.CTkSwitch(
             git_row,
@@ -281,7 +361,15 @@ class AutoContinueControl(ctk.CTkFrame):
             progress_color=COLORS["accent"],
             button_color=COLORS["text"],
         )
-        self._git_auto_push_switch.grid(row=0, column=2, sticky="w", padx=(0, 14), pady=(0, 4))
+        _bind_responsive_grid(
+            git_row,
+            (
+                self._git_snapshot_on_start_switch,
+                self._git_snapshot_on_recovery_switch,
+                self._git_auto_push_switch,
+            ),
+            lambda width: _auto_continue_layout(width)[2],
+        )
 
         # Info display
         self._info_text_host = ctk.CTkFrame(
@@ -342,7 +430,6 @@ class AutoContinueControl(ctk.CTkFrame):
             text_color=COLORS["muted"],
             font=font(11, "bold"),
         )
-        chip.pack(side="left", padx=(0, 8), pady=(0, 2))
         self._state_chips[key] = (chip, label)
         return chip
 
@@ -389,7 +476,14 @@ class AutoContinueControl(ctk.CTkFrame):
 
             run_on_ui_thread(self, finish)
 
-        threading.Thread(target=worker, name=f"auto-continue-refresh-{self.provider}", daemon=True).start()
+        try:
+            threading.Thread(
+                target=worker,
+                name=f"auto-continue-refresh-{self.provider}",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self._apply_refresh_error(f"刷新任务启动失败: {exc}")
 
     def _is_alive(self) -> bool:
         if self._destroyed:

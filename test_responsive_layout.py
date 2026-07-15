@@ -8,9 +8,11 @@ from ui.startup_splash import _splash_layout
 from ui.dialogs.auto_continue_logs_dialog import _auto_continue_logs_layout
 from ui.dialogs.git_snapshot_history_dialog import _git_history_layout
 from ui.dialogs.browser_profile_editor import _browser_profile_editor_stacked
+from ui.dialogs.close_choice_dialog import _close_choice_button_columns
+from ui.dialogs.confirm_dialog import _dialog_action_columns
 from ui.dialogs.switch_preview_dialog import _preview_summary_text
 from ui.tabs.backup_tab import _backup_tab_layout
-from ui.tabs.browser_tab import _browser_tab_layout
+from ui.tabs.browser_tab import _browser_card_action_columns, _browser_tab_layout
 from ui.tabs.claude_tab import _profile_tab_stacked as _claude_profile_tab_stacked
 from ui.tabs.codex_tab import _profile_tab_stacked as _codex_profile_tab_stacked
 from ui.tabs.local_proxy_tab import _local_proxy_tab_layout
@@ -18,6 +20,7 @@ from ui.tabs.log_viewer_tab import _log_viewer_stacked
 from ui.tabs.ssh_tab import _ssh_tab_stacked
 from ui.tabs.usage_stats_tab import _usage_stats_layout
 from ui.widgets.proxy_node_picker import _proxy_node_picker_layout
+from ui.widgets.auto_continue_control import _auto_continue_layout
 
 
 def test_window_layout_preserves_preferred_size_on_large_screen():
@@ -215,6 +218,12 @@ def test_feature_toolbars_wrap_at_narrow_breakpoints():
     assert _browser_tab_layout(720) == (True, 2, 3)
     assert _browser_tab_layout(480) == (True, 2, 2)
 
+    assert _browser_card_action_columns(480) == 2
+    assert _browser_card_action_columns(519) == 2
+    assert _browser_card_action_columns(520) == 4
+    assert _browser_card_action_columns(759) == 4
+    assert _browser_card_action_columns(760) == 6
+
     assert _usage_stats_layout(900) == (False, 4, 4)
     assert _usage_stats_layout(720) == (True, 4, 2)
     assert _usage_stats_layout(480) == (True, 2, 2)
@@ -222,6 +231,22 @@ def test_feature_toolbars_wrap_at_narrow_breakpoints():
     assert _backup_tab_layout(900) == (False, 5, False)
     assert _backup_tab_layout(720) == (True, 3, False)
     assert _backup_tab_layout(480) == (True, 2, True)
+
+
+def test_small_dialog_and_auto_continue_actions_wrap_before_clipping():
+    assert _dialog_action_columns(220) == 2
+    assert _dialog_action_columns(219) == 1
+
+    assert _close_choice_button_columns(460) == 3
+    assert _close_choice_button_columns(379) == 2
+    assert _close_choice_button_columns(240) == 2
+    assert _close_choice_button_columns(179) == 1
+
+    assert _auto_continue_layout(900) == (3, 7, 3)
+    assert _auto_continue_layout(719) == (3, 4, 2)
+    assert _auto_continue_layout(519) == (2, 3, 2)
+    assert _auto_continue_layout(339) == (1, 2, 1)
+    assert _auto_continue_layout(1) == (1, 2, 1)
 
 
 def test_compact_picker_and_editor_switch_to_stacked_layouts():

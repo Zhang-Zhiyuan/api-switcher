@@ -93,3 +93,27 @@ def test_error_stats_ignores_stale_background_result(monkeypatch):
     release_first.set()
     assert first_finished.wait(1)
     assert applied_totals == [30]
+
+
+def test_error_stats_thread_start_failure_reports_error(monkeypatch):
+    class BrokenThread:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def start():
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr("ui.dialogs.error_stats_dialog.threading.Thread", BrokenThread)
+    dialog = object.__new__(ErrorStatsDialog)
+    dialog.provider = "claude"
+    dialog._load_generation = 0
+    dialog.days_var = _ThreadBoundVar("7")
+    dialog.status_label = _Widget()
+    dialog.detail_text = _Widget()
+    errors = []
+    dialog._display_error = lambda error: errors.append(error)
+
+    ErrorStatsDialog._load_stats(dialog)
+
+    assert errors == ["thread unavailable"]

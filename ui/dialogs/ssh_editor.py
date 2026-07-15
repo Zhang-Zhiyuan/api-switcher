@@ -5,6 +5,7 @@ from tkinter import filedialog
 from ui.widgets.masked_entry import MaskedEntry
 from models.profile import SSHProfile
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
+from ui.ui_dispatch import run_on_ui_thread
 
 
 class SSHEditorDialog(ctk.CTkToplevel):
@@ -19,6 +20,8 @@ class SSHEditorDialog(ctk.CTkToplevel):
         self.configure(fg_color=COLORS["app_bg"])
         self.grab_set()
 
+        self._destroyed = False
+        self._ui_dispatch = getattr(master, "_run_on_ui_thread", None)
         self._on_save = on_save
         self._profile = profile
         self._field_rows = {}
@@ -174,6 +177,10 @@ class SSHEditorDialog(ctk.CTkToplevel):
         self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
         self._on_auth_type_change(self._get_value("auth_type"))
+
+    def destroy(self):
+        self._destroyed = True
+        super().destroy()
 
     def _add_field(self, parent, label, key, value="", field_type="entry"):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -335,7 +342,14 @@ class SSHEditorDialog(ctk.CTkToplevel):
                 message = f"测试失败: {e}"
             self._safe_after(lambda: self._finish_test(success, message))
 
-        threading.Thread(target=run_test, name="ssh-editor-test", daemon=True).start()
+        try:
+            threading.Thread(target=run_test, name="ssh-editor-test", daemon=True).start()
+        except Exception as exc:
+            self._set_test_busy(False)
+            self._test_result.configure(
+                text=f"无法启动连接测试: {exc}",
+                text_color=COLORS["danger"],
+            )
 
     def _set_test_busy(self, busy: bool, message: str | None = None) -> None:
         self._test_busy = busy
@@ -355,12 +369,8 @@ class SSHEditorDialog(ctk.CTkToplevel):
             text_color=COLORS["success"] if success else COLORS["danger"],
         )
 
-    def _safe_after(self, callback) -> None:
-        try:
-            if self.winfo_exists():
-                self.after(0, callback)
-        except Exception:
-            pass
+    def _safe_after(self, callback) -> bool:
+        return run_on_ui_thread(self, callback)
 
     def _collect_data(self) -> dict:
         return {

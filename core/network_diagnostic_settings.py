@@ -98,68 +98,90 @@ class NetworkDiagnosticSettings:
 
 def load_settings() -> NetworkDiagnosticSettings:
     """Load settings and decrypt saved API key pools."""
-
-    signature = _settings_signature()
     with _SETTINGS_CACHE_LOCK:
+        signature = _settings_signature()
         if _SETTINGS_CACHE is not None and _SETTINGS_CACHE_SIGNATURE == signature:
             return _clone_settings(_SETTINGS_CACHE)
 
-    data = _read_settings_file()
-    signature = _settings_signature()
-    raw_services = data.get("services") if isinstance(data.get("services"), dict) else {}
-    settings = NetworkDiagnosticSettings()
+        data = _read_settings_file()
+        signature = _settings_signature()
+        raw_services = data.get("services") if isinstance(data.get("services"), dict) else {}
+        settings = NetworkDiagnosticSettings()
 
-    for service in SERVICE_ORDER:
-        has_raw_service = isinstance(raw_services.get(service), dict)
-        raw = raw_services.get(service) if has_raw_service else {}
-        env_keys = _env_keys(service)
-        default_enabled = DEFAULT_ENABLED.get(service, False)
-        if not has_raw_service and env_keys and service in {SERVICE_IPQS, SERVICE_VPNAPI}:
-            default_enabled = True
-        enabled = _coerce_bool(raw.get("enabled"), default_enabled)
-        key_refs = [str(item) for item in raw.get("key_refs", []) if str(item).strip()]
-        keys = [value for ref in key_refs if (value := security.get_secret(ref))]
-        if not keys and not has_raw_service:
-            keys = env_keys
-        settings.services[service] = DiagnosticServiceSettings(
-            enabled=enabled,
-            api_keys=_dedupe(keys),
-        )
+        for service in SERVICE_ORDER:
+            has_raw_service = isinstance(raw_services.get(service), dict)
+            raw = raw_services.get(service) if has_raw_service else {}
+            env_keys = _env_keys(service)
+            default_enabled = DEFAULT_ENABLED.get(service, False)
+            if not has_raw_service and env_keys and service in {SERVICE_IPQS, SERVICE_VPNAPI}:
+                default_enabled = True
+            enabled = _coerce_bool(raw.get("enabled"), default_enabled)
+            key_refs = [
+                ref
+                for item in raw.get("key_refs", [])
+                if (ref := _canonical_service_ref(service, item))
+            ]
+            keys = [value for ref in key_refs if (value := security.get_secret(ref))]
+            if not keys and not has_raw_service:
+                keys = env_keys
+            settings.services[service] = DiagnosticServiceSettings(
+                enabled=enabled,
+                api_keys=_dedupe(keys),
+            )
 
-    with _SETTINGS_CACHE_LOCK:
         _cache_settings(settings, signature)
-    return _clone_settings(settings)
+        return _clone_settings(settings)
 
 
 def save_settings(settings: NetworkDiagnosticSettings) -> None:
     """Persist settings and store API keys in the app-managed secret store."""
-
-    existing_refs = _collect_existing_refs()
-    saved_refs: set[str] = set()
-    payload: dict[str, Any] = {"version": 1, "services": {}}
-
-    for service in SERVICE_ORDER:
-        service_settings = settings.service(service)
-        refs: list[str] = []
-        for index, key in enumerate(_dedupe(service_settings.api_keys)):
-            ref = f"network-diagnostics:{service}:{index}"
-            security.set_secret(ref, key)
-            refs.append(ref)
-            saved_refs.add(ref)
-        payload["services"][service] = {
-            "enabled": bool(service_settings.enabled),
-            "key_refs": refs,
-        }
-
-    atomic_write_text(SETTINGS_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
-
-    for ref in existing_refs - saved_refs:
-        try:
-            security.delete_secret(ref)
-        except Exception as exc:
-            logger.warning("Failed to delete stale network diagnostic secret %s: %s", ref, exc)
-
     with _SETTINGS_CACHE_LOCK:
+        existing_refs = _collect_existing_refs()
+        saved_refs: set[str] = set()
+        payload: dict[str, Any] = {"version": 1, "services": {}}
+        values_by_ref: dict[str, str] = {}
+
+        for service in SERVICE_ORDER:
+            service_settings = settings.service(service)
+            refs: list[str] = []
+            for index, key in enumerate(_dedupe(service_settings.api_keys)):
+                ref = f"network-diagnostics:{service}:{index}"
+                refs.append(ref)
+                saved_refs.add(ref)
+                values_by_ref[ref] = key
+            payload["services"][service] = {
+                "enabled": bool(service_settings.enabled),
+                "key_refs": refs,
+            }
+
+        affected_refs = existing_refs | saved_refs
+        previous_values = {ref: security.get_secret_strict(ref) for ref in affected_refs}
+        try:
+            for ref, key in values_by_ref.items():
+                security.set_secret(ref, key)
+            atomic_write_text(SETTINGS_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
+        except Exception as save_error:
+            rollback_errors: list[str] = []
+            for ref, previous_value in previous_values.items():
+                try:
+                    if previous_value is None:
+                        security.delete_secret(ref)
+                    else:
+                        security.set_secret(ref, previous_value)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"{ref}: {rollback_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "诊断设置保存失败，且密钥自动回滚不完整：" + "；".join(rollback_errors)
+                ) from save_error
+            raise
+
+        for ref in existing_refs - saved_refs:
+            try:
+                security.delete_secret(ref)
+            except Exception as exc:
+                logger.warning("Failed to delete stale network diagnostic secret %s: %s", ref, exc)
+
         _cache_settings(settings)
 
 
@@ -294,11 +316,37 @@ def _collect_existing_refs() -> set[str]:
     data = _read_settings_file()
     raw_services = data.get("services") if isinstance(data.get("services"), dict) else {}
     refs: set[str] = set()
-    for raw in raw_services.values():
+    for service in SERVICE_ORDER:
+        raw = raw_services.get(service)
         if not isinstance(raw, dict):
             continue
-        refs.update(str(item) for item in raw.get("key_refs", []) if str(item).strip())
+        refs.update(
+            ref
+            for item in raw.get("key_refs", [])
+            if (ref := _canonical_service_ref(service, item))
+        )
     return refs
+
+
+def _canonical_service_ref(service: str, value: Any) -> str:
+    if service not in SERVICE_SET or not isinstance(value, str):
+        return ""
+    ref = value.strip()
+    prefix = f"network-diagnostics:{service}:"
+    suffix = ref.removeprefix(prefix)
+    if (
+        not ref.startswith(prefix)
+        or not suffix
+        or len(suffix) > 10
+        or not suffix.isascii()
+        or not suffix.isdigit()
+        or (len(suffix) > 1 and suffix.startswith("0"))
+    ):
+        return ""
+    # Avoid converting attacker-controlled input to int: extremely long digit
+    # strings can raise due to Python's integer conversion limit.  The checks
+    # above are sufficient to recognize the canonical decimal form.
+    return ref
 
 
 def _env_keys(service: str) -> list[str]:

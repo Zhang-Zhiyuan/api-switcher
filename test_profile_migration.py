@@ -161,7 +161,7 @@ def test_profile_models_coerce_dirty_persisted_values(tmp_path, monkeypatch):
     browser = profile_manager.list_browser_profiles()[0]
 
     assert claude.name == "Dirty Claude"
-    assert claude.auth_token_ref == "123"
+    assert claude.auth_token_ref == ""
     assert claude.base_url == ""
     assert claude.skip_dangerous_prompt is False
     assert claude.permissions_allow == ["Read", "42"]

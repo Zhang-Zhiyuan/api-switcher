@@ -1,6 +1,20 @@
 import json
+import threading
+import time
+
+import pytest
 
 from core import network_diagnostic_settings
+
+
+@pytest.fixture(autouse=True)
+def strict_secret_reads_follow_test_secret_store(monkeypatch):
+    """Keep transaction snapshots inside each test's in-memory secret stub."""
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "get_secret_strict",
+        lambda ref: network_diagnostic_settings.security.get_secret(ref),
+    )
 
 
 def test_parse_api_keys_splits_and_deduplicates():
@@ -254,11 +268,23 @@ def test_save_settings_keeps_old_secret_refs_when_file_write_fails(tmp_path, mon
         }),
         encoding="utf-8",
     )
+    secrets = {
+        "network-diagnostics:vpnapi:0": "old-a",
+        "network-diagnostics:vpnapi:1": "old-b",
+    }
     deleted = []
     monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", settings_file)
-    monkeypatch.setattr(network_diagnostic_settings.security, "set_secret", lambda ref, value: None)
-    monkeypatch.setattr(network_diagnostic_settings.security, "get_secret", lambda ref: "existing")
-    monkeypatch.setattr(network_diagnostic_settings.security, "delete_secret", lambda ref: deleted.append(ref))
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "set_secret",
+        lambda ref, value: secrets.__setitem__(ref, value),
+    )
+    monkeypatch.setattr(network_diagnostic_settings.security, "get_secret", lambda ref: secrets.get(ref))
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "delete_secret",
+        lambda ref: (deleted.append(ref), secrets.pop(ref, None)),
+    )
 
     def fail_write(*_args, **_kwargs):
         raise OSError("disk full")
@@ -277,6 +303,57 @@ def test_save_settings_keeps_old_secret_refs_when_file_write_fails(tmp_path, mon
         raise AssertionError("save_settings should surface the write failure")
 
     assert deleted == []
+    assert secrets == {
+        "network-diagnostics:vpnapi:0": "old-a",
+        "network-diagnostics:vpnapi:1": "old-b",
+    }
+
+
+def test_save_settings_aborts_before_mutation_when_snapshot_read_fails(
+    tmp_path,
+    monkeypatch,
+):
+    settings_file = tmp_path / "network_diagnostics.json"
+    settings_file.write_text(
+        json.dumps({
+            "services": {
+                network_diagnostic_settings.SERVICE_VPNAPI: {
+                    "enabled": True,
+                    "key_refs": ["network-diagnostics:vpnapi:0"],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    original = settings_file.read_bytes()
+    writes = []
+    deletes = []
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "get_secret_strict",
+        lambda _ref: (_ for _ in ()).throw(RuntimeError("backend unreadable")),
+    )
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "set_secret",
+        lambda ref, value: writes.append((ref, value)),
+    )
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "delete_secret",
+        lambda ref: deletes.append(ref),
+    )
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_VPNAPI},
+        {network_diagnostic_settings.SERVICE_VPNAPI: ["new-key"]},
+    )
+
+    with pytest.raises(RuntimeError, match="backend unreadable"):
+        network_diagnostic_settings.save_settings(settings)
+
+    assert writes == [] and deletes == []
+    assert settings_file.read_bytes() == original
 
 
 def test_save_settings_ignores_stale_secret_delete_failure(tmp_path, monkeypatch):
@@ -316,3 +393,112 @@ def test_save_settings_ignores_stale_secret_delete_failure(tmp_path, monkeypatch
     assert stored["services"][network_diagnostic_settings.SERVICE_VPNAPI]["key_refs"] == [
         "network-diagnostics:vpnapi:0"
     ]
+
+
+def test_load_and_save_ignore_noncanonical_secret_refs(tmp_path, monkeypatch):
+    settings_file = tmp_path / "network_diagnostics.json"
+    settings_file.write_text(
+        json.dumps({
+            "services": {
+                network_diagnostic_settings.SERVICE_VPNAPI: {
+                    "enabled": True,
+                    "key_refs": [
+                        "app:unrelated:secret",
+                        "network-diagnostics:vpnapi:00",
+                        "network-diagnostics:vpnapi:²",
+                        f"network-diagnostics:vpnapi:{'9' * 5000}",
+                        "network-diagnostics:vpnapi:0",
+                    ],
+                },
+                "evil-service": {
+                    "enabled": True,
+                    "key_refs": ["app:another:secret"],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    reads = []
+    deleted = []
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "get_secret",
+        lambda ref: (reads.append(ref), "vpn-key")[1],
+    )
+    monkeypatch.setattr(network_diagnostic_settings.security, "set_secret", lambda *_args: None)
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "delete_secret",
+        lambda ref: deleted.append(ref),
+    )
+    network_diagnostic_settings.clear_settings_cache()
+
+    loaded = network_diagnostic_settings.load_settings()
+    network_diagnostic_settings.save_settings(loaded)
+
+    assert reads
+    assert set(reads) == {"network-diagnostics:vpnapi:0"}
+    assert "app:unrelated:secret" not in deleted
+    assert "app:another:secret" not in deleted
+
+
+def test_concurrent_saves_cannot_mix_file_and_secret_values(tmp_path, monkeypatch):
+    settings_file = tmp_path / "network_diagnostics.json"
+    secrets = {}
+    first_write_entered = threading.Event()
+    release_first_write = threading.Event()
+    second_secret_written = threading.Event()
+    real_atomic_write = network_diagnostic_settings.atomic_write_text
+
+    monkeypatch.setattr(network_diagnostic_settings, "SETTINGS_FILE", settings_file)
+
+    def set_secret(ref, value):
+        secrets[ref] = value
+        if value == "second-key":
+            second_secret_written.set()
+
+    monkeypatch.setattr(network_diagnostic_settings.security, "set_secret", set_secret)
+    monkeypatch.setattr(network_diagnostic_settings.security, "get_secret", lambda ref: secrets.get(ref))
+    monkeypatch.setattr(
+        network_diagnostic_settings.security,
+        "delete_secret",
+        lambda ref: secrets.pop(ref, None),
+    )
+
+    def controlled_write(path, content, *args, **kwargs):
+        payload = json.loads(content)
+        refs = payload["services"][network_diagnostic_settings.SERVICE_VPNAPI]["key_refs"]
+        if refs and secrets.get(refs[0]) == "first-key" and not first_write_entered.is_set():
+            first_write_entered.set()
+            assert release_first_write.wait(1)
+        return real_atomic_write(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(network_diagnostic_settings, "atomic_write_text", controlled_write)
+    first = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_VPNAPI},
+        {network_diagnostic_settings.SERVICE_VPNAPI: "first-key"},
+    )
+    second = network_diagnostic_settings.settings_from_values(
+        set(),
+        {network_diagnostic_settings.SERVICE_VPNAPI: "second-key"},
+    )
+    first_thread = threading.Thread(target=network_diagnostic_settings.save_settings, args=(first,))
+    second_thread = threading.Thread(target=network_diagnostic_settings.save_settings, args=(second,))
+
+    first_thread.start()
+    assert first_write_entered.wait(1)
+    second_thread.start()
+    time.sleep(0.05)
+    assert not second_secret_written.is_set()
+    release_first_write.set()
+    first_thread.join(timeout=1)
+    second_thread.join(timeout=1)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    payload = json.loads(settings_file.read_text(encoding="utf-8"))
+    service_payload = payload["services"][network_diagnostic_settings.SERVICE_VPNAPI]
+    [ref] = service_payload["key_refs"]
+    assert service_payload["enabled"] is False
+    assert secrets[ref] == "second-key"

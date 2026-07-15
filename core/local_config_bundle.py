@@ -18,6 +18,14 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from core import backup_manager, network_diagnostic_settings, profile_manager, security
 from core.atomic_io import atomic_write_bytes, atomic_write_text, replace_with_retry, temp_path_for
+from models.profile import (
+    BrowserProfile,
+    ClaudeAccountProfile,
+    ClaudeProfile,
+    CodexAccountProfile,
+    CodexProfile,
+    SSHProfile,
+)
 
 
 PACKAGE_FORMAT = "api-switcher-local-config-zip"
@@ -39,6 +47,24 @@ ACTIVE_TO_LIST_KEY = {
     "active_codex_account": "codex_account_profiles",
     "active_ssh_profile": "ssh_profiles",
     "active_browser_profile": "browser_profiles",
+}
+
+PROFILE_MODEL_TYPES = {
+    "claude_profiles": ClaudeProfile,
+    "codex_profiles": CodexProfile,
+    "claude_account_profiles": ClaudeAccountProfile,
+    "codex_account_profiles": CodexAccountProfile,
+    "ssh_profiles": SSHProfile,
+    "browser_profiles": BrowserProfile,
+}
+
+PROFILE_SECRET_REF_FIELDS = {
+    "claude_profiles": ("auth_token_ref", "primary_api_key_ref"),
+    "codex_profiles": ("api_key_ref",),
+    "claude_account_profiles": ("credentials_ref",),
+    "codex_account_profiles": ("auth_json_ref",),
+    "ssh_profiles": ("password_ref", "private_key_passphrase_ref"),
+    "browser_profiles": (),
 }
 
 
@@ -99,6 +125,8 @@ def _encrypt_payload(payload: dict[str, Any], password: str) -> dict[str, Any]:
     salt = os.urandom(16)
     nonce = os.urandom(12)
     plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
+        raise ValueError("完整配置 ZIP 内容过大")
     compressed = zlib.compress(plaintext, level=6)
     ciphertext = AESGCM(_derive_key(password, salt)).encrypt(nonce, compressed, None)
     return {
@@ -167,7 +195,7 @@ def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
             plaintext += decompressor.flush(MAX_DECRYPTED_PAYLOAD_BYTES + 1 - len(plaintext))
             if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
                 raise ValueError("完整配置 ZIP 解密后内容过大")
-            if not decompressor.eof:
+            if not decompressor.eof or decompressor.unused_data:
                 raise ValueError("完整配置 ZIP 压缩数据损坏")
         elif bundle.get("compression") in {None, "none"}:
             plaintext = decrypted
@@ -206,15 +234,16 @@ def _profile_counts_by_type(store: dict[str, Any]) -> dict[str, int]:
 
 def _collect_secret_refs(store: dict[str, Any]) -> set[str]:
     refs: set[str] = set()
-    for key in profile_manager.PROFILE_LIST_KEYS:
+    for key, ref_fields in PROFILE_SECRET_REF_FIELDS.items():
         items = store.get(key, [])
         if not isinstance(items, list):
             continue
         for item in items:
             if not isinstance(item, dict):
                 continue
-            for field_name, value in item.items():
-                if field_name.endswith("_ref") and isinstance(value, str) and value:
+            for field_name in ref_fields:
+                value = item.get(field_name)
+                if isinstance(value, str) and value:
                     refs.add(value)
     return refs
 
@@ -233,11 +262,81 @@ def _load_network_diagnostic_settings_payload() -> dict[str, Any]:
 def _collect_network_diagnostic_secret_refs(settings_payload: dict[str, Any]) -> set[str]:
     services = settings_payload.get("services") if isinstance(settings_payload.get("services"), dict) else {}
     refs: set[str] = set()
-    for raw in services.values():
+    for service in network_diagnostic_settings.SERVICE_ORDER:
+        raw = services.get(service)
         if not isinstance(raw, dict):
             continue
-        refs.update(str(item) for item in raw.get("key_refs", []) if str(item).strip())
+        key_refs = raw.get("key_refs", [])
+        if not isinstance(key_refs, list):
+            continue
+        for index, item in enumerate(key_refs):
+            expected = f"network-diagnostics:{service}:{index}"
+            if isinstance(item, str) and item.strip() == expected:
+                refs.add(expected)
     return refs
+
+
+def _normalized_network_diagnostic_settings_payload(
+    settings_payload: dict[str, Any],
+    *,
+    strict: bool,
+) -> dict[str, Any]:
+    """Return only supported services with their canonical secret references."""
+    services = settings_payload.get("services")
+    if services is None:
+        return {}
+    if not isinstance(services, dict):
+        if strict:
+            raise ValueError("完整配置 ZIP 中的环境检测设置无效")
+        return {}
+
+    known_services = set(network_diagnostic_settings.SERVICE_ORDER)
+    unknown_services = sorted(str(service) for service in services if service not in known_services)
+    if strict and unknown_services:
+        raise ValueError(
+            "完整配置 ZIP 的环境检测设置包含不支持的服务: "
+            + ", ".join(unknown_services[:3])
+        )
+
+    normalized_services: dict[str, Any] = {}
+    for service in network_diagnostic_settings.SERVICE_ORDER:
+        if service not in services:
+            continue
+        raw = services.get(service)
+        if not isinstance(raw, dict):
+            if strict:
+                raise ValueError(f"完整配置 ZIP 的环境检测服务配置无效: {service}")
+            continue
+
+        raw_refs = raw.get("key_refs", [])
+        if not isinstance(raw_refs, list):
+            if strict:
+                raise ValueError(f"完整配置 ZIP 的环境检测密钥引用无效: {service}")
+            raw_refs = []
+
+        canonical_refs: list[str] = []
+        invalid_ref = False
+        for index, item in enumerate(raw_refs):
+            expected = f"network-diagnostics:{service}:{index}"
+            if not isinstance(item, str) or item.strip() != expected:
+                invalid_ref = True
+                continue
+            canonical_refs.append(expected)
+        if strict and invalid_ref:
+            raise ValueError(f"完整配置 ZIP 的环境检测密钥引用不是规范路径: {service}")
+
+        enabled = network_diagnostic_settings._coerce_bool(
+            raw.get("enabled"),
+            network_diagnostic_settings.DEFAULT_ENABLED.get(service, False),
+        )
+        normalized_services[service] = {
+            "enabled": enabled,
+            "key_refs": canonical_refs,
+        }
+
+    if not normalized_services:
+        return {}
+    return {"version": 1, "services": normalized_services}
 
 
 def _has_network_diagnostic_settings(settings_payload: Any) -> bool:
@@ -248,10 +347,35 @@ def _has_network_diagnostic_settings(settings_payload: Any) -> bool:
 
 
 def _normalized_store_for_import(store: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild a store through the explicit profile schemas used by the app."""
     normalized = profile_manager._get_default_store()
-    if isinstance(store, dict):
-        for key, value in store.items():
-            normalized[key] = value
+    if not isinstance(store, dict):
+        return normalized
+
+    version = store.get("version")
+    if isinstance(version, int) and not isinstance(version, bool):
+        normalized["version"] = version
+
+    for key, model_type in PROFILE_MODEL_TYPES.items():
+        items = store.get(key, [])
+        if not isinstance(items, list):
+            continue
+        cleaned_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                cleaned = model_type.from_dict(item).to_dict()
+            except Exception:
+                continue
+            if isinstance(cleaned.get("name"), str) and cleaned["name"]:
+                cleaned_items.append(cleaned)
+        normalized[key] = cleaned_items
+
+    for active_key in profile_manager.ACTIVE_PROFILE_KEYS:
+        active_name = store.get(active_key)
+        normalized[active_key] = active_name if isinstance(active_name, str) else None
+
     profile_manager._normalize_store(normalized)
     return normalized
 
@@ -314,16 +438,6 @@ def _apply_imported_active_profiles(target_store: dict[str, Any], imported_store
             target_store[active_key] = imported_active
 
 
-def _delete_unreferenced_replaced_secrets(existing_store: dict[str, Any], new_store: dict[str, Any]) -> list[str]:
-    skipped: list[str] = []
-    for ref in sorted(_collect_secret_refs(existing_store) - _collect_secret_refs(new_store)):
-        try:
-            security.delete_secret(ref)
-        except Exception as e:
-            skipped.append(f"{ref} (旧密钥清理失败: {e})")
-    return skipped
-
-
 def _disconnect_imported_ssh_profiles(imported_store: dict[str, Any]) -> None:
     names = {
         item.get("name")
@@ -384,15 +498,28 @@ def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
     return data
 
 
+def _json_zip_entry_bytes(name: str, data: dict[str, Any]) -> bytes:
+    encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    if len(encoded) > MAX_ZIP_ENTRY_BYTES:
+        raise ValueError(f"完整配置 ZIP 条目过大: {name}")
+    return encoded
+
+
 def _validate_local_config_export_path(path: Path, store: dict[str, Any]) -> None:
     """Prevent an export archive from replacing live data it represents."""
     resolved = Path(path).expanduser().resolve(strict=False)
+    profile_path = Path(profile_manager.PROFILES_FILE).expanduser().resolve(strict=False)
     protected_files = {
-        Path(profile_manager.PROFILES_FILE).expanduser().resolve(strict=False),
+        profile_path,
+        profile_path.with_suffix(".backup"),
         Path(network_diagnostic_settings.SETTINGS_FILE).expanduser().resolve(strict=False),
     }
     if resolved in protected_files:
         raise ValueError("完整配置 ZIP 不能覆盖当前应用配置文件")
+
+    secrets_dir = Path(security.SECRETS_DIR).expanduser().resolve(strict=False)
+    if resolved == secrets_dir or secrets_dir in resolved.parents:
+        raise ValueError("完整配置 ZIP 不能保存在应用密钥目录内")
 
     for profile in store.get("browser_profiles", []):
         if not isinstance(profile, dict):
@@ -421,7 +548,7 @@ def _restore_file(path: Path, snapshot: _FileSnapshot) -> None:
 
 
 def _snapshot_secrets(refs: set[str]) -> dict[str, str | None]:
-    return {ref: security.get_secret(ref) for ref in sorted(refs)}
+    return {ref: security.get_secret_strict(ref) for ref in sorted(refs)}
 
 
 def _rollback_import(
@@ -505,8 +632,23 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
     if len(password) < 8:
         raise ValueError("迁移密码至少需要 8 个字符")
 
+    # Use the same global order as import so the store, diagnostics settings,
+    # and referenced secrets come from one coherent in-process snapshot.
+    with profile_manager._STORE_CACHE_LOCK:
+        with network_diagnostic_settings._SETTINGS_CACHE_LOCK:
+            return _export_local_config_zip_locked(output_path, password)
+
+
+def _export_local_config_zip_locked(
+    output_path: str | Path,
+    password: str,
+) -> LocalConfigExportResult:
     store = _normalized_store_for_import(profile_manager._load_store())
-    network_diagnostics = _load_network_diagnostic_settings_payload()
+    profile_manager.validate_profile_secret_refs(store)
+    network_diagnostics = _normalized_network_diagnostic_settings_payload(
+        _load_network_diagnostic_settings_payload(),
+        strict=False,
+    )
     secret_refs = sorted(
         _collect_secret_refs(store)
         | _collect_network_diagnostic_secret_refs(network_diagnostics)
@@ -550,13 +692,20 @@ def export_local_config_zip(output_path: str | Path, password: str) -> LocalConf
     if path.exists() and path.is_dir():
         raise ValueError("导出路径不能是目录")
     _validate_local_config_export_path(path, store)
+    manifest_entry = _json_zip_entry_bytes(MANIFEST_NAME, manifest)
+    payload_entry = _json_zip_entry_bytes(
+        PAYLOAD_NAME,
+        _encrypt_payload(payload, password),
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_output = temp_path_for(path)
     try:
         with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            bundle.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
-            bundle.writestr(PAYLOAD_NAME, json.dumps(_encrypt_payload(payload, password), ensure_ascii=False, indent=2))
+            bundle.writestr(MANIFEST_NAME, manifest_entry)
+            bundle.writestr(PAYLOAD_NAME, payload_entry)
+        if tmp_output.stat().st_size > MAX_ZIP_BYTES:
+            raise ValueError("完整配置 ZIP 过大")
         replace_with_retry(tmp_output, path)
     except Exception:
         tmp_output.unlink(missing_ok=True)
@@ -603,36 +752,63 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
     imported_store = payload.get("store")
     if not isinstance(imported_store, dict):
         raise ValueError("完整配置 ZIP 中没有有效配置数据")
+    profile_manager.validate_profile_secret_refs(imported_store)
     imported_store = _normalized_store_for_import(imported_store)
     imported_network_diagnostics = payload.get("network_diagnostics")
     if imported_network_diagnostics is not None and not isinstance(imported_network_diagnostics, dict):
         raise ValueError("完整配置 ZIP 中的环境检测设置无效")
+    imported_network_diagnostics = _normalized_network_diagnostic_settings_payload(
+        imported_network_diagnostics or {},
+        strict=True,
+    )
 
     secrets = payload.get("secrets", {})
     if not isinstance(secrets, dict):
         raise ValueError("完整配置 ZIP 中的密钥数据无效")
-    missing_from_source = [
-        ref for ref in payload.get("missing_secret_refs", [])
-        if isinstance(ref, str) and ref
-    ]
+    # Every participant follows profile -> network-settings lock order.  Both
+    # RLocks stay held from the existing-state read through commit or rollback.
+    with profile_manager._STORE_CACHE_LOCK:
+        with network_diagnostic_settings._SETTINGS_CACHE_LOCK:
+            result = _import_local_config_zip_locked(
+                imported_store,
+                imported_network_diagnostics,
+                secrets,
+            )
+    _disconnect_imported_ssh_profiles(imported_store)
+    return result
 
-    allowed_secret_refs = _collect_secret_refs(imported_store)
-    if isinstance(imported_network_diagnostics, dict):
-        allowed_secret_refs.update(
-            _collect_network_diagnostic_secret_refs(imported_network_diagnostics)
-        )
+
+def _import_local_config_zip_locked(
+    imported_store: dict[str, Any],
+    imported_network_diagnostics: dict[str, Any],
+    secrets: dict[str, Any],
+) -> LocalConfigImportResult:
+    imported_profile_refs = _collect_secret_refs(imported_store)
+    imported_network_refs = _collect_network_diagnostic_secret_refs(
+        imported_network_diagnostics
+    )
+    allowed_secret_refs = imported_profile_refs | imported_network_refs
 
     existing_store = _normalized_store_for_import(profile_manager._load_store())
-    protected_secret_refs = _collect_unreplaced_profile_secret_refs(
+    existing_profile_refs = _collect_secret_refs(existing_store)
+    retained_profile_refs = _collect_unreplaced_profile_secret_refs(
         existing_store,
         imported_store,
     )
-    if not _has_network_diagnostic_settings(imported_network_diagnostics):
-        protected_secret_refs.update(
-            _collect_network_diagnostic_secret_refs(
-                _load_network_diagnostic_settings_payload()
-            )
-        )
+    existing_network_diagnostics = _normalized_network_diagnostic_settings_payload(
+        _load_network_diagnostic_settings_payload(),
+        strict=False,
+    )
+    existing_network_refs = _collect_network_diagnostic_secret_refs(
+        existing_network_diagnostics
+    )
+    replaces_network_settings = _has_network_diagnostic_settings(
+        imported_network_diagnostics
+    )
+
+    protected_secret_refs = set(retained_profile_refs)
+    if not replaces_network_settings:
+        protected_secret_refs.update(existing_network_refs)
     conflicting_refs = sorted(allowed_secret_refs & protected_secret_refs)
     if conflicting_refs:
         details = ", ".join(conflicting_refs[:3])
@@ -652,12 +828,13 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
             continue
         valid_secrets.append((ref, value))
 
-    missing_from_source = [
-        ref for ref in missing_from_source
-        if ref in allowed_secret_refs
-    ]
+    valid_secret_refs = {ref for ref, _value in valid_secrets}
+    missing_secret_refs = allowed_secret_refs - valid_secret_refs
+    skipped.extend(
+        f"{ref} (源包缺少密钥，已清除本机旧值)"
+        for ref in sorted(missing_secret_refs)
+    )
 
-    backup_entry = backup_manager.create_backup("导入 ZIP 前客户端运行配置备份")
     new_store = dict(existing_store)
     for key in profile_manager.PROFILE_LIST_KEYS:
         new_store[key] = _merge_profile_lists(existing_store.get(key, []), imported_store.get(key, []))
@@ -667,25 +844,53 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
     except (TypeError, ValueError):
         new_store["version"] = existing_store.get("version", 1)
 
+    final_profile_refs = _collect_secret_refs(new_store)
+    final_network_refs = (
+        imported_network_refs
+        if replaces_network_settings
+        else existing_network_refs
+    )
+    replaceable_secret_refs = existing_profile_refs - retained_profile_refs
+    if replaces_network_settings:
+        replaceable_secret_refs.update(existing_network_refs)
+    obsolete_secret_refs = (
+        existing_profile_refs
+        | (existing_network_refs if replaces_network_settings else set())
+    ) - (final_profile_refs | final_network_refs)
+    secret_refs_to_delete = missing_secret_refs | obsolete_secret_refs
+    secret_refs_to_change = valid_secret_refs | secret_refs_to_delete
+
     profile_snapshot = _snapshot_file(profile_manager.PROFILES_FILE)
     settings_snapshot = (
         _snapshot_file(network_diagnostic_settings.SETTINGS_FILE)
-        if _has_network_diagnostic_settings(imported_network_diagnostics)
+        if replaces_network_settings
         else None
     )
-    secret_refs_to_change = {ref for ref, _value in valid_secrets}
-    secret_refs_to_change.update(_collect_secret_refs(existing_store) - _collect_secret_refs(new_store))
     secret_snapshot = _snapshot_secrets(secret_refs_to_change)
+    unowned_local_collisions = sorted(
+        ref
+        for ref in missing_secret_refs
+        if secret_snapshot.get(ref) is not None
+        and ref not in replaceable_secret_refs
+    )
+    if unowned_local_collisions:
+        details = ", ".join(unowned_local_collisions[:3])
+        suffix = (
+            f" 等 {len(unowned_local_collisions)} 项"
+            if len(unowned_local_collisions) > 3
+            else ""
+        )
+        raise ValueError(f"完整配置 ZIP 的密钥引用与本机未归属密钥冲突: {details}{suffix}")
+
+    backup_entry = backup_manager.create_backup("导入 ZIP 前客户端运行配置备份")
 
     restored = 0
     try:
         for ref, value in valid_secrets:
-            try:
-                security.set_secret(ref, value)
-            except Exception as e:
-                skipped.append(f"{ref} ({e})")
-                continue
+            security.set_secret(ref, value)
             restored += 1
+        for ref in sorted(secret_refs_to_delete):
+            security.delete_secret(ref)
 
         profile_manager._normalize_store(new_store)
         profile_manager._save_store(new_store)
@@ -695,16 +900,12 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
                 json.dumps(imported_network_diagnostics, ensure_ascii=False, indent=2),
             )
             network_diagnostic_settings.clear_settings_cache()
-        _disconnect_imported_ssh_profiles(imported_store)
-        skipped.extend(_delete_unreferenced_replaced_secrets(existing_store, new_store))
     except Exception as import_error:
         rollback_errors = _rollback_import(profile_snapshot, settings_snapshot, secret_snapshot)
         if rollback_errors:
             details = "；".join(rollback_errors)
             raise RuntimeError(f"完整配置 ZIP 导入失败，且自动回滚不完整: {details}") from import_error
         raise
-
-    skipped.extend(f"{ref} (源包缺少密钥)" for ref in missing_from_source)
 
     return LocalConfigImportResult(
         profile_count=_profile_count(imported_store),

@@ -587,7 +587,8 @@ class App(ctk.CTk):
                 except Exception:
                     continue
             self._critical_widget_states = snapshots
-            self._set_app_status("正在执行 Profile 迁移导入，请勿退出程序")
+            label = self._active_critical_operation_label() or "正在执行关键数据操作"
+            self._set_app_status(f"{label}，请勿退出程序")
             return
 
         for widget, state in list(getattr(self, "_critical_widget_states", ())):
@@ -596,7 +597,7 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self._critical_widget_states = []
-        self._set_app_status("Profile 迁移导入已完成")
+        self._set_app_status("关键数据操作已完成")
 
     def _show_tab_loading(self, label: str):
         frame = self._tab_frames.get(label)
@@ -789,7 +790,11 @@ class App(ctk.CTk):
                 except Exception as exc:
                     logger.debug("Lazy tab preload skipped for %s: %s", label, exc)
 
-        threading.Thread(target=run, name="lazy-tab-preload", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="lazy-tab-preload", daemon=True).start()
+        except Exception as exc:
+            self._lazy_tab_preload_started = False
+            logger.debug("Failed to start lazy tab preload: %s", exc, exc_info=True)
 
     def _start_lazy_tab_warmup(self, priority_only: bool = False):
         if self._exit_requested or self._lazy_tab_warmup_started:
@@ -943,7 +948,13 @@ class App(ctk.CTk):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=worker, name=f"tab-class-load-{label}", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name=f"tab-class-load-{label}", daemon=True).start()
+        except Exception as exc:
+            self._tab_class_loading.discard(label)
+            setattr(self, attr, None)
+            logger.error("Failed to start tab loader for %s: %s", label, exc, exc_info=True)
+            self._show_tab_error(label, exc)
 
     def _on_tab_changed(self):
         self._mark_user_interaction()
@@ -1086,7 +1097,11 @@ class App(ctk.CTk):
             finally:
                 self._tray_starting = False
 
-        threading.Thread(target=run, name="tray-startup", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="tray-startup", daemon=True).start()
+        except Exception as exc:
+            self._tray_starting = False
+            logger.error("Failed to create tray startup worker: %s", exc, exc_info=True)
 
     def _auto_start_local_proxy(self):
         if self._exit_requested:
@@ -1118,7 +1133,11 @@ class App(ctk.CTk):
 
                 self._run_on_ui_thread(update_error)
 
-        threading.Thread(target=run, daemon=True).start()
+        try:
+            threading.Thread(target=run, name="local-proxy-auto-start", daemon=True).start()
+        except Exception as exc:
+            logger.error("Failed to create local proxy auto-start worker: %s", exc, exc_info=True)
+            self._set_app_status(f"Win11 本机代理自启任务启动失败: {exc}")
 
     def _load_quick_switch_profiles(self, delay_ms: int = 80):
         """Load profiles for quick switch menus."""
@@ -1181,7 +1200,13 @@ class App(ctk.CTk):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, name="quick-switch-refresh", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="quick-switch-refresh", daemon=True).start()
+        except Exception as exc:
+            self._quick_switch_loading = False
+            self._quick_switch_reload_pending = False
+            logger.error("Failed to start quick-switch refresh: %s", exc, exc_info=True)
+            self._set_app_status(f"快速切换配置加载任务启动失败: {exc}")
 
     def _apply_quick_switch_profiles(self, claude_names, claude_current, codex_names, codex_current):
         active_critical_operation = bool(self._active_critical_operation_label())
@@ -1353,7 +1378,13 @@ class App(ctk.CTk):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=worker, name="switch-preview-build", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="switch-preview-build", daemon=True).start()
+        except Exception as exc:
+            logger.error("Failed to start switch preview worker: %s", exc, exc_info=True)
+            self._set_app_status(f"切换预览启动失败: {exc}")
+            if on_cancel:
+                on_cancel()
 
     def _on_closing(self):
         """Ask whether the close button should exit or minimize to tray."""
@@ -1464,7 +1495,13 @@ class App(ctk.CTk):
 
         timer = threading.Timer(6.0, force_exit_if_still_alive)
         timer.daemon = True
-        timer.start()
+        try:
+            timer.start()
+        except Exception as exc:
+            # Failure to create the watchdog must never prevent the normal
+            # shutdown path below from releasing resources and closing Tk.
+            self._force_exit_timer_started = False
+            logger.error("Failed to start force-exit watchdog: %s", exc, exc_info=True)
 
     def _shutdown_runtime_resources(self) -> None:
         """Best-effort cleanup for resources that can keep the process alive."""

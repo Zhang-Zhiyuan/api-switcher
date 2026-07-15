@@ -8,6 +8,7 @@ import customtkinter as ctk
 
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.toast import show_toast
 
 
@@ -430,12 +431,12 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
                 except Exception as exc:
                     self._apply_refresh_error(f"读取 Git 快照失败: {exc}", status="读取失败")
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
-        threading.Thread(target=worker, name="git-snapshot-refresh", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="git-snapshot-refresh", daemon=True).start()
+        except Exception as exc:
+            self._apply_refresh_error(f"读取 Git 快照失败: {exc}", status="启动失败")
 
     def _apply_refresh_error(self, message: str, status: str = "读取失败"):
         self._commits = []
@@ -537,12 +538,12 @@ class GitSnapshotHistoryDialog(ctk.CTkToplevel):
                 except Exception:
                     pass
 
-            try:
-                self.after(0, finish)
-            except Exception:
-                pass
+            run_on_ui_thread(self, finish)
 
-        threading.Thread(target=worker, name="git-snapshot-diff", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="git-snapshot-diff", daemon=True).start()
+        except Exception as exc:
+            self._set_text("\n".join(header) + f"\n读取 diff 任务启动失败: {exc}")
 
     def _copy_hash(self):
         commit = self._selected_commit()
