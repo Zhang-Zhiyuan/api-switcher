@@ -1,3 +1,6 @@
+import logging
+import threading
+
 from ui.tabs.log_viewer_tab import LOG_LEVELS, LogViewerTab, _prepare_log_entries
 from core.log_handler import LogManager
 
@@ -65,6 +68,27 @@ def test_log_manager_initial_snapshot_consumes_duplicate_queue_backlog():
     manager.publish({"level": "INFO", "levelno": 20, "message": "live"})
 
     assert manager.get_log_queue().get_nowait()["message"] == "live"
+
+
+def test_log_manager_concurrent_initialize_registers_one_handler_and_shutdown_clears_it():
+    manager = LogManager()
+    threads = [threading.Thread(target=manager.initialize) for _ in range(20)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert all(not thread.is_alive() for thread in threads)
+        handler = manager.gui_handler
+        assert handler is not None
+        assert logging.getLogger().handlers.count(handler) == 1
+    finally:
+        manager.shutdown()
+
+    assert manager.gui_handler is None
+    assert manager._is_initialized is False
+    assert handler not in logging.getLogger().handlers
 
 
 def test_log_viewer_updates_counts_from_batch_without_rescanning_history():

@@ -53,6 +53,16 @@ def test_dpapi_get_does_not_read_legacy_path_outside_secrets_directory(tmp_path,
     assert outside.read_bytes() == b"must not be read"
 
 
+def test_dpapi_get_rejects_oversized_fallback_before_reading_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(security, "MAX_DPAPI_SECRET_BYTES", 64)
+    fallback = tmp_path / "oversized.bin"
+    fallback.write_bytes(b"x" * 65)
+
+    with pytest.raises(ValueError, match="过大"):
+        security._dpapi_get_from_paths("oversized", [fallback], strict=True)
+    assert security._dpapi_get_from_paths("oversized", [fallback]) is None
+
+
 def test_dpapi_delete_does_not_remove_legacy_path_outside_secrets_directory(tmp_path, monkeypatch):
     secrets_dir = tmp_path / "secrets"
     outside = tmp_path / "victim.bin"

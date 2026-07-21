@@ -3,6 +3,8 @@ Git版本管理模块 - 自动为项目创建git快照
 """
 import subprocess
 import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple
@@ -23,25 +25,35 @@ class GitManager:
             project_path: 项目路径，如果为None则使用当前工作目录
         """
         self.project_path = project_path or Path.cwd()
+        self._repo_root_cache: Path | None = None
+        self._repo_root_lock = threading.RLock()
 
     def _repo_root(self) -> Path | None:
         """返回当前目录所在的 Git 仓库根目录；不存在仓库时返回 None。"""
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=self.project_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5
-            )
-            if result.returncode != 0:
+        with self._repo_root_lock:
+            cached = self._repo_root_cache
+            if cached is not None and (cached / ".git").exists():
+                return cached
+            self._repo_root_cache = None
+
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=self.project_path,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5
+                )
+                if result.returncode != 0:
+                    return None
+                root = Path(result.stdout.strip()).resolve()
+                self._repo_root_cache = root
+                return root
+            except Exception as e:
+                logger.debug(f"检查git仓库失败: {e}")
                 return None
-            return Path(result.stdout.strip()).resolve()
-        except Exception as e:
-            logger.debug(f"检查git仓库失败: {e}")
-            return None
 
     def _git_cwd(self) -> Path:
         """Git 命令执行目录：已有仓库用仓库根，新项目用项目目录。"""
@@ -145,6 +157,9 @@ class GitManager:
 
             if result.returncode != 0:
                 return False, f"初始化失败: {result.stderr}"
+
+            with self._repo_root_lock:
+                self._repo_root_cache = self.project_path.resolve()
 
             self._ensure_local_identity()
 
@@ -554,7 +569,9 @@ class GitManager:
 
 
 # 全局实例
-_git_manager_cache = {}
+_GIT_MANAGER_CACHE_MAX = 32
+_git_manager_cache: OrderedDict[str, GitManager] = OrderedDict()
+_git_manager_cache_lock = threading.RLock()
 
 
 def get_git_manager(project_path: Optional[Path] = None) -> GitManager:
@@ -568,9 +585,13 @@ def get_git_manager(project_path: Optional[Path] = None) -> GitManager:
         GitManager实例
     """
     path = project_path or Path.cwd()
-    path_str = str(path.resolve())
+    path_str = str(path.resolve(strict=False))
 
-    if path_str not in _git_manager_cache:
-        _git_manager_cache[path_str] = GitManager(path)
-
-    return _git_manager_cache[path_str]
+    with _git_manager_cache_lock:
+        manager = _git_manager_cache.pop(path_str, None)
+        if manager is None:
+            manager = GitManager(path)
+        _git_manager_cache[path_str] = manager
+        while len(_git_manager_cache) > _GIT_MANAGER_CACHE_MAX:
+            _git_manager_cache.popitem(last=False)
+        return manager

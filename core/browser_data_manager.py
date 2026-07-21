@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 from models.profile import BrowserProfile
-from core.atomic_io import atomic_write_bytes, temp_path_for
+from core.atomic_io import replace_with_retry, temp_path_for
 from core.browser_profile_manager import MANAGED_BROWSER_PROFILES_DIR
 
 logger = logging.getLogger(__name__)
@@ -183,18 +185,62 @@ class BrowserDataManager:
             start = value_start
 
     def _is_file_locked(self, path: Path) -> bool:
-        """Check if a file is locked by attempting a rename operation."""
+        """Check a file lock without ever renaming the live browser file."""
+        if os.name == "nt":
+            return self._is_file_locked_windows(path)
+
         try:
-            # Windows rename-to-self-parent tmp probe; if locked, rename often fails.
-            probe = path.with_name(path.name + ".lockprobe")
-            path.replace(probe)
-            probe.replace(path)
+            import fcntl
+
+            with path.open("rb") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             return False
-        except (OSError, PermissionError):
+        except (BlockingIOError, OSError, PermissionError):
             return True
         except Exception as e:
             logger.debug(f"Unexpected error in lock check: {e}")
             return True  # Conservative: assume locked
+
+    def _is_file_locked_windows(self, path: Path) -> bool:
+        """Attempt a non-mutating exclusive Windows handle open."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            create_file = ctypes.windll.kernel32.CreateFileW
+            create_file.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            create_file.restype = wintypes.HANDLE
+            close_handle = ctypes.windll.kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            handle = create_file(
+                str(path),
+                0x80000000,  # GENERIC_READ
+                0,  # no sharing: fail if another process owns the file
+                None,
+                3,  # OPEN_EXISTING
+                0x80,  # FILE_ATTRIBUTE_NORMAL
+                None,
+            )
+            invalid_handle = ctypes.c_void_p(-1).value
+            if handle == invalid_handle:
+                return True
+            try:
+                return False
+            finally:
+                close_handle(handle)
+        except Exception as e:
+            logger.debug(f"Unexpected error in Windows lock check: {e}")
+            return True
 
     def _resolve_profile_dir(self, profile: BrowserProfile) -> Path:
         """Resolve and validate profile directory."""
@@ -323,51 +369,53 @@ class BrowserDataManager:
             raise ValueError(f"Cookies path is not a file: {cookies_path}")
 
         temp_copy = temp_path_for(cookies_path)
-        backup_path = temp_path_for(cookies_path).with_suffix(".backup")
 
         try:
-            # Create backup
-            shutil.copy2(cookies_path, backup_path)
-            logger.debug(f"Created backup: {backup_path}")
+            # A file copy of a WAL-mode SQLite database can omit committed rows
+            # that still live in Cookies-wal.  Build a consistent, standalone
+            # snapshot through SQLite itself, then edit only that snapshot.
+            with (
+                closing(sqlite3.connect(cookies_path, timeout=10.0)) as source_conn,
+                closing(sqlite3.connect(temp_copy, timeout=10.0)) as snapshot_conn,
+            ):
+                checkpoint = source_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint and checkpoint[0] != 0:
+                    raise RuntimeError("Cookies 数据库仍在使用，无法安全合并 WAL")
 
-            # Create working copy
-            shutil.copy2(cookies_path, temp_copy)
+                source_conn.backup(snapshot_conn)
+                journal_mode = snapshot_conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+                if not journal_mode or str(journal_mode[0]).lower() != "delete":
+                    raise RuntimeError("无法为 Cookies 快照禁用 WAL 模式")
 
-            # Modify working copy. The sqlite3 context manager does not close
-            # the connection, so close it explicitly before replacing files.
-            conn = sqlite3.connect(temp_copy, timeout=10.0)
-            try:
-                cur = conn.cursor()
+                cur = snapshot_conn.cursor()
                 deleted_count = 0
                 for domain in domains:
                     cur.execute("DELETE FROM cookies WHERE host_key = ? OR host_key LIKE ?", (domain, f"%.{domain}"))
                     deleted_count += cur.rowcount
-                conn.commit()
-                logger.info(f"Deleted {deleted_count} cookies for domains: {domains}")
-            finally:
-                conn.close()
+                snapshot_conn.commit()
 
-            # Replace original with modified copy
-            atomic_write_bytes(cookies_path, temp_copy.read_bytes())
+            # The checkpoint above made the live main DB self-contained.  Drop
+            # its now-stale sidecars before publishing the new main DB so they
+            # can never be interpreted against the replacement database.  If
+            # replacement fails, the checkpointed original remains complete.
+            for suffix in ("-journal", "-shm", "-wal"):
+                Path(f"{cookies_path}{suffix}").unlink(missing_ok=True)
 
-            # Remove backup on success
-            backup_path.unlink(missing_ok=True)
+            # Move the already-written working database into place instead of
+            # reading a potentially large Cookies DB fully into memory.
+            replace_with_retry(temp_copy, cookies_path)
+            logger.info(f"Deleted {deleted_count} cookies for domains: {domains}")
 
         except sqlite3.Error as e:
             logger.error(f"SQLite error: {e}")
-            # Restore from backup if available
-            if backup_path.exists():
-                try:
-                    atomic_write_bytes(cookies_path, backup_path.read_bytes())
-                    logger.info("Restored cookies from backup")
-                except Exception as restore_error:
-                    logger.error(f"Failed to restore backup: {restore_error}")
+            # The live DB is only checkpointed, never logically edited, so it
+            # remains a complete recovery source and needs no restore.
             raise RuntimeError(f"清理 Cookies 数据库失败: {e}") from e
         finally:
             # Clean up temporary files
             temp_copy.unlink(missing_ok=True)
-            if backup_path.exists():
-                backup_path.unlink(missing_ok=True)
+            for suffix in ("-journal", "-shm", "-wal"):
+                Path(f"{temp_copy}{suffix}").unlink(missing_ok=True)
 
     def _clear_network_cache(self, default_dir: Path) -> None:
         """Clear network cache directories with validation."""
@@ -441,7 +489,7 @@ class BrowserDataManager:
                 logger.warning(f"Storage path is not a directory: {target}")
                 continue
             try:
-                for child in list(target.iterdir()):
+                for child in target.iterdir():
                     if not self._storage_name_matches_domains(child.name, domains):
                         continue
                     if child.is_dir() and not child.is_symlink():

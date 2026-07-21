@@ -221,6 +221,28 @@ def test_full_export_preserves_selected_main_file_byte_exact(tmp_path):
     assert result.omitted_output_count == 0
 
 
+def test_local_session_cache_is_bounded_and_refreshes_lru_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_migration, "LOCAL_SESSION_CACHE_MAX_ENTRIES", 2)
+    claude_home = tmp_path / "claude"
+    codex_homes = [tmp_path / f"codex-{index}" for index in range(3)]
+    session_migration.clear_local_session_cache()
+    try:
+        session_migration.list_sessions("codex", claude_home=claude_home, codex_home=codex_homes[0])
+        session_migration.list_sessions("codex", claude_home=claude_home, codex_home=codex_homes[1])
+        # Refresh the first entry so the second one becomes the eviction candidate.
+        session_migration.list_sessions("codex", claude_home=claude_home, codex_home=codex_homes[0])
+        session_migration.list_sessions("codex", claude_home=claude_home, codex_home=codex_homes[2])
+
+        keys = list(session_migration._LOCAL_SESSION_CACHE)
+        assert len(keys) == 2
+        assert keys == [
+            session_migration._local_session_cache_key("codex", claude_home, codex_homes[0]),
+            session_migration._local_session_cache_key("codex", claude_home, codex_homes[2]),
+        ]
+    finally:
+        session_migration.clear_local_session_cache()
+
+
 def test_remote_compact_export_uses_same_tool_output_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(session_migration, "COMPACT_TOOL_OUTPUT_LIMIT_BYTES", 32)
     remote_path = "/home/test/.codex/sessions/rollout-remote.jsonl"
@@ -353,3 +375,62 @@ def test_compact_claude_export_excludes_support_directory(tmp_path, monkeypatch)
         assert all("tool-results" not in name for name in bundle.namelist())
         manifest = json.loads(bundle.read("manifest.json"))
         assert manifest["compact_policy"]["include_claude_support_files"] is False
+
+
+def test_full_export_rejects_too_many_support_files_without_publishing(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_migration, "MAX_SESSION_EXPORT_FILES", 3)
+    claude_home = tmp_path / "claude"
+    codex_home = tmp_path / "codex"
+    session_file = claude_home / "projects" / "project" / "session-many.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_bytes(_jsonl({"sessionId": "session-many", "cwd": "C:/Project"}))
+    support_dir = session_file.with_suffix("") / "tool-results"
+    support_dir.mkdir(parents=True)
+    for index in range(3):
+        (support_dir / f"result-{index}.txt").write_text("x", encoding="utf-8")
+    session_migration.clear_local_session_cache()
+    [record] = session_migration.list_sessions(
+        "claude",
+        claude_home=claude_home,
+        codex_home=codex_home,
+    )
+    package = tmp_path / "too-many-files.asxsession"
+
+    with pytest.raises(ValueError, match="导出文件数量超过安全上限"):
+        session_migration.export_sessions(
+            package,
+            {record.key},
+            claude_home=claude_home,
+            codex_home=codex_home,
+            content_mode=session_migration.CONTENT_MODE_FULL,
+        )
+
+    assert not package.exists()
+    assert not list(tmp_path.glob("too-many-files.asxsession.*.tmp"))
+
+
+def test_export_rejects_manifest_larger_than_import_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_migration, "MAX_MANIFEST_BYTES", 128)
+    claude_home = tmp_path / "claude"
+    codex_home = tmp_path / "codex"
+    session_file = codex_home / "sessions" / "rollout-manifest.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_bytes(_jsonl({"type": "session_meta", "payload": {"id": "manifest"}}))
+    session_migration.clear_local_session_cache()
+    [record] = session_migration.list_sessions(
+        "codex",
+        claude_home=claude_home,
+        codex_home=codex_home,
+    )
+    package = tmp_path / "oversized-manifest.asxsession"
+
+    with pytest.raises(ValueError, match="manifest 超过安全大小上限"):
+        session_migration.export_sessions(
+            package,
+            {record.key},
+            claude_home=claude_home,
+            codex_home=codex_home,
+        )
+
+    assert not package.exists()
+    assert not list(tmp_path.glob("oversized-manifest.asxsession.*.tmp"))

@@ -10,9 +10,11 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -35,8 +37,14 @@ MAX_REMOTE_PARSE_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+MAX_REWRITE_JSONL_LINE_BYTES = 16 * 1024 * 1024
+MAX_SESSION_EXPORT_FILES = MAX_REMOTE_SESSION_FILES
+LOCAL_SESSION_CACHE_MAX_ENTRIES = 32
 _LOCAL_SESSION_CACHE_LOCK = threading.RLock()
-_LOCAL_SESSION_CACHE: dict[tuple[str, str, str], tuple[tuple, tuple[Any, ...]]] = {}
+_LOCAL_SESSION_CACHE: OrderedDict[
+    tuple[str, str, str],
+    tuple[tuple, tuple[Any, ...]],
+] = OrderedDict()
 
 
 class SessionSourceChangedError(ValueError):
@@ -187,6 +195,7 @@ def list_sessions(
     with _LOCAL_SESSION_CACHE_LOCK:
         cached = _LOCAL_SESSION_CACHE.get(cache_key)
         if cached and cached[0] == signature:
+            _LOCAL_SESSION_CACHE.move_to_end(cache_key)
             return list(cached[1])
 
     records: list[SessionRecord] = []
@@ -197,7 +206,10 @@ def list_sessions(
 
     records = sorted(records, key=lambda item: item.updated_at or item.created_at, reverse=True)
     with _LOCAL_SESSION_CACHE_LOCK:
+        _LOCAL_SESSION_CACHE.pop(cache_key, None)
         _LOCAL_SESSION_CACHE[cache_key] = (signature, tuple(records))
+        while len(_LOCAL_SESSION_CACHE) > LOCAL_SESSION_CACHE_MAX_ENTRIES:
+            _LOCAL_SESSION_CACHE.popitem(last=False)
     return list(records)
 
 
@@ -268,6 +280,8 @@ def export_sessions(
                     record,
                     include_support_files=content_mode == CONTENT_MODE_FULL,
                 ):
+                    if total_bytes >= MAX_PACKAGE_TOTAL_BYTES:
+                        break
                     try:
                         relative_path, file_info = _local_export_file_info(
                             file_path,
@@ -287,6 +301,10 @@ def export_sessions(
                             continue
                     elif not _package_size_allowed(size, total_bytes):
                         continue
+                    if len(entry["files"]) >= MAX_SESSION_EXPORT_FILES:
+                        raise ValueError(
+                            f"单个会话导出文件数量超过安全上限（{MAX_SESSION_EXPORT_FILES} 个）"
+                        )
 
                     archive_path = f"files/{index}/{relative_path}"
                     try:
@@ -349,7 +367,7 @@ def export_sessions(
                 "omitted_bytes": omitted_bytes,
                 "sessions": manifest_entries,
             }
-            bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            bundle.writestr("manifest.json", _encode_manifest(manifest))
         replace_with_retry(tmp_output, output_path)
     except Exception:
         tmp_output.unlink(missing_ok=True)
@@ -415,6 +433,8 @@ def export_remote_sessions(
                     record,
                     include_support_files=content_mode == CONTENT_MODE_FULL,
                 ):
+                    if total_bytes >= MAX_PACKAGE_TOTAL_BYTES:
+                        break
                     try:
                         relative_path, info = _remote_export_file_info(
                             sftp,
@@ -435,6 +455,10 @@ def export_remote_sessions(
                             continue
                     elif not _package_size_allowed(size, total_bytes):
                         continue
+                    if len(entry["files"]) >= MAX_SESSION_EXPORT_FILES:
+                        raise ValueError(
+                            f"单个会话导出文件数量超过安全上限（{MAX_SESSION_EXPORT_FILES} 个）"
+                        )
 
                     archive_path = f"files/{index}/{relative_path}"
                     try:
@@ -496,7 +520,7 @@ def export_remote_sessions(
                 "omitted_bytes": omitted_bytes,
                 "sessions": manifest_entries,
             }
-            bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            bundle.writestr("manifest.json", _encode_manifest(manifest))
         replace_with_retry(tmp_output, output_path)
     except Exception:
         tmp_output.unlink(missing_ok=True)
@@ -551,7 +575,11 @@ def import_sessions(
 
             home = _provider_home(provider, claude_home, codex_home)
             imported_main = False
-            for file_entry in session.get("files", []):
+            file_entries = session.get("files")
+            if not isinstance(file_entries, list):
+                skipped_invalid += 1
+                continue
+            for file_entry in file_entries:
                 if not isinstance(file_entry, dict):
                     skipped_invalid += 1
                     continue
@@ -577,14 +605,23 @@ def import_sessions(
                     skipped_invalid += 1
                     continue
 
+                imported_size = info.file_size
                 if target_project_text and destination.suffix.lower() == ".jsonl":
-                    data = bundle.read(info)
-                    written = _write_local_bytes_atomic(
+                    rewritten_size = _copy_rewritten_package_file_atomic(
+                        bundle,
+                        info,
                         destination,
-                        _rewrite_jsonl_cwd(data, target_project_text),
+                        target_project_text,
                         root=home,
                         overwrite=overwrite,
+                        max_output_bytes=min(
+                            MAX_PACKAGE_FILE_BYTES,
+                            MAX_PACKAGE_TOTAL_BYTES - imported_bytes,
+                        ),
                     )
+                    written = rewritten_size is not None
+                    if written:
+                        imported_size = rewritten_size
                 else:
                     written = _copy_package_file_atomic(
                         bundle,
@@ -596,9 +633,9 @@ def import_sessions(
                 if not written:
                     skipped_existing += 1
                     continue
-                imported_bytes += info.file_size
+                imported_bytes += imported_size
                 file_count += 1
-                imported_main = imported_main or bool(file_entry.get("main"))
+                imported_main = imported_main or file_entry.get("main") is True
 
             if imported_main:
                 key = f"{provider}:{session.get('relative_path', '')}"
@@ -651,7 +688,11 @@ def import_sessions_to_ssh(
 
                 home = claude_home if provider == "claude" else codex_home
                 imported_main = False
-                for file_entry in session.get("files", []):
+                file_entries = session.get("files")
+                if not isinstance(file_entries, list):
+                    skipped_invalid += 1
+                    continue
+                for file_entry in file_entries:
                     if not isinstance(file_entry, dict):
                         skipped_invalid += 1
                         continue
@@ -681,16 +722,25 @@ def import_sessions_to_ssh(
                         skipped_existing += 1
                         continue
 
+                    imported_size = info.file_size
                     if target_project_text and destination.lower().endswith(".jsonl"):
-                        data = bundle.read(info)
-                        written = _write_remote_bytes_atomic(
+                        rewritten_size = _copy_rewritten_package_file_to_remote(
                             sftp,
+                            bundle,
+                            info,
                             destination,
-                            _rewrite_jsonl_cwd(data, target_project_text),
+                            target_project_text,
                             root=home,
                             overwrite=overwrite,
                             file_mode=0o600,
+                            max_output_bytes=min(
+                                MAX_PACKAGE_FILE_BYTES,
+                                MAX_PACKAGE_TOTAL_BYTES - imported_bytes,
+                            ),
                         )
+                        written = rewritten_size is not None
+                        if written:
+                            imported_size = rewritten_size
                     else:
                         written = _copy_package_file_to_remote(
                             sftp,
@@ -704,9 +754,9 @@ def import_sessions_to_ssh(
                     if not written:
                         skipped_existing += 1
                         continue
-                    imported_bytes += info.file_size
+                    imported_bytes += imported_size
                     file_count += 1
-                    imported_main = imported_main or bool(file_entry.get("main"))
+                    imported_main = imported_main or file_entry.get("main") is True
 
                 if imported_main:
                     key = f"{provider}:{session.get('relative_path', '')}"
@@ -748,7 +798,10 @@ def inspect_package(input_path: str | Path) -> SessionPackageSummary:
             if project_path and project_path not in seen_projects:
                 project_paths.append(project_path)
                 seen_projects.add(project_path)
-            for file_entry in session.get("files", []):
+            file_entries = session.get("files")
+            if not isinstance(file_entries, list):
+                continue
+            for file_entry in file_entries:
                 if isinstance(file_entry, dict):
                     try:
                         info = _package_file_info(bundle, str(file_entry.get("archive_path") or ""))
@@ -790,6 +843,13 @@ def _nonnegative_manifest_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _encode_manifest(manifest: dict[str, Any]) -> bytes:
+    encoded = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise ValueError("会话迁移包 manifest 超过安全大小上限")
+    return encoded
 
 
 def _json_value_size(value: Any) -> int:
@@ -1586,19 +1646,58 @@ def _remap_relative_path(provider: str, relative_path: str, target_project_path:
 
 
 def _rewrite_jsonl_cwd(data: bytes, target_project_path: str) -> bytes:
-    output: list[str] = []
-    for raw_line in data.decode("utf-8", errors="replace").splitlines():
-        if not raw_line.strip():
-            output.append(raw_line)
-            continue
-        try:
-            item = json.loads(raw_line)
-        except json.JSONDecodeError:
-            output.append(raw_line)
-            continue
-        _rewrite_cwd_values(item, target_project_path)
-        output.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
-    return ("\n".join(output) + ("\n" if output else "")).encode("utf-8")
+    source = BytesIO(bytes(data))
+    target = BytesIO()
+    _copy_rewritten_jsonl_stream(
+        source,
+        target,
+        target_project_path,
+        max_output_bytes=MAX_PACKAGE_FILE_BYTES,
+    )
+    return target.getvalue()
+
+
+def _copy_rewritten_jsonl_stream(
+    source,
+    target,
+    target_project_path: str,
+    *,
+    max_output_bytes: int,
+) -> int:
+    """Rewrite JSONL cwd values incrementally instead of loading the whole session."""
+    written = 0
+    while True:
+        raw_line = source.readline(MAX_REWRITE_JSONL_LINE_BYTES + 1)
+        if not raw_line:
+            break
+        if isinstance(raw_line, str):
+            raw_bytes = raw_line.encode("utf-8")
+        else:
+            raw_bytes = bytes(raw_line)
+        if len(raw_bytes) > MAX_REWRITE_JSONL_LINE_BYTES:
+            raise ValueError(
+                "项目重映射的 JSONL 单行超过安全上限"
+                f"（{MAX_REWRITE_JSONL_LINE_BYTES} 字节）"
+            )
+        if isinstance(raw_line, str):
+            line = raw_line.rstrip("\r\n")
+        else:
+            line = raw_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+        output_line = line
+        if line.strip():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                pass
+            else:
+                _rewrite_cwd_values(item, target_project_path)
+                output_line = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        encoded = (output_line + "\n").encode("utf-8")
+        if written + len(encoded) > max_output_bytes:
+            raise ValueError("项目重映射后的会话文件超过迁移包大小上限")
+        target.write(encoded)
+        written += len(encoded)
+    return written
 
 
 def _rewrite_cwd_values(value: Any, target_project_path: str) -> None:
@@ -1613,13 +1712,12 @@ def _rewrite_cwd_values(value: Any, target_project_path: str) -> None:
             _rewrite_cwd_values(item, target_project_path)
 
 
-def _record_files(record: SessionRecord, *, include_support_files: bool = True) -> list[Path]:
-    files = [record.source_path]
+def _record_files(record: SessionRecord, *, include_support_files: bool = True):
+    yield record.source_path
     if include_support_files and record.provider == "claude":
         support_dir = record.source_path.with_suffix("")
         if support_dir.is_dir():
-            files.extend(_iter_local_files(support_dir))
-    return files
+            yield from _iter_local_files(support_dir)
 
 
 def _iter_local_claude_session_files(projects_root: Path):
@@ -1683,14 +1781,21 @@ def _iter_local_files(root: Path):
         return
 
 
-def _remote_record_files(sftp, record: SessionRecord, *, include_support_files: bool = True) -> list[str]:
+def _remote_record_files(sftp, record: SessionRecord, *, include_support_files: bool = True):
     if not record.remote_path:
-        return []
-    files = [record.remote_path]
+        return
+    yield record.remote_path
     if include_support_files and record.provider == "claude":
         support_dir = record.remote_path[:-6] if record.remote_path.endswith(".jsonl") else record.remote_path
-        files.extend(path for path, _attr in _remote_walk_files(sftp, support_dir, suffix="", limit=MAX_REMOTE_SESSION_FILES))
-    return files
+        yield from (
+            path
+            for path, _attr in _remote_walk_files(
+                sftp,
+                support_dir,
+                suffix="",
+                limit=MAX_REMOTE_SESSION_FILES,
+            )
+        )
 
 
 def _safe_destination(root: Path, relative_path: str) -> Path:
@@ -2044,6 +2149,7 @@ def _commit_local_temp_file(temp_path: Path, destination: Path, *, overwrite: bo
     try:
         os.link(temp_path, destination)
     except FileExistsError:
+        temp_path.unlink(missing_ok=True)
         return False
     temp_path.unlink(missing_ok=True)
     return True
@@ -2092,6 +2198,37 @@ def _copy_package_file_atomic(
         raise
 
 
+def _copy_rewritten_package_file_atomic(
+    bundle: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    destination: Path,
+    target_project_path: str,
+    *,
+    root: Path,
+    overwrite: bool,
+    max_output_bytes: int,
+) -> int | None:
+    _prepare_local_import_parent(root, destination)
+    tmp_path = temp_path_for(destination)
+    try:
+        with bundle.open(info, "r") as source, tmp_path.open("xb") as target:
+            written = _copy_rewritten_jsonl_stream(
+                source,
+                target,
+                target_project_path,
+                max_output_bytes=max_output_bytes,
+            )
+            target.flush()
+            os.fsync(target.fileno())
+        _validate_local_import_destination(root, destination)
+        if not _commit_local_temp_file(tmp_path, destination, overwrite=overwrite):
+            return None
+        return written
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _copy_package_file_to_remote(
     sftp,
     bundle: zipfile.ZipFile,
@@ -2121,6 +2258,50 @@ def _copy_package_file_to_remote(
             except Exception:
                 pass
         return True
+    except Exception:
+        try:
+            sftp.remove(temp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _copy_rewritten_package_file_to_remote(
+    sftp,
+    bundle: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    destination: str,
+    target_project_path: str,
+    *,
+    root: str,
+    overwrite: bool,
+    max_output_bytes: int,
+    file_mode: int | None = None,
+) -> int | None:
+    _prepare_remote_import_destination(sftp, root, destination)
+    temp_path = f"{destination}.tmp.{uuid.uuid4().hex}"
+    try:
+        with bundle.open(info, "r") as source, sftp.open(temp_path, "wb") as target:
+            written = _copy_rewritten_jsonl_stream(
+                source,
+                target,
+                target_project_path,
+                max_output_bytes=max_output_bytes,
+            )
+        if file_mode is not None:
+            try:
+                sftp.chmod(temp_path, file_mode)
+            except Exception:
+                pass
+        _prepare_remote_import_destination(sftp, root, destination)
+        if not _commit_remote_temp_file(sftp, temp_path, destination, overwrite=overwrite):
+            return None
+        if file_mode is not None:
+            try:
+                sftp.chmod(destination, file_mode)
+            except Exception:
+                pass
+        return written
     except Exception:
         try:
             sftp.remove(temp_path)
@@ -2311,11 +2492,11 @@ def _remote_walk_files(sftp, root: str, suffix: str = "", limit: int = MAX_REMOT
     root_attr = _remote_lstat(sftp, root)
     if root_attr is None or _remote_attr_is_link(root_attr) or not _remote_attr_is_dir(root_attr):
         return
-    pending = [(root, root_attr)]
+    pending = deque([(root, root_attr)])
     visited: set[tuple[Any, ...]] = set()
     yielded = 0
     while pending and yielded < limit:
-        current, current_attr = pending.pop(0)
+        current, current_attr = pending.popleft()
         identity = _remote_directory_identity(current, current_attr)
         if identity in visited:
             continue

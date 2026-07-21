@@ -46,7 +46,7 @@ def _clean_bool(value, default: bool = False) -> bool:
 def _clean_int(value, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         number = default
     if minimum is not None:
         number = max(minimum, number)

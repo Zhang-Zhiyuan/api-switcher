@@ -17,6 +17,7 @@ _KEYRING_LOCK = threading.RLock()
 _SECRET_OPERATION_LOCK = threading.RLock()
 MAX_SECRET_JSON_BYTES = 16 * 1024 * 1024
 MAX_SECRET_JSON_COMPRESSED_BYTES = 8 * 1024 * 1024
+MAX_DPAPI_SECRET_BYTES = 32 * 1024 * 1024
 
 
 class SecretReadError(RuntimeError):
@@ -311,7 +312,13 @@ def _dpapi_get_from_paths(
         class DATA_BLOB(ctypes.Structure):
             _fields_ = [("cbData", ctypes.wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-        encrypted = path.read_bytes()
+        encrypted_size = path.stat().st_size
+        if encrypted_size > MAX_DPAPI_SECRET_BYTES:
+            raise ValueError(f"DPAPI 密钥文件过大: {encrypted_size} bytes")
+        with path.open("rb") as handle:
+            encrypted = handle.read(MAX_DPAPI_SECRET_BYTES + 1)
+        if len(encrypted) > MAX_DPAPI_SECRET_BYTES:
+            raise ValueError("DPAPI 密钥文件过大")
         blob_in = DATA_BLOB(len(encrypted), ctypes.create_string_buffer(encrypted, len(encrypted)))
         blob_out = DATA_BLOB()
 

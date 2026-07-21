@@ -91,7 +91,12 @@ class TrayManager:
                 if not icon_path.exists():
                     continue
                 try:
-                    return Image.open(icon_path).convert("RGBA").resize((64, 64), Image.LANCZOS)
+                    with Image.open(icon_path) as source:
+                        converted = source.convert("RGBA")
+                    try:
+                        return converted.resize((64, 64), Image.LANCZOS)
+                    finally:
+                        converted.close()
                 except Exception as e:
                     logger.debug("Failed to load tray icon %s: %s", icon_path, e)
 

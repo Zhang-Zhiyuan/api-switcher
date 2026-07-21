@@ -4,9 +4,10 @@ The test temporarily replaces storage/profiles.json, runs the normal loader,
 asserts migration was persisted, then restores the original files.
 """
 import json
+import stat
 
 from config.paths import PROFILES_FILE
-from core import profile_manager
+from core import atomic_io, profile_manager
 
 
 def _read_bytes(path):
@@ -19,6 +20,28 @@ def _restore(path, content):
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+
+
+def test_atomic_copy_file_copies_source_mode_before_publish(tmp_path, monkeypatch):
+    source = tmp_path / "source.json"
+    target = tmp_path / "target.backup"
+    source.write_bytes(b"profile data")
+    source.chmod(0o600)
+    expected_mode = stat.S_IMODE(source.stat().st_mode)
+    real_replace = atomic_io.replace_with_retry
+    published_modes = []
+
+    def inspect_replace(temp_path, destination, *args, **kwargs):
+        published_modes.append(stat.S_IMODE(temp_path.stat().st_mode))
+        return real_replace(temp_path, destination, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_io, "replace_with_retry", inspect_replace)
+
+    atomic_io.atomic_copy_file(source, target)
+
+    assert target.read_bytes() == b"profile data"
+    assert published_modes == [expected_mode]
+    assert stat.S_IMODE(target.stat().st_mode) == expected_mode
 
 
 def test_corrupted_profiles_restore_preserves_valid_backup(tmp_path, monkeypatch):
@@ -62,6 +85,36 @@ def test_corrupted_profiles_restore_preserves_valid_backup(tmp_path, monkeypatch
     assert persisted["active_claude_profile"] == "Backup Claude"
     assert backup_after["active_claude_profile"] == "Backup Claude"
     assert backup_after["version"] == 3
+
+
+def test_profile_backup_failure_preserves_previous_recovery_file(tmp_path, monkeypatch):
+    profiles_file = tmp_path / "profiles.json"
+    backup_file = profiles_file.with_suffix(".backup")
+    monkeypatch.setattr(profile_manager, "PROFILES_FILE", profiles_file)
+    profile_manager.clear_profile_store_cache()
+
+    old_store = profile_manager._get_default_store()
+    new_store = profile_manager._get_default_store()
+    new_store["active_claude_profile"] = None
+    new_store["version"] += 1
+    profiles_file.write_text(json.dumps(old_store), encoding="utf-8")
+    previous_backup = b'{"known_good": true}'
+    backup_file.write_bytes(previous_backup)
+
+    real_replace = atomic_io.replace_with_retry
+
+    def fail_backup_write(source, target, *args, **kwargs):
+        if target == backup_file:
+            raise OSError("forced backup commit failure")
+        return real_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_io, "replace_with_retry", fail_backup_write)
+
+    profile_manager._save_store(new_store)
+
+    assert json.loads(profiles_file.read_text(encoding="utf-8"))["version"] == new_store["version"]
+    assert backup_file.read_bytes() == previous_backup
+    assert not list(tmp_path.glob("profiles.backup.*.tmp"))
 
 
 def test_profile_store_normalization_removes_bad_entries(tmp_path, monkeypatch):

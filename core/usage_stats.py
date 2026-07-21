@@ -1,6 +1,7 @@
 """Usage statistics data models and storage."""
 import json
 import logging
+import threading
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 STATS_FILE = STORAGE_DIR / "usage_stats.json"
 DAILY_STATS_FILE = STORAGE_DIR / "daily_stats.json"
+MAX_DAILY_HISTORY_DAYS = 366
 
 
 @dataclass
@@ -232,6 +234,7 @@ class UsageStatsManager:
     """Manager for usage statistics."""
 
     def __init__(self):
+        self._lock = threading.RLock()
         self.stats: Dict[str, ProfileUsageStats] = {}
         self.load()
 
@@ -241,45 +244,59 @@ class UsageStatsManager:
 
     def get_stats(self, profile_name: str, profile_type: str) -> ProfileUsageStats:
         """Get or create stats for a profile."""
-        key = self._get_key(profile_name, profile_type)
+        with self._lock:
+            key = self._get_key(profile_name, profile_type)
 
-        if key not in self.stats:
-            self.stats[key] = ProfileUsageStats(
-                profile_name=profile_name,
-                profile_type=profile_type
-            )
+            if key not in self.stats:
+                self.stats[key] = ProfileUsageStats(
+                    profile_name=profile_name,
+                    profile_type=profile_type
+                )
 
-        return self.stats[key]
+            return self.stats[key]
 
     def record_switch(self, profile_name: str, profile_type: str):
         """Record a profile switch."""
-        stats = self.get_stats(profile_name, profile_type)
-        stats.record_switch()
-        self.save()
+        with self._lock:
+            stats = self.get_stats(profile_name, profile_type)
+            stats.record_switch()
+            self.save()
         logger.info(f"Recorded switch to {profile_type}:{profile_name}")
 
     def record_tokens(self, profile_name: str, profile_type: str,
                      input_tokens: int = 0, output_tokens: int = 0):
         """Record token usage."""
-        stats = self.get_stats(profile_name, profile_type)
-        stats.record_tokens(input_tokens, output_tokens)
-        self.save()
+        with self._lock:
+            stats = self.get_stats(profile_name, profile_type)
+            stats.record_tokens(input_tokens, output_tokens)
+            self.save()
+
+    def record_usage(self, profile_name: str, profile_type: str,
+                     duration_seconds: float):
+        """Record usage duration and persist it as one transaction."""
+        with self._lock:
+            stats = self.get_stats(profile_name, profile_type)
+            stats.record_usage(duration_seconds)
+            self.save()
 
     def record_error(self, profile_name: str, profile_type: str):
         """Record an error."""
-        stats = self.get_stats(profile_name, profile_type)
-        stats.record_error()
-        self.save()
+        with self._lock:
+            stats = self.get_stats(profile_name, profile_type)
+            stats.record_error()
+            self.save()
 
     def record_success(self, profile_name: str, profile_type: str):
         """Record a success."""
-        stats = self.get_stats(profile_name, profile_type)
-        stats.record_success()
-        self.save()
+        with self._lock:
+            stats = self.get_stats(profile_name, profile_type)
+            stats.record_success()
+            self.save()
 
     def get_all_stats(self, profile_type: Optional[str] = None) -> List[ProfileUsageStats]:
         """Get all stats, optionally filtered by type."""
-        stats_list = list(self.stats.values())
+        with self._lock:
+            stats_list = list(self.stats.values())
 
         if profile_type:
             stats_list = [s for s in stats_list if s.profile_type == profile_type]
@@ -430,61 +447,100 @@ class UsageStatsManager:
     def clear_stats(self, profile_name: Optional[str] = None,
                    profile_type: Optional[str] = None):
         """Clear statistics."""
-        if profile_name and profile_type:
-            # Clear specific profile
-            key = self._get_key(profile_name, profile_type)
-            if key in self.stats:
-                del self.stats[key]
-        elif profile_type:
-            # Clear all profiles of a type
-            keys_to_delete = [
-                k for k, v in self.stats.items()
-                if v.profile_type == profile_type
-            ]
-            for key in keys_to_delete:
-                del self.stats[key]
-        else:
-            # Clear all
-            self.stats.clear()
+        with self._lock:
+            if profile_name and profile_type:
+                # Clear specific profile
+                key = self._get_key(profile_name, profile_type)
+                if key in self.stats:
+                    del self.stats[key]
+            elif profile_type:
+                # Clear all profiles of a type
+                keys_to_delete = [
+                    k for k, v in self.stats.items()
+                    if v.profile_type == profile_type
+                ]
+                for key in keys_to_delete:
+                    del self.stats[key]
+            else:
+                # Clear all
+                self.stats.clear()
 
-        self.save()
+            self.save()
         logger.info("Cleared usage statistics")
+
+    @staticmethod
+    def _prune_daily_history(stats: ProfileUsageStats) -> int:
+        """Bound persisted trend history while retaining lifetime totals."""
+        today = datetime.now().date()
+        cutoff = today - timedelta(days=MAX_DAILY_HISTORY_DAYS - 1)
+        removed = 0
+        for date_text, daily in list(stats.daily_history.items()):
+            try:
+                parsed_date = datetime.strptime(str(date_text), "%Y-%m-%d").date()
+            except (TypeError, ValueError):
+                parsed_date = None
+            if (
+                not isinstance(daily, DailyStats)
+                or parsed_date is None
+                or parsed_date < cutoff
+                or parsed_date > today
+            ):
+                del stats.daily_history[date_text]
+                removed += 1
+        return removed
 
     def load(self):
         """Load statistics from file."""
-        if not STATS_FILE.exists():
-            return
+        with self._lock:
+            if not STATS_FILE.exists():
+                return
 
-        try:
-            with open(STATS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            try:
+                with open(STATS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("usage stats root must be an object")
 
-            self.stats = {
-                key: ProfileUsageStats.from_dict(value)
-                for key, value in data.items()
-            }
+                loaded: Dict[str, ProfileUsageStats] = {}
+                for key, value in data.items():
+                    if not isinstance(key, str) or not isinstance(value, dict):
+                        logger.warning("Skipping malformed usage stats entry: %r", key)
+                        continue
+                    try:
+                        stats = ProfileUsageStats.from_dict(value)
+                        self._prune_daily_history(stats)
+                        loaded[key] = stats
+                    except Exception as entry_error:
+                        logger.warning(
+                            "Skipping malformed usage stats entry %r: %s",
+                            key,
+                            entry_error,
+                        )
+                self.stats = loaded
+                logger.info(f"Loaded {len(self.stats)} usage statistics")
 
-            logger.info(f"Loaded {len(self.stats)} usage statistics")
-
-        except Exception as e:
-            logger.error(f"Failed to load usage stats: {e}", exc_info=True)
-            self.stats = {}
+            except Exception as e:
+                logger.error(f"Failed to load usage stats: {e}", exc_info=True)
+                self.stats = {}
 
     def save(self):
         """Save statistics to file."""
-        try:
-            STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            try:
+                STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                for value in self.stats.values():
+                    self._prune_daily_history(value)
 
-            data = {
-                key: value.to_dict()
-                for key, value in self.stats.items()
-            }
+                data = {
+                    key: value.to_dict()
+                    for key, value in self.stats.items()
+                }
 
-            content = json.dumps(data, indent=2, ensure_ascii=False)
-            atomic_write_text(STATS_FILE, content)
+                content = json.dumps(data, indent=2, ensure_ascii=False)
+                atomic_write_text(STATS_FILE, content)
 
-        except Exception as e:
-            logger.error(f"Failed to save usage stats: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"Failed to save usage stats: {e}", exc_info=True)
 
 
 # Global instance

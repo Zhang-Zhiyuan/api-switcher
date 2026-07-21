@@ -2,7 +2,6 @@ import hashlib
 import json
 import logging
 import re
-import shutil
 import base64
 import copy
 import threading
@@ -10,7 +9,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_copy_file, atomic_write_text
 from core.lazy_imports import LazyModule
 from models.profile import (
     ClaudeProfile,
@@ -415,7 +414,7 @@ def _save_store(store: dict, create_backup: bool = True) -> None:
             backup_file = PROFILES_FILE.with_suffix(".backup")
             if create_backup and PROFILES_FILE.exists():
                 try:
-                    shutil.copy2(PROFILES_FILE, backup_file)
+                    atomic_copy_file(PROFILES_FILE, backup_file)
                     logger.debug(f"Created backup: {backup_file}")
                 except Exception as e:
                     logger.warning(f"Failed to create backup: {e}")

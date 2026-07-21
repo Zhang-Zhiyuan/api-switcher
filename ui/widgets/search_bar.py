@@ -63,6 +63,7 @@ class SearchBar(ctk.CTkFrame):
 
     def _on_enter(self, event):
         """回车键触发搜索"""
+        self._cancel_pending_search()
         query = self.search_entry.get().strip()
         if query:
             self._add_to_history(query)

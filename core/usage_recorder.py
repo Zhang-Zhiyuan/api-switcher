@@ -37,9 +37,11 @@ class UsageRecorder:
 
         if self.session_start_time:
             duration = time.time() - self.session_start_time
-            stats = usage_stats.get_stats(self.current_profile, self.current_type)
-            stats.record_usage(duration)
-            usage_stats.save()
+            usage_stats.record_usage(
+                self.current_profile,
+                self.current_type,
+                duration,
+            )
 
             logger.info(
                 f"Ended session for {self.current_type}:{self.current_profile}, "

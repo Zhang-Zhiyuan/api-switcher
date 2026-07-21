@@ -98,6 +98,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._records: list[session_migration.SessionRecord] = []
         self._selected_keys: set[str] = set()
         self._refresh_generation = 0
+        self._refresh_in_progress = False
+        self._refresh_requested = False
         self._record_render_generation = 0
         self._record_render_after_id = None
         self._deferred_render_after_id = None
@@ -127,6 +129,8 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
 
     def destroy(self):
         self._destroyed = True
+        self._refresh_in_progress = False
+        self._refresh_requested = False
         self._cancel_record_render()
         self._cancel_deferred_render()
         self._cancel_initial_refresh()
@@ -574,27 +578,37 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
         self._deferred_refresh_pending = False
         if not self._cards_frame:
             return
-        self._cancel_inactive_clear()
-        self._refresh_location_options()
-        self._visible_limit = self.MAX_VISIBLE_RECORDS
-        self._refresh_generation += 1
-        generation = self._refresh_generation
-        self._cancel_record_render()
-        self._cancel_deferred_render()
-        provider_filter = self._provider_filter
-        source_ssh_name = self._current_source_ssh_name()
-        source_label = self._endpoint_label(source_ssh_name)
-        for widget in self._cards_frame.winfo_children():
-            widget.destroy()
+        if getattr(self, "_refresh_in_progress", False):
+            self._refresh_requested = True
+            return
+        self._refresh_in_progress = True
+        self._refresh_requested = False
+        try:
+            self._cancel_inactive_clear()
+            self._refresh_location_options()
+            self._visible_limit = self.MAX_VISIBLE_RECORDS
+            self._refresh_generation += 1
+            generation = self._refresh_generation
+            self._cancel_record_render()
+            self._cancel_deferred_render()
+            provider_filter = self._provider_filter
+            source_ssh_name = self._current_source_ssh_name()
+            source_label = self._endpoint_label(source_ssh_name)
+            for widget in self._cards_frame.winfo_children():
+                widget.destroy()
 
-        if self._stats_label:
-            self._stats_label.configure(text=f"正在读取{source_label}会话...")
-        ctk.CTkLabel(
-            self._cards_frame,
-            text=f"正在读取{source_label}会话...",
-            text_color=COLORS["muted"],
-            font=font(13),
-        ).pack(fill="x", pady=(22, 6))
+            if self._stats_label:
+                self._stats_label.configure(text=f"正在读取{source_label}会话...")
+            ctk.CTkLabel(
+                self._cards_frame,
+                text=f"正在读取{source_label}会话...",
+                text_color=COLORS["muted"],
+                font=font(13),
+            ).pack(fill="x", pady=(22, 6))
+        except Exception:
+            self._refresh_in_progress = False
+            self._refresh_requested = False
+            raise
 
         def worker():
             try:
@@ -606,22 +620,43 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 payload = {"records": [], "error": str(exc)}
 
             def finish():
-                try:
-                    if not self.winfo_exists() or generation != self._refresh_generation:
-                        return
-                    if payload["error"]:
-                        show_toast(self.winfo_toplevel(), f"读取会话失败: {payload['error']}", is_error=True)
-                    self._records = payload["records"]
-                    self._render_records()
-                except Exception:
-                    logger.exception("Failed to finish session migration refresh")
+                self._finish_refresh(generation, payload)
 
-            self._run_on_ui_thread(finish)
+            if not self._run_on_ui_thread(finish):
+                self._refresh_in_progress = False
+                self._refresh_requested = False
 
         try:
             threading.Thread(target=worker, name="session-migration-refresh", daemon=True).start()
         except Exception as exc:
+            self._refresh_in_progress = False
+            self._refresh_requested = False
             self._show_refresh_start_error(str(exc))
+
+    def _finish_refresh(self, generation: int, payload: dict) -> None:
+        """Apply one scan result, or replay the latest request after a busy scan."""
+
+        if getattr(self, "_destroyed", False):
+            self._refresh_in_progress = False
+            self._refresh_requested = False
+            return
+        if generation != self._refresh_generation:
+            return
+        self._refresh_in_progress = False
+        refresh_requested = bool(getattr(self, "_refresh_requested", False))
+        self._refresh_requested = False
+        if refresh_requested:
+            self.refresh()
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            if payload["error"]:
+                show_toast(self.winfo_toplevel(), f"读取会话失败: {payload['error']}", is_error=True)
+            self._records = payload["records"]
+            self._render_records()
+        except Exception:
+            logger.exception("Failed to finish session migration refresh")
 
     def _show_refresh_start_error(self, message: str) -> None:
         """Replace the loading placeholder when no refresh worker can start."""

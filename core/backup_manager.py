@@ -352,6 +352,8 @@ def restore_latest_backup() -> tuple[BackupEntry, list[str]]:
 
 def prune_backups(keep_count: int = 20) -> int:
     """Remove old backups, keeping the most recent ones. Returns count removed."""
+    if isinstance(keep_count, bool) or not isinstance(keep_count, int) or keep_count < 0:
+        raise ValueError("保留备份数量必须是非负整数")
     backups = list_backups()
     if len(backups) <= keep_count:
         return 0

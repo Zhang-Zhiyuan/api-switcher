@@ -181,6 +181,18 @@ def test_backup_prune_ignores_directory_from_metadata(tmp_path, monkeypatch):
     assert (external_dir / "keep.txt").exists()
 
 
+def test_backup_prune_rejects_invalid_keep_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(backup_manager, "BACKUPS_DIR", tmp_path / "backups")
+
+    for value in (-1, True, 1.5, "2"):
+        try:
+            backup_manager.prune_backups(keep_count=value)
+        except ValueError as exc:
+            assert "非负整数" in str(exc)
+        else:
+            raise AssertionError(f"invalid keep_count must be rejected: {value!r}")
+
+
 def test_restore_backup_rejects_unmanaged_directory_before_safety_backup(tmp_path, monkeypatch):
     source = tmp_path / "config.json"
     source.write_text("current", encoding="utf-8")

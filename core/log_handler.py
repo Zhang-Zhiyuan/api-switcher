@@ -53,18 +53,18 @@ class LogManager:
 
     def initialize(self):
         """初始化日志系统"""
-        if self._is_initialized:
-            return
+        with self._lock:
+            if self._is_initialized:
+                return
 
-        # 创建 GUI 日志处理器
-        self.gui_handler = GUILogHandler(self)
-        self.gui_handler.setLevel(logging.DEBUG)
-
-        # 添加到根日志记录器
-        root_logger = logging.getLogger()
-        root_logger.addHandler(self.gui_handler)
-
-        self._is_initialized = True
+            # Publish the handler only after registration succeeds. This also
+            # prevents concurrent app-start paths from installing duplicates.
+            handler = GUILogHandler(self)
+            handler.setLevel(logging.DEBUG)
+            root_logger = logging.getLogger()
+            root_logger.addHandler(handler)
+            self.gui_handler = handler
+            self._is_initialized = True
 
     def get_log_queue(self) -> Queue:
         """获取日志队列"""
@@ -125,10 +125,15 @@ class LogManager:
 
     def shutdown(self):
         """关闭日志系统"""
-        if self.gui_handler:
+        with self._lock:
+            handler = self.gui_handler
+            if handler is None:
+                self._is_initialized = False
+                return
             root_logger = logging.getLogger()
-            root_logger.removeHandler(self.gui_handler)
-            self.gui_handler.close()
+            root_logger.removeHandler(handler)
+            handler.close()
+            self.gui_handler = None
             self._is_initialized = False
 
 

@@ -49,6 +49,7 @@ class AdaptiveTabBar(ctk.CTkFrame):
         self._column_count = 0
         self._layout_mode = None
         self._layout_after_id = None
+        self._destroyed = False
 
         self._selector = ctk.CTkComboBox(
             self,
@@ -79,9 +80,14 @@ class AdaptiveTabBar(ctk.CTkFrame):
             self._buttons[value] = button
 
         self.bind("<Configure>", self._schedule_layout, add="+")
-        self.after_idle(self._layout_buttons)
+        self._schedule_layout()
         if self._values:
             self.set(self._values[0])
+
+    def destroy(self) -> None:
+        self._destroyed = True
+        self._cancel_pending_layout()
+        super().destroy()
 
     def get(self) -> str:
         return self._selected
@@ -136,15 +142,27 @@ class AdaptiveTabBar(ctk.CTkFrame):
         return max(1, width)
 
     def _schedule_layout(self, _event=None) -> None:
-        if self._layout_after_id is not None:
+        if getattr(self, "_destroyed", False) or self._layout_after_id is not None:
             return
         try:
             self._layout_after_id = self.after_idle(self._layout_buttons)
         except Exception:
             self._layout_after_id = None
 
+    def _cancel_pending_layout(self) -> None:
+        after_id = self._layout_after_id
+        self._layout_after_id = None
+        if after_id is None:
+            return
+        try:
+            self.after_cancel(after_id)
+        except Exception:
+            pass
+
     def _layout_buttons(self) -> None:
         self._layout_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
         if not self._buttons:
             return
         logical_width = self._logical_width()

@@ -191,6 +191,21 @@ def test_create_spec_file_excludes_heavy_optional_modules(monkeypatch, tmp_path)
         assert module_name in spec_text
 
 
+def test_create_spec_file_uses_runtime_toml_reader_without_copying_config_sources(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "paths.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(build_exe, "SPEC_PATH", tmp_path / "ApiSwitcher.spec")
+
+    build_exe.create_spec_file()
+
+    spec_text = build_exe.SPEC_PATH.read_text(encoding="utf-8")
+    obsolete_reader = "tomli" if build_exe.TOML_READER_MODULE == "tomllib" else "tomllib"
+    assert repr(build_exe.TOML_READER_MODULE) in spec_text
+    assert repr(obsolete_reader) not in spec_text
+    assert "('config', 'config')" not in spec_text
+
+
 def test_build_exe_onedir_checks_folder_artifact(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(build_exe, "APP_NAME", "ApiSwitcher")
@@ -269,3 +284,11 @@ def test_pyinstaller_env_prepends_conda_dll_dirs(monkeypatch, tmp_path):
         str(prefix / "bin"),
     ]
     assert path_parts[3] == "ORIGINAL_PATH"
+
+
+def test_batch_build_uses_release_check_without_unconditional_toolchain_upgrade():
+    batch = Path("打包.bat").read_text(encoding="utf-8")
+
+    assert 'pushd "%~dp0"' in batch
+    assert "release_check.py --build" in batch
+    assert "pip install --upgrade pip" not in batch

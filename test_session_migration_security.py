@@ -322,6 +322,65 @@ def test_local_import_no_overwrite_commit_loses_race_safely(monkeypatch, tmp_pat
     assert result.session_count == 0
     assert result.skipped_existing == 1
     assert destination.read_bytes() == b"concurrent winner"
+    assert not list(claude_home.rglob("*.tmp"))
+
+
+def test_local_rewritten_import_race_cleans_temp_file(monkeypatch, tmp_path):
+    package = tmp_path / "local-rewritten-race.asxsession"
+    relative = "sessions/2026/07/14/session.jsonl"
+    _write_session_package(
+        package,
+        provider="codex",
+        relative_path=relative,
+        content=b'{"cwd":"C:/old"}\n',
+    )
+    codex_home = tmp_path / "codex"
+    destination = codex_home / relative
+    real_link = os.link
+
+    def racing_link(source, target, *args, **kwargs):
+        Path(target).write_bytes(b"concurrent winner")
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(session_migration.os, "link", racing_link)
+
+    result = session_migration.import_sessions(
+        package,
+        claude_home=tmp_path / "claude",
+        codex_home=codex_home,
+        target_project_path=tmp_path / "new-project",
+        overwrite=False,
+    )
+
+    assert result.file_count == 0
+    assert result.skipped_existing == 1
+    assert destination.read_bytes() == b"concurrent winner"
+    assert not list(codex_home.rglob("*.tmp"))
+
+
+def test_local_rewritten_import_rejects_overlong_jsonl_line_without_temp(monkeypatch, tmp_path):
+    monkeypatch.setattr(session_migration, "MAX_REWRITE_JSONL_LINE_BYTES", 64)
+    package = tmp_path / "overlong-line.asxsession"
+    relative = "sessions/2026/07/14/session.jsonl"
+    _write_session_package(
+        package,
+        provider="codex",
+        relative_path=relative,
+        content=b'{"cwd":"' + (b"x" * 80) + b'"}\n',
+    )
+    codex_home = tmp_path / "codex"
+    destination = codex_home / relative
+
+    with pytest.raises(ValueError, match="JSONL 单行超过安全上限"):
+        session_migration.import_sessions(
+            package,
+            claude_home=tmp_path / "claude",
+            codex_home=codex_home,
+            target_project_path=tmp_path / "new-project",
+        )
+
+    assert not destination.exists()
+    assert not list(codex_home.rglob("*.tmp"))
 
 
 def test_remote_import_no_overwrite_commit_loses_race_safely(monkeypatch, tmp_path):

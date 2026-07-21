@@ -1,6 +1,44 @@
 import subprocess
 
+import core.git_manager as git_manager_module
 from core.git_manager import GitManager
+
+
+def test_git_manager_caches_a_valid_repository_root(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    manager = GitManager(nested)
+    real_run = subprocess.run
+    rev_parse_calls = 0
+
+    def counting_run(*args, **kwargs):
+        nonlocal rev_parse_calls
+        command = args[0] if args else kwargs.get("args", [])
+        if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
+            rev_parse_calls += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(git_manager_module.subprocess, "run", counting_run)
+
+    assert manager._repo_root() == repo.resolve()
+    assert manager._repo_root() == repo.resolve()
+    assert rev_parse_calls == 1
+
+
+def test_global_git_manager_cache_is_bounded_lru(tmp_path, monkeypatch):
+    monkeypatch.setattr(git_manager_module, "_GIT_MANAGER_CACHE_MAX", 3)
+    git_manager_module._git_manager_cache.clear()
+    try:
+        paths = [tmp_path / f"project-{index}" for index in range(5)]
+        managers = [git_manager_module.get_git_manager(path) for path in paths]
+
+        assert len(git_manager_module._git_manager_cache) == 3
+        assert git_manager_module.get_git_manager(paths[-1]) is managers[-1]
+        assert str(paths[0].resolve()) not in git_manager_module._git_manager_cache
+    finally:
+        git_manager_module._git_manager_cache.clear()
 
 
 def test_git_manager_uses_existing_parent_repository_without_touching_remote(tmp_path):

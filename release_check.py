@@ -16,6 +16,7 @@ RUNTIME_DEPENDENCY_IMPORTS = (
     "customtkinter",
     "keyring",
     "tomli_w",
+    "tomllib" if sys.version_info >= (3, 11) else "tomli",
     "PIL",
     "paramiko",
     "pystray",
@@ -27,7 +28,6 @@ APP_NAME = "API切换器"
 PYTEST_BASETEMP = Path("build") / "pytest-tmp"
 CHECKS = [
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
-    ("compileall", [sys.executable, "-m", "compileall", "-q", "."]),
     (
         "pytest",
         [
@@ -41,12 +41,38 @@ CHECKS = [
             PYTEST_BASETEMP.as_posix(),
         ],
     ),
-    ("diff-check", ["git", "diff", "--check"]),
 ]
 
 TEXT_EXTENSIONS = {".py", ".md", ".bat", ".txt", ".json", ".toml", ".ps1"}
-SKIPPED_TEXT_DIRS = {"build", "dist", ".git", ".pytest_cache", ".ruff_cache", "__pycache__"}
-SKIPPED_CLEAN_DIRS = {".git", "dist", "storage"}
+SKIPPED_TEXT_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "backups",
+    "build",
+    "data",
+    "dist",
+    "env",
+    "logs",
+    "storage",
+    "tmp_ui_screens",
+    "venv",
+}
+SKIPPED_CLEAN_DIRS = {
+    ".git",
+    ".venv",
+    "backups",
+    "build",
+    "data",
+    "dist",
+    "env",
+    "storage",
+    "venv",
+}
 MOJIBAKE_SOURCE_PHRASES = (
     "正在",
     "配置",
@@ -128,6 +154,21 @@ def _make_writable_and_retry(function, path, _exc_info) -> None:
     function(path)
 
 
+def _iter_project_python_caches():
+    """Yield project caches while pruning environments, user data, and build output."""
+    skipped_dirs = {name.lower() for name in SKIPPED_CLEAN_DIRS}
+    for directory, child_dirs, _filenames in os.walk(Path("."), topdown=True, followlinks=False):
+        root = Path(directory)
+        cache_names = [name for name in child_dirs if name.lower() == "__pycache__"]
+        for name in sorted(cache_names):
+            yield root / name
+        child_dirs[:] = sorted(
+            name
+            for name in child_dirs
+            if name.lower() != "__pycache__" and name.lower() not in skipped_dirs
+        )
+
+
 def cleanup_intermediate_files() -> bool:
     paths = [
         Path("build"),
@@ -135,11 +176,7 @@ def cleanup_intermediate_files() -> bool:
         Path(".ruff_cache"),
         Path(f"{APP_NAME}.spec"),
     ]
-    paths.extend(
-        path
-        for path in Path(".").rglob("__pycache__")
-        if not any(part in SKIPPED_CLEAN_DIRS for part in path.parts)
-    )
+    paths.extend(_iter_project_python_caches())
     ok = True
     for path in paths:
         ok = _remove_path(path) and ok
@@ -157,6 +194,44 @@ def _mojibake_terms() -> tuple[str, ...]:
         if (term := _to_common_mojibake(phrase)) and len(term) >= 2
     }
     return tuple(sorted(terms, key=len, reverse=True))
+
+
+def _iter_workspace_files(extensions: set[str]):
+    """Yield source files without descending into generated or user-data trees."""
+    normalized_extensions = {suffix.lower() for suffix in extensions}
+    skipped_dirs = {name.lower() for name in SKIPPED_TEXT_DIRS}
+    for directory, child_dirs, filenames in os.walk(Path("."), topdown=True, followlinks=False):
+        child_dirs[:] = sorted(name for name in child_dirs if name.lower() not in skipped_dirs)
+        root = Path(directory)
+        for filename in sorted(filenames):
+            path = root / filename
+            if path.suffix.lower() in normalized_extensions:
+                yield path
+
+
+def check_python_syntax() -> bool:
+    """Compile project Python sources in memory without creating __pycache__."""
+    print("\n== syntax ==", flush=True)
+    findings: list[tuple[Path, str]] = []
+    for path in _iter_workspace_files({".py"}):
+        try:
+            source = path.read_bytes()
+            compile(source, str(path), "exec", dont_inherit=True)
+        except (OSError, SyntaxError, ValueError) as exc:
+            findings.append((path, str(exc)))
+
+    if findings:
+        print("Python source syntax errors found:", flush=True)
+        for path, detail in findings[:20]:
+            print(f"  - {path}: {detail}", flush=True)
+        if len(findings) > 20:
+            print(f"  ... and {len(findings) - 20} more", flush=True)
+        print("syntax: FAILED", flush=True)
+        return False
+
+    print("Python source syntax: OK", flush=True)
+    print("syntax: OK", flush=True)
+    return True
 
 
 def check_runtime_dependencies() -> bool:
@@ -183,7 +258,11 @@ def check_runtime_dependencies() -> bool:
 def run_command(label: str, command: list[str]) -> bool:
     print(f"\n== {label} ==", flush=True)
     print(" ".join(command), flush=True)
-    result = subprocess.run(command, stderr=subprocess.STDOUT, env=_command_env(label))
+    try:
+        result = subprocess.run(command, stderr=subprocess.STDOUT, env=_command_env(label))
+    except OSError as exc:
+        print(f"{label}: FAILED ({exc})", flush=True)
+        return False
     if result.returncode == 0:
         print(f"{label}: OK", flush=True)
         return True
@@ -191,16 +270,25 @@ def run_command(label: str, command: list[str]) -> bool:
     return False
 
 
+def check_git_diff() -> bool:
+    """Check repository whitespace when Git metadata and the executable exist."""
+    if not Path(".git").exists():
+        print("\n== diff-check ==", flush=True)
+        print("diff-check: SKIPPED (source tree has no local Git metadata)", flush=True)
+        return True
+    if shutil.which("git") is None:
+        print("\n== diff-check ==", flush=True)
+        print("diff-check: SKIPPED (Git is not installed)", flush=True)
+        return True
+    return run_command("diff-check", ["git", "diff", "--check", "HEAD", "--"])
+
+
 def check_source_mojibake() -> bool:
     print("\n== mojibake ==", flush=True)
     terms = _mojibake_terms()
     findings = []
 
-    for path in Path(".").rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in TEXT_EXTENSIONS:
-            continue
-        if any(part in SKIPPED_TEXT_DIRS for part in path.parts):
-            continue
+    for path in _iter_workspace_files(TEXT_EXTENSIONS):
         try:
             text = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError as exc:
@@ -288,7 +376,11 @@ def main() -> int:
         failed.append("dependencies")
     if not check_source_mojibake():
         failed.append("mojibake")
+    if not check_python_syntax():
+        failed.append("syntax")
     failed.extend(label for label, command in CHECKS if not run_command(label, command))
+    if not check_git_diff():
+        failed.append("diff-check")
     if failed:
         print("\nRelease check failed: " + ", ".join(failed), flush=True)
         return 1

@@ -1,4 +1,5 @@
 import sqlite3
+import shutil
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,103 @@ def test_clear_cookies_db_uses_unique_temps_and_cleans_target_domains(tmp_path):
 
     assert rows == ["example.com"]
     assert not list(network_dir.glob("Cookies.*"))
+
+
+def test_clear_cookies_db_absorbs_committed_wal_and_removes_old_sidecars(tmp_path):
+    default_dir = tmp_path / "Default"
+    network_dir = default_dir / "Network"
+    network_dir.mkdir(parents=True)
+    cookies_path = network_dir / "Cookies"
+    staging_path = tmp_path / "staging-cookies"
+
+    conn = sqlite3.connect(staging_path)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE cookies (host_key TEXT)")
+        conn.execute("INSERT INTO cookies (host_key) VALUES ('example.com')")
+        conn.commit()
+        assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+
+        # These rows are committed but deliberately remain outside the main DB.
+        conn.executemany(
+            "INSERT INTO cookies (host_key) VALUES (?)",
+            [("chatgpt.com",), (".chatgpt.com",), ("wal.example",)],
+        )
+        conn.commit()
+        staging_wal = Path(f"{staging_path}-wal")
+        staging_shm = Path(f"{staging_path}-shm")
+        assert staging_wal.stat().st_size > 0
+
+        shutil.copy2(staging_path, cookies_path)
+        shutil.copy2(staging_wal, Path(f"{cookies_path}-wal"))
+        shutil.copy2(staging_shm, Path(f"{cookies_path}-shm"))
+    finally:
+        conn.close()
+
+    # An immutable connection ignores WAL, proving the target rows are not in
+    # the copied main file and must be captured from the committed WAL.
+    immutable_uri = cookies_path.resolve().as_uri() + "?immutable=1"
+    immutable_conn = sqlite3.connect(immutable_uri, uri=True)
+    try:
+        assert list(immutable_conn.execute("SELECT host_key FROM cookies")) == [("example.com",)]
+    finally:
+        immutable_conn.close()
+
+    BrowserDataManager()._clear_cookies_db(default_dir, ["chatgpt.com"])
+
+    result_conn = sqlite3.connect(cookies_path)
+    try:
+        rows = [row[0] for row in result_conn.execute("SELECT host_key FROM cookies ORDER BY host_key")]
+    finally:
+        result_conn.close()
+    assert rows == ["example.com", "wal.example"]
+    for suffix in ("-journal", "-shm", "-wal"):
+        assert not Path(f"{cookies_path}{suffix}").exists()
+    assert not list(network_dir.glob("Cookies.*"))
+
+
+def test_cookie_copy_on_write_failure_preserves_live_database(tmp_path, monkeypatch):
+    default_dir = tmp_path / "Default"
+    network_dir = default_dir / "Network"
+    network_dir.mkdir(parents=True)
+    cookies_path = network_dir / "Cookies"
+    conn = sqlite3.connect(cookies_path)
+    try:
+        conn.execute("CREATE TABLE cookies (host_key TEXT)")
+        conn.execute("INSERT INTO cookies (host_key) VALUES ('chatgpt.com')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(browser_data_module, "replace_with_retry", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        BrowserDataManager()._clear_cookies_db(default_dir, ["chatgpt.com"])
+
+    conn = sqlite3.connect(cookies_path)
+    try:
+        rows = list(conn.execute("SELECT host_key FROM cookies"))
+    finally:
+        conn.close()
+    assert rows == [("chatgpt.com",)]
+    assert not list(network_dir.glob("Cookies.*"))
+
+
+def test_file_lock_probe_never_renames_live_browser_file(tmp_path, monkeypatch):
+    candidate = tmp_path / "Preferences"
+    candidate.write_text("keep", encoding="utf-8")
+
+    def unexpected_rename(*_args, **_kwargs):
+        raise AssertionError("lock probe must not rename browser data")
+
+    monkeypatch.setattr(Path, "replace", unexpected_rename)
+    assert BrowserDataManager()._is_file_locked(candidate) is False
+    assert candidate.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "Preferences.lockprobe").exists()
 
 
 def test_full_reset_requires_opt_in_and_never_accepts_managed_root(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 import uuid
 import os
+import shutil
 from pathlib import Path
 
 
@@ -60,6 +61,24 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         replace_with_retry(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def atomic_copy_file(source: Path, target: Path) -> None:
+    """Copy a file through a bounded-memory temporary and atomically publish it."""
+    source = Path(source)
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = temp_path_for(target)
+    try:
+        with source.open("rb") as source_handle, tmp.open("xb") as target_handle:
+            shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+        shutil.copymode(source, tmp, follow_symlinks=False)
+        replace_with_retry(tmp, target)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise

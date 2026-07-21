@@ -16,6 +16,7 @@ APP_NAME = "API切换器"
 SPEC_PATH = Path(f"{APP_NAME}.spec")
 DEFAULT_BUNDLE_MODE = "onefile"
 SUPPORTED_BUNDLE_MODES = {"onefile", "onedir"}
+TOML_READER_MODULE = "tomllib" if sys.version_info >= (3, 11) else "tomli"
 UI_TAB_HIDDEN_IMPORTS = [
     "ui.tabs.claude_tab",
     "ui.tabs.codex_tab",
@@ -123,7 +124,6 @@ def create_spec_file(bundle_mode: str = DEFAULT_BUNDLE_MODE) -> None:
 
     datas = []
     for source, target in [
-        ("config", "config"),
         ("assets", "assets"),
         ("icon.ico", "."),
         ("icon.png", "."),
@@ -195,8 +195,7 @@ coll = COLLECT(
         "PIL._tkinter_finder",
         "keyring.backends.Windows",
         "tomli_w",
-        "tomli",
-        "tomllib",
+        TOML_READER_MODULE,
         "paramiko",
         "cryptography",
         "pystray",
