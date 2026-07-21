@@ -296,9 +296,12 @@ class AutoContinueProvider(ABC):
                 try:
                     self.unregister_hook()
                 finally:
-                    settings_path = self.get_settings_path()
-                    if settings_path.exists():
-                        settings_path.unlink()
+                    try:
+                        self.uninstall_hook_script()
+                    finally:
+                        settings_path = self.get_settings_path()
+                        if settings_path.exists():
+                            settings_path.unlink()
                 return ""
             self._apply_hook_state_for_settings(previous_settings)
             self.save_settings(previous_settings)

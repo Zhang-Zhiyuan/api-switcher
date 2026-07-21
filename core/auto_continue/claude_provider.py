@@ -205,13 +205,18 @@ class ClaudeProvider(AutoContinueProvider):
             or git_snapshot_on_start
         )
         needs_permission_hooks = bool(auto_settings.auto_approve_permission_requests)
+        needs_prompt_hooks = bool(
+            git_snapshot_on_start
+            or auto_settings.enabled
+            or auto_settings.training_auto_continue_enabled
+        )
 
         required_events = []
         if needs_stop_hook:
             required_events.append("Stop")
             if auto_settings.apply_to_subagents:
                 required_events.append("SubagentStop")
-        if git_snapshot_on_start:
+        if needs_prompt_hooks:
             required_events.extend(["UserPromptSubmit", "SessionStart"])
         if needs_permission_hooks:
             required_events.extend(["PreToolUse", "PermissionRequest"])
@@ -263,16 +268,30 @@ class ClaudeProvider(AutoContinueProvider):
                 or git_snapshot_on_start
             )
         )
+        needs_prompt_hooks = bool(
+            git_snapshot_on_start
+            or auto_settings is None
+            or auto_settings.enabled
+            or auto_settings.training_auto_continue_enabled
+        )
 
         # Register Stop hook
         self._register_hook_event(claude_settings, "Stop", hook_def if needs_stop_hook else None)
 
-        if git_snapshot_on_start:
+        if needs_prompt_hooks:
             prompt_hook = dict(hook_def)
-            prompt_hook["statusMessage"] = "Creating Git snapshot before Claude starts work"
+            prompt_hook["statusMessage"] = (
+                "Creating Git snapshot before Claude starts work"
+                if git_snapshot_on_start
+                else "Starting a new Claude auto-continue chain"
+            )
             self._register_hook_event(claude_settings, "UserPromptSubmit", prompt_hook)
             session_hook = dict(hook_def)
-            session_hook["statusMessage"] = "Creating Git snapshot when Claude session starts"
+            session_hook["statusMessage"] = (
+                "Creating Git snapshot when Claude session starts"
+                if git_snapshot_on_start
+                else "Resetting Claude auto-continue state for this session"
+            )
             self._register_hook_event(claude_settings, "SessionStart", session_hook)
         else:
             self._register_hook_event(claude_settings, "UserPromptSubmit", None)
@@ -427,7 +446,7 @@ class ClaudeProvider(AutoContinueProvider):
         )
 
         settings_path = str(self.get_settings_path()).replace("\\", "\\\\")
-        script_content = generate_hook_script(settings_path, enable_git)
+        script_content = generate_hook_script(settings_path, enable_git, provider_name="claude")
 
         atomic_write_text(script_path, script_content, encoding='utf-8-sig')
 

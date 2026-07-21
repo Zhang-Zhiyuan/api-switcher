@@ -3382,7 +3382,7 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     except ModuleNotFoundError:
         import tomli as tomllib
     config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
-    assert config["features"]["codex_hooks"] is True
+    assert config["features"]["hooks"] is True
 
     provider.get_error_recovery_script_path().parent.mkdir(parents=True, exist_ok=True)
     provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
@@ -3403,7 +3403,7 @@ def test_local_codex_hooks_preserve_existing_entries(tmp_path, monkeypatch):
     assert error_commands == ["powershell.exe -File user_error.ps1"]
     assert response_error_commands == []
     config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
-    assert config["features"]["codex_hooks"] is True
+    assert config["features"]["hooks"] is True
 
 
 def test_local_codex_hook_repair_backs_up_invalid_hooks_json(tmp_path, monkeypatch):
@@ -3637,16 +3637,16 @@ def test_local_codex_hooks_toggle_config_when_no_hooks_remain(tmp_path, monkeypa
     except ModuleNotFoundError:
         import tomli as tomllib
 
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is True
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["hooks"] is True
     provider.unregister_hook()
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is False
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["hooks"] is False
 
     provider._register_error_recovery_hook()
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is True
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["hooks"] is True
     provider.get_error_recovery_script_path().parent.mkdir(parents=True, exist_ok=True)
     provider.get_error_recovery_script_path().write_text("", encoding="utf-8")
     provider.uninstall_error_recovery()
-    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["codex_hooks"] is False
+    assert tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["features"]["hooks"] is False
 
 
 def test_local_uninstall_removes_error_recovery_hook(tmp_path, monkeypatch):
@@ -3689,12 +3689,12 @@ def test_local_codex_hooks_sync_legacy_root_flag(tmp_path, monkeypatch):
     provider.register_hook()
     config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
     assert config["codex_hooks"] is True
-    assert config["features"]["codex_hooks"] is True
+    assert config["features"]["hooks"] is True
 
     provider.unregister_hook()
     config = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
     assert config["codex_hooks"] is False
-    assert config["features"]["codex_hooks"] is False
+    assert config["features"]["hooks"] is False
 
 
 def test_load_settings_migrates_chinese_incomplete_patterns(tmp_path, monkeypatch):

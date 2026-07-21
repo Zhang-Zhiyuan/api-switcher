@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -56,12 +57,14 @@ def _jsonl_events(path: Path, limit: int) -> list[dict[str, Any]]:
         return []
 
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail_size = max(limit * 3, limit)
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            lines = deque(handle, maxlen=tail_size)
     except Exception:
         return []
 
     events: list[dict[str, Any]] = []
-    for line in lines[-max(limit * 3, limit):]:
+    for line in lines:
         text = line.strip()
         if not text:
             continue

@@ -45,24 +45,64 @@ class AutoContinueManager:
         else:
             provider.uninstall_error_recovery()
 
+    def _rollback_full_update(
+        self,
+        provider,
+        previous_settings: Optional[AutoContinueSettings],
+    ) -> str:
+        """Restore settings, stop hooks, recovery hooks, and guidance together."""
+        errors = []
+        rollback_settings = getattr(provider, "_rollback_settings_update", None)
+        if callable(rollback_settings):
+            rollback_error = rollback_settings(previous_settings)
+            if rollback_error:
+                errors.append(f"settings/hook rollback failed: {rollback_error}")
+
+        recovery_settings = previous_settings or AutoContinueSettings()
+        try:
+            self._sync_error_recovery(provider, recovery_settings)
+        except Exception as exc:
+            errors.append(f"error recovery rollback failed: {exc}")
+
+        try:
+            if previous_settings and previous_settings.enabled:
+                install_guidance = getattr(provider, "install_guidance", None)
+                if callable(install_guidance):
+                    install_guidance()
+            else:
+                uninstall_guidance = getattr(provider, "uninstall_guidance", None)
+                if callable(uninstall_guidance):
+                    uninstall_guidance()
+        except Exception as exc:
+            errors.append(f"guidance rollback failed: {exc}")
+
+        return "; ".join(errors)
+
     def enable(self, provider_name: str, settings: Optional[AutoContinueSettings] = None,
                apply_to_subagents: bool = False) -> None:
         """Enable auto-continue for a provider."""
         provider = self.get_provider(provider_name)
+        load_settings = getattr(provider, "load_settings", None)
+        previous_settings = load_settings() if callable(load_settings) else None
 
         if settings is None:
-            settings = provider.load_settings() or AutoContinueSettings()
+            settings = (load_settings() if callable(load_settings) else None) or AutoContinueSettings()
 
         settings.enabled = True
         if provider_name.lower() == "claude":
             settings.apply_to_subagents = apply_to_subagents
 
-        provider.enable(settings)
-        self._sync_error_recovery(provider, settings)
+        try:
+            provider.enable(settings)
+            self._sync_error_recovery(provider, settings)
 
-        # Install guidance
-        if hasattr(provider, 'install_guidance'):
-            provider.install_guidance()
+            # Install guidance
+            if hasattr(provider, 'install_guidance'):
+                provider.install_guidance()
+        except Exception as exc:
+            rollback_error = self._rollback_full_update(provider, previous_settings)
+            detail = f"; rollback failed: {rollback_error}" if rollback_error else ""
+            raise RuntimeError(f"Failed to enable auto-continue: {exc}{detail}") from exc
 
     def pause(self, provider_name: str) -> None:
         """Pause auto-continue for a provider."""
@@ -81,14 +121,23 @@ class AutoContinueManager:
     def update_settings(self, provider_name: str, settings: AutoContinueSettings) -> None:
         """Update settings for a provider."""
         provider = self.get_provider(provider_name)
-        provider.update_settings(settings)
-        self._sync_error_recovery(provider, settings)
+        load_settings = getattr(provider, "load_settings", None)
+        previous_settings = load_settings() if callable(load_settings) else None
+        try:
+            provider.update_settings(settings)
+            self._sync_error_recovery(provider, settings)
 
-        # provider.update_settings re-installs/registers the hook when either
-        # auto-continue or standalone Git snapshots need it. Error recovery is
-        # synchronized above because it uses a separate Error/ResponseError hook.
-        if settings.enabled and hasattr(provider, 'install_guidance'):
-            provider.install_guidance()
+            # provider.update_settings re-installs/registers the hook when either
+            # auto-continue or standalone Git snapshots need it. Error recovery is
+            # synchronized above because it uses a separate Error/ResponseError hook.
+            if settings.enabled and hasattr(provider, 'install_guidance'):
+                provider.install_guidance()
+            elif hasattr(provider, 'uninstall_guidance'):
+                provider.uninstall_guidance()
+        except Exception as exc:
+            rollback_error = self._rollback_full_update(provider, previous_settings)
+            detail = f"; rollback failed: {rollback_error}" if rollback_error else ""
+            raise RuntimeError(f"Failed to update auto-continue settings: {exc}{detail}") from exc
 
     def repair(self, provider_name: str) -> None:
         """Repair installation (re-enable with current settings)."""

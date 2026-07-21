@@ -684,6 +684,13 @@ try {{
         $headerRetryAfter = Get-FirstTextField $hookInput.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
         if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
     }}
+    if ($hookInput.response_headers) {{
+        $headerRetryAfter = Get-FirstTextField $hookInput.response_headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+        if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
+    }} elseif ($hookInput.responseHeaders) {{
+        $headerRetryAfter = Get-FirstTextField $hookInput.responseHeaders @("retry-after", "Retry-After", "retry_after", "retryAfter")
+        if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
+    }}
 
     # 尝试从嵌套的 error 对象中提取
     if ($hookInput.error) {{
@@ -699,6 +706,13 @@ try {{
         if (-not [string]::IsNullOrWhiteSpace($nestedRetryAfter)) {{ $retryAfterText = $nestedRetryAfter }}
         if ($hookInput.error.headers) {{
             $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+            if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
+        }}
+        if ($hookInput.error.response_headers) {{
+            $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.response_headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+            if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
+        }} elseif ($hookInput.error.responseHeaders) {{
+            $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.responseHeaders @("retry-after", "Retry-After", "retry_after", "retryAfter")
             if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
         }}
     }}
@@ -727,6 +741,27 @@ try {{
     # 如果没有恢复策略，退出
     if ($recoveryStrategy -eq $RecoveryStrategies.NONE -or $recoveryStrategy -eq $RecoveryStrategies.ABORT) {{
         Write-Log "No recovery strategy available for this error type" "INFO"
+        exit 0
+    }}
+
+    # Authentication, permission and quota failures are not retryable. Notify
+    # immediately so max_error_recoveries=0 (or an exhausted retry budget) can
+    # never suppress the actionable message. These failures must not consume a
+    # retry slot or create a Git snapshot.
+    if ($recoveryStrategy -eq $RecoveryStrategies.NOTIFY_USER) {{
+        $userMsg = switch ($errorType) {{
+            $ErrorTypes.AUTHENTICATION_ERROR {{ "认证失败，请检查 API 密钥" }}
+            $ErrorTypes.PERMISSION_DENIED {{ "权限不足，请检查账户权限" }}
+            $ErrorTypes.QUOTA_EXCEEDED {{ "配额已用完，请充值或等待配额重置" }}
+            default {{ "发生错误: $errorMessage" }}
+        }}
+        $output = @{{
+            decision = "notify"
+            userMessage = $userMsg
+            suppressOutput = $false
+        }} | ConvertTo-Json -Depth 10
+        Write-Output $output
+        Write-Log "Non-retryable API error notified without consuming retry budget: $errorType" "INFO"
         exit 0
     }}
 
@@ -1296,6 +1331,13 @@ try {{
         $headerRetryAfter = Get-FirstTextField $hookInput.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
         if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
     }}
+    if ($hookInput.response_headers) {{
+        $headerRetryAfter = Get-FirstTextField $hookInput.response_headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+        if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
+    }} elseif ($hookInput.responseHeaders) {{
+        $headerRetryAfter = Get-FirstTextField $hookInput.responseHeaders @("retry-after", "Retry-After", "retry_after", "retryAfter")
+        if (-not [string]::IsNullOrWhiteSpace($headerRetryAfter)) {{ $retryAfterText = $headerRetryAfter }}
+    }}
 
     # 尝试从嵌套对象提取
     if ($hookInput.error) {{
@@ -1311,6 +1353,13 @@ try {{
         if (-not [string]::IsNullOrWhiteSpace($nestedRetryAfter)) {{ $retryAfterText = $nestedRetryAfter }}
         if ($hookInput.error.headers) {{
             $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+            if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
+        }}
+        if ($hookInput.error.response_headers) {{
+            $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.response_headers @("retry-after", "Retry-After", "retry_after", "retryAfter")
+            if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
+        }} elseif ($hookInput.error.responseHeaders) {{
+            $nestedHeaderRetryAfter = Get-FirstTextField $hookInput.error.responseHeaders @("retry-after", "Retry-After", "retry_after", "retryAfter")
             if (-not [string]::IsNullOrWhiteSpace($nestedHeaderRetryAfter)) {{ $retryAfterText = $nestedHeaderRetryAfter }}
         }}
     }}
@@ -1334,6 +1383,30 @@ try {{
     $compactTransportPattern = "remote compact task|backend-api/codex/responses/compact|responses/compact"
     $compactRecoveryText = "$errorCode $errorMessage"
     $isCompactRecovery = ($errorType -eq "content_length") -or ($compactRecoveryText -match $compactTransportPattern)
+
+    # Non-retryable failures are notifications, not recovery attempts. Handle
+    # them before the counter and Git snapshot so a zero/exhausted retry budget
+    # cannot hide the problem from the user.
+    if ($errorType -in @("auth", "quota", "permission")) {{
+        $userMsg = switch ($errorType) {{
+            "auth" {{ "认证失败，请检查 API 密钥" }}
+            "permission" {{ "权限不足，请检查账户权限" }}
+            default {{ "配额已用完，请充值" }}
+        }}
+        $output = @{{
+            recover = $false
+            notify = $true
+            userMessage = $userMsg
+        }} | ConvertTo-Json
+        Write-Output $output
+        Write-Log "Non-retryable API error notified without consuming retry budget: $errorType" "INFO"
+        exit 0
+    }}
+
+    if ($errorType -in @("unknown", "invalid")) {{
+        Write-Log "No automatic recovery strategy for $errorType error; retry budget unchanged" "INFO"
+        exit 0
+    }}
 
     # 检查恢复次数
     $stateDir = Get-RecoveryStateDir -SettingsPath $settingsPath

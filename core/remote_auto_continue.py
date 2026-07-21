@@ -26,9 +26,11 @@ from core.auto_continue.permission_rules import (
 from core.ssh_manager import ssh_manager
 from models.auto_continue import (
     AutoContinueSettings,
+    DEFAULT_TERMINAL_COMPLETION_PATTERNS,
     DEFAULT_TRAINING_COMPLETION_PATTERNS,
     DEFAULT_TRAINING_CONTEXT_PATTERNS,
     DEFAULT_TRAINING_CONTINUE_PROMPT,
+    DEFAULT_TRAINING_NOT_MET_PATTERNS,
     DEFAULT_TRAINING_SKIP_PATTERNS,
 )
 
@@ -50,6 +52,7 @@ Only stop when you encounter a genuine blocker that requires user input or decis
 
 SCRIPT_NAME = "auto_continue_stop.sh"
 SCRIPT_MARKERS = ("auto_continue_stop.sh", "auto_continue_stop.ps1")
+CODEX_HOOKS_FEATURE_STATE_FILE = "auto_continue_codex_hooks_feature_state.json"
 
 
 def _as_bool_value(value: Any, default: bool = False) -> bool:
@@ -180,7 +183,7 @@ class RemoteAutoContinueStatus:
         if self.provider_name == "claude":
             parts.append(f"权限模式 {self.permission_mode or '(未设置)'}")
         if self.provider_name == "codex":
-            parts.append(f"codex_hooks {'已开启' if self.codex_hooks_enabled else '未开启'}")
+            parts.append(f"hooks feature {'已开启' if self.codex_hooks_enabled else '未开启'}")
         if self.issues:
             parts.append("问题: " + "；".join(self.issues[:3]))
         return "，".join(parts)
@@ -650,7 +653,15 @@ def _python_literal_list(values: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _generate_remote_hook_script(settings_path: str, state_dir: str) -> str:
+def _generate_remote_hook_script(
+    settings_path: str,
+    state_dir: str,
+    provider_name: str | None = None,
+) -> str:
+    if provider_name is None:
+        normalized_path = str(settings_path or "").replace("\\", "/").lower()
+        provider_name = "codex" if "/.codex/" in normalized_path else "claude"
+    provider = _normal_provider(provider_name)
     header = "\n".join(
         [
             "#!/bin/sh",
@@ -677,6 +688,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -717,6 +729,8 @@ DEFAULT_GITIGNORE_LINES = [
     "logs/",
 ]
 
+PROVIDER_NAME = __PROVIDER_NAME__
+
 
 def log(message, level="INFO"):
     ts = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
@@ -741,6 +755,14 @@ def as_int(value, default):
     return number if number >= 0 else default
 
 
+def max_continuations_setting(value, default=100):
+    try:
+        number = int(value)
+    except Exception:
+        return default
+    return number if number >= -1 else default
+
+
 def flatten_text(value):
     if value is None:
         return ""
@@ -758,7 +780,8 @@ def flatten_text(value):
 
 
 def normalize_text(text):
-    return re.sub(r"\s+", " ", str(text or "")).strip()
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    return normalized[-32768:]
 
 
 def pick_text(data, keys):
@@ -807,19 +830,176 @@ def transcript_tail(path):
     return ""
 
 
+REGEX_MAX_PATTERNS = 128
+REGEX_MAX_PATTERN_LENGTH = 512
+REGEX_PER_PATTERN_TIMEOUT_SECONDS = 0.05
+REGEX_TOTAL_BUDGET_SECONDS = 1.0
+_regex_decision_deadline = None
+_regex_budget_warning_written = False
+
+
+class RegexMatchTimedOut(Exception):
+    pass
+
+
+def reset_regex_decision_budget():
+    global _regex_decision_deadline, _regex_budget_warning_written
+    _regex_decision_deadline = time.monotonic() + REGEX_TOTAL_BUDGET_SECONDS
+    _regex_budget_warning_written = False
+
+
+def regex_alarm_handler(_signum, _frame):
+    raise RegexMatchTimedOut()
+
+
+def unsafe_regex_pattern(pattern):
+    # Deterministic scan for the two most dangerous fallback structures on
+    # platforms without SIGALRM: nested repetition and repeated alternations.
+    stack = []
+    escaped = False
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if char == "[" and not in_class:
+            in_class = True
+            index += 1
+            continue
+        if char == "]" and in_class:
+            in_class = False
+            index += 1
+            continue
+        if in_class:
+            index += 1
+            continue
+        if char == "(":
+            stack.append({"has_repeat": False, "has_alternation": False})
+            index += 1
+            continue
+        if char == "|" and stack:
+            stack[-1]["has_alternation"] = True
+            index += 1
+            continue
+        if char in "+*?" and stack:
+            # A '?' immediately after '(' introduces a special group such as
+            # (?:...), (?=...), or (?P<...>), not a repeated atom.
+            if not (char == "?" and index > 0 and pattern[index - 1] == "("):
+                stack[-1]["has_repeat"] = True
+            index += 1
+            continue
+        if char == "{" and stack:
+            close = pattern.find("}", index + 1)
+            if close > index + 1:
+                content = pattern[index + 1:close]
+                if all(part.strip().isdigit() or not part.strip() for part in content.split(",")):
+                    stack[-1]["has_repeat"] = True
+                    index = close + 1
+                    continue
+        if char == ")" and stack:
+            group = stack.pop()
+            next_index = index + 1
+            while next_index < len(pattern) and pattern[next_index].isspace():
+                next_index += 1
+            outer_repeat = next_index < len(pattern) and pattern[next_index] in "+*{"
+            if outer_repeat and (group["has_repeat"] or group["has_alternation"]):
+                return True
+            if stack:
+                if outer_repeat or group["has_repeat"]:
+                    stack[-1]["has_repeat"] = True
+                if group["has_alternation"]:
+                    stack[-1]["has_alternation"] = True
+            index += 1
+            continue
+        index += 1
+    return False
+
+
+def bounded_regex_match(pattern_text, text, find_latest=False):
+    global _regex_decision_deadline, _regex_budget_warning_written
+    if len(pattern_text) > REGEX_MAX_PATTERN_LENGTH:
+        log(f"Oversized regex pattern ignored ({len(pattern_text)} characters)", "WARN")
+        return None
+    if unsafe_regex_pattern(pattern_text):
+        log(f"Potentially unsafe regex pattern ignored: {pattern_text[:160]}", "WARN")
+        return None
+    if _regex_decision_deadline is None:
+        reset_regex_decision_budget()
+    remaining = _regex_decision_deadline - time.monotonic()
+    if remaining <= 0:
+        if not _regex_budget_warning_written:
+            log("Regex decision budget exhausted; remaining patterns skipped", "WARN")
+            _regex_budget_warning_written = True
+        return None
+
+    timeout = min(REGEX_PER_PATTERN_TIMEOUT_SECONDS, remaining)
+    use_alarm = bool(
+        os.name != "nt"
+        and hasattr(signal, "SIGALRM")
+        and hasattr(signal, "ITIMER_REAL")
+        and hasattr(signal, "setitimer")
+    )
+    old_handler = None
+    try:
+        compiled = re.compile(pattern_text, re.IGNORECASE)
+        if use_alarm:
+            old_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, regex_alarm_handler)
+            signal.setitimer(signal.ITIMER_REAL, max(timeout, 0.001))
+        if not find_latest:
+            return compiled.search(text)
+        latest = None
+        for match in compiled.finditer(text):
+            latest = match
+        return latest
+    except RegexMatchTimedOut:
+        log(f"Timed-out regex pattern ignored: {pattern_text[:160]}", "WARN")
+        return None
+    except re.error as exc:
+        log(f"Invalid pattern ignored: {pattern_text[:160]}: {exc}", "WARN")
+        return None
+    finally:
+        if use_alarm and old_handler is not None:
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old_handler)
+            except Exception:
+                pass
+
+
 def matching_pattern(patterns, text):
     if not isinstance(patterns, list):
         return ""
-    for pattern in patterns:
+    for pattern in patterns[:REGEX_MAX_PATTERNS]:
         pattern_text = str(pattern or "").strip()
         if not pattern_text:
             continue
-        try:
-            if re.search(pattern_text, text, re.IGNORECASE):
-                return pattern_text
-        except re.error as exc:
-            log(f"Invalid pattern ignored: {pattern}: {exc}", "WARN")
+        if bounded_regex_match(pattern_text, text):
+            return pattern_text
     return ""
+
+
+def latest_matching_pattern(patterns, text):
+    if not isinstance(patterns, list):
+        return "", -1
+    latest_pattern = ""
+    latest_end = -1
+    for pattern in patterns[:REGEX_MAX_PATTERNS]:
+        pattern_text = str(pattern or "").strip()
+        if not pattern_text:
+            continue
+        match = bounded_regex_match(pattern_text, text, find_latest=True)
+        if match is not None and match.end() >= latest_end:
+            latest_pattern = pattern_text
+            latest_end = match.end()
+    return latest_pattern, latest_end
 
 
 RECOVERABLE_API_ERROR_PATTERNS = __RECOVERABLE_API_ERROR_PATTERNS__
@@ -830,8 +1010,10 @@ DEFAULT_PERMISSION_AUTO_APPROVE_TOOLS = ["Bash", "Edit", "MultiEdit", "Write", "
 PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}
 STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}
 TRAINING_COMPLETION_PATTERNS = __TRAINING_COMPLETION_PATTERNS__
+TRAINING_NOT_MET_PATTERNS = __TRAINING_NOT_MET_PATTERNS__
 TRAINING_SKIP_PATTERNS = __TRAINING_SKIP_PATTERNS__
 TRAINING_CONTEXT_PATTERNS = __TRAINING_CONTEXT_PATTERNS__
+TERMINAL_COMPLETION_PATTERNS = __TERMINAL_COMPLETION_PATTERNS__
 DEFAULT_TRAINING_CONTINUE_PROMPT = __DEFAULT_TRAINING_CONTINUE_PROMPT__
 
 
@@ -961,7 +1143,14 @@ def extract_error_fields(data):
     )
     http_status = parse_int(first_text(data, ["status", "http_status", "status_code", "statusCode"]), 0)
     retry_after = first_text(data, ["retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After"])
-    header_retry_after = header_value(data.get("headers"), ["retry-after", "Retry-After", "retry_after", "retryAfter"])
+    header_retry_after = ""
+    for header_field in ("headers", "response_headers", "responseHeaders"):
+        header_retry_after = header_value(
+            data.get(header_field),
+            ["retry-after", "Retry-After", "retry_after", "retryAfter"],
+        )
+        if header_retry_after:
+            break
     if header_retry_after:
         retry_after = header_retry_after
 
@@ -971,7 +1160,14 @@ def extract_error_fields(data):
         nested_message = first_text(nested, ["message", "error_message", "errorMessage", "detail", "hint", "response", "body", "data", "errors"])
         nested_status = first_text(nested, ["status", "status_code", "statusCode", "http_status"])
         nested_retry_after = first_text(nested, ["retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", "Retry-After"])
-        nested_header_retry_after = header_value(nested.get("headers"), ["retry-after", "Retry-After", "retry_after", "retryAfter"])
+        nested_header_retry_after = ""
+        for header_field in ("headers", "response_headers", "responseHeaders"):
+            nested_header_retry_after = header_value(
+                nested.get(header_field),
+                ["retry-after", "Retry-After", "retry_after", "retryAfter"],
+            )
+            if nested_header_retry_after:
+                break
         if nested_code:
             error_code = nested_code
         if nested_message:
@@ -1104,16 +1300,51 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
         return False
 
     error_type = classify_api_error(error_code, error_message, http_status)
+    os.makedirs(state_dir, exist_ok=True)
+    log_path = os.path.join(state_dir, "error_recovery_log.jsonl")
     if error_type in {"invalid", "unknown"}:
-        return False
+        write_jsonl(log_path, {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": str(session_id),
+            "error_type": error_type,
+            "error_code": error_code,
+            "error_message": error_message,
+            "http_status": http_status,
+            "action": "ignored_non_recoverable",
+            "recovery_count": 0,
+        })
+        return True
+
+    # Authentication, permission, and quota failures require user action. They
+    # must always notify, even when automatic retry count is zero/exhausted, and
+    # must not consume retry state or create a Git recovery snapshot.
+    if error_type in {"auth", "permission", "quota"}:
+        output = error_recovery_output(
+            is_claude,
+            error_type,
+            0,
+            False,
+            error_message,
+        )
+        write_jsonl(log_path, {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": str(session_id),
+            "error_type": error_type,
+            "error_code": error_code,
+            "error_message": error_message,
+            "http_status": http_status,
+            "action": "notify_user",
+            "recovery_count": 0,
+        })
+        if output:
+            print(json.dumps(output, ensure_ascii=False))
+        return True
 
     compact_source = f"{error_code or ''} {error_message or ''}"
     compact_transport = bool(re.search(r"remote compact task|backend-api/codex/responses/compact|responses/compact", compact_source, re.IGNORECASE))
     compact_recovery = (not is_claude) and (error_type == "content_length" or compact_transport)
 
-    os.makedirs(state_dir, exist_ok=True)
     state_path = os.path.join(state_dir, "error_recovery_state.json")
-    log_path = os.path.join(state_dir, "error_recovery_log.jsonl")
     state_seed = f"{session_id}|{error_type}"
     state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
     max_recoveries = int_setting(settings, "max_error_recoveries", 3, 0, 10)
@@ -1394,8 +1625,67 @@ def save_state(path, data):
     write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def acquire_state_lock(lock_path, attempts=20, stale_seconds=60):
+    for _ in range(attempts):
+        try:
+            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > stale_seconds:
+                    os.unlink(lock_path)
+                    continue
+            except FileNotFoundError:
+                continue
+            except Exception:
+                pass
+            time.sleep(0.1)
+    return None
+
+
+def release_state_lock(lock_fd, lock_path):
+    try:
+        if lock_fd is not None:
+            os.close(lock_fd)
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
+def clear_state_key(state_path, state_key):
+    lock_path = state_path + ".lock"
+    lock_fd = acquire_state_lock(lock_path)
+    if lock_fd is None:
+        log("Failed to acquire state reset lock", "WARN")
+        return False
+    try:
+        state_file_exists = os.path.exists(state_path)
+        state = load_state(state_path)
+        changed = state_key in state
+        state.pop(state_key, None)
+        # Saving an existing invalid/non-dict file also repairs it.
+        if state_file_exists or changed:
+            save_state(state_path, state)
+        return True
+    except Exception as exc:
+        log(f"Failed to reset auto-continue state: {exc}", "WARN")
+        return False
+    finally:
+        release_state_lock(lock_fd, lock_path)
+
+
 def write_jsonl(path, data):
     try:
+        if os.path.exists(path) and os.path.getsize(path) > 2 * 1024 * 1024:
+            archive_path = path + ".1"
+            try:
+                os.unlink(archive_path)
+            except FileNotFoundError:
+                pass
+            replace_file(path, archive_path)
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception as exc:
@@ -1705,13 +1995,16 @@ def main():
         return
     use_hook_project_dir(data)
 
-    is_claude = data.get("hook_event_name") is not None or data.get("hookEventName") is not None
+    is_claude = PROVIDER_NAME == "claude"
     hook_event = data.get("hook_event_name") or data.get("hookEventName") or "Stop"
     agent_id = data.get("agent_id") or data.get("agentId") or ""
     session_id = (
         data.get("session_id")
         or data.get("sessionId")
         or data.get("conversation_id")
+        or data.get("conversationId")
+        or data.get("agent_transcript_path")
+        or data.get("agentTranscriptPath")
         or data.get("transcript_path")
         or data.get("transcriptPath")
         or os.getcwd()
@@ -1734,13 +2027,25 @@ def main():
             "stdout",
         )
     )
-    if error_recovery_enabled and (explicit_error_event or (not is_claude and has_error_payload)):
+    if explicit_error_event:
+        if error_recovery_enabled:
+            handle_error_recovery(data, settings, state_dir, is_claude, session_id)
+        # Error events are never Stop events. Unknown or disabled recovery must
+        # fail open instead of feeding error text into generic continuation.
+        return
+    if error_recovery_enabled and not is_claude and has_error_payload:
         if handle_error_recovery(data, settings, state_dir, is_claude, session_id):
             return
 
     git_snapshot_attempted = False
     git_snapshot_hash = ""
     if hook_event in PROMPT_SNAPSHOT_EVENTS:
+        if auto_continue_enabled or training_auto_continue_enabled:
+            os.makedirs(state_dir, exist_ok=True)
+            prompt_state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
+            prompt_seed = f"{PROVIDER_NAME}|{session_id}|Stop|"
+            prompt_state_key = hashlib.sha256(prompt_seed.encode("utf-8", errors="replace")).hexdigest()
+            clear_state_key(prompt_state_path, prompt_state_key)
         if git_snapshot_enabled:
             git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
             git_snapshot_attempted = True
@@ -1881,20 +2186,28 @@ def main():
         ],
     )
     if not last_message:
-        transcript_path = data.get("transcript_path") or data.get("transcriptPath")
+        if hook_event == "SubagentStop":
+            transcript_path = (
+                data.get("agent_transcript_path")
+                or data.get("agentTranscriptPath")
+                or data.get("transcript_path")
+                or data.get("transcriptPath")
+            )
+        else:
+            transcript_path = data.get("transcript_path") or data.get("transcriptPath")
         last_message = transcript_tail(transcript_path)
     last_message = normalize_text(last_message)
     if not last_message.strip():
         return
 
-    max_continuations = as_int(settings.get("max_continuations"), 100)
+    max_continuations = max_continuations_setting(settings.get("max_continuations"), 100)
     if max_continuations == 0 or max_continuations < -1:
         return
 
     if is_claude and as_bool(settings.get("conservative_mode"), True) and as_bool(data.get("stop_hook_active"), False):
         return
 
-    state_seed = f"{session_id}|{hook_event}|{agent_id}"
+    state_seed = f"{PROVIDER_NAME}|{session_id}|{hook_event}|{agent_id}"
     state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
 
     os.makedirs(state_dir, exist_ok=True)
@@ -1902,18 +2215,32 @@ def main():
     log_path = os.path.join(state_dir, "auto_continue_stop_log.jsonl")
     lock_path = state_path + ".lock"
 
-    recoverable_api_error_match = matching_pattern(RECOVERABLE_API_ERROR_PATTERNS, last_message)
-    recoverable_api_error = bool(recoverable_api_error_match)
+    reset_regex_decision_budget()
+    terminal_completion_match, terminal_completion_end = latest_matching_pattern(
+        TERMINAL_COMPLETION_PATTERNS,
+        last_message,
+    )
+    recoverable_api_error_match, recoverable_api_error_end = latest_matching_pattern(
+        RECOVERABLE_API_ERROR_PATTERNS,
+        last_message,
+    )
+    recoverable_api_error = bool(
+        recoverable_api_error_match
+        and (
+            not terminal_completion_match
+            or recoverable_api_error_end > terminal_completion_end
+        )
+    )
 
     training_guard_applies = False
     training_context_match = ""
     if training_auto_continue_enabled:
-        training_target_met_match = matching_pattern(TRAINING_COMPLETION_PATTERNS, last_message)
+        training_not_met_match = matching_pattern(TRAINING_NOT_MET_PATTERNS, last_message)
+        training_target_met_match = ""
+        if not training_not_met_match:
+            training_target_met_match = matching_pattern(TRAINING_COMPLETION_PATTERNS, last_message)
         if training_target_met_match:
-            state = load_state(state_path)
-            if state_key in state:
-                state.pop(state_key, None)
-                save_state(state_path, state)
+            clear_state_key(state_path, state_key)
             write_decision_log(
                 log_path,
                 session_id,
@@ -1929,10 +2256,7 @@ def main():
 
         training_skip_match = matching_pattern(TRAINING_SKIP_PATTERNS, last_message)
         if training_skip_match:
-            state = load_state(state_path)
-            if state_key in state:
-                state.pop(state_key, None)
-                save_state(state_path, state)
+            clear_state_key(state_path, state_key)
             write_decision_log(
                 log_path,
                 session_id,
@@ -1946,11 +2270,16 @@ def main():
             )
             return
 
-        training_context_match = matching_pattern(TRAINING_CONTEXT_PATTERNS, last_message)
+        training_context_match = training_not_met_match or matching_pattern(TRAINING_CONTEXT_PATTERNS, last_message)
         training_guard_applies = bool(training_context_match)
 
-    blocker_match = matching_pattern(settings.get("blocker_patterns"), last_message)
-    if blocker_match and not recoverable_api_error:
+    blocker_match, blocker_end = latest_matching_pattern(settings.get("blocker_patterns"), last_message)
+    current_blocker = bool(
+        blocker_match
+        and (not terminal_completion_match or blocker_end > terminal_completion_end)
+    )
+    if current_blocker and not recoverable_api_error:
+        clear_state_key(state_path, state_key)
         write_decision_log(
             log_path,
             session_id,
@@ -1964,16 +2293,21 @@ def main():
         )
         return
 
-    incomplete_match = matching_pattern(settings.get("incomplete_patterns"), last_message)
-    generic_continue_match = bool(auto_continue_enabled and incomplete_match)
+    incomplete_match, incomplete_end = latest_matching_pattern(settings.get("incomplete_patterns"), last_message)
+    terminal_completion_wins = bool(
+        terminal_completion_match
+        and (not incomplete_match or terminal_completion_end >= incomplete_end)
+    )
+    generic_continue_match = bool(
+        auto_continue_enabled and incomplete_match and not terminal_completion_wins
+    )
     should_continue = recoverable_api_error or training_guard_applies or generic_continue_match
     if not should_continue:
-        state = load_state(state_path)
-        if state_key in state:
-            state.pop(state_key, None)
-            save_state(state_path, state)
+        clear_state_key(state_path, state_key)
         allow_reason = (
-            "training_context_not_detected"
+            "terminal_completion_detected"
+            if terminal_completion_wins
+            else "training_context_not_detected"
             if training_auto_continue_enabled and not auto_continue_enabled
             else "no_incomplete_match"
         )
@@ -1984,7 +2318,7 @@ def main():
             agent_id,
             "allow_stop",
             allow_reason,
-            "",
+            terminal_completion_match if terminal_completion_wins else "",
             last_message,
             git_commit_hash=git_snapshot_hash,
         )
@@ -2099,6 +2433,10 @@ rm -f "$INPUT_PATH" 2>/dev/null || true
 exit 0
 '''
     body = body.replace(
+        "__PROVIDER_NAME__",
+        repr(provider),
+    )
+    body = body.replace(
         "__RECOVERABLE_API_ERROR_PATTERNS__",
         _python_literal_list(RECOVERABLE_API_ERROR_PATTERNS),
     )
@@ -2111,12 +2449,20 @@ exit 0
         _python_literal_list(DEFAULT_TRAINING_COMPLETION_PATTERNS),
     )
     body = body.replace(
+        "__TRAINING_NOT_MET_PATTERNS__",
+        _python_literal_list(DEFAULT_TRAINING_NOT_MET_PATTERNS),
+    )
+    body = body.replace(
         "__TRAINING_SKIP_PATTERNS__",
         _python_literal_list(DEFAULT_TRAINING_SKIP_PATTERNS),
     )
     body = body.replace(
         "__TRAINING_CONTEXT_PATTERNS__",
         _python_literal_list(DEFAULT_TRAINING_CONTEXT_PATTERNS),
+    )
+    body = body.replace(
+        "__TERMINAL_COMPLETION_PATTERNS__",
+        _python_literal_list(DEFAULT_TERMINAL_COMPLETION_PATTERNS),
     )
     body = body.replace(
         "__DEFAULT_TRAINING_CONTINUE_PROMPT__",
@@ -2233,13 +2579,27 @@ def _register_claude_hook(
         if settings_data is None
         else bool(settings_data.enabled or settings_data.training_auto_continue_enabled or needs_git_start_hook)
     )
+    needs_prompt_hooks = bool(
+        needs_git_start_hook
+        or settings_data is None
+        or settings_data.enabled
+        or settings_data.training_auto_continue_enabled
+    )
     register_event("Stop", hook_def if needs_stop_hook else None)
-    if needs_git_start_hook:
+    if needs_prompt_hooks:
         prompt_hook = dict(hook_def)
-        prompt_hook["statusMessage"] = "Creating Git snapshot before Claude starts work"
+        prompt_hook["statusMessage"] = (
+            "Creating Git snapshot before Claude starts work"
+            if needs_git_start_hook
+            else "Starting a new Claude auto-continue chain"
+        )
         register_event("UserPromptSubmit", prompt_hook)
         session_hook = dict(hook_def)
-        session_hook["statusMessage"] = "Creating Git snapshot when Claude session starts"
+        session_hook["statusMessage"] = (
+            "Creating Git snapshot when Claude session starts"
+            if needs_git_start_hook
+            else "Resetting Claude auto-continue state for this session"
+        )
         register_event("SessionStart", session_hook)
     else:
         register_event("UserPromptSubmit", None)
@@ -2379,6 +2739,80 @@ def _codex_event_hooks(value) -> list[dict]:
     return []
 
 
+def _partition_codex_event_value(value, is_managed) -> tuple[object | None, list[dict], bool]:
+    """Remove managed hooks without flattening user-owned event groups."""
+    managed: list[dict] = []
+
+    def clean_hook_container(container):
+        removed = False
+        if isinstance(container, dict):
+            if container.get("command") and is_managed(str(container.get("command", ""))):
+                managed.append(dict(container))
+                return None, True
+            return dict(container), False
+        if isinstance(container, list):
+            remaining = []
+            for hook in container:
+                if (
+                    isinstance(hook, dict)
+                    and hook.get("command")
+                    and is_managed(str(hook.get("command", "")))
+                ):
+                    managed.append(dict(hook))
+                    removed = True
+                else:
+                    remaining.append(dict(hook) if isinstance(hook, dict) else hook)
+            return remaining, removed
+        return container, False
+
+    def clean_item(item):
+        if not isinstance(item, dict):
+            return item, False
+        if item.get("command"):
+            if is_managed(str(item.get("command", ""))):
+                managed.append(dict(item))
+                return None, True
+            return dict(item), False
+        if "hooks" not in item:
+            return dict(item), False
+
+        cleaned_hooks, removed = clean_hook_container(item.get("hooks"))
+        if not removed:
+            return dict(item), False
+        if cleaned_hooks is None or cleaned_hooks == []:
+            return None, True
+        cleaned = dict(item)
+        cleaned["hooks"] = cleaned_hooks
+        return cleaned, True
+
+    if isinstance(value, list):
+        remaining = []
+        removed = False
+        for item in value:
+            cleaned, item_removed = clean_item(item)
+            removed = removed or item_removed
+            if cleaned is not None:
+                remaining.append(cleaned)
+        return (remaining if remaining else None), managed, removed
+
+    cleaned, removed = clean_item(value)
+    return cleaned, managed, removed
+
+
+def _canonical_codex_event_items(value) -> list:
+    """Normalize singleton shapes while preserving every group field."""
+    if value is None:
+        return []
+    source = value if isinstance(value, list) else [value]
+    items = []
+    for item in source:
+        if isinstance(item, dict) and item.get("command"):
+            items.append({"hooks": [dict(item)]})
+        else:
+            items.append(dict(item) if isinstance(item, dict) else item)
+    return items
+
+
 def _codex_hooks_container(data: dict, *, migrate_legacy: bool = False) -> dict:
     if not isinstance(data, dict):
         return {}
@@ -2392,25 +2826,20 @@ def _codex_hooks_container(data: dict, *, migrate_legacy: bool = False) -> dict:
         for event_name in list(data.keys()):
             if event_name == "hooks":
                 continue
-            event_hooks = _codex_event_hooks(data.get(event_name))
-            managed_hooks = [
-                hook for hook in event_hooks
-                if _is_our_command(str(hook.get("command", "")))
-            ]
-            if not managed_hooks:
+            remaining, managed_hooks, removed = _partition_codex_event_value(
+                data.get(event_name),
+                _is_our_command,
+            )
+            if not removed:
                 continue
-            existing = _codex_event_hooks(hooks.get(event_name))
-            hooks[event_name] = _format_codex_event_hooks(existing + managed_hooks)
+            event_items = _canonical_codex_event_items(hooks.get(event_name))
+            event_items.extend({"hooks": [hook]} for hook in managed_hooks)
+            hooks[event_name] = event_items
 
-            remaining = [
-                hook for hook in event_hooks
-                if not _is_our_command(str(hook.get("command", "")))
-            ]
-            formatted = _format_legacy_codex_event_hooks(remaining)
-            if formatted is None:
+            if remaining is None:
                 data.pop(event_name, None)
             else:
-                data[event_name] = formatted
+                data[event_name] = remaining
 
     return hooks
 
@@ -2430,29 +2859,29 @@ def _format_legacy_codex_event_hooks(hook_list: list[dict]):
 
 
 def _upsert_codex_event_hook(hooks: dict, event_name: str, hook_def: dict) -> None:
-    existing = [
-        hook for hook in _codex_event_hooks(hooks.get(event_name))
-        if not _is_our_command(str(hook.get("command", "")))
-    ]
-    existing.append(hook_def)
-    hooks[event_name] = _format_codex_event_hooks(existing)
+    remaining, _managed, _removed = _partition_codex_event_value(
+        hooks.get(event_name),
+        _is_our_command,
+    )
+    items = _canonical_codex_event_items(remaining)
+    items.append({"hooks": [hook_def]})
+    hooks[event_name] = items
 
 
 def _remove_codex_event_hook(hooks: dict, event_name: str) -> bool:
     if event_name not in hooks:
         return False
-    existing = _codex_event_hooks(hooks.get(event_name))
-    remaining = [
-        hook for hook in existing
-        if not _is_our_command(str(hook.get("command", "")))
-    ]
-    if len(remaining) == len(existing):
+    remaining, _managed, removed = _partition_codex_event_value(
+        hooks.get(event_name),
+        _is_our_command,
+    )
+    if not removed:
         return False
-    formatted = _format_codex_event_hooks(remaining)
-    if formatted is None:
+    items = _canonical_codex_event_items(remaining)
+    if not items:
         hooks.pop(event_name, None)
     else:
-        hooks[event_name] = formatted
+        hooks[event_name] = items
     return True
 
 
@@ -2479,23 +2908,79 @@ def _codex_hooks_enabled_from_config(config: dict) -> bool:
     if not isinstance(config, dict):
         return False
     features = config.get("features") if isinstance(config.get("features"), dict) else {}
+    if "hooks" in features:
+        return bool(features.get("hooks"))
     if "codex_hooks" in features:
         return bool(features.get("codex_hooks"))
     return bool(config.get("codex_hooks"))
 
 
+def _codex_hooks_feature_state_path(paths: RemoteAutoContinuePaths) -> str:
+    return posixpath.join(paths.config_dir, CODEX_HOOKS_FEATURE_STATE_FILE)
+
+
+def _load_codex_hooks_feature_ownership(client, paths: RemoteAutoContinuePaths) -> dict | None:
+    state_path = _codex_hooks_feature_state_path(paths)
+    payload = _read_json(client, state_path, default=None, strict=True)
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("original_enabled"), bool):
+        raise RuntimeError("远端 Codex hooks feature ownership 状态无效")
+    return payload
+
+
+def _release_codex_hooks_feature_ownership(client, paths: RemoteAutoContinuePaths) -> None:
+    _remove_remote_file(client, _codex_hooks_feature_state_path(paths))
+
+
 def _set_codex_hooks_enabled(client, paths: RemoteAutoContinuePaths, enabled: bool) -> None:
-    config = _read_toml(client, paths.provider_config_path, strict=False)
-    features = config.get("features") if isinstance(config.get("features"), dict) else {}
-    if enabled or "codex_hooks" in features:
-        features["codex_hooks"] = bool(enabled)
-        config["features"] = features
-    if config.get("codex_hooks") is not None:
-        config["codex_hooks"] = bool(enabled)
-    _write_toml(client, paths.provider_config_path, config)
+    """Set canonical hooks while retaining the feature state from before install."""
+    from core.auto_continue.codex_provider import _set_codex_hooks_feature_lines
+
+    config_path = paths.provider_config_path
+    state_path = _codex_hooks_feature_state_path(paths)
+    if not enabled and not _remote_file_exists(client, state_path):
+        return
+
+    snapshots = _snapshot_remote_files(client, [config_path, state_path])
+    try:
+        raw = _read_text(client, config_path) or ""
+        try:
+            try:
+                import tomllib
+            except ModuleNotFoundError:
+                import tomli as tomllib
+            config = tomllib.loads(raw) if raw.strip() else {}
+        except Exception as exc:
+            _backup_remote_text(client, config_path, raw, f"Codex config.toml invalid: {exc}")
+            raise RuntimeError(f"远端 Codex config.toml 解析失败，未修改 Hook: {exc}") from exc
+
+        ownership = _load_codex_hooks_feature_ownership(client, paths)
+        if enabled and ownership is None:
+            ownership = {
+                "version": 1,
+                "original_enabled": _codex_hooks_enabled_from_config(config),
+            }
+            _write_json(client, state_path, ownership)
+        elif not enabled and ownership is None:
+            return
+
+        target = True if enabled else bool(ownership["original_enabled"])
+        lines, changed = _set_codex_hooks_feature_lines(raw.splitlines(), target)
+        candidate = "\n".join(lines).rstrip() + "\n"
+        parsed_candidate = tomllib.loads(candidate)
+        if _codex_hooks_enabled_from_config(parsed_candidate) is not target:
+            raise RuntimeError("无法安全更新 canonical [features].hooks")
+        if changed:
+            _write_text(client, config_path, candidate, mode=0o600)
+        if not enabled:
+            _release_codex_hooks_feature_ownership(client, paths)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
 
 
-def _register_codex_hook(
+def _register_codex_hook_unchecked(
     client,
     paths: RemoteAutoContinuePaths,
     command: str,
@@ -2515,6 +3000,12 @@ def _register_codex_hook(
         if settings_data is None
         else bool(settings_data.enabled or settings_data.training_auto_continue_enabled or needs_git_start_hook)
     )
+    needs_prompt_hooks = bool(
+        needs_git_start_hook
+        or settings_data is None
+        or settings_data.enabled
+        or settings_data.training_auto_continue_enabled
+    )
     hook_def = {
         "type": "command",
         "command": command,
@@ -2529,12 +3020,20 @@ def _register_codex_hook(
         )
     else:
         _remove_codex_event_hook(hooks, "Stop")
-    if needs_git_start_hook:
+    if needs_prompt_hooks:
         prompt_hook = dict(hook_def)
-        prompt_hook["statusMessage"] = "Creating Git snapshot before Codex starts work"
+        prompt_hook["statusMessage"] = (
+            "Creating Git snapshot before Codex starts work"
+            if needs_git_start_hook
+            else "Starting a new Codex auto-continue chain"
+        )
         _upsert_codex_event_hook(hooks, "UserPromptSubmit", prompt_hook)
         session_hook = dict(hook_def)
-        session_hook["statusMessage"] = "Creating Git snapshot when Codex session starts"
+        session_hook["statusMessage"] = (
+            "Creating Git snapshot when Codex session starts"
+            if needs_git_start_hook
+            else "Resetting Codex auto-continue state for this session"
+        )
         _upsert_codex_event_hook(hooks, "SessionStart", session_hook)
     else:
         _remove_codex_event_hook(hooks, "UserPromptSubmit")
@@ -2557,7 +3056,26 @@ def _register_codex_hook(
     _set_codex_hooks_enabled(client, paths, True)
 
 
-def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
+def _register_codex_hook(
+    client,
+    paths: RemoteAutoContinuePaths,
+    command: str,
+    settings_data: AutoContinueSettings | None = None,
+) -> None:
+    snapshot_paths = [
+        paths.codex_hooks_path or "",
+        paths.provider_config_path,
+        _codex_hooks_feature_state_path(paths),
+    ]
+    snapshots = _snapshot_remote_files(client, snapshot_paths)
+    try:
+        _register_codex_hook_unchecked(client, paths, command, settings_data)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
+
+
+def _unregister_codex_hook_unchecked(client, paths: RemoteAutoContinuePaths) -> None:
     if not paths.codex_hooks_path:
         return
     data = _read_json(client, paths.codex_hooks_path, default={}, strict=False)
@@ -2569,8 +3087,28 @@ def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
         changed = _remove_codex_event_hook(hooks, "Error") or changed
         if changed:
             _write_json(client, paths.codex_hooks_path, data)
-            if not _codex_data_has_entries(data):
+        if changed or _remote_file_exists(client, _codex_hooks_feature_state_path(paths)):
+            if _codex_data_has_entries(data):
+                # Remaining hooks are user-owned; keep their feature active but
+                # release our ownership so a later uninstall cannot alter it.
+                _set_codex_hooks_enabled(client, paths, True)
+                _release_codex_hooks_feature_ownership(client, paths)
+            else:
                 _set_codex_hooks_enabled(client, paths, False)
+
+
+def _unregister_codex_hook(client, paths: RemoteAutoContinuePaths) -> None:
+    snapshot_paths = [
+        paths.codex_hooks_path or "",
+        paths.provider_config_path,
+        _codex_hooks_feature_state_path(paths),
+    ]
+    snapshots = _snapshot_remote_files(client, snapshot_paths)
+    try:
+        _unregister_codex_hook_unchecked(client, paths)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
 
 
 def _install_guidance(client, path: str) -> None:
@@ -2632,13 +3170,16 @@ def install_remote_auto_continue(
         paths.permission_rules_path,
     ]
     if paths.codex_hooks_path:
-        snapshot_paths.append(paths.codex_hooks_path)
+        snapshot_paths.extend([
+            paths.codex_hooks_path,
+            _codex_hooks_feature_state_path(paths),
+        ])
     snapshots = _snapshot_remote_files(client, snapshot_paths)
 
     try:
         _write_json(client, paths.settings_path, resolved_settings.to_dict())
 
-        script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+        script = _generate_remote_hook_script(paths.settings_path, paths.state_dir, provider)
         _write_text(client, paths.script_path, script, mode=0o700)
         _install_guidance(client, paths.guidance_path)
 
@@ -2674,13 +3215,16 @@ def install_remote_git_snapshot(
         paths.permission_rules_path,
     ]
     if paths.codex_hooks_path:
-        snapshot_paths.append(paths.codex_hooks_path)
+        snapshot_paths.extend([
+            paths.codex_hooks_path,
+            _codex_hooks_feature_state_path(paths),
+        ])
     snapshots = _snapshot_remote_files(client, snapshot_paths)
 
     try:
         _write_json(client, paths.settings_path, resolved_settings.to_dict())
 
-        script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+        script = _generate_remote_hook_script(paths.settings_path, paths.state_dir, provider)
         _write_text(client, paths.script_path, script, mode=0o700)
 
         command = f"sh {shlex.quote(paths.script_path)}"
@@ -2736,14 +3280,17 @@ def update_remote_auto_continue_settings(
         paths.permission_rules_path,
     ]
     if paths.codex_hooks_path:
-        snapshot_paths.append(paths.codex_hooks_path)
+        snapshot_paths.extend([
+            paths.codex_hooks_path,
+            _codex_hooks_feature_state_path(paths),
+        ])
     snapshots = _snapshot_remote_files(client, snapshot_paths)
 
     try:
         _write_json(client, paths.settings_path, resolved_settings.to_dict())
 
         if hook_required:
-            script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+            script = _generate_remote_hook_script(paths.settings_path, paths.state_dir, provider)
             _write_text(client, paths.script_path, script, mode=0o700)
             if resolved_settings.enabled:
                 _install_guidance(client, paths.guidance_path)
@@ -2781,9 +3328,22 @@ def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
     ssh_profile, client = _connect(ssh_name)
     paths = _paths(client, ssh_profile, provider)
 
-    settings = _read_json(client, paths.settings_path, default={}, strict=False)
-    keep_hook = False
-    if isinstance(settings, dict):
+    snapshot_paths = [
+        paths.settings_path,
+        paths.provider_config_path,
+        paths.permission_rules_path,
+    ]
+    if paths.codex_hooks_path:
+        snapshot_paths.extend([
+            paths.codex_hooks_path,
+            _codex_hooks_feature_state_path(paths),
+        ])
+    snapshots = _snapshot_remote_files(client, snapshot_paths)
+
+    try:
+        settings = _read_json(client, paths.settings_path, default={}, strict=True)
+        if not isinstance(settings, dict):
+            raise RuntimeError("远端自动续跑设置必须是 JSON 对象")
         settings["enabled"] = False
         keep_hook = (
             _as_bool_value(settings.get("git_auto_snapshot"), True)
@@ -2796,11 +3356,14 @@ def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
         )
         _write_json(client, paths.settings_path, settings)
 
-    if not keep_hook:
-        if provider == "claude":
-            _unregister_claude_hook(client, paths)
-        else:
-            _unregister_codex_hook(client, paths)
+        if not keep_hook:
+            if provider == "claude":
+                _unregister_claude_hook(client, paths)
+            else:
+                _unregister_codex_hook(client, paths)
+    except Exception:
+        _restore_remote_files(client, snapshots)
+        raise
 
     return f"已暂停 {ssh_profile.host} 的 {_provider_label(provider)} 远端自动续跑"
 
@@ -2864,7 +3427,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
         remote_script = _read_text(client, paths.script_path)
         if remote_script is not None:
             status.hook_script_sha256 = _sha256_text(remote_script)
-            expected_script = _generate_remote_hook_script(paths.settings_path, paths.state_dir)
+            expected_script = _generate_remote_hook_script(paths.settings_path, paths.state_dir, provider)
             status.expected_hook_script_sha256 = _sha256_text(expected_script)
             status.hook_script_matches_expected = (
                 status.hook_script_sha256 == status.expected_hook_script_sha256
@@ -2933,14 +3496,18 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             permission_hook_registered = _claude_event_has_our_command(provider_config, "PermissionRequest")
             error_hook_registered = _claude_event_has_our_command(provider_config, "ResponseError")
             needs_stop_hook = bool(status.enabled or status.training_auto_continue_enabled or status.git_snapshot_enabled)
-            needs_prompt_snapshot_hooks = bool(status.git_snapshot_enabled)
+            needs_prompt_hooks = bool(
+                status.git_snapshot_enabled
+                or status.enabled
+                or status.training_auto_continue_enabled
+            )
             needs_permission_hooks = bool(status.permission_auto_approve_enabled)
             needs_error_hook = bool(status.error_recovery_enabled)
-            if needs_stop_hook or needs_prompt_snapshot_hooks or needs_permission_hooks or needs_error_hook:
+            if needs_stop_hook or needs_prompt_hooks or needs_permission_hooks or needs_error_hook:
                 status.hook_registered = (
                     (not needs_stop_hook or stop_hook_registered)
                     and (
-                        not needs_prompt_snapshot_hooks
+                        not needs_prompt_hooks
                         or (prompt_hook_registered and session_hook_registered)
                     )
                     and (not needs_permission_hooks or (pre_tool_hook_registered and permission_hook_registered))
@@ -2953,7 +3520,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                 )
             if needs_stop_hook and not stop_hook_registered:
                 status.issues.append("Stop Hook 未注册；请重新安装/修复远端自动续跑")
-            if needs_prompt_snapshot_hooks:
+            if needs_prompt_hooks:
                 missing_prompt_hooks = []
                 if not prompt_hook_registered:
                     missing_prompt_hooks.append("UserPromptSubmit")
@@ -2961,7 +3528,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                     missing_prompt_hooks.append("SessionStart")
                 if missing_prompt_hooks:
                     status.issues.append(
-                        "Git 快照 Hook 未注册: "
+                        "每轮状态/Git 快照 Hook 未注册: "
                         + ", ".join(missing_prompt_hooks)
                         + "；请重新安装/修复远端自动续跑"
                     )
@@ -3034,13 +3601,17 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
             )
             error_hook_registered = any(_is_our_command(command) for command in _iter_codex_hook_commands(hooks, "Error"))
             needs_stop_hook = bool(status.enabled or status.training_auto_continue_enabled or status.git_snapshot_enabled)
-            needs_prompt_snapshot_hooks = bool(status.git_snapshot_enabled)
+            needs_prompt_hooks = bool(
+                status.git_snapshot_enabled
+                or status.enabled
+                or status.training_auto_continue_enabled
+            )
             needs_error_hook = bool(status.error_recovery_enabled)
-            if needs_stop_hook or needs_prompt_snapshot_hooks or needs_error_hook:
+            if needs_stop_hook or needs_prompt_hooks or needs_error_hook:
                 status.hook_registered = (
                     (not needs_stop_hook or stop_hook_registered)
                     and (
-                        not needs_prompt_snapshot_hooks
+                        not needs_prompt_hooks
                         or (prompt_hook_registered and session_hook_registered)
                     )
                     and (not needs_error_hook or error_hook_registered)
@@ -3052,7 +3623,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                     or session_hook_registered
                     or error_hook_registered
                 )
-            if needs_prompt_snapshot_hooks:
+            if needs_prompt_hooks:
                 missing_prompt_hooks = []
                 if not prompt_hook_registered:
                     missing_prompt_hooks.append("UserPromptSubmit")
@@ -3060,7 +3631,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
                     missing_prompt_hooks.append("SessionStart")
                 if missing_prompt_hooks:
                     status.issues.append(
-                        "Git 快照 Hook 未注册: "
+                        "每轮状态/Git 快照 Hook 未注册: "
                         + ", ".join(missing_prompt_hooks)
                         + "；请重新安装/修复远端自动续跑"
                     )
@@ -3090,7 +3661,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
     if hook_required and not status.hook_registered:
         status.issues.append("Hook 未注册")
     if provider == "codex" and hook_required and not status.codex_hooks_enabled:
-        status.issues.append("config.toml 未开启 codex_hooks")
+        status.issues.append("config.toml 未开启 [features].hooks")
     if status.enabled and not status.guidance_installed:
         status.issues.append("指导文件未安装")
 

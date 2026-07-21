@@ -9,7 +9,7 @@ DEFAULT_INCOMPLETE_PATTERNS = [
     r"(?i)(incomplete|unfinished|not finished|not done|partially done|partial implementation)",
     r"(?i)(?=.*\b(project|task|work|implementation|feature|change|repo|repository)\b)(?=.*\b(?:not|isn't|is not|hasn't|has not|haven't|have not)\b.{0,120}\b(?:actually|really|truly|fully|completely)?\b.{0,120}\b(?:complete|completed|done|finished|ready)\b)(?=.*\b(?:continue|resume|keep\s+going|keep\s+running|carry\s+on|run\s+again|keep\s+working)\b).*",
     r"(?i)(?=.*\b(project|task|work|implementation|feature|change|repo|repository)\b)(?=.*\b(?:actually|really|truly|fully|completely)\b.{0,80}\b(?:not|isn't|is not|hasn't|has not|haven't|have not)\b.{0,80}\b(?:complete|completed|done|finished|ready)\b)(?=.*\b(?:continue|resume|keep\s+going|keep\s+running|carry\s+on|run\s+again|keep\s+working)\b).*",
-    r"(?i)(will|need to|should|must).{0,80}(implement|add|create|fix|test|verify|wire|integrate|finish|complete|clean up)",
+    r"(?i)(?<!\bno\s)(will|need to|should|must).{0,80}(implement|add|create|fix|test|verify|wire|integrate|finish|complete|clean up)",
     r"(?i)(next|following|follow-up|remaining) steps?:",
     r"(?is)<task-notification>.*<status>\s*(killed|stopped|failed|terminated)\s*</status>.*</task-notification>",
     r"(?i)background command .{0,160}\b(was )?(stopped|killed|terminated|interrupted)\b",
@@ -26,7 +26,8 @@ DEFAULT_INCOMPLETE_PATTERNS = [
     r"(?i)still (need|needs|needed|left|missing)",
     r"(?i)still (to do|todo|pending|open)",
     r"(?i)left to (do|implement|finish|complete)",
-    r"(?i)(need|needs|needed|required|requires?) (to )?(implement|finish|complete|fix|test|verify|wire|integrate|add|update|clean up)",
+    r"(?i)(?<!\bno\s)(need|needs|needed|required|requires?) (to )?(implement|finish|complete|fix|test|verify|wire|integrate|add|update|clean up)",
+    r"(?i)\bno\s+(?:test\s+)?failures?\s+(?:has|have)\s+been\s+(?:fixed|resolved|addressed)\b(?:\s+yet)?",
     r"(?i)needs? (more work|implementation|cleanup|testing|verification)",
     r"(?i)(missing|lacking) (implementation|tests|verification|coverage|config|documentation|files|support|integration)",
     r"(?i)not (tested|verified|validated|covered|wired|integrated|implemented|supported)",
@@ -95,6 +96,26 @@ DEFAULT_INCOMPLETE_PATTERNS = [
 ]
 
 
+# Explicit terminal signals are intentionally limited to affirmative clauses.
+# They are evaluated against incomplete signals by match position so a later
+# resolved conclusion can override an earlier historical issue without treating
+# "must verify that everything is complete" as a completion claim.
+DEFAULT_TERMINAL_COMPLETION_PATTERNS = [
+    r"(?i)(?:^|[.!?;]\s+|\s[-*•]\s+)no\s+(?:unfinished|remaining|pending|outstanding)\s+(?:work|tasks?|items?|steps?|todos?)\b(?:\s+(?:remain|remains|remaining|left))?",
+    r"(?i)(?:^|[.!?;]\s+|\s[-*•]\s+)(?:everything|all(?:\s+(?:requested|required|remaining))?\s+(?:work|tasks?|items?|steps?|changes?)|(?:the\s+)?(?:task|work|implementation|changes?))\s+(?:(?:is|are|was|were|has\s+been|have\s+been)\s+)?(?:fully\s+)?(?:complete|completed|done|finished|implemented)\b",
+    r"(?i)(?:^|[.!?;]\s+|\s[-*•]\s+)(?:all|the)\s+tests?\s+(?:pass|passed|are\s+passing|have\s+passed)\b",
+    r"(?i)(?:^|[.!?;]\s+|\s[-*•]\s+)no\s+(?:test\s+)?failures?\b(?=\s*(?:remain(?:ing|s)?|(?:were\s+)?(?:found|detected|observed|reported)|exist(?:s)?|[.!?;]|$))",
+    r"(?i)(?:^|[.!?;]\s+|\s[-*•]\s+)no\s+need\s+to\s+(?:continue|implement|add|create|fix|test|verify|wire|integrate|finish|complete|clean\s+up)\b",
+    r"(?i)(?:^|[.!?;]\s+|\s[-*•]\s+)(?:the\s+)?previously\s+missing\b.{0,120}\b(?:added|implemented|fixed|restored|resolved|now\s+pass(?:es|ed)?)\b",
+    r"(?:^|[。！？；，]\s*)(?:也|并)?(?:没有|无)(?:任何)?(?:未完成|剩余|待处理|待办)(?:的)?(?:工作|任务|事项|步骤|项)?",
+    r"(?:^|[。！？；，]\s*)(?:全部|所有|整体|任务|工作|改动|修改).{0,20}(?:已完成|完成了|已实现|已处理|已收尾)",
+    r"(?:^|[。！？；，]\s*)已?完成了?(?:全部|所有).{0,20}(?:修改|改动|工作|任务|事项)",
+    r"(?:^|[。！？；，]\s*)(?:所有|全部)?测试.{0,20}(?:均|都|已|全部).{0,10}(?:通过|成功)",
+    r"(?:^|[。！？；，]\s*)(?:没有|无).{0,20}(?:测试失败|失败的测试|失败项)(?:[。！？；，]|$)",
+    r"(?:^|[。！？；，]\s*)无需.{0,20}(?:继续|实现|修复|测试|验证|收尾)",
+]
+
+
 DEFAULT_BLOCKER_PATTERNS = [
     r"(?i)\u9700\u8981(\u4f60|\u7528\u6237).{0,20}(\u786e\u8ba4|\u63d0\u4f9b|\u51b3\u5b9a|\u9009\u62e9|\u6388\u6743|\u767b\u5f55|\u5bc6\u94a5|\u51ed\u636e|\u5bc6\u7801|token|api\s*key)",
     r"(?i)(\u7b49\u5f85|\u9700\u8981).{0,30}(\u8f93\u5165|\u786e\u8ba4|\u6388\u6743|\u767b\u5f55|\u5bc6\u94a5|\u51ed\u636e|\u5bc6\u7801|token|api\s*key)",
@@ -112,7 +133,8 @@ DEFAULT_BLOCKER_PATTERNS = [
     r"(?i)(missing|not found|does not exist).{0,80}(file|config|path|command|dependency|parameter|credential|permission|api key|token|model|account|directory|environment variable)",
     r"(?i)(waiting for|blocked by).{0,80}(user|your).{0,40}(decision|choice|confirmation|approval|credential|secret|password|token|api key)",
     r"(?i)(deploy|publish|release).{0,80}(confirmation|approval|credential|secret|password|token|api key|login|sign in)",
-    r"(?i)(payment|billing|delete user data|destructive)",
+    r"(?i)(?:blocked|cannot|can't|unable|requires?|needs?|waiting).{0,80}(?:payment|billing|delete user data|destructive action|approval)",
+    r"(?i)(?:payment|billing).{0,80}(?:required|failed|issue|blocked|approval|credential|login)",
 ]
 
 
@@ -121,6 +143,7 @@ LEGACY_GENERATED_PATTERNS_TO_DROP = {
     r"(?i)(error|failed|cannot|unable to|blocked by)",
     r"(?i)(missing|not found|does not exist)",
     r"(\u8981\u4e0d\u8981|\u662f\u5426|\u9700\u8981|\u8fd8\u8981|\u53ef\u4ee5).{0,80}\u7ee7\u7eed",
+    r"(?i)(payment|billing|delete user data|destructive)",
 }
 
 
@@ -207,6 +230,14 @@ DEFAULT_TRAINING_COMPLETION_PATTERNS = [
     r"\u6307\u6807\u5df2\u8fbe\u6807",
     r"\u8bc4\u4f30\u7ed3\u679c\u5df2\u8fbe\u6807",
     r"(\u51c6\u786e\u7387|\u7cbe\u5ea6|\u53ec\u56de\u7387|F1|loss|AUC).{0,80}(\u8fbe\u6807|\u8fbe\u5230\u8981\u6c42|\u6ee1\u8db3\u8981\u6c42)",
+]
+DEFAULT_TRAINING_NOT_MET_PATTERNS = [
+    r"(?i)\b(?:not|hasn't|has\s+not|haven't|have\s+not|wasn't|was\s+not|isn't|is\s+not|yet\s+to)\b.{0,80}\bTRAINING_TARGET_MET\b",
+    r"(?i)\bTRAINING_TARGET_MET\b.{0,80}\b(?:not|isn't|is\s+not|wasn't|was\s+not|hasn't|has\s+not|yet)\b",
+    r"(?i)\b(?:training|evaluation|model)\b.{0,80}\b(?:target|goal|criteria|requirement)s?\b.{0,80}\b(?:not|isn't|wasn't|hasn't|haven't|failed\s+to)\b.{0,40}\b(?:met|reached|satisfied|passed)\b",
+    r"(?i)\b(?:not|hasn't|has\s+not|haven't|have\s+not|failed\s+to)\b.{0,60}\b(?:met|reached|satisfied|passed)\b.{0,80}\b(?:training|evaluation|model)\b.{0,80}\b(?:target|goal|criteria|requirement)s?\b",
+    r"(?:训练目标|训练指标|评估目标|评估指标).{0,30}(?:未|没有|尚未|还未).{0,20}(?:达成|达到|达标|满足)",
+    r"(?:未|没有|尚未|还未).{0,30}(?:达成|达到|满足).{0,30}(?:训练目标|训练指标|评估目标|评估指标)",
 ]
 DEFAULT_TRAINING_SKIP_PATTERNS = [
     r"(?i)\bTRAINING_NOT_APPLICABLE\b",
@@ -459,6 +490,23 @@ class AutoContinueSettings:
 
         if not isinstance(self.continuation_prompt, str) or not self.continuation_prompt.strip():
             return False, "continuation_prompt cannot be empty"
+
+        if len(self.continuation_prompt) > 8000:
+            return False, "continuation_prompt is too long (max: 8000 characters)"
+
+        for field_name, patterns in (
+            ("incomplete_patterns", self.incomplete_patterns),
+            ("blocker_patterns", self.blocker_patterns),
+        ):
+            if not isinstance(patterns, list):
+                return False, f"{field_name} must be a list"
+            if len(patterns) > 128:
+                return False, f"{field_name} contains too many patterns (max: 128)"
+            for pattern in patterns:
+                if not isinstance(pattern, str) or not pattern.strip():
+                    return False, f"{field_name} contains an empty pattern"
+                if len(pattern) > 512:
+                    return False, f"{field_name} contains a pattern that is too long (max: 512 characters)"
 
         for pattern in self.incomplete_patterns:
             try:

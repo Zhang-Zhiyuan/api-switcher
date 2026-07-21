@@ -1771,6 +1771,21 @@ def test_remote_user_env_delete_removes_only_selected_exports():
     assert "HF_TOKEN" not in env_text
 
 
+def _remote_codex_hook_test_paths():
+    return remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name="codex",
+        config_dir="/home/test/.codex",
+        hooks_dir="/home/test/.codex/hooks",
+        settings_path="/home/test/.codex/auto_continue_settings.json",
+        script_path="/home/test/.codex/hooks/auto_continue_stop.sh",
+        state_dir="/home/test/.codex/tmp",
+        guidance_path="/home/test/.codex/AGENTS.md",
+        provider_config_path="/home/test/.codex/config.toml",
+        permission_rules_path="/home/test/.codex/auto_continue_permission_rules.json",
+        codex_hooks_path="/home/test/.codex/hooks.json",
+    )
+
+
 def test_remote_codex_hooks_preserve_existing_entries(monkeypatch):
     sftp = _FakeSFTP()
     client = _FakeClient(sftp)
@@ -1953,12 +1968,13 @@ def test_remote_codex_hooks_feature_prefers_features_section():
 
     remote_auto_continue._set_codex_hooks_enabled(client, paths, True)
     config = tomllib.loads(sftp.files[paths.provider_config_path].decode("utf-8"))
-    assert config["features"]["codex_hooks"] is True
+    assert config["features"]["hooks"] is True
+    assert "codex_hooks" not in config["features"]
     assert "codex_hooks" not in config
 
     remote_auto_continue._set_codex_hooks_enabled(client, paths, False)
     config = tomllib.loads(sftp.files[paths.provider_config_path].decode("utf-8"))
-    assert config["features"]["codex_hooks"] is False
+    assert config["features"]["hooks"] is False
 
 
 def test_remote_codex_hooks_feature_syncs_legacy_root_flag():
@@ -1986,19 +2002,126 @@ def test_remote_codex_hooks_feature_syncs_legacy_root_flag():
     remote_auto_continue._set_codex_hooks_enabled(client, paths, True)
     config = tomllib.loads(sftp.files[paths.provider_config_path].decode("utf-8"))
     assert config["codex_hooks"] is True
-    assert config["features"]["codex_hooks"] is True
+    assert config["features"]["hooks"] is True
     assert remote_auto_continue._codex_hooks_enabled_from_config(config) is True
 
     remote_auto_continue._set_codex_hooks_enabled(client, paths, False)
     config = tomllib.loads(sftp.files[paths.provider_config_path].decode("utf-8"))
     assert config["codex_hooks"] is False
-    assert config["features"]["codex_hooks"] is False
+    assert config["features"]["hooks"] is False
     assert remote_auto_continue._codex_hooks_enabled_from_config(config) is False
     assert remote_auto_continue._codex_hooks_enabled_from_config({"codex_hooks": True}) is True
     assert remote_auto_continue._codex_hooks_enabled_from_config({
         "codex_hooks": True,
         "features": {"codex_hooks": False},
     }) is False
+
+
+def test_remote_codex_hook_round_trip_preserves_user_group_metadata():
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = _remote_codex_hook_test_paths()
+    user_group = {
+        "matcher": "tool == 'shell'",
+        "custom": {"owner": "user", "priority": 7},
+        "hooks": [{"type": "command", "command": "sh /home/test/user.sh", "timeout": 4}],
+    }
+    sftp.files[paths.codex_hooks_path] = json.dumps({
+        "hooks": {"Stop": [user_group]},
+        "userMetadata": {"keep": True},
+    }).encode("utf-8")
+    sftp.files[paths.provider_config_path] = (
+        b"# keep this comment\n[features]\nhooks = false # user value\n\n[model]\nname = 'x'\n"
+    )
+
+    remote_auto_continue._register_codex_hook(
+        client,
+        paths,
+        "sh /home/test/.codex/hooks/auto_continue_stop.sh",
+        AutoContinueSettings(enabled=True, git_auto_snapshot=False),
+    )
+    installed = json.loads(sftp.files[paths.codex_hooks_path].decode("utf-8"))
+    assert installed["hooks"]["Stop"][0] == user_group
+    assert installed["userMetadata"] == {"keep": True}
+
+    remote_auto_continue._unregister_codex_hook(client, paths)
+    restored = json.loads(sftp.files[paths.codex_hooks_path].decode("utf-8"))
+    assert restored["hooks"]["Stop"] == [user_group]
+    assert restored["userMetadata"] == {"keep": True}
+    config_text = sftp.files[paths.provider_config_path].decode("utf-8")
+    assert "# keep this comment" in config_text
+    assert "[model]" in config_text
+    assert remote_auto_continue._read_toml(client, paths.provider_config_path)["features"]["hooks"] is True
+    assert remote_auto_continue._codex_hooks_feature_state_path(paths) not in sftp.files
+
+
+@pytest.mark.parametrize("original_enabled", [False, True])
+def test_remote_codex_hook_uninstall_restores_owned_feature_state(original_enabled):
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = _remote_codex_hook_test_paths()
+    value = "true" if original_enabled else "false"
+    sftp.files[paths.provider_config_path] = (
+        f"# preserve\n[features]\nhooks = {value} # original\n".encode("utf-8")
+    )
+
+    remote_auto_continue._register_codex_hook(
+        client,
+        paths,
+        "sh /home/test/.codex/hooks/auto_continue_stop.sh",
+    )
+    assert remote_auto_continue._read_toml(client, paths.provider_config_path)["features"]["hooks"] is True
+
+    remote_auto_continue._unregister_codex_hook(client, paths)
+    config = remote_auto_continue._read_toml(client, paths.provider_config_path)
+    assert config["features"]["hooks"] is original_enabled
+    assert "# preserve" in sftp.files[paths.provider_config_path].decode("utf-8")
+    assert remote_auto_continue._codex_hooks_feature_state_path(paths) not in sftp.files
+
+
+def test_remote_codex_inline_features_are_updated_without_rewriting_other_config():
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = _remote_codex_hook_test_paths()
+    sftp.files[paths.provider_config_path] = (
+        b"features = { telemetry = false } # inline\nmodel = 'gpt-test'\n"
+    )
+
+    remote_auto_continue._set_codex_hooks_enabled(client, paths, True)
+
+    text = sftp.files[paths.provider_config_path].decode("utf-8")
+    config = remote_auto_continue._read_toml(client, paths.provider_config_path)
+    assert config["features"] == {"telemetry": False, "hooks": True}
+    assert "# inline" in text
+    assert "model = 'gpt-test'" in text
+
+
+def test_remote_codex_invalid_toml_rolls_back_hooks_and_creates_backup():
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    paths = _remote_codex_hook_test_paths()
+    original_hooks = json.dumps({
+        "hooks": {"Stop": [{"hooks": [{"command": "sh /home/test/user.sh"}]}]},
+    }).encode("utf-8")
+    invalid_config = b"[features\nhooks = true\n"
+    sftp.files[paths.codex_hooks_path] = original_hooks
+    sftp.files[paths.provider_config_path] = invalid_config
+
+    with pytest.raises(RuntimeError, match="config.toml"):
+        remote_auto_continue._register_codex_hook(
+            client,
+            paths,
+            "sh /home/test/.codex/hooks/auto_continue_stop.sh",
+        )
+
+    assert sftp.files[paths.codex_hooks_path] == original_hooks
+    assert sftp.files[paths.provider_config_path] == invalid_config
+    assert remote_auto_continue._codex_hooks_feature_state_path(paths) not in sftp.files
+    backups = [path for path in sftp.files if path.startswith(paths.provider_config_path + ".bak-")]
+    assert len(backups) == 1
+    assert sftp.files[backups[0]] == invalid_config
 
 
 def test_remote_git_snapshot_settings_do_not_inherit_error_or_permission_hooks():
@@ -2244,7 +2367,7 @@ def test_remote_claude_permission_only_registers_permission_hooks_without_stop()
     assert list(remote_auto_continue._iter_claude_hook_commands(settings, ("PermissionRequest",)))
 
 
-def test_remote_training_guard_registers_stop_hook_without_general_auto_continue():
+def test_remote_training_guard_registers_chain_reset_hooks_without_general_auto_continue():
     from models.auto_continue import AutoContinueSettings
 
     sftp = _FakeSFTP()
@@ -2276,8 +2399,8 @@ def test_remote_training_guard_registers_stop_hook_without_general_auto_continue
 
     hooks = json.loads(sftp.files[paths.codex_hooks_path].decode("utf-8"))
     assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
-    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit"))
-    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart"))
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit"))
+    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart"))
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Error"))
 
 
