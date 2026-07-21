@@ -236,7 +236,12 @@ def test_tray_profile_change_refreshes_main_window_state():
 
     assert refreshed == ["_claude_tab", "_usage_stats_tab"]
     assert quick_switch_delays == [0]
-    assert status_updates == [{"text": "已从托盘切换 Claude API 配置: relay"}]
+    assert status_updates == [
+        {
+            "text": "已从托盘切换 Claude API 配置: relay",
+            "text_color": app_module.COLORS["success"],
+        }
+    ]
 
 
 def test_run_on_ui_thread_queues_worker_callbacks_until_ui_pump():

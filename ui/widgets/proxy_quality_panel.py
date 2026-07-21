@@ -25,6 +25,34 @@ KEYLESS_SERVICES = {
 NO_KEY_SERVICES = {diagnostic_constants.SERVICE_NETCOFFEE}
 OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {diagnostic_constants.SERVICE_PING0}
 
+PROXY_QUALITY_WIDE_MIN_WIDTH = 720
+PROXY_QUALITY_TWO_COLUMN_MIN_WIDTH = 420
+
+
+def _proxy_quality_toolbar_layout(width: int) -> tuple[int, int, bool]:
+    """Return action columns, preset columns and whether its label stays inline."""
+
+    try:
+        available = max(1, int(width))
+    except (TypeError, ValueError):
+        available = 1
+    if available >= PROXY_QUALITY_WIDE_MIN_WIDTH:
+        return 3, 3, True
+    if available >= PROXY_QUALITY_TWO_COLUMN_MIN_WIDTH:
+        return 2, 2, False
+    return 1, 1, False
+
+
+def _proxy_quality_service_row_layout(width: int) -> str:
+    """Keep service descriptions and key inputs readable on narrow panels."""
+
+    available = max(1, int(width))
+    if available >= 620:
+        return "wide"
+    if available >= 360:
+        return "compact"
+    return "narrow"
+
 
 class ProxyQualityPanel(ctk.CTkScrollableFrame):
     """Panel for public network and proxy exit quality diagnostics."""
@@ -35,6 +63,13 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._busy = False
         self._last_report = None
         self._on_settings_saved = on_settings_saved
+        self._action_bar = None
+        self._action_buttons = []
+        self._preset_bar = None
+        self._preset_label = None
+        self._preset_buttons = []
+        self._responsive_layout_after_id = None
+        self._responsive_layout_state = None
         self._run_button = None
         self._copy_button = None
         self._open_ping0_button = None
@@ -48,6 +83,8 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         self._service_key_frames = {}
         self._service_count_labels = {}
         self._service_cards = {}
+        self._service_row_widgets = {}
+        self._key_row_widgets = []
         self._settings_controls = []
         self._hidden_service_settings = {}
         self._settings_status_label = None
@@ -85,7 +122,8 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         bind_wraplength(title_area, subtitle, padding=24, min_width=260, max_width=760)
 
         action_bar = ctk.CTkFrame(header, fg_color="transparent")
-        action_bar.pack(anchor="w", pady=(8, 0))
+        action_bar.pack(fill="x", pady=(8, 0))
+        self._action_bar = action_bar
         self._run_button = ctk.CTkButton(
             action_bar,
             text="开始检测",
@@ -93,7 +131,6 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             command=self._start_detection,
             **button_style("primary"),
         )
-        self._run_button.pack(side="left")
         self._copy_button = ctk.CTkButton(
             action_bar,
             text="复制报告",
@@ -102,7 +139,6 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             state="disabled",
             **button_style("secondary"),
         )
-        self._copy_button.pack(side="left", padx=(8, 0))
         self._open_ping0_button = ctk.CTkButton(
             action_bar,
             text="打开最快 Ping0",
@@ -111,7 +147,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             state="disabled",
             **button_style("accent"),
         )
-        self._open_ping0_button.pack(side="left", padx=(8, 0))
+        self._action_buttons = [self._run_button, self._copy_button, self._open_ping0_button]
 
         settings_section = ctk.CTkFrame(self, fg_color="transparent")
         settings_section.pack(fill="x", padx=14, pady=(0, 10))
@@ -149,14 +185,15 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         }
         preset_bar = ctk.CTkFrame(settings_section, fg_color="transparent")
         preset_bar.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(
+        self._preset_bar = preset_bar
+        self._preset_label = ctk.CTkLabel(
             preset_bar,
             text="快速方案",
             text_color=COLORS["muted_soft"],
             font=font(11),
             width=62,
             anchor="w",
-        ).pack(side="left", padx=(0, 6))
+        )
         for text, mode in (
             ("AI 推荐", "recommended"),
             ("免 Key 多源", "keyless"),
@@ -169,7 +206,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 command=lambda mode=mode: self._apply_service_preset(mode),
                 **button_style("secondary", compact=True),
             )
-            button.pack(side="left", padx=(0, 6))
+            self._preset_buttons.append(button)
             self._settings_controls.append(button)
         service_rows = [
             (
@@ -249,8 +286,16 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         )
         self._report_placeholder_label.pack(expand=True)
         self._report_box_after_id = self.after(60, self._build_report_box)
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
 
     def destroy(self):
+        if self._responsive_layout_after_id:
+            try:
+                self.after_cancel(self._responsive_layout_after_id)
+            except Exception:
+                pass
+            self._responsive_layout_after_id = None
         if self._report_box_after_id:
             try:
                 self.after_cancel(self._report_box_after_id)
@@ -258,6 +303,182 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
                 pass
             self._report_box_after_id = None
         super().destroy()
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_layout_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_layout_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_layout_after_id = (
+                self.after_idle(apply_layout)
+                if delay_ms <= 0
+                else self.after(delay_ms, apply_layout)
+            )
+        except Exception:
+            self._responsive_layout_after_id = None
+
+    @staticmethod
+    def _reset_grid_columns(frame, count: int) -> None:
+        for column in range(count):
+            frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+    def _apply_responsive_layout(self) -> None:
+        logical_width = self._logical_layout_width()
+        action_columns, preset_columns, preset_label_inline = _proxy_quality_toolbar_layout(logical_width)
+        service_row_layout = _proxy_quality_service_row_layout(logical_width)
+        state = (action_columns, preset_columns, preset_label_inline, service_row_layout)
+        if state == self._responsive_layout_state:
+            return
+        self._responsive_layout_state = state
+
+        action_bar = self._action_bar
+        preset_bar = self._preset_bar
+        preset_label = self._preset_label
+        if action_bar is None or preset_bar is None or preset_label is None:
+            return
+
+        self._reset_grid_columns(action_bar, 3)
+        for column in range(action_columns):
+            action_bar.grid_columnconfigure(
+                column,
+                weight=1 if action_columns < 3 else 0,
+                uniform="proxy-quality-actions" if action_columns < 3 else "",
+            )
+        for index, button in enumerate(self._action_buttons):
+            row = index // action_columns
+            column = index % action_columns
+            button.grid(
+                row=row,
+                column=column,
+                sticky="ew",
+                padx=(0, 8 if column < action_columns - 1 else 0),
+                pady=(0, 6 if index + action_columns < len(self._action_buttons) else 0),
+            )
+
+        self._reset_grid_columns(preset_bar, 4)
+        if preset_label_inline:
+            preset_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            for index, button in enumerate(self._preset_buttons):
+                button.grid(
+                    row=0,
+                    column=index + 1,
+                    sticky="ew",
+                    padx=(0, 6 if index < len(self._preset_buttons) - 1 else 0),
+                )
+        else:
+            for column in range(preset_columns):
+                preset_bar.grid_columnconfigure(
+                    column,
+                    weight=1,
+                    uniform="proxy-quality-presets",
+                )
+            preset_label.grid(
+                row=0,
+                column=0,
+                columnspan=preset_columns,
+                sticky="w",
+                pady=(0, 4),
+            )
+            for index, button in enumerate(self._preset_buttons):
+                row = 1 + index // preset_columns
+                column = index % preset_columns
+                button.grid(
+                    row=row,
+                    column=column,
+                    sticky="ew",
+                    padx=(0, 6 if column < preset_columns - 1 else 0),
+                    pady=(0, 6 if index + preset_columns < len(self._preset_buttons) else 0),
+                )
+
+        for top, service_check, description, count_label, add_button in self._service_row_widgets.values():
+            self._layout_service_setting_row(
+                top,
+                service_check,
+                description,
+                count_label,
+                add_button,
+                service_row_layout,
+                logical_width,
+            )
+        for row, key_label, entry, delete_button in self._key_row_widgets:
+            self._layout_key_row(row, key_label, entry, delete_button, service_row_layout)
+
+    @staticmethod
+    def _layout_service_setting_row(
+        top,
+        service_check,
+        description,
+        count_label,
+        add_button,
+        layout: str,
+        logical_width: int,
+    ) -> None:
+        for widget in (service_check, description, count_label, add_button):
+            widget.grid_forget()
+        for column in range(4):
+            top.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if layout == "wide":
+            top.grid_columnconfigure(1, weight=1)
+            service_check.grid(row=0, column=0, sticky="w")
+            description.grid(row=0, column=1, sticky="ew", padx=(10, 8))
+            count_label.grid(row=0, column=2, sticky="e", padx=(0, 8))
+            add_button.grid(row=0, column=3, sticky="e")
+            description.configure(wraplength=max(180, min(620, logical_width - 320)))
+            return
+
+        if layout == "compact":
+            top.grid_columnconfigure(0, weight=1)
+            service_check.grid(row=0, column=0, sticky="w")
+            count_label.grid(row=0, column=1, sticky="e", padx=(8, 8))
+            add_button.grid(row=0, column=2, sticky="e")
+            description.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+            description.configure(wraplength=max(160, logical_width - 60))
+            return
+
+        top.grid_columnconfigure(0, weight=1)
+        service_check.grid(row=0, column=0, columnspan=2, sticky="w")
+        count_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        add_button.grid(row=1, column=1, sticky="e", pady=(6, 0))
+        description.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        description.configure(wraplength=max(120, logical_width - 60))
+
+    @staticmethod
+    def _layout_key_row(row, key_label, entry, delete_button, layout: str) -> None:
+        for widget in (key_label, entry, delete_button):
+            widget.grid_forget()
+        for column in range(3):
+            row.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if layout == "wide":
+            row.grid_columnconfigure(1, weight=1)
+            key_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            entry.entry.configure(width=360)
+            entry.grid(row=0, column=1, sticky="ew")
+            delete_button.grid(row=0, column=2, padx=(6, 0), sticky="e")
+            return
+
+        row.grid_columnconfigure(0, weight=1)
+        key_label.grid(row=0, column=0, sticky="w")
+        delete_button.grid(row=0, column=1, sticky="e")
+        entry.entry.configure(width=1)
+        entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
     def _build_report_box(self):
         self._report_box_after_id = None
@@ -303,6 +524,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             font=font(11),
             anchor="w",
+            justify="left",
         )
         desc.grid(row=0, column=1, sticky="ew", padx=(10, 8))
         self._service_count_labels[service] = ctk.CTkLabel(
@@ -327,16 +549,23 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         else:
             add_button.grid(row=0, column=3, sticky="e")
             self._settings_controls.append(add_button)
+        self._service_row_widgets[service] = (
+            top,
+            service_check,
+            desc,
+            self._service_count_labels[service],
+            add_button,
+        )
 
         key_frame = ctk.CTkFrame(card, fg_color="transparent")
-        key_frame.pack(fill="x", padx=12, pady=(0, 10))
         self._service_key_frames[service] = key_frame
         self._service_key_entries[service] = []
         for key in service_settings.api_keys:
             self._add_key_row(service, key)
         self._assign_first_key_entry(service)
         self._update_key_frame_spacing(service)
-        bind_wraplength(top, desc, padding=320, min_width=180, max_width=620)
+        self._responsive_layout_state = None
+        self._schedule_responsive_layout(delay_ms=0)
 
     def _add_key_row(self, service: str, value: str = "", focus: bool = False):
         if service in NO_KEY_SERVICES:
@@ -348,14 +577,15 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         row.pack(fill="x", pady=(0, 5))
         row.grid_columnconfigure(1, weight=1)
         key_index = len(self._service_key_entries.get(service, [])) + 1
-        ctk.CTkLabel(
+        key_label = ctk.CTkLabel(
             row,
             text=diagnostic_constants.SERVICE_LABELS.get(service, service),
             text_color=COLORS["muted_soft"],
             font=font(11, "bold"),
             width=86,
             anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        )
+        key_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
         entry = MaskedEntry(row, placeholder=self._key_placeholder(service, key_index), width=360)
         entry.grid(row=0, column=1, sticky="ew")
         entry.set(value)
@@ -371,11 +601,14 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         delete_button.grid(row=0, column=2, padx=(6, 0), sticky="e")
+        self._key_row_widgets.append((row, key_label, entry, delete_button))
         self._service_key_entries.setdefault(service, []).append(entry)
         self._settings_controls.extend([entry.entry, entry.toggle_btn, delete_button])
         self._assign_first_key_entry(service)
         self._update_key_frame_spacing(service)
         self._update_settings_preview()
+        self._responsive_layout_state = None
+        self._schedule_responsive_layout(delay_ms=0)
         if focus:
             try:
                 entry.entry.focus_set()
@@ -385,6 +618,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
     def _remove_key_row(self, service: str, entry: MaskedEntry, row):
         entries = self._service_key_entries.get(service, [])
         self._service_key_entries[service] = [item for item in entries if item is not entry]
+        self._key_row_widgets = [item for item in self._key_row_widgets if item[0] is not row]
         row.destroy()
         self._renumber_key_placeholders(service)
         self._assign_first_key_entry(service)
@@ -409,9 +643,14 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         key_frame = self._service_key_frames.get(service)
         if key_frame is None:
             return
-        pady = (0, 10) if self._service_key_entries.get(service) else (0, 0)
         try:
-            key_frame.pack_configure(pady=pady)
+            if self._service_key_entries.get(service):
+                if key_frame.winfo_manager() != "pack":
+                    key_frame.pack(fill="x", padx=12, pady=(0, 10))
+                else:
+                    key_frame.pack_configure(fill="x", padx=12, pady=(0, 10))
+            else:
+                key_frame.pack_forget()
         except Exception:
             pass
 

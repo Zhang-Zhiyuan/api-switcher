@@ -6,7 +6,24 @@ from models.auto_continue import (
     training_prompt_template_by_key,
     training_prompt_template_by_name,
 )
-from ui.theme import COLORS, button_style, center_window, combo_style, font, input_style, textbox_style
+from ui.theme import (
+    COLORS,
+    bind_wraplength,
+    button_style,
+    center_window,
+    combo_style,
+    font,
+    input_style,
+    textbox_style,
+)
+
+
+def _auto_continue_settings_layout(width: int) -> tuple[bool, int]:
+    """Return field/template stacking and template action columns."""
+    available = max(1, int(width))
+    stacked = available < 650
+    action_columns = 3 if available >= 420 else (2 if available >= 300 else 1)
+    return stacked, action_columns
 
 
 class AutoContinueSettingsDialog(ctk.CTkToplevel):
@@ -16,7 +33,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         super().__init__(master)
         self.title(f"{provider_name} 自动续跑设置")
         self.geometry("780x860")
-        self.minsize(680, 680)
+        self.minsize(400, 560)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.transient(master)
@@ -25,8 +42,13 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self.provider_name = provider_name
         self.settings = settings
         self._on_save = on_save
+        self._responsive_rows = []
+        self._responsive_after_id = None
+        self._responsive_state = None
 
         self._build_ui()
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
 
     def _build_ui(self):
@@ -39,12 +61,16 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             text_color=COLORS["text"],
             font=font(16, "bold"),
         ).pack(anchor="w")
-        ctk.CTkLabel(
+        header_description = ctk.CTkLabel(
             header,
             text="Stop 续跑、训练守护、Git 快照、API 恢复和权限自动确认分别独立控制。",
             text_color=COLORS["muted"],
             font=font(12),
-        ).pack(anchor="w", pady=(2, 0))
+            anchor="w",
+            justify="left",
+        )
+        header_description.pack(fill="x", anchor="w", pady=(2, 0))
+        bind_wraplength(header, header_description, padding=4, min_width=220, max_width=740)
 
         # Scrollable content
         scroll = ctk.CTkScrollableFrame(
@@ -89,49 +115,58 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             progress_color=COLORS["accent"],
         )
 
-        template_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        template_row.pack(fill="x", pady=(8, 2))
-        ctk.CTkLabel(
-            template_row,
+        self._training_template_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        self._training_template_row.pack(fill="x", pady=(8, 2))
+        self._training_template_label = ctk.CTkLabel(
+            self._training_template_row,
             text="Prompt 模板",
             text_color=COLORS["muted"],
             anchor="w",
             font=font(12),
             width=86,
-        ).pack(side="left")
+        )
         selected_template = training_prompt_template_by_key(self.settings.training_prompt_template_key)
         self._training_template_var = ctk.StringVar(value=selected_template["name"])
         template_names = [template["name"] for template in TRAINING_PROMPT_TEMPLATES]
         self._training_template_combo = ctk.CTkComboBox(
-            template_row,
+            self._training_template_row,
             variable=self._training_template_var,
             values=template_names,
             command=self._on_training_template_selected,
             width=210,
             **combo_style(),
         )
-        self._training_template_combo.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            template_row,
+        apply_template_button = ctk.CTkButton(
+            self._training_template_row,
             text="应用",
             width=58,
             command=lambda: self._apply_training_template(append=False),
             **button_style("accent", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
-            template_row,
+        )
+        append_template_button = ctk.CTkButton(
+            self._training_template_row,
             text="追加",
             width=58,
             command=lambda: self._apply_training_template(append=True),
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
-            template_row,
+        )
+        restore_template_button = ctk.CTkButton(
+            self._training_template_row,
             text="恢复默认",
             width=86,
             command=self._restore_default_training_prompt,
             **button_style("secondary", compact=True),
-        ).pack(side="left")
+        )
+        self._training_template_buttons = [
+            apply_template_button,
+            append_template_button,
+            restore_template_button,
+        ]
+        self._training_template_row.grid_columnconfigure(1, weight=1)
+        self._training_template_label.grid(row=0, column=0, sticky="w")
+        self._training_template_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        for index, button in enumerate(self._training_template_buttons, start=2):
+            button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 2 else 6, 0))
         self._training_template_desc = ctk.CTkLabel(
             scroll,
             text=selected_template["description"],
@@ -141,14 +176,18 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             font=font(11),
         )
         self._training_template_desc.pack(fill="x", pady=(0, 6))
+        bind_wraplength(scroll, self._training_template_desc, padding=8, min_width=220, max_width=740)
 
-        ctk.CTkLabel(
+        training_prompt_description = ctk.CTkLabel(
             scroll,
             text="训练目标/续跑指令（可手写，也可先套模板再改指标）",
             text_color=COLORS["muted"],
             anchor="w",
+            justify="left",
             font=font(12),
-        ).pack(fill="x", pady=(10, 2))
+        )
+        training_prompt_description.pack(fill="x", pady=(10, 2))
+        bind_wraplength(scroll, training_prompt_description, padding=8, min_width=220, max_width=740)
         self._training_prompt_text = ctk.CTkTextbox(scroll, height=150, **textbox_style())
         self._training_prompt_text.insert("1.0", self.settings.training_continue_prompt)
         self._training_prompt_text.pack(fill="x", pady=(0, 6))
@@ -172,13 +211,16 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 "auto_approve_max_per_session",
                 str(self.settings.auto_approve_max_per_session),
             )
-            ctk.CTkLabel(
+            permission_tools_description = ctk.CTkLabel(
                 scroll,
                 text="自动确认工具（每行一个，支持 * 通配；默认包含 Bash/Edit/MultiEdit/Write/NotebookEdit）",
                 text_color=COLORS["muted"],
                 anchor="w",
+                justify="left",
                 font=font(12),
-            ).pack(fill="x", pady=(10, 2))
+            )
+            permission_tools_description.pack(fill="x", pady=(10, 2))
+            bind_wraplength(scroll, permission_tools_description, padding=8, min_width=220, max_width=740)
             self._auto_approve_tools_text = ctk.CTkTextbox(scroll, height=70, **textbox_style(monospace=True))
             self._auto_approve_tools_text.insert("1.0", "\n".join(self.settings.auto_approve_tools))
             self._auto_approve_tools_text.pack(fill="x", pady=(0, 10))
@@ -253,6 +295,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             anchor="w"
         )
         git_help_text.pack(anchor="w")
+        bind_wraplength(git_help_frame, git_help_text, padding=4, min_width=220, max_width=740)
 
         self._add_section(scroll, "识别规则", "中英文正则规则；未完成会继续，阻塞会停止并等待用户。")
         ctk.CTkLabel(scroll, text="未完成模式 (正则表达式)", text_color=COLORS["text"], font=font(13, "bold")).pack(
@@ -268,12 +311,24 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         self._blocker_text.pack(fill="x", pady=(0, 10))
 
         # Buttons
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=15, pady=(0, 15))
-        self._error_label = ctk.CTkLabel(btn_frame, text="", text_color=COLORS["danger"], font=font(12))
-        self._error_label.pack(side="left")
-        ctk.CTkButton(btn_frame, text="取消", command=self.destroy, **button_style("secondary")).pack(side="right", padx=5)
-        ctk.CTkButton(btn_frame, text="保存", command=self._save, **button_style("primary")).pack(side="right")
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=15, pady=(0, 15))
+        self._error_label = ctk.CTkLabel(
+            footer,
+            text="",
+            text_color=COLORS["danger"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._error_label.pack(fill="x", pady=(0, 5))
+        bind_wraplength(footer, self._error_label, padding=4, min_width=220, max_width=740)
+        button_row = ctk.CTkFrame(footer, fg_color="transparent")
+        button_row.pack(fill="x")
+        ctk.CTkButton(button_row, text="取消", command=self.destroy, **button_style("secondary")).pack(
+            side="right", padx=(5, 0)
+        )
+        ctk.CTkButton(button_row, text="保存", command=self._save, **button_style("primary")).pack(side="right")
 
     def _add_section(self, parent, title, subtitle):
         ctk.CTkLabel(
@@ -282,14 +337,16 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             text_color=COLORS["text"],
             font=font(14, "bold"),
         ).pack(anchor="w", pady=(16, 2))
-        ctk.CTkLabel(
+        subtitle_label = ctk.CTkLabel(
             parent,
             text=subtitle,
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
             justify="left",
-        ).pack(fill="x", pady=(0, 6))
+        )
+        subtitle_label.pack(fill="x", pady=(0, 6))
+        bind_wraplength(parent, subtitle_label, padding=8, min_width=220, max_width=740)
 
     def _add_switch(self, parent, text, variable, progress_color=None, padx=(0, 0)):
         switch = ctk.CTkSwitch(
@@ -314,23 +371,132 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
                 switch.configure(state=state)
 
     def _add_note(self, parent, text):
-        ctk.CTkLabel(
+        note = ctk.CTkLabel(
             parent,
             text=text,
             text_color=COLORS["muted"],
             font=font(11),
             anchor="w",
             justify="left",
-        ).pack(fill="x", pady=(2, 10))
+        )
+        note.pack(fill="x", pady=(2, 10))
+        bind_wraplength(parent, note, padding=8, min_width=220, max_width=740)
 
     def _add_field(self, parent, label, key, value):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text=label, width=190, anchor="w", text_color=COLORS["muted"], font=font(12)).pack(side="left")
+        label_widget = ctk.CTkLabel(
+            row,
+            text=label,
+            width=190,
+            anchor="w",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        label_widget.pack(side="left")
         entry = ctk.CTkEntry(row, width=400, **input_style())
         entry.insert(0, value)
         entry.pack(side="left", fill="x", expand=True)
+        self._responsive_rows.append((label_widget, entry))
         setattr(self, f"_{key}_entry", entry)
+
+    def _logical_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_window_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_after_id = self.after_idle(apply_layout) if delay_ms <= 0 else self.after(
+                delay_ms, apply_layout
+            )
+        except Exception:
+            self._responsive_after_id = None
+
+    def _apply_responsive_layout(self) -> None:
+        stacked, action_columns = _auto_continue_settings_layout(self._logical_width())
+        state = (stacked, action_columns)
+        if state == self._responsive_state:
+            return
+        self._responsive_state = state
+
+        for label, entry in self._responsive_rows:
+            label.pack_forget()
+            entry.pack_forget()
+            if stacked:
+                label.configure(width=0)
+                entry.configure(width=1)
+                label.pack(side="top", fill="x", anchor="w")
+                entry.pack(side="top", fill="x", expand=True, pady=(3, 0))
+            else:
+                label.configure(width=190)
+                entry.configure(width=400)
+                label.pack(side="left")
+                entry.pack(side="left", fill="x", expand=True)
+
+        template_widgets = (
+            self._training_template_label,
+            self._training_template_combo,
+            *self._training_template_buttons,
+        )
+        for widget in template_widgets:
+            widget.grid_forget()
+        for column in range(5):
+            self._training_template_row.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if stacked:
+            for column in range(action_columns):
+                self._training_template_row.grid_columnconfigure(
+                    column,
+                    weight=1,
+                    uniform="auto-continue-template-actions",
+                )
+            self._training_template_label.configure(width=0)
+            self._training_template_combo.configure(width=1)
+            self._training_template_label.grid(
+                row=0,
+                column=0,
+                columnspan=action_columns,
+                sticky="ew",
+            )
+            self._training_template_combo.grid(
+                row=1,
+                column=0,
+                columnspan=action_columns,
+                sticky="ew",
+                pady=(3, 6),
+            )
+            for index, button in enumerate(self._training_template_buttons):
+                column = index % action_columns
+                button.grid(
+                    row=2 + index // action_columns,
+                    column=column,
+                    sticky="ew",
+                    padx=(0 if column == 0 else 6, 0),
+                    pady=(0 if index < action_columns else 6, 0),
+                )
+        else:
+            self._training_template_row.grid_columnconfigure(1, weight=1)
+            self._training_template_label.configure(width=86)
+            self._training_template_combo.configure(width=210)
+            self._training_template_label.grid(row=0, column=0, sticky="w")
+            self._training_template_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+            for index, button in enumerate(self._training_template_buttons, start=2):
+                button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 2 else 6, 0))
 
     def _selected_training_template(self) -> dict[str, str]:
         name = self._training_template_var.get()

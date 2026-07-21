@@ -3,6 +3,69 @@ import customtkinter as ctk
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 
 
+def _profile_card_action_columns(width: int, item_count: int) -> int:
+    """Choose readable action columns for the card's logical width."""
+
+    count = max(1, int(item_count))
+    available = max(1, int(width))
+    if available >= 420:
+        columns = 5
+    elif available >= 280:
+        columns = 3
+    elif available >= 180:
+        columns = 2
+    else:
+        columns = 1
+    return min(count, columns)
+
+
+def _bind_profile_card_action_grid(container, buttons) -> None:
+    """Keep profile actions reachable without overflowing at high DPI."""
+
+    widgets = tuple(buttons)
+    if not widgets:
+        return
+    state = {"columns": 0}
+
+    def apply_layout(event=None):
+        try:
+            width = int(getattr(event, "width", 0) or container.winfo_width())
+            try:
+                scaling = float(container._get_widget_scaling())
+            except (AttributeError, TypeError, ValueError):
+                scaling = 1.0
+            if scaling > 0:
+                width = round(width / scaling)
+            columns = _profile_card_action_columns(width, len(widgets))
+            if columns == state["columns"]:
+                return
+
+            previous = state["columns"]
+            state["columns"] = columns
+            for column in range(max(previous, columns)):
+                container.grid_columnconfigure(
+                    column,
+                    weight=1 if column < columns else 0,
+                    minsize=0,
+                    uniform="profile-card-actions" if column < columns else "",
+                )
+            for index, button in enumerate(widgets):
+                column = index % columns
+                has_following_row = index // columns < (len(widgets) - 1) // columns
+                button.grid(
+                    row=index // columns,
+                    column=column,
+                    sticky="ew",
+                    padx=(0 if column == 0 else 6, 0),
+                    pady=(0, 6 if has_following_row else 0),
+                )
+        except Exception:
+            return
+
+    container.bind("<Configure>", apply_layout, add="+")
+    apply_layout()
+
+
 class ProfileCard(ctk.CTkFrame):
     """A card widget displaying a profile summary with action buttons."""
 
@@ -83,15 +146,18 @@ class ProfileCard(ctk.CTkFrame):
             actions_row = ctk.CTkFrame(self, fg_color="transparent")
             actions_row.pack(fill="x", padx=14, pady=(0, 8))
             btn_frame = ctk.CTkFrame(actions_row, fg_color="transparent")
-            btn_frame.pack(anchor="e")
-            for index, (text, width, kind, command) in enumerate(actions):
-                ctk.CTkButton(
+            btn_frame.pack(fill="x")
+            action_buttons = []
+            for text, width, kind, command in actions:
+                button = ctk.CTkButton(
                     btn_frame,
                     text=text,
                     width=width,
                     command=command,
                     **button_style(kind, compact=True),
-                ).pack(side="left", padx=(0, 6 if index < len(actions) - 1 else 0))
+                )
+                action_buttons.append(button)
+            _bind_profile_card_action_grid(btn_frame, action_buttons)
 
         # Info lines
         info_frame = ctk.CTkFrame(self, fg_color="transparent")

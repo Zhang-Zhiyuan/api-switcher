@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from ui import theme
-from ui.app import MAIN_LAYOUT_COMPACT_MIN_WIDTH, MAIN_LAYOUT_WIDE_MIN_WIDTH, main_layout_mode
-from ui.widgets.adaptive_tab_bar import AdaptiveTabBar, adaptive_tab_columns
+from ui.app import MAIN_LAYOUT_COMPACT_MIN_WIDTH, MAIN_LAYOUT_WIDE_MIN_WIDTH, app_status_severity, main_layout_mode
+from ui.dialogs.auto_continue_settings import _auto_continue_settings_layout
+from ui.tabs.common_tab import _storage_action_columns
+from ui.widgets.adaptive_tab_bar import AdaptiveTabBar, adaptive_tab_columns, adaptive_tab_uses_dropdown
+from ui.widgets.profile_card import _profile_card_action_columns
+from ui.widgets.proxy_quality_panel import _proxy_quality_service_row_layout, _proxy_quality_toolbar_layout
 from ui.widgets.toast import _toast_wraplength
 from ui.startup_splash import _splash_layout
 from ui.dialogs.auto_continue_logs_dialog import _auto_continue_logs_layout
@@ -31,6 +35,35 @@ def test_window_layout_preserves_preferred_size_on_large_screen():
     )
 
     assert layout == theme.WindowLayout(1120, 760, 480, 460, 400, 160)
+
+
+def _relative_luminance(color: str) -> float:
+    channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast_ratio(first: str, second: str) -> float:
+    lighter, darker = sorted((_relative_luminance(first), _relative_luminance(second)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_small_text_and_button_palettes_have_readable_contrast():
+    colors = theme.COLORS
+    assert _contrast_ratio(colors["muted_soft"], colors["surface_alt"]) >= 4.5
+
+    assert _contrast_ratio(colors["danger"], colors["surface"]) >= 4.5
+    button_palettes = (
+        ("text", "primary", "primary_hover"),
+        ("text", "secondary", "secondary_hover"),
+        ("text", "danger_fill", "danger_fill_hover"),
+        ("app_bg", "warning", "warning_hover"),
+        ("app_bg", "success", "success_hover"),
+        ("app_bg", "accent", "accent_hover"),
+    )
+    for foreground, normal, hover in button_palettes:
+        assert _contrast_ratio(colors[foreground], colors[normal]) >= 4.5
+        assert _contrast_ratio(colors[foreground], colors[hover]) >= 4.5
 
 
 def test_window_layout_fits_small_high_dpi_work_area_without_double_scaling():
@@ -134,10 +167,49 @@ def test_main_layout_breakpoints_are_stable():
 
 
 def test_adaptive_tab_columns_wrap_all_destinations():
-    assert adaptive_tab_columns(1120, 11) == 10
+    assert adaptive_tab_columns(1120, 11) == 11
+    assert adaptive_tab_columns(1000, 11) == 6
     assert adaptive_tab_columns(720, 11) == 6
     assert adaptive_tab_columns(480, 11) == 4
     assert adaptive_tab_columns(80, 11) == 1
+
+    assert adaptive_tab_uses_dropdown(575) is True
+    assert adaptive_tab_uses_dropdown(576) is False
+    assert adaptive_tab_uses_dropdown(480, item_count=4) is False
+
+
+def test_status_bar_assigns_semantic_states():
+    assert app_status_severity("正在刷新页面...") == "busy"
+    assert app_status_severity("已刷新全部页面") == "success"
+    assert app_status_severity("切换预览已打开") == "success"
+    assert app_status_severity("代理质量检测设置已保存") == "success"
+    assert app_status_severity("暂无已加载页面") == "warning"
+    assert app_status_severity("配置加载失败") == "error"
+    assert app_status_severity("等待操作") == "info"
+
+
+def test_new_card_and_toolbar_actions_wrap_before_overflow():
+    assert _profile_card_action_columns(420, 5) == 5
+    assert _profile_card_action_columns(419, 5) == 3
+    assert _profile_card_action_columns(279, 5) == 2
+    assert _profile_card_action_columns(179, 5) == 1
+
+    assert _storage_action_columns(520, 5) == 5
+    assert _storage_action_columns(519, 5) == 3
+    assert _storage_action_columns(329, 5) == 2
+    assert _storage_action_columns(219, 5) == 1
+
+    assert _proxy_quality_toolbar_layout(720) == (3, 3, True)
+    assert _proxy_quality_toolbar_layout(719) == (2, 2, False)
+    assert _proxy_quality_toolbar_layout(419) == (1, 1, False)
+    assert _proxy_quality_service_row_layout(620) == "wide"
+    assert _proxy_quality_service_row_layout(619) == "compact"
+    assert _proxy_quality_service_row_layout(359) == "narrow"
+
+    assert _auto_continue_settings_layout(650) == (False, 3)
+    assert _auto_continue_settings_layout(649) == (True, 3)
+    assert _auto_continue_settings_layout(419) == (True, 2)
+    assert _auto_continue_settings_layout(299) == (True, 1)
 
 
 def test_adaptive_tab_selection_only_restyles_changed_buttons():

@@ -31,19 +31,21 @@ COLORS = {
     "border_soft": "#2a323d",
     "text": "#f3f6fb",
     "muted": "#a0a9b5",
-    "muted_soft": "#737d8a",
-    "primary": "#3578f6",
-    "primary_hover": "#2563eb",
+    "muted_soft": "#87919f",
+    "primary": "#2563eb",
+    "primary_hover": "#1d4ed8",
     "success": "#2fbf71",
     "success_hover": "#24995a",
-    "danger": "#ef4444",
-    "danger_hover": "#dc2626",
+    "danger": "#f87171",
+    "danger_hover": "#ef4444",
+    "danger_fill": "#d32626",
+    "danger_fill_hover": "#b91c1c",
     "warning": "#e6a23c",
     "warning_hover": "#c98218",
     "secondary": "#303946",
     "secondary_hover": "#414c5d",
     "accent": "#14a6a8",
-    "accent_hover": "#0d8688",
+    "accent_hover": "#0f9294",
 }
 
 
@@ -279,10 +281,10 @@ def button_style(kind: str = "primary", compact: bool = False) -> dict:
     palette = {
         "primary": ("primary", "primary_hover", "text"),
         "secondary": ("secondary", "secondary_hover", "text"),
-        "danger": ("danger", "danger_hover", "text"),
-        "warning": ("warning", "warning_hover", "text"),
-        "success": ("success", "success_hover", "text"),
-        "accent": ("accent", "accent_hover", "text"),
+        "danger": ("danger_fill", "danger_fill_hover", "text"),
+        "warning": ("warning", "warning_hover", "app_bg"),
+        "success": ("success", "success_hover", "app_bg"),
+        "accent": ("accent", "accent_hover", "app_bg"),
     }
     fg, hover, text = palette.get(kind, palette["primary"])
     return {

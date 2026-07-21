@@ -26,6 +26,69 @@ OVERVIEW_TEXTBOX_SCROLL_IDLE_MS = 850
 OVERVIEW_TEXTBOX_RETRY_MS = 260
 
 
+def _storage_action_columns(width: int, item_count: int) -> int:
+    """Choose storage action columns from the container's logical width."""
+
+    count = max(1, int(item_count))
+    available = max(1, int(width))
+    if available >= 520:
+        columns = 5
+    elif available >= 330:
+        columns = 3
+    elif available >= 220:
+        columns = 2
+    else:
+        columns = 1
+    return min(count, columns)
+
+
+def _bind_storage_action_grid(container, buttons) -> None:
+    """Wrap storage actions in a DPI-aware, equal-width grid."""
+
+    widgets = tuple(buttons)
+    if not widgets:
+        return
+    state = {"columns": 0}
+
+    def apply_layout(event=None):
+        try:
+            width = int(getattr(event, "width", 0) or container.winfo_width())
+            try:
+                scaling = float(container._get_widget_scaling())
+            except (AttributeError, TypeError, ValueError):
+                scaling = 1.0
+            if scaling > 0:
+                width = round(width / scaling)
+            columns = _storage_action_columns(width, len(widgets))
+            if columns == state["columns"]:
+                return
+
+            previous = state["columns"]
+            state["columns"] = columns
+            for column in range(max(previous, columns)):
+                container.grid_columnconfigure(
+                    column,
+                    weight=1 if column < columns else 0,
+                    minsize=0,
+                    uniform="storage-actions" if column < columns else "",
+                )
+            for index, button in enumerate(widgets):
+                column = index % columns
+                has_following_row = index // columns < (len(widgets) - 1) // columns
+                button.grid(
+                    row=index // columns,
+                    column=column,
+                    sticky="ew",
+                    padx=(0 if column == 0 else 6, 0),
+                    pady=(0, 6 if has_following_row else 0),
+                )
+        except Exception:
+            return
+
+    container.bind("<Configure>", apply_layout, add="+")
+    apply_layout()
+
+
 def _build_storage_info_text(info: dict) -> str:
     source_labels = {
         paths.ENV_DATA_DIR: "环境变量",
@@ -286,41 +349,48 @@ class CommonTab(ctk.CTkScrollableFrame):
 
         storage_buttons = ctk.CTkFrame(storage_frame, fg_color="transparent")
         storage_buttons.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkButton(
+        storage_action_buttons = []
+        open_button = ctk.CTkButton(
             storage_buttons,
             text="打开数据目录",
             width=108,
             command=self._open_data_dir,
             **button_style("primary", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        )
+        storage_action_buttons.append(open_button)
+        copy_button = ctk.CTkButton(
             storage_buttons,
             text="复制路径",
             width=78,
             command=self._copy_data_dir,
             **button_style("secondary", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        )
+        storage_action_buttons.append(copy_button)
+        choose_button = ctk.CTkButton(
             storage_buttons,
             text="选择目录",
             width=86,
             command=self._choose_data_dir,
             **button_style("accent", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        )
+        storage_action_buttons.append(choose_button)
+        portable_button = ctk.CTkButton(
             storage_buttons,
             text="便携模式",
             width=86,
             command=self._enable_portable_mode,
             **button_style("success", compact=True),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        )
+        storage_action_buttons.append(portable_button)
+        restore_button = ctk.CTkButton(
             storage_buttons,
             text="恢复默认",
             width=86,
             command=self._restore_default_storage,
             **button_style("warning", compact=True),
-        ).pack(side="left")
+        )
+        storage_action_buttons.append(restore_button)
+        _bind_storage_action_grid(storage_buttons, storage_action_buttons)
 
         # --- Current Config Overview ---
         overview_frame = ctk.CTkFrame(self, **card_frame_kwargs())

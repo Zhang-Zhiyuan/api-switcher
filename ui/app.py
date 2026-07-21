@@ -61,6 +61,21 @@ def main_layout_mode(width: int) -> str:
     return "narrow"
 
 
+def app_status_severity(message: str) -> str:
+    """Infer a concise visual state for status-bar messages."""
+
+    text = str(message or "")
+    if any(token in text for token in ("失败", "错误", "异常")):
+        return "error"
+    if any(token in text for token in ("取消", "暂无", "不能", "请勿", "不可")):
+        return "warning"
+    if any(token in text for token in ("正在", "加载中", "启动中", "读取中", "生成中")):
+        return "busy"
+    if "已" in text or any(token in text for token in ("完成", "就绪", "成功")):
+        return "success"
+    return "info"
+
+
 class _LazyTrayManager:
     """Delay tray imports until tray support is actually needed."""
 
@@ -353,8 +368,11 @@ class App(ctk.CTk):
             text="就绪",
             text_color=COLORS["muted"],
             font=font(11),
+            anchor="w",
+            justify="left",
         )
-        self._status.pack(anchor="w", padx=10, pady=6)
+        self._status.pack(fill="x", anchor="w", padx=10, pady=6)
+        bind_wraplength(footer, self._status, padding=20, min_width=180, max_width=1400)
         self.bind("<Configure>", self._schedule_main_layout, add="+")
         self.after_idle(self._apply_main_layout)
         self._schedule_ui_callback_pump(delay_ms=UI_CALLBACK_IDLE_POLL_MS)
@@ -497,12 +515,20 @@ class App(ctk.CTk):
             **button_style("secondary"),
         ).pack()
 
-    def _set_app_status(self, message: str):
+    def _set_app_status(self, message: str, severity: str | None = None):
         status = getattr(self, "_status", None)
         if status is None:
             return
         try:
-            status.configure(text=message)
+            resolved = severity or app_status_severity(message)
+            color = {
+                "busy": COLORS["accent"],
+                "success": COLORS["success"],
+                "warning": COLORS["warning"],
+                "error": COLORS["danger"],
+                "info": COLORS["muted"],
+            }.get(resolved, COLORS["muted"])
+            status.configure(text=message, text_color=color)
         except Exception as exc:
             logger.debug("Failed to update status bar: %s", exc)
 
@@ -1119,7 +1145,7 @@ class App(ctk.CTk):
                 def update_status():
                     if self._exit_requested:
                         return
-                    self._status.configure(text=message)
+                    self._set_app_status(message)
                     self._refresh_loaded_tab("_local_proxy_tab")
 
                 self._run_on_ui_thread(update_status)
@@ -1129,7 +1155,7 @@ class App(ctk.CTk):
 
                 def update_error():
                     if not self._exit_requested:
-                        self._status.configure(text=f"Win11 本机代理自启失败: {error_message}")
+                        self._set_app_status(f"Win11 本机代理自启失败: {error_message}")
 
                 self._run_on_ui_thread(update_error)
 
@@ -1257,7 +1283,7 @@ class App(ctk.CTk):
                 switcher.switch_claude_profile(profile_name)
 
                 show_toast(self, f"已切换 Claude API 配置: {profile_name}")
-                self._status.configure(text=f"已切换 Claude API 配置: {profile_name}")
+                self._set_app_status(f"已切换 Claude API 配置: {profile_name}")
 
                 self._refresh_loaded_tab("_claude_tab")
                 self._refresh_loaded_tab("_usage_stats_tab")
@@ -1302,7 +1328,7 @@ class App(ctk.CTk):
                 switcher.switch_codex_profile(profile_name)
 
                 show_toast(self, f"已切换 Codex API 配置: {profile_name}")
-                self._status.configure(text=f"已切换 Codex API 配置: {profile_name}")
+                self._set_app_status(f"已切换 Codex API 配置: {profile_name}")
 
                 self._refresh_loaded_tab("_codex_tab")
                 self._refresh_loaded_tab("_usage_stats_tab")
@@ -1608,7 +1634,7 @@ class App(ctk.CTk):
                 return
             self._refresh_loaded_tab("_usage_stats_tab")
             self._load_quick_switch_profiles(delay_ms=0)
-            self._status.configure(text=f"已从托盘切换 {label} 配置: {profile_name}")
+            self._set_app_status(f"已从托盘切换 {label} 配置: {profile_name}")
 
         self._run_on_ui_thread(refresh_profile_state)
 
@@ -1717,7 +1743,7 @@ class App(ctk.CTk):
             self.after(30, tab.refresh)
         else:
             self._schedule_tab_load(ENV_TAB_LABEL, delay_ms=1)
-        self._status.configure(text="已打开环境变量管理")
+        self._set_app_status("已打开环境变量管理")
 
     def _show_proxy_quality_dialog(self):
         try:
@@ -1738,11 +1764,11 @@ class App(ctk.CTk):
                 on_settings_saved=self._on_proxy_quality_settings_saved,
             )
             self._proxy_quality_dialog = dialog
-            self._status.configure(text="已打开代理质量检测")
+            self._set_app_status("已打开代理质量检测")
             return dialog
         except Exception as exc:
             logger.error("Failed to open proxy quality dialog: %s", exc, exc_info=True)
-            self._status.configure(text=f"代理质量检测打开失败: {exc}")
+            self._set_app_status(f"代理质量检测打开失败: {exc}")
             try:
                 from ui.widgets.toast import show_toast
 
@@ -1776,23 +1802,23 @@ class App(ctk.CTk):
             if tab and hasattr(tab, "refresh"):
                 tabs.append((label, tab))
         if not tabs:
-            self._status.configure(text="暂无已加载页面需要刷新")
+            self._set_app_status("暂无已加载页面需要刷新")
             self._load_quick_switch_profiles()
             return
 
-        self._status.configure(text=f"正在刷新已加载页面 0/{len(tabs)}...")
+        self._set_app_status(f"正在刷新已加载页面 0/{len(tabs)}...")
 
         def refresh_next(index: int = 0):
             if self._exit_requested:
                 return
             if index >= len(tabs):
-                self._status.configure(text="已刷新已加载页面和快捷菜单")
+                self._set_app_status("已刷新已加载页面和快捷菜单")
                 if self.tray_manager.is_running():
                     self.tray_manager.update_menu()
                 self._load_quick_switch_profiles()
                 return
             label, tab = tabs[index]
-            self._status.configure(text=f"正在刷新 {label} ({index + 1}/{len(tabs)})...")
+            self._set_app_status(f"正在刷新 {label} ({index + 1}/{len(tabs)})...")
             try:
                 if tab.winfo_exists():
                     tab.refresh()
@@ -1818,7 +1844,7 @@ class App(ctk.CTk):
                 restored = backup_manager.restore_backup(entry)
                 self.refresh_all()
                 show_toast(self, f"已回滚 {len(restored)} 个配置文件")
-                self._status.configure(text=f"已回滚到备份: {entry.timestamp}")
+                self._set_app_status(f"已回滚到备份: {entry.timestamp}")
             except Exception as e:
                 logger.error(f"Failed to restore latest backup: {e}", exc_info=True)
                 show_toast(self, f"回滚失败: {e}", is_error=True)
