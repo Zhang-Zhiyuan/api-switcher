@@ -577,7 +577,8 @@ class AutoContinueControl(ctk.CTkFrame):
             if settings:
                 info_lines.append(
                     f"Stop续跑: {'ON' if settings.enabled else 'OFF'} / "
-                    f"最大 {settings.max_continuations} / 保守 {'ON' if settings.conservative_mode else 'OFF'}"
+                    f"最大 {settings.max_continuations} / 停滞熔断 {settings.max_stagnant_continuations} / "
+                    f"保守 {'ON' if settings.conservative_mode else 'OFF'}"
                 )
                 info_lines.append(
                     f"训练续跑: {'ON' if settings.training_auto_continue_enabled else 'OFF'}"

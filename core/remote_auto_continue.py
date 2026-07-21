@@ -9,6 +9,7 @@ import json
 import logging
 import posixpath
 import shlex
+import stat
 from typing import Any
 
 from core import profile_manager, remote_config, security
@@ -280,6 +281,39 @@ def _remove_remote_file(client, path: str) -> None:
                 pass
 
 
+def _remove_remote_files_with_prefix(client, directory: str, prefix: str) -> None:
+    """Best-effort removal for dynamically named state sidecars."""
+    sftp = None
+    try:
+        sftp = client.open_sftp()
+        for name in sftp.listdir(directory):
+            name_text = str(name)
+            suffix = name_text[len(prefix) :] if name_text.startswith(prefix) else ""
+            if len(suffix) != 64 or any(char not in "0123456789abcdefABCDEF" for char in suffix):
+                continue
+            remote_path = posixpath.join(directory, name_text)
+            try:
+                attributes = sftp.lstat(remote_path)
+            except (FileNotFoundError, OSError):
+                continue
+            if not stat.S_ISREG(attributes.st_mode):
+                continue
+            sftp.remove(remote_path)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        if "No such file" not in str(e):
+            logger.debug(f"Failed to remove remote files {directory}/{prefix}*: {e}")
+    except Exception as e:
+        logger.debug(f"Failed to remove remote files {directory}/{prefix}*: {e}")
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
 def _read_text(client, path: str) -> str | None:
     return ssh_manager.read_remote_file(client, path)
 
@@ -412,9 +446,9 @@ def _probe_remote_environment(client) -> dict:
         "printf 'os='; (uname -s 2>/dev/null || printf unknown); printf '\\n'; "
         "printf 'sh='; (command -v sh 2>/dev/null || true); printf '\\n'; "
         "printf 'python='; "
-        "if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' 2>/dev/null; then "
+        "if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then "
         "command -v python3; "
-        "elif command -v python >/dev/null 2>&1 && python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' 2>/dev/null; then "
+        "elif command -v python >/dev/null 2>&1 && python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then "
         "command -v python; "
         "fi; printf '\\n'; "
         "printf 'git='; (command -v git 2>/dev/null || true); printf '\\n'; "
@@ -444,7 +478,7 @@ def _ensure_runtime_ready(env: dict) -> None:
     if not env.get("sh"):
         raise RuntimeError("远端缺少 sh，无法运行自动续跑 hook")
     if not env.get("python"):
-        raise RuntimeError("远端缺少 Python 3.6+，无法运行自动续跑判断逻辑")
+        raise RuntimeError("远端缺少 Python 3.7+，无法运行自动续跑判断逻辑")
 
 
 def _ensure_runtime_ready_with_git(env: dict, require_git: bool = False) -> None:
@@ -673,9 +707,9 @@ def _generate_remote_hook_script(
             'INPUT_PATH="$STATE_DIR/auto_continue_input_$$.json"',
             'cat > "$INPUT_PATH" 2>/dev/null || true',
             'PYTHON_BIN=""',
-            'if command -v python3 >/dev/null 2>&1 && python3 -c \'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)\' 2>/dev/null; then',
+            'if command -v python3 >/dev/null 2>&1 && python3 -c \'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)\' 2>/dev/null; then',
             '  PYTHON_BIN="$(command -v python3)"',
-            'elif command -v python >/dev/null 2>&1 && python -c \'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)\' 2>/dev/null; then',
+            'elif command -v python >/dev/null 2>&1 && python -c \'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)\' 2>/dev/null; then',
             '  PYTHON_BIN="$(command -v python)"',
             "fi",
             'if [ -n "$PYTHON_BIN" ]; then',
@@ -684,6 +718,7 @@ def _generate_remote_hook_script(
     )
     body = r'''
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -694,6 +729,16 @@ import subprocess
 import sys
 import time
 import urllib.parse
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX remote hosts always provide it
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - only used by Windows-based tests
+    msvcrt = None
 
 
 DEFAULT_GITIGNORE_LINES = [
@@ -730,6 +775,9 @@ DEFAULT_GITIGNORE_LINES = [
 ]
 
 PROVIDER_NAME = __PROVIDER_NAME__
+AUTO_CONTINUE_STATE_TTL_SECONDS = 24 * 60 * 60
+AUTO_CONTINUE_STATE_META_KEY = "__auto_continue_state_meta_v2__"
+GIT_SNAPSHOT_BUDGET_SECONDS = 5.0
 
 
 def log(message, level="INFO"):
@@ -771,12 +819,38 @@ def flatten_text(value):
     if isinstance(value, list):
         return "\n".join(part for part in (flatten_text(v) for v in value) if part)
     if isinstance(value, dict):
+        block_type = str(value.get("type") or "").strip().lower()
+        if block_type in {
+            "tool_use",
+            "tool_result",
+            "thinking",
+            "redacted_thinking",
+            "metadata",
+            "image",
+            "input_json_delta",
+        }:
+            return ""
         for key in ("text", "content", "message", "body"):
             text = flatten_text(value.get(key))
             if text:
                 return text
-        return "\n".join(part for part in (flatten_text(v) for v in value.values()) if part)
+        # Hook payload dictionaries contain tool inputs, reasoning metadata and
+        # identifiers alongside user-visible text. Do not recursively scan
+        # arbitrary values: only the explicitly visible fields above may drive
+        # continuation decisions.
+        return ""
     return str(value)
+
+
+def has_nonempty_hook_collection(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    try:
+        return len(value) > 0
+    except Exception:
+        return bool(value)
 
 
 def normalize_text(text):
@@ -822,7 +896,8 @@ def transcript_tail(path):
             content = obj.get("content") or obj.get("text") or obj
         else:
             continue
-        if role and role != "assistant":
+        record_type = str(obj.get("type") or "") if isinstance(obj, dict) else ""
+        if role.lower() != "assistant" and record_type.lower() != "assistant":
             continue
         text = flatten_text(content)
         if text.strip():
@@ -1349,21 +1424,7 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
     state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
     max_recoveries = int_setting(settings, "max_error_recoveries", 3, 0, 10)
     lock_path = state_path + ".lock"
-    lock_fd = None
-    for _ in range(20):
-        try:
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            break
-        except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(lock_path) > 60:
-                    os.unlink(lock_path)
-                    continue
-            except FileNotFoundError:
-                continue
-            except Exception:
-                pass
-            time.sleep(0.1)
+    lock_fd = acquire_state_lock(lock_path)
     if lock_fd is None:
         log("Failed to acquire error recovery state lock", "WARN")
         return True
@@ -1391,16 +1452,7 @@ def handle_error_recovery(data, settings, state_dir, is_claude, session_id):
         if compact_recovery and recovery_count > max_recoveries:
             log(f"Compact recovery is retry-until-success; ignoring max_error_recoveries={max_recoveries}", "INFO")
     finally:
-        try:
-            if lock_fd is not None:
-                os.close(lock_fd)
-        finally:
-            try:
-                os.unlink(lock_path)
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
+        release_state_lock(lock_fd, lock_path)
 
     git_commit_hash = ""
     if as_bool(settings.get("git_auto_snapshot"), True) and as_bool(settings.get("git_snapshot_on_recovery"), True):
@@ -1625,34 +1677,460 @@ def save_state(path, data):
     write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
-def acquire_state_lock(lock_path, attempts=20, stale_seconds=60):
+def acquire_state_lock(lock_path, attempts=20, stale_seconds=None):
+    # The lock path is intentionally persistent. flock is tied to the open file
+    # description, so a slow owner cannot accidentally unlink a successor's
+    # lock. Existing lock files from the legacy O_EXCL implementation are safe
+    # to reuse because an unlocked persistent file is immediately acquirable.
+    del stale_seconds
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     for _ in range(attempts):
+        lock_fd = None
         try:
-            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(lock_path) > stale_seconds:
-                    os.unlink(lock_path)
-                    continue
-            except FileNotFoundError:
-                continue
-            except Exception:
-                pass
+            lock_fd = os.open(lock_path, flags, 0o600)
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif msvcrt is not None:
+                if os.fstat(lock_fd).st_size < 1:
+                    os.write(lock_fd, b"\0")
+                    os.fsync(lock_fd)
+                os.lseek(lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
+            else:
+                raise RuntimeError("No supported file-locking backend")
+            return lock_fd
+        except OSError as exc:
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                log(f"Failed to acquire state lock: {exc}", "WARN")
+                return None
             time.sleep(0.1)
+        except Exception as exc:
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+            log(f"Failed to acquire state lock: {exc}", "WARN")
+            return None
     return None
 
 
-def release_state_lock(lock_fd, lock_path):
+def release_state_lock(lock_fd, lock_path=None):
+    del lock_path
+    if lock_fd is None:
+        return
     try:
-        if lock_fd is not None:
-            os.close(lock_fd)
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            os.lseek(lock_fd, 0, os.SEEK_SET)
+            msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+    except OSError as exc:
+        log(f"Failed to release state lock cleanly: {exc}", "WARN")
     finally:
         try:
-            os.unlink(lock_path)
-        except FileNotFoundError:
+            os.close(lock_fd)
+        except OSError:
             pass
+
+
+def auto_continue_scope_hash(session_id):
+    seed = f"{PROVIDER_NAME}|{session_id}"
+    return hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()
+
+
+def auto_continue_message_hash(message):
+    return hashlib.sha256(str(message or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def state_file_timestamp(state_path, default=None):
+    fallback = time.time() if default is None else float(default)
+    try:
+        return float(os.path.getmtime(state_path))
+    except Exception:
+        return fallback
+
+
+def state_value_timestamp(value, fallback):
+    raw = value.get("updated_at") if isinstance(value, dict) else fallback
+    try:
+        timestamp = float(raw)
+    except Exception:
+        timestamp = float(fallback)
+    return timestamp
+
+
+def state_value_expired(value, fallback, now=None):
+    current = time.time() if now is None else float(now)
+    updated_at = state_value_timestamp(value, fallback)
+    return current - updated_at >= AUTO_CONTINUE_STATE_TTL_SECONDS
+
+
+def migrate_legacy_auto_continue_state(state, state_path, now=None):
+    """Upgrade every v1 scalar once using the pre-write state-file mtime."""
+    current = time.time() if now is None else float(now)
+    fallback = state_file_timestamp(state_path, current)
+    changed = False
+    for key, value in list(state.items()):
+        if key == AUTO_CONTINUE_STATE_META_KEY or isinstance(value, dict):
+            continue
+        state[key] = {
+            "count": as_int(value, 0),
+            "updated_at": fallback,
+            "message_hash": "",
+            "repeat_count": 0,
+            # A hash key is intentionally one-way. Unknown legacy sessions stay
+            # unscoped until that exact key is next used, or expire by TTL.
+            "scope_hash": "",
+        }
+        changed = True
+    return changed
+
+
+def prune_expired_auto_continue_state(state, state_path, now=None):
+    current = time.time() if now is None else float(now)
+    fallback = state_file_timestamp(state_path, current)
+    changed = False
+    for key, value in list(state.items()):
+        if key == AUTO_CONTINUE_STATE_META_KEY:
+            if not isinstance(value, dict):
+                state.pop(key, None)
+                changed = True
+                continue
+            consumed = value.get("consumed_scope_resets")
+            if not isinstance(consumed, dict):
+                state.pop(key, None)
+                changed = True
+                continue
+            for scope, record in list(consumed.items()):
+                consumed_at = state_value_timestamp(record, fallback)
+                if current - consumed_at >= AUTO_CONTINUE_STATE_TTL_SECONDS:
+                    consumed.pop(scope, None)
+                    changed = True
+            if not consumed:
+                state.pop(key, None)
+                changed = True
+            continue
+        if state_value_expired(value, fallback, current):
+            state.pop(key, None)
+            changed = True
+    return changed
+
+
+def normalize_auto_continue_record(value, scope_hash, state_path, now=None):
+    current = time.time() if now is None else float(now)
+    fallback = state_file_timestamp(state_path, current)
+    if state_value_expired(value, fallback, current):
+        value = None
+    if isinstance(value, dict):
+        count = as_int(value.get("count"), 0)
+        message_hash = str(value.get("message_hash") or "")
+        repeat_count = as_int(value.get("repeat_count"), 0)
+        updated_at = state_value_timestamp(value, fallback)
+    else:
+        # v1 stored the count directly. Preserve a fresh legacy count, while
+        # using the state file mtime as its TTL timestamp.
+        count = as_int(value, 0)
+        message_hash = ""
+        repeat_count = 0
+        updated_at = fallback
+    return {
+        "count": count,
+        "updated_at": updated_at,
+        "message_hash": message_hash,
+        "repeat_count": repeat_count,
+        "scope_hash": scope_hash,
+    }
+
+
+def pending_scope_reset_path(state_path, scope_hash):
+    return f"{state_path}.reset.{scope_hash}"
+
+
+def write_pending_scope_reset(state_path, scope_hash):
+    marker_path = pending_scope_reset_path(state_path, scope_hash)
+    try:
+        created_at = time.time()
+        marker_id = hashlib.sha256(
+            f"{marker_path}|{created_at!r}|{os.getpid()}".encode("utf-8", errors="replace")
+        ).hexdigest()
+        write_text_atomic(
+            marker_path,
+            json.dumps({"id": marker_id, "created_at": created_at}, separators=(",", ":")),
+        )
+        return marker_id
+    except Exception as exc:
+        log(f"Failed to persist pending auto-continue scope reset: {exc}", "WARN")
+        return ""
+
+
+def read_pending_scope_reset(state_path, scope_hash):
+    marker_path = pending_scope_reset_path(state_path, scope_hash)
+    try:
+        stat_result = os.stat(marker_path)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log(f"Failed to inspect pending auto-continue scope reset: {exc}", "WARN")
+        return None
+
+    raw = ""
+    try:
+        with open(marker_path, "r", encoding="utf-8", errors="replace") as handle:
+            raw = handle.read().strip()
+    except Exception:
+        # A corrupt marker is still a pending reset. Its stable stat-derived id
+        # makes consumption idempotent even if cleanup keeps failing.
+        pass
+
+    marker_id = ""
+    created_at = float(stat_result.st_mtime)
+    if raw:
+        try:
+            payload = json.loads(raw)
         except Exception:
-            pass
+            payload = None
+        if isinstance(payload, dict):
+            marker_id = str(payload.get("id") or "")
+            try:
+                created_at = float(payload.get("created_at"))
+            except Exception:
+                created_at = float(stat_result.st_mtime)
+        else:
+            # Compatibility with the original marker, which stored a timestamp.
+            try:
+                created_at = float(raw)
+            except Exception:
+                created_at = float(stat_result.st_mtime)
+    if not marker_id:
+        marker_id = hashlib.sha256(
+            f"{marker_path}|{raw}|{stat_result.st_mtime_ns}|{stat_result.st_size}".encode(
+                "utf-8", errors="replace"
+            )
+        ).hexdigest()
+    return {"id": marker_id, "created_at": created_at, "path": marker_path}
+
+
+def remove_pending_scope_reset(state_path, scope_hash, expected_marker_id=""):
+    if expected_marker_id:
+        current = read_pending_scope_reset(state_path, scope_hash)
+        if current is None:
+            return True
+        if current["id"] != expected_marker_id:
+            # Another prompt has already replaced this marker. Its owner must
+            # consume it; deleting it here would lose that newer reset.
+            return False
+    try:
+        os.unlink(pending_scope_reset_path(state_path, scope_hash))
+        return True
+    except FileNotFoundError:
+        return True
+    except Exception as exc:
+        log(f"Failed to remove pending auto-continue scope reset: {exc}", "WARN")
+        return False
+
+
+def remove_scope_entries(state, scope_hash, legacy_state_keys=None):
+    legacy_state_keys = set(legacy_state_keys or ())
+    changed = False
+    for key, value in list(state.items()):
+        if key == AUTO_CONTINUE_STATE_META_KEY:
+            continue
+        matches_scope = isinstance(value, dict) and str(value.get("scope_hash") or "") == scope_hash
+        if matches_scope or key in legacy_state_keys:
+            state.pop(key, None)
+            changed = True
+    return changed
+
+
+def consumed_scope_reset_record(state, scope_hash):
+    metadata = state.get(AUTO_CONTINUE_STATE_META_KEY)
+    if not isinstance(metadata, dict):
+        return None
+    consumed = metadata.get("consumed_scope_resets")
+    if not isinstance(consumed, dict):
+        return None
+    record = consumed.get(scope_hash)
+    return record if isinstance(record, dict) else None
+
+
+def record_consumed_scope_reset(state, scope_hash, marker, now, expired):
+    metadata = state.get(AUTO_CONTINUE_STATE_META_KEY)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        state[AUTO_CONTINUE_STATE_META_KEY] = metadata
+    consumed = metadata.get("consumed_scope_resets")
+    if not isinstance(consumed, dict):
+        consumed = {}
+        metadata["consumed_scope_resets"] = consumed
+    consumed[scope_hash] = {
+        "marker_id": marker["id"],
+        "marker_created_at": marker["created_at"],
+        "updated_at": now,
+        "expired": bool(expired),
+    }
+
+
+def forget_consumed_scope_reset(state, scope_hash):
+    metadata = state.get(AUTO_CONTINUE_STATE_META_KEY)
+    if not isinstance(metadata, dict):
+        return False
+    consumed = metadata.get("consumed_scope_resets")
+    if not isinstance(consumed, dict) or scope_hash not in consumed:
+        return False
+    consumed.pop(scope_hash, None)
+    if not consumed:
+        state.pop(AUTO_CONTINUE_STATE_META_KEY, None)
+    return True
+
+
+def has_unscoped_auto_continue_entries(state):
+    return any(
+        key != AUTO_CONTINUE_STATE_META_KEY
+        and isinstance(value, dict)
+        and not str(value.get("scope_hash") or "")
+        for key, value in state.items()
+    )
+
+
+def reset_legacy_state_key_after_scope_reset(state, state_key, scope_hash):
+    """Lazily reset an unscoped v1 key after a prompt reset for this scope."""
+    reset_record = consumed_scope_reset_record(state, scope_hash)
+    entry = state.get(state_key)
+    if not reset_record or not isinstance(entry, dict):
+        return False
+    if as_bool(reset_record.get("expired"), False):
+        # An expired marker is maintenance debris, not a valid prompt reset.
+        # In particular, it must not reset a freshly migrated legacy count.
+        return False
+    if str(entry.get("scope_hash") or ""):
+        return False
+    reset_at = state_value_timestamp(reset_record, 0.0)
+    entry_updated_at = state_value_timestamp(entry, 0.0)
+    if reset_at <= 0 or entry_updated_at > reset_at:
+        return False
+    state.pop(state_key, None)
+    return True
+
+
+def consume_pending_scope_reset_locked(
+    state,
+    state_path,
+    scope_hash,
+    legacy_state_keys=None,
+    now=None,
+):
+    marker = read_pending_scope_reset(state_path, scope_hash)
+    if marker is None:
+        return False, None
+    current = time.time() if now is None else float(now)
+    previous = consumed_scope_reset_record(state, scope_hash)
+    if previous and str(previous.get("marker_id") or "") == marker["id"]:
+        return False, marker
+
+    expired = current - float(marker["created_at"]) >= AUTO_CONTINUE_STATE_TTL_SECONDS
+    if not expired:
+        remove_scope_entries(state, scope_hash, legacy_state_keys)
+    record_consumed_scope_reset(state, scope_hash, marker, current, expired)
+    return True, marker
+
+
+def clear_state_scope(state_path, scope_hash, legacy_state_keys=None):
+    marker_id = write_pending_scope_reset(state_path, scope_hash)
+    lock_path = state_path + ".lock"
+    lock_fd = acquire_state_lock(lock_path)
+    if lock_fd is None:
+        log("Failed to acquire state scope reset lock", "WARN")
+        if marker_id or read_pending_scope_reset(state_path, scope_hash) is not None:
+            log("Deferred auto-continue scope reset until the next Stop hook", "WARN")
+        return False
+
+    success = False
+    consumed_marker = None
+    try:
+        state_file_exists = os.path.exists(state_path)
+        state = load_state(state_path)
+        now = time.time()
+        changed = migrate_legacy_auto_continue_state(state, state_path, now)
+        changed = prune_expired_auto_continue_state(state, state_path, now) or changed
+        marker_changed, consumed_marker = consume_pending_scope_reset_locked(
+            state,
+            state_path,
+            scope_hash,
+            legacy_state_keys,
+            now,
+        )
+        if consumed_marker is not None:
+            changed = marker_changed or changed
+            marker_removed = remove_pending_scope_reset(
+                state_path,
+                scope_hash,
+                consumed_marker["id"],
+            )
+            if marker_removed and not has_unscoped_auto_continue_entries(state):
+                changed = forget_consumed_scope_reset(state, scope_hash) or changed
+                consumed_marker = None
+        else:
+            changed = remove_scope_entries(state, scope_hash, legacy_state_keys) or changed
+        if state_file_exists or state:
+            save_state(state_path, state)
+        success = True
+    except Exception as exc:
+        log(f"Failed to reset auto-continue state scope: {exc}", "WARN")
+    finally:
+        release_state_lock(lock_fd, lock_path)
+
+    if success:
+        if consumed_marker is not None:
+            remove_pending_scope_reset(state_path, scope_hash, consumed_marker["id"])
+        return True
+    return False
+
+
+def maintain_auto_continue_state_for_stop(state_path, scope_hash, state_key):
+    """Run migration, TTL pruning, and pending reset before Stop classification."""
+    lock_path = state_path + ".lock"
+    lock_fd = acquire_state_lock(lock_path)
+    if lock_fd is None:
+        log("Failed to acquire state maintenance lock", "WARN")
+        return False
+    success = False
+    consumed_marker = None
+    try:
+        state = load_state(state_path)
+        now = time.time()
+        changed = migrate_legacy_auto_continue_state(state, state_path, now)
+        changed = prune_expired_auto_continue_state(state, state_path, now) or changed
+        marker_changed, consumed_marker = consume_pending_scope_reset_locked(
+            state,
+            state_path,
+            scope_hash,
+            [state_key],
+            now,
+        )
+        changed = marker_changed or changed
+        changed = reset_legacy_state_key_after_scope_reset(
+            state,
+            state_key,
+            scope_hash,
+        ) or changed
+        if changed:
+            save_state(state_path, state)
+        success = True
+    except Exception as exc:
+        log(f"Failed to maintain auto-continue state: {exc}", "WARN")
+    finally:
+        release_state_lock(lock_fd, lock_path)
+    if success and consumed_marker is not None:
+        remove_pending_scope_reset(state_path, scope_hash, consumed_marker["id"])
+    return success
 
 
 def clear_state_key(state_path, state_key):
@@ -1664,7 +2142,10 @@ def clear_state_key(state_path, state_key):
     try:
         state_file_exists = os.path.exists(state_path)
         state = load_state(state_path)
-        changed = state_key in state
+        now = time.time()
+        changed = migrate_legacy_auto_continue_state(state, state_path, now)
+        changed = prune_expired_auto_continue_state(state, state_path, now) or changed
+        changed = state_key in state or changed
         state.pop(state_key, None)
         # Saving an existing invalid/non-dict file also repairs it.
         if state_file_exists or changed:
@@ -1789,39 +2270,100 @@ def ensure_gitignore():
         log(f"Failed to create local .gitignore: {exc}", "WARN")
 
 
-def push_git_snapshot(auto_push=False):
-    if not auto_push:
+def terminate_git_process_tree(process):
+    if process is None:
+        return
+    if os.name != "nt":
+        try:
+            # git push commonly starts ssh/credential helpers. Every Git
+            # command gets its own POSIX session, so kill the whole process
+            # group rather than leaving a network child behind after timeout.
+            # Do this even if the group leader has already exited: a helper may
+            # still own an inherited pipe and keep communicate() waiting.
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except (AttributeError, OSError):
+            pass
+    if process.poll() is not None:
         return
     try:
-        upstream = subprocess.run(
+        process.kill()
+    except OSError:
+        pass
+
+
+def git_command(args, deadline, capture=False, combine_stderr=False):
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(args, GIT_SNAPSHOT_BUDGET_SECONDS)
+    popen_kwargs = {
+        "stdout": subprocess.PIPE if capture else subprocess.DEVNULL,
+        "stderr": subprocess.STDOUT if combine_stderr else subprocess.DEVNULL,
+        "universal_newlines": True,
+    }
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(args, **popen_kwargs)
+    try:
+        stdout, _stderr = process.communicate(timeout=max(0.05, remaining))
+    except subprocess.TimeoutExpired as exc:
+        terminate_git_process_tree(process)
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait()
+        if process.stdout is not None:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+        raise subprocess.TimeoutExpired(
+            args,
+            GIT_SNAPSHOT_BUDGET_SECONDS,
+            output=getattr(exc, "output", None),
+        )
+    except Exception:
+        terminate_git_process_tree(process)
+        try:
+            process.wait(timeout=1.0)
+        except Exception:
+            pass
+        raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout=stdout)
+
+
+def push_git_snapshot(auto_push=False, deadline=None):
+    if not auto_push:
+        return
+    if deadline is None:
+        deadline = time.monotonic() + GIT_SNAPSHOT_BUDGET_SECONDS
+    try:
+        upstream = git_command(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
+            deadline,
+            capture=True,
         )
         if upstream.returncode == 0 and upstream.stdout.strip():
-            push = subprocess.run(
+            push = git_command(
                 ["git", "push"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=60,
+                deadline,
+                capture=True,
+                combine_stderr=True,
             )
         else:
-            branch = subprocess.run(
+            branch = git_command(
                 ["git", "branch", "--show-current"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=5,
+                deadline,
+                capture=True,
             )
-            remotes = subprocess.run(
+            remotes = git_command(
                 ["git", "remote"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=5,
+                deadline,
+                capture=True,
             )
             if branch.returncode != 0 or remotes.returncode != 0:
                 log("Git auto push skipped: failed to inspect branch or remotes", "WARN")
@@ -1832,18 +2374,19 @@ def push_git_snapshot(auto_push=False):
                 log("Git auto push skipped: no upstream or remote", "WARN")
                 return
             remote_name = "origin" if "origin" in remote_names else remote_names[0]
-            push = subprocess.run(
+            push = git_command(
                 ["git", "push", "-u", remote_name, branch_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=60,
+                deadline,
+                capture=True,
+                combine_stderr=True,
             )
         if push.returncode != 0:
             first_line = next((line.strip() for line in push.stdout.splitlines() if line.strip()), "unknown error")
             log(f"Git auto push failed: {first_line}", "WARN")
             return
         log("Git auto push completed")
+    except subprocess.TimeoutExpired:
+        log("Git auto push skipped: snapshot time budget exhausted", "WARN")
     except Exception as exc:
         log(f"Git auto push failed: {exc}", "WARN")
 
@@ -1852,29 +2395,23 @@ def run_git_snapshot(auto_push=False):
     if not shutil.which("git"):
         return ""
 
-    def run(args, timeout=15):
-        return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
-
+    deadline = time.monotonic() + GIT_SNAPSHOT_BUDGET_SECONDS
     try:
         initialized_repo = False
-        git_dir_result = subprocess.run(
+        git_dir_result = git_command(
             ["git", "rev-parse", "--git-dir"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
+            deadline,
+            capture=True,
         )
         if git_dir_result.returncode != 0:
-            initialized_repo = run(["git", "init"]).returncode == 0
+            initialized_repo = git_command(["git", "init"], deadline).returncode == 0
             if not initialized_repo:
                 log("Git init did not complete; skipping git snapshot", "WARN")
                 return ""
-            git_dir_result = subprocess.run(
+            git_dir_result = git_command(
                 ["git", "rev-parse", "--git-dir"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=5,
+                deadline,
+                capture=True,
             )
             if git_dir_result.returncode != 0 or not git_dir_result.stdout.strip():
                 log("Git directory could not be resolved after init; skipping git snapshot", "WARN")
@@ -1888,12 +2425,11 @@ def run_git_snapshot(auto_push=False):
             log("Git index lock exists; skipping git snapshot", "WARN")
             return ""
 
-        status = subprocess.run(
+        status = git_command(
             ["git", "status", "--porcelain"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15,
+            deadline,
+            capture=True,
+            combine_stderr=True,
         )
         if status.returncode != 0:
             first_line = next((line.strip() for line in status.stdout.splitlines() if line.strip()), "unknown error")
@@ -1902,44 +2438,47 @@ def run_git_snapshot(auto_push=False):
         if not status.stdout.strip():
             return ""
 
-        add_result = run(["git", "add", "-A"], timeout=30)
+        add_result = git_command(["git", "add", "-A"], deadline)
         if add_result.returncode != 0:
             log("Git add did not complete; skipping git snapshot", "WARN")
             return ""
-        username = subprocess.run(
+        username = git_command(
             ["git", "config", "user.name"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
+            deadline,
+            capture=True,
         )
-        email = subprocess.run(
+        email = git_command(
             ["git", "config", "user.email"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
+            deadline,
+            capture=True,
         )
         if not username.stdout.strip() or not email.stdout.strip():
-            run(["git", "config", "user.name", "API-Switcher-Auto"], timeout=5)
-            run(["git", "config", "user.email", "auto@api-switcher.local"], timeout=5)
+            git_command(["git", "config", "user.name", "API-Switcher-Auto"], deadline)
+            git_command(["git", "config", "user.email", "auto@api-switcher.local"], deadline)
 
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        commit = run(["git", "commit", "--no-verify", "-m", f"[git-snapshot] {stamp}"], timeout=30)
+        commit = git_command(
+            ["git", "commit", "--no-verify", "-m", f"[git-snapshot] {stamp}"],
+            deadline,
+        )
         if commit.returncode != 0:
             log("Git snapshot commit did not complete", "WARN")
             return ""
-        rev = subprocess.run(
+        rev = git_command(
             ["git", "rev-parse", "--short", "HEAD"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
+            deadline,
+            capture=True,
         )
         commit_hash = rev.stdout.strip() if rev.returncode == 0 else ""
         if commit_hash:
-            push_git_snapshot(auto_push)
+            push_git_snapshot(auto_push, deadline)
         return commit_hash
+    except subprocess.TimeoutExpired:
+        log(
+            f"Git snapshot skipped after {GIT_SNAPSHOT_BUDGET_SECONDS:.0f}s time budget",
+            "WARN",
+        )
+        return ""
     except Exception as exc:
         log(f"Git snapshot failed: {exc}", "WARN")
         return ""
@@ -2033,29 +2572,95 @@ def main():
         # Error events are never Stop events. Unknown or disabled recovery must
         # fail open instead of feeding error text into generic continuation.
         return
+
+    scope_hash = ""
+    state_key = ""
+    stop_state_path = ""
+    if hook_event in STOP_SNAPSHOT_EVENTS:
+        os.makedirs(state_dir, exist_ok=True)
+        scope_hash = auto_continue_scope_hash(session_id)
+        state_seed = f"{PROVIDER_NAME}|{session_id}|{hook_event}|{agent_id}"
+        state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
+        stop_state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
+        # Reset markers, v1 migration and TTL pruning must happen before every
+        # Stop classification, including background/terminal/blocker exits.
+        maintain_auto_continue_state_for_stop(stop_state_path, scope_hash, state_key)
+
     if error_recovery_enabled and not is_claude and has_error_payload:
         if handle_error_recovery(data, settings, state_dir, is_claude, session_id):
             return
 
+    if (
+        is_claude
+        and hook_event == "Stop"
+        and (
+            has_nonempty_hook_collection(data.get("background_tasks"))
+            or has_nonempty_hook_collection(data.get("backgroundTasks"))
+            or has_nonempty_hook_collection(data.get("session_crons"))
+            or has_nonempty_hook_collection(data.get("sessionCrons"))
+        )
+    ):
+        # Claude documents these fields on the main Stop payload. Background
+        # work owns the continuation lifecycle, so do not snapshot, inspect
+        # regexes, or consume the user's continuation budget yet.
+        os.makedirs(state_dir, exist_ok=True)
+        background_message = normalize_text(
+            pick_text(
+                data,
+                [
+                    "last_assistant_message",
+                    "lastAssistantMessage",
+                    "last_message",
+                    "lastMessage",
+                    "assistant_message",
+                    "assistantMessage",
+                    "message",
+                    "content",
+                    "text",
+                ],
+            )
+        )
+        write_decision_log(
+            os.path.join(state_dir, "auto_continue_stop_log.jsonl"),
+            session_id,
+            hook_event,
+            agent_id,
+            "allow_stop",
+            "background_work_pending",
+            message=background_message,
+        )
+        return
+
     git_snapshot_attempted = False
     git_snapshot_hash = ""
     if hook_event in PROMPT_SNAPSHOT_EVENTS:
-        if auto_continue_enabled or training_auto_continue_enabled:
+        session_start_source = str(
+            data.get("source")
+            or data.get("session_start_source")
+            or data.get("sessionStartSource")
+            or ""
+        ).strip().lower()
+        resets_chain = hook_event == "UserPromptSubmit" or (
+            hook_event == "SessionStart"
+            and session_start_source in {"startup", "clear"}
+        )
+        if resets_chain and (auto_continue_enabled or training_auto_continue_enabled):
             os.makedirs(state_dir, exist_ok=True)
             prompt_state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
+            prompt_scope_hash = auto_continue_scope_hash(session_id)
             prompt_seed = f"{PROVIDER_NAME}|{session_id}|Stop|"
-            prompt_state_key = hashlib.sha256(prompt_seed.encode("utf-8", errors="replace")).hexdigest()
-            clear_state_key(prompt_state_path, prompt_state_key)
+            prompt_main_state_key = hashlib.sha256(
+                prompt_seed.encode("utf-8", errors="replace")
+            ).hexdigest()
+            clear_state_scope(
+                prompt_state_path,
+                prompt_scope_hash,
+                [prompt_main_state_key],
+            )
         if git_snapshot_enabled:
             git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
             git_snapshot_attempted = True
         return
-
-    # Stop hooks are the broadest safety net: they cover normal manual turns,
-    # auto-continue turns, and older Codex builds that do not emit prompt hooks.
-    if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:
-        git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
-        git_snapshot_attempted = True
 
     if is_claude and hook_event in {"PermissionRequest", "PreToolUse"}:
         if not auto_approve_enabled:
@@ -2088,21 +2693,7 @@ def main():
             state_path = os.path.join(state_dir, "auto_continue_permission_state.json")
             lock_path = state_path + ".lock"
 
-            lock_fd = None
-            for _ in range(5):
-                try:
-                    lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                    break
-                except FileExistsError:
-                    try:
-                        if time.time() - os.path.getmtime(lock_path) > 15:
-                            os.unlink(lock_path)
-                            continue
-                    except FileNotFoundError:
-                        continue
-                    except Exception:
-                        pass
-                    time.sleep(0.05)
+            lock_fd = acquire_state_lock(lock_path, attempts=5)
             if lock_fd is None:
                 return
 
@@ -2126,16 +2717,7 @@ def main():
                 state[state_key] = count
                 save_state(state_path, state)
             finally:
-                try:
-                    if lock_fd is not None:
-                        os.close(lock_fd)
-                finally:
-                    try:
-                        os.unlink(lock_path)
-                    except FileNotFoundError:
-                        pass
-                    except Exception:
-                        pass
+                release_state_lock(lock_fd, lock_path)
 
         write_jsonl(log_path, {
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -2201,17 +2783,22 @@ def main():
         return
 
     max_continuations = max_continuations_setting(settings.get("max_continuations"), 100)
-    if max_continuations == 0 or max_continuations < -1:
-        return
 
     if is_claude and as_bool(settings.get("conservative_mode"), True) and as_bool(data.get("stop_hook_active"), False):
         return
 
-    state_seed = f"{PROVIDER_NAME}|{session_id}|{hook_event}|{agent_id}"
-    state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
+    message_hash = auto_continue_message_hash(last_message)
+    if not scope_hash:
+        scope_hash = auto_continue_scope_hash(session_id)
+    if not state_key:
+        state_seed = f"{PROVIDER_NAME}|{session_id}|{hook_event}|{agent_id}"
+        state_key = hashlib.sha256(state_seed.encode("utf-8", errors="replace")).hexdigest()
+    max_stagnant_continuations = parse_int(settings.get("max_stagnant_continuations"), 3)
+    if not 0 <= max_stagnant_continuations <= 20:
+        max_stagnant_continuations = 3
 
     os.makedirs(state_dir, exist_ok=True)
-    state_path = os.path.join(state_dir, "auto_continue_stop_state.json")
+    state_path = stop_state_path or os.path.join(state_dir, "auto_continue_stop_state.json")
     log_path = os.path.join(state_dir, "auto_continue_stop_log.jsonl")
     lock_path = state_path + ".lock"
 
@@ -2332,93 +2919,119 @@ def main():
         else incomplete_match
     )
 
-    lock_fd = None
-    for _ in range(20):
-        try:
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            break
-        except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(lock_path) > 60:
-                    os.unlink(lock_path)
-                    continue
-            except FileNotFoundError:
-                continue
-            except Exception:
-                pass
-            time.sleep(0.1)
+    lock_fd = acquire_state_lock(lock_path)
     if lock_fd is None:
         log("Failed to acquire state lock", "WARN")
         return
 
+    post_lock_decision = ""
+    count = 0
+    continuation_prompt = ""
+    continue_reason = ""
+    pending_reset_marker = None
     try:
         state = load_state(state_path)
-        count = as_int(state.get(state_key), 0)
-        if max_continuations >= 0 and count >= max_continuations:
-            write_decision_log(
-                log_path,
-                session_id,
-                hook_event,
-                agent_id,
-                "allow_stop",
-                "max_continuations_reached",
-                matched_pattern,
-                last_message,
-                count,
-                git_commit_hash=git_snapshot_hash,
-            )
-            return
+        now = time.time()
+        migrate_legacy_auto_continue_state(state, state_path, now)
+        prune_expired_auto_continue_state(state, state_path, now)
+        _marker_changed, pending_reset_marker = consume_pending_scope_reset_locked(
+            state,
+            state_path,
+            scope_hash,
+            [state_key],
+            now,
+        )
+        reset_legacy_state_key_after_scope_reset(state, state_key, scope_hash)
 
-        count += 1
-        state[state_key] = count
-        save_state(state_path, state)
-
-        if training_guard_applies and not recoverable_api_error:
-            continuation_prompt = training_continue_prompt(settings)
+        record = normalize_auto_continue_record(
+            state.get(state_key),
+            scope_hash,
+            state_path,
+            now,
+        )
+        count = record["count"]
+        if record["message_hash"] and record["message_hash"] == message_hash:
+            repeat_count = record["repeat_count"] + 1
         else:
-            continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
-        continue_reason = (
-            "recoverable_api_error_detected"
-            if recoverable_api_error
-            else "training_guard_continue"
-            if training_guard_applies
-            else "incomplete_work_detected"
+            repeat_count = 1
+        record.update(
+            {
+                "updated_at": now,
+                "message_hash": message_hash,
+                "repeat_count": repeat_count,
+                "scope_hash": scope_hash,
+            }
         )
 
-        if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:
-            git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
+        if max_stagnant_continuations > 0 and repeat_count >= max_stagnant_continuations:
+            state[state_key] = record
+            post_lock_decision = "no_progress_detected"
+        elif max_continuations >= 0 and count >= max_continuations:
+            state[state_key] = record
+            post_lock_decision = "max_continuations_reached"
+        else:
+            count += 1
+            record["count"] = count
+            state[state_key] = record
 
+            if training_guard_applies and not recoverable_api_error:
+                continuation_prompt = training_continue_prompt(settings)
+            else:
+                continuation_prompt = settings.get("continuation_prompt") or "Please continue from where you left off. Complete any remaining work."
+            continue_reason = (
+                "recoverable_api_error_detected"
+                if recoverable_api_error
+                else "training_guard_continue"
+                if training_guard_applies
+                else "incomplete_work_detected"
+            )
+
+        save_state(state_path, state)
+    finally:
+        release_state_lock(lock_fd, lock_path)
+    if pending_reset_marker is not None:
+        remove_pending_scope_reset(state_path, scope_hash, pending_reset_marker["id"])
+
+    if post_lock_decision:
         write_decision_log(
             log_path,
             session_id,
             hook_event,
             agent_id,
-            "block_stop",
-            continue_reason,
+            "allow_stop",
+            post_lock_decision,
             matched_pattern,
             last_message,
             count,
-            continuation_prompt,
             git_commit_hash=git_snapshot_hash,
         )
+        return
 
-        output = {
-            "decision": "block",
-            "reason": continuation_prompt,
-            "suppressOutput": True,
-        }
-        print(json.dumps(output, ensure_ascii=False))
-    finally:
-        try:
-            if lock_fd is not None:
-                os.close(lock_fd)
-        finally:
-            try:
-                os.unlink(lock_path)
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
+    # State is durable and its lock is released before any potentially slow
+    # Git subprocess runs.
+    if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:
+        git_snapshot_hash = run_git_snapshot(as_bool(settings.get("git_auto_push"), False))
+
+    write_decision_log(
+        log_path,
+        session_id,
+        hook_event,
+        agent_id,
+        "block_stop",
+        continue_reason,
+        matched_pattern,
+        last_message,
+        count,
+        continuation_prompt,
+        git_commit_hash=git_snapshot_hash,
+    )
+
+    output = {
+        "decision": "block",
+        "reason": continuation_prompt,
+        "suppressOutput": True,
+    }
+    print(json.dumps(output, ensure_ascii=False))
 
 
 try:
@@ -2427,7 +3040,7 @@ except Exception as exc:
     log(f"Unexpected hook error: {exc}", "ERROR")
 PY
 else
-  echo "Python 3.6+ not found; auto-continue hook skipped" >&2
+  echo "Python 3.7+ not found; auto-continue hook skipped" >&2
 fi
 rm -f "$INPUT_PATH" 2>/dev/null || true
 exit 0
@@ -3392,6 +4005,11 @@ def uninstall_remote_auto_continue(ssh_name: str, provider_name: str) -> str:
         posixpath.join(paths.state_dir, "error_recovery_log.jsonl"),
     ]:
         _remove_remote_file(client, path)
+    _remove_remote_files_with_prefix(
+        client,
+        paths.state_dir,
+        "auto_continue_stop_state.json.reset.",
+    )
     _uninstall_guidance(client, paths.guidance_path)
 
     return f"已卸载 {ssh_profile.host} 的 {_provider_label(provider)} 远端自动续跑"
@@ -3419,7 +4037,7 @@ def get_remote_auto_continue_status(ssh_name: str, provider_name: str) -> Remote
     if not env.get("sh"):
         status.issues.append("缺少 sh")
     if not env.get("python"):
-        status.issues.append("缺少 Python 3.6+")
+        status.issues.append("缺少 Python 3.7+")
 
     status.hook_script_exists = _remote_file_exists(client, paths.script_path)
     if status.hook_script_exists:

@@ -94,6 +94,12 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             self._add_switch(scroll, "应用到 Claude Subagent (SubagentStop hook)", self._subagents_var)
 
         self._add_field(scroll, "最大续跑次数 (-1=不限)", "max_continuations", str(self.settings.max_continuations))
+        self._add_field(
+            scroll,
+            "相同回答熔断次数 (0=关闭)",
+            "max_stagnant_continuations",
+            str(self.settings.max_stagnant_continuations),
+        )
 
         # Continuation prompt
         prompt_label = ctk.CTkLabel(scroll, text="续跑提示语", text_color=COLORS["muted"], anchor="w", font=font(12))
@@ -531,11 +537,12 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
         try:
             # Collect values
             max_cont = int(self._max_continuations_entry.get())
+            max_stagnant = int(self._max_stagnant_continuations_entry.get())
             max_recoveries = int(self._max_error_recoveries_entry.get())
             retry_initial_delay = int(self._error_retry_initial_delay_seconds_entry.get())
             retry_max_delay = int(self._error_retry_max_delay_seconds_entry.get())
-            if max_cont < -1 or max_recoveries < 0:
-                raise ValueError("续跑次数必须为 -1 或非负数；恢复次数不能为负数")
+            if max_cont < -1 or max_stagnant < 0 or max_recoveries < 0:
+                raise ValueError("续跑次数必须为 -1 或非负数；熔断次数和恢复次数不能为负数")
             enabled = self._enabled_var.get()
             prompt = self._prompt_text.get("1.0", "end").strip()
             training_auto_continue = self._training_auto_continue_var.get()
@@ -571,6 +578,7 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
             new_settings = AutoContinueSettings(
                 enabled=enabled,
                 max_continuations=max_cont,
+                max_stagnant_continuations=max_stagnant,
                 continuation_prompt=prompt,
                 conservative_mode=conservative,
                 training_auto_continue_enabled=training_auto_continue,

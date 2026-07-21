@@ -223,7 +223,7 @@ def test_remote_unlimited_count_and_prompt_reset_use_one_chain(tmp_path):
     )
     assert unlimited.returncode == 0, unlimited.stderr
     assert json.loads(unlimited.stdout)["decision"] == "block"
-    assert json.loads(state_path.read_text(encoding="utf-8"))[unlimited_key] == 101
+    assert json.loads(state_path.read_text(encoding="utf-8"))[unlimited_key]["count"] == 101
 
     reset_seed = "codex|session-reset|Stop|"
     reset_key = hashlib.sha256(reset_seed.encode()).hexdigest()

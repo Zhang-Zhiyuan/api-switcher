@@ -251,11 +251,25 @@ class AutoContinueProvider(ABC):
                 "error_recovery_state.json.tmp",
                 "error_recovery_log.jsonl",
             ]
+            reset_marker_prefix = "auto_continue_stop_state.json.reset."
+            hex_characters = frozenset("0123456789abcdefABCDEF")
             for cleanup_dir in cleanup_dirs:
                 for name in cleanup_names:
                     path = cleanup_dir / name
                     if path.exists():
                         path.unlink()
+                # Reset markers contain only a SHA-256 scope digest. Restrict
+                # cleanup to an exact filename prefix plus 64 hexadecimal
+                # characters so similarly named user files and directories are
+                # never removed.
+                for marker_path in cleanup_dir.glob(f"{reset_marker_prefix}*"):
+                    suffix = marker_path.name[len(reset_marker_prefix):]
+                    is_scope_marker = (
+                        len(suffix) == 64
+                        and all(character in hex_characters for character in suffix)
+                    )
+                    if is_scope_marker and (marker_path.is_file() or marker_path.is_symlink()):
+                        marker_path.unlink()
         except Exception as e:
             errors.append(f"Failed to remove state files: {e}")
 

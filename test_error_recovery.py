@@ -447,20 +447,20 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert '$toolName -ieq "Bash"' not in local_script
     assert "tool_name.lower() == \"bash\"" not in remote_script
     assert '["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]' in remote_script
-    assert "git config user.email" in local_script
+    assert '@("config", "user.email")' in local_script
     assert "Ensure-LocalGitIgnore" in local_script
     assert "Get-Command git" in local_script
     assert "Get-BoolSetting" in local_script
     assert "Read-HookInput" in local_script
     assert "$initializedRepo = $false" in local_script
     assert "if ($initializedRepo)" in local_script
-    assert "\n        git add -A 2>&1 | Out-Null\n" in local_script
-    assert "git commit --no-verify" in local_script
+    assert '-Arguments @("add", "-A")' in local_script
+    assert '@("-c", "commit.gpgSign=false", "commit", "--no-verify", "-m", $commitMsg)' in local_script
     assert "Convert-HookDirectoryCandidateToPath" in local_script
     assert '"uri"' in local_script
     assert '"UserPromptSubmit", "SessionStart"' in local_script
-    assert '$stopSnapshotEvents = @("Stop", "SubagentStop")' in local_script
-    assert "Creating git snapshot on stop hook" in local_script
+    assert '$stopSnapshotEvents = @("Stop", "SubagentStop")' not in local_script
+    assert "Creating git snapshot on stop hook" not in local_script
     assert "Creating git snapshot before auto-continue" in local_script
     assert 'permissionDecision = "allow"' in local_script
     assert "auto_continue_permission_state.json" in local_script
@@ -475,14 +475,15 @@ def test_stop_hook_scripts_treat_compact_stream_disconnect_as_recoverable():
     assert '"uri"' in remote_script
     assert 'PROMPT_SNAPSHOT_EVENTS = {"UserPromptSubmit", "SessionStart"}' in remote_script
     assert 'STOP_SNAPSHOT_EVENTS = {"Stop", "SubagentStop"}' in remote_script
-    assert "if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled:" in remote_script
+    assert "if hook_event in STOP_SNAPSHOT_EVENTS and git_snapshot_enabled and not git_snapshot_attempted:" in remote_script
     assert '"permissionDecision": "allow"' in remote_script
     assert "auto_continue_permission_state.json" in remote_script
     assert "node_modules/" in remote_script
     assert ".env.*" in remote_script
-    assert "[System.IO.FileMode]::CreateNew" in local_script
+    assert "[System.IO.FileMode]::OpenOrCreate" in local_script
     assert "New-Item -Path $lockPath -ItemType File -Force" not in local_script
-    assert "os.O_CREAT | os.O_EXCL | os.O_WRONLY" in remote_script
+    assert "fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)" in remote_script
+    assert "flags = os.O_CREAT | os.O_RDWR" in remote_script
     assert "def replace_file(source, target):" in remote_script
     assert "def write_text_atomic(path, content):" in remote_script
     assert "write_text_atomic(path, json.dumps(data" in remote_script
@@ -1451,7 +1452,7 @@ def test_local_stop_hook_reads_claude_transcript_path(tmp_path):
     assert output["reason"] == "continue from transcript"
 
 
-def test_local_stop_hook_snapshots_completed_manual_turn(tmp_path):
+def test_local_stop_hook_skips_snapshot_for_completed_manual_turn(tmp_path):
     import subprocess
 
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
@@ -1497,19 +1498,8 @@ def test_local_stop_hook_snapshots_completed_manual_turn(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ""
-    assert (tmp_path / ".git").exists()
-    assert "Creating git snapshot on stop hook" in result.stderr
-
-    rev_parse = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
-        cwd=tmp_path,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=10,
-        check=False,
-    )
-    assert rev_parse.returncode == 0, rev_parse.stderr
+    assert not (tmp_path / ".git").exists()
+    assert "Creating git snapshot" not in result.stderr
 
 
 def test_local_session_start_hook_uses_payload_cwd_for_initial_git_snapshot(tmp_path):
@@ -2409,10 +2399,14 @@ def test_git_auto_push_is_wired_into_generated_hooks():
     assert '$gitAutoPush = Get-BoolSetting -Settings $settings -Name "git_auto_push" -Default $false' in local_script
     assert "function Push-GitSnapshot" in local_script
     assert "Push-GitSnapshot" in local_script
-    assert "git push -u $remote $branch" in local_script
+    assert "function Invoke-GitCommandWithTimeout" in local_script
+    assert "function Invoke-GitCommandWithinBudget" in local_script
+    assert '$pushArguments = @("-u", $remote, $branch)' in local_script
+    assert "$gitBudgetMilliseconds = 5000" in local_script
     assert "function Push-GitSnapshot" in error_script
     assert "git_auto_push" in error_script
-    assert "def push_git_snapshot(auto_push=False):" in remote_script
+    assert "def push_git_snapshot(auto_push=False, deadline=None):" in remote_script
+    assert "GIT_SNAPSHOT_BUDGET_SECONDS = 5.0" in remote_script
     assert 'run_git_snapshot(as_bool(settings.get("git_auto_push"), False))' in remote_script
     assert '["git", "push", "-u", remote_name, branch_name]' in remote_script
 

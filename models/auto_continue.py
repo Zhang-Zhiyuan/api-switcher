@@ -285,6 +285,7 @@ STRING_SETTING_FIELDS = {
 }
 INTEGER_SETTING_FIELDS = {
     "max_continuations",
+    "max_stagnant_continuations",
     "max_error_recoveries",
     "error_retry_initial_delay_seconds",
     "error_retry_max_delay_seconds",
@@ -393,6 +394,7 @@ class AutoContinueSettings:
 
     enabled: bool = False
     max_continuations: int = 100
+    max_stagnant_continuations: int = 3
     continuation_prompt: str = "Please continue from where you left off. Complete any remaining work."
     apply_to_subagents: bool = False
     conservative_mode: bool = True
@@ -425,6 +427,16 @@ class AutoContinueSettings:
 
         if self.max_continuations > 100:
             return False, "max_continuations too large (max: 100)"
+
+        if (
+            isinstance(self.max_stagnant_continuations, bool)
+            or not isinstance(self.max_stagnant_continuations, int)
+            or self.max_stagnant_continuations < 0
+        ):
+            return False, "max_stagnant_continuations must be a non-negative integer"
+
+        if self.max_stagnant_continuations > 20:
+            return False, "max_stagnant_continuations too large (max: 20)"
 
         if not isinstance(self.max_error_recoveries, int) or self.max_error_recoveries < 0:
             return False, "max_error_recoveries must be a non-negative integer"
