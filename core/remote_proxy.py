@@ -174,6 +174,13 @@ PROXY_SUBSCRIPTION_USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) API-Switcher/1.0",
 )
 
+# These are mihomo routing primitives, not usable subscription transports. If
+# accepted as a proxy-node ``type``, a crafted document could make a candidate
+# probe or a nominally strict config use bypass semantics.
+PROXY_NODE_FORBIDDEN_OUTBOUND_TYPES = frozenset(
+    {"direct", "pass", "reject", "reject-drop", "dns"}
+)
+
 
 def _strict_privacy_dns_config() -> dict:
     """Return the one DNS shape emitted and trusted for managed strict mode."""
@@ -806,7 +813,10 @@ def delete_proxy_subscription_profile(profile_id: str) -> dict:
             state["active_profile_id"] = ""
             for key in _PROXY_SUBSCRIPTION_PROFILE_FIELDS:
                 state.pop(key, None)
-        _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+        persisted_state = _persist_proxy_subscription_state(
+            _sync_active_profile_to_state(state)
+        )
+        _prune_unreferenced_proxy_subscription_caches(persisted_state)
         return copy.deepcopy(_active_proxy_subscription_profile(state) or {})
 
 
@@ -2492,6 +2502,10 @@ def _normalize_proxy_node(node: dict) -> dict:
         raise ValueError("代理节点缺少字段: " + "、".join(missing))
     for key in ("name", "type", "server"):
         parsed[key] = str(parsed[key]).strip()
+    if parsed["type"].casefold() in PROXY_NODE_FORBIDDEN_OUTBOUND_TYPES:
+        raise ValueError(
+            f"代理节点 type={parsed['type']} 是路由内置类型，不能作为上游节点"
+        )
     if parsed["type"].lower() == "hy2":
         parsed["type"] = "hysteria2"
     elif parsed["type"].lower() == "socks":
@@ -2524,8 +2538,7 @@ def build_mihomo_config(
     proxy_non_cn: bool = False,
     strict_privacy: bool = False,
 ) -> str:
-    node = dict(proxy_node)
-    node["port"] = _normalize_port(node.get("port"), "代理节点端口")
+    node = _normalize_proxy_node(proxy_node)
     display_name = str(node.get("name") or "AI_PROXY").strip() or "AI_PROXY"
     # Subscription display names share mihomo's outbound namespace with
     # built-ins and proxy groups.  Never let names such as DIRECT/REJECT/PASS
@@ -2624,6 +2637,14 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         for node in proxy_nodes or ()
         if isinstance(node, dict)
     ]
+    managed_node_valid = False
+    if isinstance(proxy_nodes, list) and len(proxy_nodes) == 1:
+        try:
+            _normalize_proxy_node(proxy_nodes[0])
+        except (TypeError, ValueError):
+            pass
+        else:
+            managed_node_valid = True
     ai_proxy_groups = [
         group
         for group in proxy_groups or ()
@@ -2638,6 +2659,7 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     proxy_group_contract_valid = bool(
         isinstance(proxy_nodes, list)
         and len(proxy_nodes) == 1
+        and managed_node_valid
         and node_names == [AI_PROXY_INTERNAL_NODE_NAME]
         and isinstance(proxy_groups, list)
         and len(proxy_groups) == 1
@@ -5334,6 +5356,46 @@ def _proxy_subscription_cache_path(url: str, payload: bytes, content_type: str) 
     return _proxy_subscription_dir() / f"subscription-{digest}{extension}"
 
 
+def _prune_unreferenced_proxy_subscription_caches(state: dict) -> int:
+    """Best-effort removal of managed node caches no profile references.
+
+    Cached subscription documents can contain live node credentials.  Limit
+    cleanup to direct children created by this module; never touch imported
+    source paths or arbitrary paths supplied through state.
+    """
+
+    directory = _proxy_subscription_dir()
+    profiles = state.get("profiles") if isinstance(state, dict) else None
+    referenced: set[Path] = set()
+    for profile in profiles.values() if isinstance(profiles, dict) else ():
+        if not isinstance(profile, dict):
+            continue
+        saved_path = str(profile.get("saved_path") or "").strip()
+        if not saved_path:
+            continue
+        try:
+            referenced.add(Path(saved_path).resolve(strict=False))
+        except (OSError, RuntimeError):
+            continue
+
+    removed = 0
+    try:
+        candidates = tuple(directory.glob("subscription-*"))
+    except OSError:
+        return 0
+    for candidate in candidates:
+        if candidate.suffix.casefold() not in {".yaml", ".yml", ".txt"}:
+            continue
+        try:
+            if candidate.resolve(strict=False) in referenced:
+                continue
+            candidate.unlink(missing_ok=True)
+            removed += 1
+        except (OSError, RuntimeError):
+            continue
+    return removed
+
+
 def _write_proxy_subscription_cache(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
@@ -5355,7 +5417,8 @@ def _commit_proxy_subscription_cache_and_state(
     previous_payload = cache_path.read_bytes() if cache_existed else None
     _write_proxy_subscription_cache(cache_path, payload)
     try:
-        _persist_proxy_subscription_state(state)
+        persisted_state = _persist_proxy_subscription_state(state)
+        _prune_unreferenced_proxy_subscription_caches(persisted_state)
     except Exception as state_error:
         try:
             if previous_payload is None:
@@ -5676,7 +5739,9 @@ pid_managed() {{
     return 1
   fi
   if ! command -v ps >/dev/null 2>&1; then
-    return 0
+    # Never trust only a reusable PID number.  Without process identity
+    # evidence, restart mode must not risk terminating an unrelated process.
+    return 1
   fi
   cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
   case "$cmd" in
@@ -5732,11 +5797,26 @@ nohup "$BIN" -d "$CONFIG_DIR" >>"$LOG_FILE" 2>&1 &
 echo "$!" > "$PID_FILE"
 sleep 2
 new_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+cleanup_new_process() {{
+  if [ -n "$new_pid" ] && kill -0 "$new_pid" 2>/dev/null; then
+    kill "$new_pid" 2>/dev/null || true
+    for _ in 1 2 3; do
+      kill -0 "$new_pid" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$new_pid" 2>/dev/null; then
+      kill -9 "$new_pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$PID_FILE"
+}}
 if [ -z "$new_pid" ] || ! kill -0 "$new_pid" 2>/dev/null; then
+  rm -f "$PID_FILE"
   echo "mihomo failed to stay running; see $LOG_FILE" >&2
   exit 2
 fi
 if ! pid_managed "$new_pid"; then
+  cleanup_new_process
   echo "started process is not recognized as mihomo/clash; see $LOG_FILE" >&2
   exit 7
 fi
@@ -5747,6 +5827,7 @@ for _ in 1 2 3 4 5; do
   sleep 1
 done
 if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+  cleanup_new_process
   echo "mihomo is running but port $PORT is not listening yet; see $LOG_FILE" >&2
   exit 3
 fi
@@ -6398,7 +6479,8 @@ request = urllib.request.Request(
     headers={{"Content-Type": "application/json"}},
     method="PUT",
 )
-with urllib.request.urlopen(request, timeout=8) as response:
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+with opener.open(request, timeout=8) as response:
     code = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
     if not (200 <= code < 300):
         raise SystemExit(f"mihomo reload HTTP {{code}}")
@@ -6406,7 +6488,7 @@ PY
   exit $?
 fi
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS -X PUT -H 'Content-Type: application/json' --data "$PAYLOAD" "$URL" >/dev/null
+  curl --noproxy '*' -fsS -X PUT -H 'Content-Type: application/json' --data "$PAYLOAD" "$URL" >/dev/null
   exit $?
 fi
 echo "远端未安装 python3/curl，无法调用 mihomo 热更新接口" >&2

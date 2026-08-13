@@ -558,11 +558,15 @@ class APITester:
         )
 
     @staticmethod
-    def _network_error_result(error: object, message: str = "网络错误，无法连接到服务器") -> TestResult:
+    def _network_error_result(
+        error: object,
+        message: str = "网络错误，无法连接到服务器",
+        secrets: tuple[str, ...] = (),
+    ) -> TestResult:
         return TestResult(
             success=False,
             message=message,
-            error_details=str(error)[:400],
+            error_details=APITester._redact_sensitive_text(error, secrets),
         )
 
     @staticmethod
@@ -635,18 +639,19 @@ class APITester:
             return False, None, TestResult(
                 success=False,
                 message="网络错误，无法连接到服务器",
-                error_details=str(e.reason)[:400],
+                error_details=APITester._redact_sensitive_text(e.reason, request_secrets),
             )
         except Exception as e:
             if APITester._is_timeout_error(e):
                 return False, None, APITester._timeout_result(timeout)
             if APITester._is_network_transport_error(e):
-                return False, None, APITester._network_error_result(e)
-            logger.error("API request failed: %s", e, exc_info=True)
+                return False, None, APITester._network_error_result(e, secrets=request_secrets)
+            safe_error = APITester._redact_sensitive_text(e, request_secrets)
+            logger.error("API request failed (%s): %s", type(e).__name__, safe_error)
             return False, None, TestResult(
                 success=False,
                 message=f"测试失败: {type(e).__name__}",
-                error_details=str(e)[:400],
+                error_details=safe_error,
             )
 
     @staticmethod
@@ -766,7 +771,7 @@ class APITester:
             return TestResult(
                 success=False,
                 message="Network error: unable to connect to the server",
-                error_details=str(e.reason)[:400],
+                error_details=APITester._redact_sensitive_text(e.reason, request_secrets),
             )
         except Exception as e:
             if APITester._is_timeout_error(e):
@@ -775,13 +780,14 @@ class APITester:
                 return TestResult(
                     success=False,
                     message="Streaming response disconnected before completion",
-                    error_details=str(e)[:400],
+                    error_details=APITester._redact_sensitive_text(e, request_secrets),
                 )
-            logger.error("API stream request failed: %s", e, exc_info=True)
+            safe_error = APITester._redact_sensitive_text(e, request_secrets)
+            logger.error("API stream request failed (%s): %s", type(e).__name__, safe_error)
             return TestResult(
                 success=False,
                 message=f"Streaming test failed: {type(e).__name__}",
-                error_details=str(e)[:400],
+                error_details=safe_error,
             )
 
     @staticmethod

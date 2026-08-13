@@ -1940,10 +1940,12 @@ def _isolated_mihomo_session(binary_path: Path, proxy_node: dict):
 
 def _build_isolated_mihomo_probe_config(proxy_node: dict, mixed_port: int) -> str:
     node = remote_proxy._normalize_proxy_node(proxy_node)
-    proxy_name = str(node.get("name") or "AI-PROBE-NODE")
+    # Subscription display names share mihomo's outbound namespace with
+    # built-ins such as DIRECT/REJECT/PASS.  A node carrying one of those
+    # names must never make the isolated quality gate test the built-in
+    # outbound instead of the candidate itself.
+    proxy_name = "API-SWITCHER-PROBE-NODE"
     group_name = "API-SWITCHER-PROBE-GROUP"
-    if proxy_name == group_name:
-        proxy_name = "API-SWITCHER-PROBE-NODE"
     node["name"] = proxy_name
     config = {
         "mixed-port": int(mixed_port),
@@ -2328,13 +2330,20 @@ def _select_local_mixed_port(preferred_port: int = DEFAULT_LOCAL_MIXED_PORT) -> 
     )
     if pid and _is_pid_running(pid) and _is_managed_mihomo_pid(pid, state=state):
         return preferred
-    if not _is_port_listening(preferred):
+
+    def ports_available(port: int) -> bool:
+        return not _is_port_listening(port) and not _is_port_listening(
+            remote_proxy.mihomo_controller_port(port)
+        )
+
+    if ports_available(preferred):
         return preferred
     for port in LOCAL_PORT_CANDIDATES:
-        if not _is_port_listening(port):
+        if ports_available(port):
             return port
     raise RuntimeError(
-        f"本机 AI 代理候选端口 {LOCAL_PORT_CANDIDATES[0]}-{LOCAL_PORT_CANDIDATES[-1]} 均被占用"
+        f"本机 AI 代理候选端口 {LOCAL_PORT_CANDIDATES[0]}-{LOCAL_PORT_CANDIDATES[-1]} "
+        "或对应控制端口均被占用"
     )
 
 
@@ -2544,7 +2553,11 @@ def _reload_local_mihomo_config(config_path: Path, mixed_port: int) -> None:
         headers={"Content-Type": "application/json"},
         method="PUT",
     )
-    with urllib.request.urlopen(request, timeout=8) as response:
+    # Controller traffic is loopback control-plane traffic, not a proxy data
+    # request.  Ignore inherited HTTP_PROXY/NO_PROXY values so an external or
+    # stale proxy cannot intercept or break the reload transaction.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=8) as response:
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
         if status < 200 or status >= 300:
             raise RuntimeError(f"mihomo reload HTTP {status}")

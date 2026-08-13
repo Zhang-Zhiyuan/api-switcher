@@ -78,6 +78,14 @@ def test_parse_proxy_node_accepts_single_proxy_uri():
     assert node["ws-opts"]["path"] == "/chat"
 
 
+@pytest.mark.parametrize("node_type", ["DIRECT", "pass", "reject", "reject-drop", "dns"])
+def test_parse_proxy_node_rejects_routing_primitive_as_transport(node_type):
+    with pytest.raises(ValueError, match="路由内置类型"):
+        remote_proxy.parse_proxy_node(
+            f"{{ name: fake, type: {node_type}, server: example.com, port: 443 }}"
+        )
+
+
 def test_ping0_detail_url_for_proxy_node_supports_ip_domain_and_ipv6():
     assert remote_proxy.ping0_detail_url_for_proxy_node({
         "name": "ipv4",
@@ -281,6 +289,7 @@ def test_strict_validator_rejects_legacy_reserved_outbound_name(reserved_name):
         ),
         lambda parsed: parsed.__setitem__("proxies", []),
         lambda parsed: parsed["proxies"].append(dict(parsed["proxies"][0])),
+        lambda parsed: parsed["proxies"][0].__setitem__("type", "direct"),
         lambda parsed: parsed["proxies"].append(
             {"name": "node-b", "type": "vless", "server": "b.example.com", "port": 443}
         ),
@@ -3722,6 +3731,33 @@ def test_delete_proxy_subscription_profile_selects_remaining_profile(monkeypatch
     assert len(remote_proxy.list_proxy_subscription_profiles()) == 1
 
 
+def test_delete_proxy_subscription_profile_prunes_only_unreferenced_managed_cache(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    cache_dir = tmp_path / "proxy_subscriptions"
+    cache_dir.mkdir()
+    first_cache = cache_dir / "subscription-first.yaml"
+    second_cache = cache_dir / "subscription-second.txt"
+    unrelated = cache_dir / "keep-me.yaml"
+    first_cache.write_text("first-secret", encoding="utf-8")
+    second_cache.write_text("second-secret", encoding="utf-8")
+    unrelated.write_text("unrelated", encoding="utf-8")
+
+    first = remote_proxy.save_proxy_subscription_profile("主力", "https://one.example/sub")
+    remote_proxy.save_proxy_subscription_state(saved_path=str(first_cache), node_count=1)
+    second = remote_proxy.save_proxy_subscription_profile("备用", "https://two.example/sub")
+    remote_proxy.save_proxy_subscription_state(saved_path=str(second_cache), node_count=1)
+
+    remote_proxy.delete_proxy_subscription_profile(second["id"])
+
+    assert first_cache.is_file()
+    assert not second_cache.exists()
+    assert unrelated.is_file()
+    assert remote_proxy.load_proxy_subscription_state()["active_profile_id"] == first["id"]
+
+
 def test_delete_last_proxy_subscription_profile_clears_active_url(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
 
@@ -3983,6 +4019,12 @@ def test_start_script_checks_port_with_netstat_when_ss_is_missing():
 
     assert "command -v netstat" in script
     assert "pid_managed()" in script
+    assert "if ! command -v ps" in script
+    assert "Without process identity" in script
+    assert "return 1" in script
+    assert "cleanup_new_process()" in script
+    assert script.count("cleanup_new_process\n") == 2
+    assert 'rm -f "$PID_FILE"' in script
     assert "kill -9" in script
     assert "pid file points to unmanaged process" in script
     assert "port $PORT is already listening before starting mihomo" in script
@@ -4010,6 +4052,50 @@ def test_remote_reload_command_calls_mihomo_controller():
     assert "127.0.0.1:8890/configs?force=true" in command
     assert '"path": "/home/me/.config/mihomo/config.yaml"' in command
     assert 'method="PUT"' in command
+    assert "urllib.request.ProxyHandler({})" in command
+    assert "curl --noproxy '*'" in command
+
+
+def test_local_reload_controller_explicitly_bypasses_environment_proxy(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("mixed-port: 17897\n", encoding="utf-8")
+    captured = {}
+
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        def open(self, request, timeout):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            return Response()
+
+    def build_opener(handler):
+        captured["handler"] = handler
+        return Opener()
+
+    monkeypatch.setattr(local_proxy.urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(
+        local_proxy.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("controller must not use environment-aware urlopen"),
+    )
+
+    local_proxy._reload_local_mihomo_config(config_path, 17897)
+
+    assert isinstance(captured["handler"], local_proxy.urllib.request.ProxyHandler)
+    assert captured["handler"].proxies == {}
+    assert captured["url"] == "http://127.0.0.1:18897/configs?force=true"
+    assert captured["timeout"] == 8
 
 
 def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
@@ -6022,6 +6108,15 @@ def test_select_local_mixed_port_skips_busy_default(monkeypatch):
     monkeypatch.setattr(local_proxy, "_read_pid", lambda: None)
     monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: False)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda port: port == 17897)
+
+    assert local_proxy._select_local_mixed_port(17897) == 17898
+
+
+def test_select_local_mixed_port_skips_busy_controller(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: None)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda port: port == 18897)
 
     assert local_proxy._select_local_mixed_port(17897) == 17898
 

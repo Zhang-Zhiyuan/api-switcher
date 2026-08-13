@@ -96,6 +96,22 @@ def test_auto_store_does_not_trust_stale_auth_file(isolated_account_import):
     assert isolated_account_import == {}
 
 
+@pytest.mark.parametrize("invalid_token", ({"nested": "value"}, ["value"], 1, True, "   "))
+def test_file_store_rejects_non_string_or_blank_official_tokens(
+    isolated_account_import,
+    invalid_token,
+):
+    toml_parser.write_codex_config({"cli_auth_credentials_store": "file"})
+    auth_parser.write_codex_auth({
+        "auth_mode": "chatgpt",
+        "tokens": {"access_token": invalid_token},
+    })
+
+    assert profile_manager.import_current_codex_account() is None
+    assert isolated_account_import == {}
+    assert profile_manager.list_codex_account_profiles() == []
+
+
 def test_codex_account_save_failure_restores_previous_secret(
     isolated_account_import,
     monkeypatch,

@@ -774,7 +774,10 @@ class CodexTab(ctk.CTkScrollableFrame):
                     result = TestResult(
                         False,
                         f"测试失败: {type(exc).__name__}",
-                        error_details=str(exc)[:400],
+                        error_details=APITester._redact_sensitive_text(
+                            exc,
+                            (api_key, f"Bearer {api_key}"),
+                        ),
                     )
                 load_error = None
             except Exception as exc:

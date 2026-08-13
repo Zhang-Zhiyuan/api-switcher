@@ -1,5 +1,6 @@
 import hashlib
 import json
+import urllib.error
 
 from core.api_tester import APITester
 from ui.tabs.common_tab import _build_overview_text, _short_secret
@@ -33,6 +34,43 @@ def test_error_body_redacts_short_request_secret_exactly():
 
     assert "abc" not in detail
     assert detail == "invalid key: [REDACTED]"
+
+
+def test_request_errors_redact_header_secret(monkeypatch):
+    secret = "short-secret"
+
+    def raise_network_error(*_args, **_kwargs):
+        raise urllib.error.URLError(f"upstream echoed {secret}")
+
+    monkeypatch.setattr("core.api_tester.urllib.request.urlopen", raise_network_error)
+
+    ok, _data, result = APITester._request_json(
+        "https://example.test/v1/models",
+        {"Authorization": f"Bearer {secret}"},
+    )
+
+    assert ok is False
+    assert secret not in (result.error_details or "")
+    assert "[REDACTED]" in (result.error_details or "")
+
+
+def test_stream_unknown_errors_redact_header_secret(monkeypatch, caplog):
+    secret = "another-short-secret"
+
+    def raise_unknown_error(*_args, **_kwargs):
+        raise RuntimeError(f"adapter echoed {secret}")
+
+    monkeypatch.setattr("core.api_tester.urllib.request.urlopen", raise_unknown_error)
+
+    result = APITester._request_event_stream(
+        "https://example.test/v1/responses",
+        {"x-api-key": secret},
+        {"model": "test"},
+    )
+
+    assert secret not in (result.error_details or "")
+    assert secret not in caplog.text
+    assert "[REDACTED]" in (result.error_details or "")
 
 
 def test_short_secret_never_reveals_even_short_credentials():

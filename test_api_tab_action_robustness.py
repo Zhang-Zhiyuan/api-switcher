@@ -117,6 +117,56 @@ def test_api_profile_test_blocks_duplicates_and_restores_button(
 
 
 @pytest.mark.parametrize("module,tab_class,list_method,profile", _api_tab_cases())
+def test_api_profile_test_redacts_secret_from_unexpected_worker_error(
+    monkeypatch,
+    module,
+    tab_class,
+    list_method,
+    profile,
+):
+    secret = "worker-echoed-secret"
+    tab = object.__new__(tab_class)
+    tab._profile_tests_inflight = set()
+    tab._profile_test_buttons = {profile.name: _FakeButton()}
+    tab._destroyed = False
+    tab.winfo_exists = lambda: True
+    tab.winfo_toplevel = lambda: "root"
+    if module is claude_tab:
+        profile.auth_scheme = "auth_token"
+
+    monkeypatch.setattr(module.profile_manager, list_method, lambda: [profile])
+    monkeypatch.setattr(security, "get_secret", lambda _ref: secret)
+    monkeypatch.setattr(module, "show_toast", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "test_claude_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(f"echo {secret}")),
+    )
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "benchmark_openai_wire_apis",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(f"echo {secret}")),
+    )
+    monkeypatch.setattr(ProviderRegistry, "get_provider", lambda _name: None)
+    captured = []
+    monkeypatch.setattr(
+        api_test_result_dialog,
+        "APITestResultDialog",
+        lambda _parent, result, _name: captured.append(result),
+    )
+    monkeypatch.setattr(module, "run_on_ui_thread", lambda _widget, callback: callback() or True)
+    _DeferredThread.instances = []
+    monkeypatch.setattr(module.threading, "Thread", _DeferredThread)
+
+    tab._test_profile(profile.name)
+    _DeferredThread.instances[0].target()
+
+    assert len(captured) == 1
+    assert secret not in (captured[0].error_details or "")
+    assert "[REDACTED]" in (captured[0].error_details or "")
+
+
+@pytest.mark.parametrize("module,tab_class,list_method,profile", _api_tab_cases())
 def test_api_profile_test_thread_start_failure_rolls_back_state(
     monkeypatch,
     module,

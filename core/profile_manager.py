@@ -1636,7 +1636,10 @@ def _codex_api_key_from_config_or_env(config: dict, auth: dict) -> tuple[str, st
     except Exception:
         pass
 
-    if auth_key:
+    # An explicit provider env_key is authoritative.  Falling back to a stale
+    # OPENAI_API_KEY would silently import the wrong account credential under
+    # the custom variable name.
+    if auth_key and not explicit_env_key:
         return auth_key, "OPENAI_API_KEY"
     return "", env_key
 
@@ -1745,7 +1748,7 @@ def _codex_auth_matches(profile: CodexProfile, auth: dict, config: dict | None =
             current_key = ""
     except Exception:
         current_key = ""
-    if not current_key and isinstance(auth, dict):
+    if not current_key and not explicit_env_key and isinstance(auth, dict):
         current_key = auth.get("OPENAI_API_KEY") or ""
     if not current_key and not explicit_env_key:
         try:
@@ -2041,7 +2044,10 @@ def _codex_official_auth_available(auth: dict) -> bool:
         "id_token",
         "idToken",
     }
-    return any(bool(tokens.get(key)) for key in token_keys)
+    return any(
+        isinstance(tokens.get(key), str) and bool(tokens[key].strip())
+        for key in token_keys
+    )
 
 
 def _normalize_codex_official_auth(auth: dict) -> dict:

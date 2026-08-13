@@ -977,6 +977,26 @@ def test_isolated_mihomo_always_stops_and_removes_secret_config(monkeypatch, tmp
     assert "top-secret-token" in created["config"]
 
 
+@pytest.mark.parametrize("reserved_name", ["DIRECT", "REJECT", "PASS", "AI-PROXY"])
+def test_isolated_probe_config_never_routes_to_reserved_display_name(reserved_name):
+    node = remote_proxy.parse_proxy_node(
+        f"{{ name: {reserved_name}, type: vless, server: node.example.com, port: 443 }}"
+    )
+
+    config = local_proxy._build_isolated_mihomo_probe_config(node, 18000)
+    parsed = remote_proxy.yaml.safe_load(config)
+
+    assert parsed["proxies"][0]["name"] == "API-SWITCHER-PROBE-NODE"
+    assert parsed["proxy-groups"] == [
+        {
+            "name": "API-SWITCHER-PROBE-GROUP",
+            "type": "select",
+            "proxies": ["API-SWITCHER-PROBE-NODE"],
+        }
+    ]
+    assert parsed["rules"] == ["MATCH,API-SWITCHER-PROBE-GROUP"]
+
+
 def test_exit_cleanup_stops_registered_process_and_removes_secret_directory(
     monkeypatch,
     tmp_path,

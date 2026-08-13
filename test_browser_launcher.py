@@ -53,6 +53,7 @@ def _proxy_flags(command):
         argument
         for argument in command
         if argument.startswith("--proxy-server=")
+        or argument.startswith("--host-resolver-rules=")
         or argument.startswith("--force-webrtc-ip-handling-policy=")
         or argument == "--disable-quic"
     ]
@@ -81,6 +82,7 @@ def test_managed_browser_uses_running_strict_local_proxy(launch_browser, monkeyp
     command = launch_browser()
 
     assert "--proxy-server=http://127.0.0.1:17897" in command
+    assert "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" in command
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in command
     assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" not in command
     assert "--disable-quic" in command
@@ -370,6 +372,7 @@ def test_strict_managed_browser_launches_when_profile_lock_is_free(
 
     lock_check.assert_called_once()
     assert "--proxy-server=http://127.0.0.1:17897" in command
+    assert "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" in command
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in command
     assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" not in command
     assert "--disable-quic" in command

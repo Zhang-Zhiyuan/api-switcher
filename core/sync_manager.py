@@ -814,7 +814,12 @@ def _remote_codex_requires_openai_auth(config: dict) -> bool:
     return bool(custom.get("requires_openai_auth", False)) if isinstance(custom, dict) else False
 
 
-def _remote_text_env_value(content: str | None, env_key: str) -> str:
+def _remote_text_env_value(
+    content: str | None,
+    env_key: str,
+    *,
+    allow_openai_fallback: bool = False,
+) -> str:
     if not content:
         return ""
     try:
@@ -823,7 +828,10 @@ def _remote_text_env_value(content: str | None, env_key: str) -> str:
         values = codex_env.parse_codex_env_text(content)
     except Exception:
         values = {}
-    return str(values.get(env_key) or values.get("OPENAI_API_KEY") or "").strip()
+    value = values.get(env_key)
+    if not value and allow_openai_fallback:
+        value = values.get("OPENAI_API_KEY")
+    return str(value or "").strip()
 
 
 def _remote_codex_api_key_from_sources(client, ssh_profile, config: dict, auth: dict) -> tuple[str, str]:
@@ -838,7 +846,11 @@ def _remote_codex_api_key_from_sources(client, ssh_profile, config: dict, auth: 
         return auth_openai_key, "OPENAI_API_KEY"
 
     try:
-        key = _remote_text_env_value(remote_config.read_remote_codex_env(client, ssh_profile), env_key)
+        key = _remote_text_env_value(
+            remote_config.read_remote_codex_env(client, ssh_profile),
+            env_key,
+            allow_openai_fallback=not explicit_env_key,
+        )
         if key:
             return key, env_key
     except Exception as e:
@@ -849,13 +861,17 @@ def _remote_codex_api_key_from_sources(client, ssh_profile, config: dict, auth: 
 
         home = remote_config._remote_home(client)
         env_path = posixpath.join(home, persistent_env.REMOTE_ENV_FILENAME)
-        key = _remote_text_env_value(ssh_manager.read_remote_file(client, env_path), env_key)
+        key = _remote_text_env_value(
+            ssh_manager.read_remote_file(client, env_path),
+            env_key,
+            allow_openai_fallback=not explicit_env_key,
+        )
         if key:
             return key, env_key
     except Exception as e:
         logger.debug("Failed to read remote shell env file for Codex import: %s", e)
 
-    if auth_openai_key:
+    if auth_openai_key and not explicit_env_key:
         return auth_openai_key, "OPENAI_API_KEY"
     return "", env_key
 
@@ -1637,8 +1653,8 @@ def _inspect_remote_codex_config(client, ssh_profile) -> RemoteConfigCandidate:
         remote_config._remote_path("codex_auth", ssh_profile, client),
     )
     try:
-        config = remote_config.read_remote_codex_config(client, ssh_profile)
-        auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+        config = _strict_remote_read(remote_config.read_remote_codex_config, client, ssh_profile)
+        auth = _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile)
     except Exception as e:
         return RemoteConfigCandidate(
             kind="codex",
@@ -1884,8 +1900,8 @@ def pull_codex_from_server(ssh_name: str) -> str:
     """Pull Codex config from server and save as a profile."""
     ssh_profile, client = _connect_ssh(ssh_name)
 
-    config = remote_config.read_remote_codex_config(client, ssh_profile)
-    auth = remote_config.read_remote_codex_auth(client, ssh_profile)
+    config = _strict_remote_read(remote_config.read_remote_codex_config, client, ssh_profile)
+    auth = _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile)
 
     if not config and not auth:
         return "服务器上未找到 Codex 配置"

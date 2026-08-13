@@ -277,6 +277,11 @@ class BrowserLauncher:
                 cmd.extend(
                     (
                         f"--proxy-server={proxy_url}",
+                        # The proxy itself is an IP literal, so managed strict
+                        # browsing does not need host DNS on the Windows side.
+                        # Force public hostname resolution to remain at the
+                        # HTTP CONNECT proxy instead of speculative system DNS.
+                        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
                         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                         "--disable-quic",
                     )

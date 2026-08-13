@@ -138,6 +138,42 @@ def test_import_current_codex_reads_explicit_key_from_codex_dotenv(isolated_code
     assert security.get_secret(profile.api_key_ref) == "relay-key"
 
 
+def test_import_current_codex_does_not_fallback_from_explicit_env_key_to_stale_openai(
+    isolated_codex_flow,
+):
+    toml_parser.write_codex_config({
+        "model": "relay-model",
+        "model_provider": "relay",
+        "model_providers": {
+            "relay": {
+                "name": "Relay",
+                "base_url": "https://relay.example.com/v1",
+                "env_key": "RELAY_API_KEY",
+            }
+        },
+    })
+    auth_parser.write_codex_auth({"auth_mode": "apikey", "OPENAI_API_KEY": "stale-openai"})
+
+    assert profile_manager.import_current_codex() is None
+    assert profile_manager.list_codex_profiles() == []
+
+
+def test_explicit_env_key_missing_does_not_match_stale_openai_auth(isolated_codex_flow):
+    profile = CodexProfile(
+        name="relay",
+        api_key_ref="codex:relay:api_key",
+        model="relay-model",
+        model_provider="relay",
+        custom_base_url="https://relay.example.com/v1",
+        custom_env_key="RELAY_API_KEY",
+    )
+    security.set_secret(profile.api_key_ref, "stale-openai")
+    config = toml_parser.apply_codex_profile({}, profile)
+    auth = {"auth_mode": "apikey", "OPENAI_API_KEY": "stale-openai"}
+
+    assert profile_manager._codex_auth_matches(profile, auth, config) is False
+
+
 def test_requires_openai_auth_profile_does_not_write_provider_key(isolated_codex_flow):
     profile_manager.save_codex_profile(
         CodexProfile(
@@ -263,3 +299,33 @@ def test_inspect_remote_codex_reads_provider_key_from_remote_dotenv(isolated_cod
     assert codex_candidate.importable is True
     assert codex_candidate.has_api_key is True
     assert codex_candidate.provider == "deepseek"
+
+
+def test_remote_explicit_env_key_does_not_fallback_to_stale_openai_key(
+    isolated_codex_flow,
+    monkeypatch,
+):
+    config = {
+        "model_provider": "relay",
+        "model_providers": {"relay": {"env_key": "RELAY_API_KEY"}},
+    }
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_env",
+        lambda *_args, **_kwargs: 'OPENAI_API_KEY="stale-dotenv"\n',
+    )
+    monkeypatch.setattr(
+        sync_manager.ssh_manager,
+        "read_remote_file",
+        lambda *_args, **_kwargs: "export OPENAI_API_KEY='stale-shell'\n",
+    )
+
+    key, env_key = sync_manager._remote_codex_api_key_from_sources(
+        object(),
+        None,
+        config,
+        {"OPENAI_API_KEY": "stale-auth"},
+    )
+
+    assert key == ""
+    assert env_key == "RELAY_API_KEY"
