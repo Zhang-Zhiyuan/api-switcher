@@ -1,0 +1,1150 @@
+from __future__ import annotations
+
+import threading
+import webbrowser
+
+import customtkinter as ctk
+
+from core import network_diagnostic_constants as diagnostic_constants
+from core.lazy_imports import LazyModule
+from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
+from ui.ui_dispatch import run_on_ui_thread
+from ui.widgets.masked_entry import MaskedEntry
+from ui.widgets.toast import show_toast
+
+
+network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
+network_diagnostics = LazyModule("core.network_diagnostics")
+
+
+KEYLESS_SERVICES = {
+    diagnostic_constants.SERVICE_NETCOFFEE,
+    diagnostic_constants.SERVICE_PROXYCHECK,
+    diagnostic_constants.SERVICE_IPAPI,
+}
+NO_KEY_SERVICES = {diagnostic_constants.SERVICE_NETCOFFEE}
+OPTIONAL_KEY_SERVICES = KEYLESS_SERVICES | {diagnostic_constants.SERVICE_PING0}
+
+PROXY_QUALITY_WIDE_MIN_WIDTH = 720
+PROXY_QUALITY_TWO_COLUMN_MIN_WIDTH = 420
+
+
+def _proxy_quality_toolbar_layout(width: int) -> tuple[int, int, bool]:
+    """Return action columns, preset columns and whether its label stays inline."""
+
+    try:
+        available = max(1, int(width))
+    except (TypeError, ValueError):
+        available = 1
+    if available >= PROXY_QUALITY_WIDE_MIN_WIDTH:
+        return 3, 3, True
+    if available >= PROXY_QUALITY_TWO_COLUMN_MIN_WIDTH:
+        return 2, 2, False
+    return 1, 1, False
+
+
+def _proxy_quality_service_row_layout(width: int) -> str:
+    """Keep service descriptions and key inputs readable on narrow panels."""
+
+    available = max(1, int(width))
+    if available >= 620:
+        return "wide"
+    if available >= 360:
+        return "compact"
+    return "narrow"
+
+
+class ProxyQualityPanel(ctk.CTkScrollableFrame):
+    """Panel for public network and proxy exit quality diagnostics."""
+
+    def __init__(self, master, on_settings_saved=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self.configure(fg_color="transparent")
+        self._busy = False
+        self._last_report = None
+        self._on_settings_saved = on_settings_saved
+        self._action_bar = None
+        self._action_buttons = []
+        self._preset_bar = None
+        self._preset_label = None
+        self._preset_buttons = []
+        self._responsive_layout_after_id = None
+        self._responsive_layout_state = None
+        self._run_button = None
+        self._copy_button = None
+        self._open_ping0_button = None
+        self._ping0_key_entry = None
+        self._proxycheck_key_entry = None
+        self._ipapi_key_entry = None
+        self._ipqs_key_entry = None
+        self._vpnapi_key_entry = None
+        self._service_vars = {}
+        self._service_key_entries = {}
+        self._service_key_frames = {}
+        self._service_count_labels = {}
+        self._service_cards = {}
+        self._service_row_widgets = {}
+        self._key_row_widgets = []
+        self._settings_controls = []
+        self._hidden_service_settings = {}
+        self._settings_status_label = None
+        self._save_settings_button = None
+        self._status_label = None
+        self._content_frame = None
+        self._report_box = None
+        self._report_box_host = None
+        self._report_box_after_id = None
+        self._report_placeholder_label = None
+        self._pending_report_text = "等待检测结果..."
+        self._build_ui()
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=14, pady=(14, 8))
+
+        title_area = ctk.CTkFrame(header, fg_color="transparent")
+        title_area.pack(fill="x")
+        ctk.CTkLabel(
+            title_area,
+            text="代理质量检测",
+            text_color=COLORS["text"],
+            font=font(18, "bold"),
+        ).pack(anchor="w")
+        subtitle = ctk.CTkLabel(
+            title_area,
+            text="用于 Win11/SSH AI 代理的出口质量检测；先测速，再用 Net.Coffee、Ping0、ProxyCheck、ipapi.is、VPNAPI 评估 IP 质量",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        subtitle.pack(anchor="w", fill="x", pady=(2, 0))
+        bind_wraplength(title_area, subtitle, padding=24, min_width=260, max_width=760)
+
+        action_bar = ctk.CTkFrame(header, fg_color="transparent")
+        action_bar.pack(fill="x", pady=(8, 0))
+        self._action_bar = action_bar
+        self._run_button = ctk.CTkButton(
+            action_bar,
+            text="开始检测",
+            width=108,
+            command=self._start_detection,
+            **button_style("primary"),
+        )
+        self._copy_button = ctk.CTkButton(
+            action_bar,
+            text="复制报告",
+            width=108,
+            command=self._copy_report,
+            state="disabled",
+            **button_style("secondary"),
+        )
+        self._open_ping0_button = ctk.CTkButton(
+            action_bar,
+            text="打开最快 Ping0",
+            width=124,
+            command=self._open_fastest_ping0,
+            state="disabled",
+            **button_style("accent"),
+        )
+        self._action_buttons = [self._run_button, self._copy_button, self._open_ping0_button]
+
+        settings_section = ctk.CTkFrame(self, fg_color="transparent")
+        settings_section.pack(fill="x", padx=14, pady=(0, 10))
+        settings_header = ctk.CTkFrame(settings_section, fg_color="transparent")
+        settings_header.pack(fill="x", pady=(0, 6))
+        settings_title = ctk.CTkFrame(settings_header, fg_color="transparent")
+        settings_title.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            settings_title,
+            text="检测源",
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            settings_title,
+            text="勾选检测源；有 Key 池的源会按顺序轮换",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+        ).pack(anchor="w", pady=(1, 0))
+        self._save_settings_button = ctk.CTkButton(
+            settings_header,
+            text="保存设置",
+            width=92,
+            command=lambda: self._save_detection_settings(show_message=True),
+            **button_style("secondary"),
+        )
+        self._save_settings_button.pack(side="right", padx=(10, 0), pady=(2, 0))
+        self._settings_controls.append(self._save_settings_button)
+        saved_settings = network_diagnostic_settings.load_settings()
+        self._hidden_service_settings = {
+            service: saved_settings.service(service)
+            for service in diagnostic_constants.HIDDEN_SERVICES
+        }
+        preset_bar = ctk.CTkFrame(settings_section, fg_color="transparent")
+        preset_bar.pack(fill="x", pady=(0, 6))
+        self._preset_bar = preset_bar
+        self._preset_label = ctk.CTkLabel(
+            preset_bar,
+            text="快速方案",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            width=62,
+            anchor="w",
+        )
+        for text, mode in (
+            ("AI 推荐", "recommended"),
+            ("免 Key 多源", "keyless"),
+            ("全量", "all"),
+        ):
+            button = ctk.CTkButton(
+                preset_bar,
+                text=text,
+                width=92 if mode == "keyless" else 74,
+                command=lambda mode=mode: self._apply_service_preset(mode),
+                **button_style("secondary", compact=True),
+            )
+            self._preset_buttons.append(button)
+            self._settings_controls.append(button)
+        service_rows = [
+            (
+                diagnostic_constants.SERVICE_NETCOFFEE,
+                "Net.Coffee AI",
+                "默认首选；免 Key；Trust Score、家宽/机房、VPN/Proxy/Tor、滥用信号",
+            ),
+            (
+                diagnostic_constants.SERVICE_PING0,
+                "Ping0",
+                "免费 Geo；Key 增强 isidc、iprisk、isnative",
+            ),
+            (
+                diagnostic_constants.SERVICE_PROXYCHECK,
+                "ProxyCheck",
+                "家宽/商宽/共享人数；可无 Key",
+            ),
+            (
+                diagnostic_constants.SERVICE_IPAPI,
+                "ipapi.is",
+                "可无 Key；补充机房、ASN、Abuser、VPN/Proxy 信号",
+            ),
+            (
+                diagnostic_constants.SERVICE_VPNAPI,
+                "VPNAPI.io",
+                "VPN、Proxy、Tor、Relay",
+            ),
+        ]
+        for service, label, description in service_rows:
+            self._add_service_setting_row(settings_section, service, label, description, saved_settings)
+
+        settings_actions = ctk.CTkFrame(settings_section, fg_color="transparent")
+        settings_actions.pack(fill="x", pady=(4, 0))
+        self._settings_status_label = ctk.CTkLabel(
+            settings_actions,
+            text=self._settings_status_text(saved_settings),
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+        )
+        self._settings_status_label.pack(fill="x")
+        bind_wraplength(settings_actions, self._settings_status_label, padding=20)
+        self._update_settings_preview()
+
+        status_card = ctk.CTkFrame(self, **card_frame_kwargs())
+        status_card.pack(fill="x", padx=14, pady=(0, 10))
+        self._status_label = ctk.CTkLabel(
+            status_card,
+            text="未检测。点击后会先测速，再只对可连通 IP 调用已启用的质量源。",
+            text_color=COLORS["muted"],
+            font=font(12),
+            anchor="w",
+            justify="left",
+        )
+        self._status_label.pack(fill="x", padx=14, pady=12)
+        bind_wraplength(status_card, self._status_label, padding=28)
+
+        self._content_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._content_frame.pack(fill="x", padx=14, pady=(0, 10))
+        self._render_empty()
+
+        self._report_box_host = ctk.CTkFrame(
+            self,
+            height=190,
+            fg_color=COLORS["field_bg"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"],
+        )
+        self._report_box_host.pack(fill="x", padx=14, pady=(0, 14))
+        self._report_box_host.pack_propagate(False)
+        self._report_placeholder_label = ctk.CTkLabel(
+            self._report_box_host,
+            text="报告文本框正在准备...",
+            text_color=COLORS["muted"],
+            font=font(12),
+        )
+        self._report_placeholder_label.pack(expand=True)
+        self._report_box_after_id = self.after(60, self._build_report_box)
+        self.bind("<Configure>", self._schedule_responsive_layout, add="+")
+        self._schedule_responsive_layout(delay_ms=0)
+
+    def destroy(self):
+        if self._responsive_layout_after_id:
+            try:
+                self.after_cancel(self._responsive_layout_after_id)
+            except Exception:
+                pass
+            self._responsive_layout_after_id = None
+        if self._report_box_after_id:
+            try:
+                self.after_cancel(self._report_box_after_id)
+            except Exception:
+                pass
+            self._report_box_after_id = None
+        super().destroy()
+
+    def _logical_layout_width(self) -> int:
+        width = self.winfo_width()
+        try:
+            scaling = float(self._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            scaling = 1.0
+        return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
+
+    def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
+        if self._responsive_layout_after_id is not None:
+            return
+
+        def apply_layout():
+            self._responsive_layout_after_id = None
+            try:
+                if self.winfo_exists():
+                    self._apply_responsive_layout()
+            except Exception:
+                pass
+
+        try:
+            self._responsive_layout_after_id = (
+                self.after_idle(apply_layout)
+                if delay_ms <= 0
+                else self.after(delay_ms, apply_layout)
+            )
+        except Exception:
+            self._responsive_layout_after_id = None
+
+    @staticmethod
+    def _reset_grid_columns(frame, count: int) -> None:
+        for column in range(count):
+            frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+    def _apply_responsive_layout(self) -> None:
+        logical_width = self._logical_layout_width()
+        action_columns, preset_columns, preset_label_inline = _proxy_quality_toolbar_layout(logical_width)
+        service_row_layout = _proxy_quality_service_row_layout(logical_width)
+        state = (action_columns, preset_columns, preset_label_inline, service_row_layout)
+        if state == self._responsive_layout_state:
+            return
+        self._responsive_layout_state = state
+
+        action_bar = self._action_bar
+        preset_bar = self._preset_bar
+        preset_label = self._preset_label
+        if action_bar is None or preset_bar is None or preset_label is None:
+            return
+
+        self._reset_grid_columns(action_bar, 3)
+        for column in range(action_columns):
+            action_bar.grid_columnconfigure(
+                column,
+                weight=1 if action_columns < 3 else 0,
+                uniform="proxy-quality-actions" if action_columns < 3 else "",
+            )
+        for index, button in enumerate(self._action_buttons):
+            row = index // action_columns
+            column = index % action_columns
+            button.grid(
+                row=row,
+                column=column,
+                sticky="ew",
+                padx=(0, 8 if column < action_columns - 1 else 0),
+                pady=(0, 6 if index + action_columns < len(self._action_buttons) else 0),
+            )
+
+        self._reset_grid_columns(preset_bar, 4)
+        if preset_label_inline:
+            preset_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            for index, button in enumerate(self._preset_buttons):
+                button.grid(
+                    row=0,
+                    column=index + 1,
+                    sticky="ew",
+                    padx=(0, 6 if index < len(self._preset_buttons) - 1 else 0),
+                )
+        else:
+            for column in range(preset_columns):
+                preset_bar.grid_columnconfigure(
+                    column,
+                    weight=1,
+                    uniform="proxy-quality-presets",
+                )
+            preset_label.grid(
+                row=0,
+                column=0,
+                columnspan=preset_columns,
+                sticky="w",
+                pady=(0, 4),
+            )
+            for index, button in enumerate(self._preset_buttons):
+                row = 1 + index // preset_columns
+                column = index % preset_columns
+                button.grid(
+                    row=row,
+                    column=column,
+                    sticky="ew",
+                    padx=(0, 6 if column < preset_columns - 1 else 0),
+                    pady=(0, 6 if index + preset_columns < len(self._preset_buttons) else 0),
+                )
+
+        for top, service_check, description, count_label, add_button in self._service_row_widgets.values():
+            self._layout_service_setting_row(
+                top,
+                service_check,
+                description,
+                count_label,
+                add_button,
+                service_row_layout,
+                logical_width,
+            )
+        for row, key_label, entry, delete_button in self._key_row_widgets:
+            self._layout_key_row(row, key_label, entry, delete_button, service_row_layout)
+
+    @staticmethod
+    def _layout_service_setting_row(
+        top,
+        service_check,
+        description,
+        count_label,
+        add_button,
+        layout: str,
+        logical_width: int,
+    ) -> None:
+        for widget in (service_check, description, count_label, add_button):
+            widget.grid_forget()
+        for column in range(4):
+            top.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if layout == "wide":
+            top.grid_columnconfigure(1, weight=1)
+            service_check.grid(row=0, column=0, sticky="w")
+            description.grid(row=0, column=1, sticky="ew", padx=(10, 8))
+            count_label.grid(row=0, column=2, sticky="e", padx=(0, 8))
+            add_button.grid(row=0, column=3, sticky="e")
+            description.configure(wraplength=max(180, min(620, logical_width - 320)))
+            return
+
+        if layout == "compact":
+            top.grid_columnconfigure(0, weight=1)
+            service_check.grid(row=0, column=0, sticky="w")
+            count_label.grid(row=0, column=1, sticky="e", padx=(8, 8))
+            add_button.grid(row=0, column=2, sticky="e")
+            description.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+            description.configure(wraplength=max(160, logical_width - 60))
+            return
+
+        top.grid_columnconfigure(0, weight=1)
+        service_check.grid(row=0, column=0, columnspan=2, sticky="w")
+        count_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        add_button.grid(row=1, column=1, sticky="e", pady=(6, 0))
+        description.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        description.configure(wraplength=max(120, logical_width - 60))
+
+    @staticmethod
+    def _layout_key_row(row, key_label, entry, delete_button, layout: str) -> None:
+        for widget in (key_label, entry, delete_button):
+            widget.grid_forget()
+        for column in range(3):
+            row.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+
+        if layout == "wide":
+            row.grid_columnconfigure(1, weight=1)
+            key_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            entry.entry.configure(width=360)
+            entry.grid(row=0, column=1, sticky="ew")
+            delete_button.grid(row=0, column=2, padx=(6, 0), sticky="e")
+            return
+
+        row.grid_columnconfigure(0, weight=1)
+        key_label.grid(row=0, column=0, sticky="w")
+        delete_button.grid(row=0, column=1, sticky="e")
+        entry.entry.configure(width=1)
+        entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+    def _build_report_box(self):
+        self._report_box_after_id = None
+        if self._report_box or not self._report_box_host:
+            return
+        try:
+            for child in self._report_box_host.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+        self._report_box = ctk.CTkTextbox(self._report_box_host, height=190, **textbox_style(monospace=True))
+        self._report_box.pack(fill="both", expand=True)
+        self._set_report_text(self._pending_report_text)
+
+    def _add_service_setting_row(self, parent, service: str, label: str, description: str, saved_settings):
+        service_settings = saved_settings.service(service)
+        var = ctk.BooleanVar(value=service_settings.enabled)
+        self._service_vars[service] = var
+        border = COLORS["success"] if service_settings.enabled else COLORS["border_soft"]
+        card = ctk.CTkFrame(parent, **card_frame_kwargs(border))
+        card.pack(fill="x", pady=5)
+        self._service_cards[service] = card
+
+        top = ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 6))
+        top.grid_columnconfigure(1, weight=1)
+        service_check = ctk.CTkCheckBox(
+            top,
+            text=label,
+            variable=var,
+            command=self._update_settings_preview,
+            text_color=COLORS["text"],
+            font=font(13, "bold"),
+            width=132,
+            checkbox_width=18,
+            checkbox_height=18,
+        )
+        service_check.grid(row=0, column=0, sticky="w")
+        self._settings_controls.append(service_check)
+        desc = ctk.CTkLabel(
+            top,
+            text=description,
+            text_color=COLORS["muted"],
+            font=font(11),
+            anchor="w",
+            justify="left",
+        )
+        desc.grid(row=0, column=1, sticky="ew", padx=(10, 8))
+        self._service_count_labels[service] = ctk.CTkLabel(
+            top,
+            text="",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            width=72,
+            anchor="e",
+        )
+        self._service_count_labels[service].grid(row=0, column=2, sticky="e", padx=(0, 8))
+        add_button = ctk.CTkButton(
+            top,
+            text="添加 Key",
+            width=82,
+            command=lambda service=service: self._add_key_row(service, focus=True),
+            **button_style("secondary", compact=True),
+        )
+        if service in NO_KEY_SERVICES:
+            add_button.configure(text="免 Key", state="disabled")
+            add_button.grid(row=0, column=3, sticky="e")
+        else:
+            add_button.grid(row=0, column=3, sticky="e")
+            self._settings_controls.append(add_button)
+        self._service_row_widgets[service] = (
+            top,
+            service_check,
+            desc,
+            self._service_count_labels[service],
+            add_button,
+        )
+
+        key_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._service_key_frames[service] = key_frame
+        self._service_key_entries[service] = []
+        for key in service_settings.api_keys:
+            self._add_key_row(service, key)
+        self._assign_first_key_entry(service)
+        self._update_key_frame_spacing(service)
+        self._responsive_layout_state = None
+        self._schedule_responsive_layout(delay_ms=0)
+
+    def _add_key_row(self, service: str, value: str = "", focus: bool = False):
+        if service in NO_KEY_SERVICES:
+            return
+        key_frame = self._service_key_frames.get(service)
+        if key_frame is None:
+            return
+        row = ctk.CTkFrame(key_frame, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 5))
+        row.grid_columnconfigure(1, weight=1)
+        key_index = len(self._service_key_entries.get(service, [])) + 1
+        key_label = ctk.CTkLabel(
+            row,
+            text=diagnostic_constants.SERVICE_LABELS.get(service, service),
+            text_color=COLORS["muted_soft"],
+            font=font(11, "bold"),
+            width=86,
+            anchor="w",
+        )
+        key_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        entry = MaskedEntry(row, placeholder=self._key_placeholder(service, key_index), width=360)
+        entry.grid(row=0, column=1, sticky="ew")
+        entry.set(value)
+        try:
+            entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview(), add="+")
+        except TypeError:
+            entry.entry.bind("<KeyRelease>", lambda _event, service=service: self._update_settings_preview())
+        delete_button = ctk.CTkButton(
+            row,
+            text="删除",
+            width=58,
+            command=lambda service=service, entry=entry, row=row: self._remove_key_row(service, entry, row),
+            **button_style("secondary", compact=True),
+        )
+        delete_button.grid(row=0, column=2, padx=(6, 0), sticky="e")
+        self._key_row_widgets.append((row, key_label, entry, delete_button))
+        self._service_key_entries.setdefault(service, []).append(entry)
+        self._settings_controls.extend([entry.entry, entry.toggle_btn, delete_button])
+        self._assign_first_key_entry(service)
+        self._update_key_frame_spacing(service)
+        self._update_settings_preview()
+        self._responsive_layout_state = None
+        self._schedule_responsive_layout(delay_ms=0)
+        if focus:
+            try:
+                entry.entry.focus_set()
+            except Exception:
+                pass
+
+    def _remove_key_row(self, service: str, entry: MaskedEntry, row):
+        entries = self._service_key_entries.get(service, [])
+        self._service_key_entries[service] = [item for item in entries if item is not entry]
+        self._key_row_widgets = [item for item in self._key_row_widgets if item[0] is not row]
+        row.destroy()
+        self._renumber_key_placeholders(service)
+        self._assign_first_key_entry(service)
+        self._update_key_frame_spacing(service)
+        self._update_settings_preview()
+
+    def _assign_first_key_entry(self, service: str):
+        entries = self._service_key_entries.get(service, [])
+        first = entries[0] if entries else None
+        if service == diagnostic_constants.SERVICE_PING0:
+            self._ping0_key_entry = first
+        elif service == diagnostic_constants.SERVICE_PROXYCHECK:
+            self._proxycheck_key_entry = first
+        elif service == diagnostic_constants.SERVICE_IPAPI:
+            self._ipapi_key_entry = first
+        elif service == diagnostic_constants.SERVICE_IPQS:
+            self._ipqs_key_entry = first
+        elif service == diagnostic_constants.SERVICE_VPNAPI:
+            self._vpnapi_key_entry = first
+
+    def _update_key_frame_spacing(self, service: str):
+        key_frame = self._service_key_frames.get(service)
+        if key_frame is None:
+            return
+        try:
+            if self._service_key_entries.get(service):
+                if key_frame.winfo_manager() != "pack":
+                    key_frame.pack(fill="x", padx=12, pady=(0, 10))
+                else:
+                    key_frame.pack_configure(fill="x", padx=12, pady=(0, 10))
+            else:
+                key_frame.pack_forget()
+        except Exception:
+            pass
+
+    def _renumber_key_placeholders(self, service: str):
+        for index, entry in enumerate(self._service_key_entries.get(service, []), start=1):
+            try:
+                entry.entry.configure(placeholder_text=self._key_placeholder(service, index))
+            except Exception:
+                pass
+
+    def _key_placeholder(self, service: str, index: int) -> str:
+        label = diagnostic_constants.SERVICE_LABELS.get(service, service)
+        return f"{label} Key #{index}"
+
+    def _apply_service_preset(self, mode: str):
+        settings = self._collect_detection_settings()
+        if mode == "all":
+            enabled = set(diagnostic_constants.VISIBLE_SERVICE_ORDER)
+        elif mode == "keyless":
+            enabled = {
+                diagnostic_constants.SERVICE_NETCOFFEE,
+                diagnostic_constants.SERVICE_PROXYCHECK,
+                diagnostic_constants.SERVICE_IPAPI,
+            }
+        else:
+            enabled = {diagnostic_constants.SERVICE_NETCOFFEE}
+            if mode == "recommended" and settings.keys_for(diagnostic_constants.SERVICE_VPNAPI):
+                enabled.add(diagnostic_constants.SERVICE_VPNAPI)
+
+        for service, var in self._service_vars.items():
+            var.set(service in enabled)
+        self._update_settings_preview()
+
+    def _collect_detection_settings(self):
+        enabled = [
+            service
+            for service, var in self._service_vars.items()
+            if bool(var.get())
+        ]
+        api_keys = {
+            service: [entry.get() for entry in entries]
+            for service, entries in self._service_key_entries.items()
+        }
+        for service in diagnostic_constants.HIDDEN_SERVICES:
+            service_settings = self._hidden_service_settings.get(service)
+            if service_settings is None:
+                continue
+            if service_settings.enabled:
+                enabled.append(service)
+            api_keys[service] = service_settings.api_keys
+        return network_diagnostic_settings.settings_from_values(enabled, api_keys)
+
+    def _update_settings_preview(self):
+        try:
+            settings = self._collect_detection_settings()
+        except Exception:
+            return
+        for service in diagnostic_constants.VISIBLE_SERVICE_ORDER:
+            service_settings = settings.service(service)
+            count_label = self._service_count_labels.get(service)
+            if count_label:
+                count = len(service_settings.api_keys)
+                if not service_settings.enabled:
+                    count_label.configure(text="关闭", text_color=COLORS["muted_soft"])
+                elif service in NO_KEY_SERVICES:
+                    count_label.configure(text="默认免 Key", text_color=COLORS["success"])
+                elif count:
+                    count_label.configure(text=f"Key x{count}", text_color=COLORS["success"])
+                elif service in KEYLESS_SERVICES:
+                    count_label.configure(text="可无 Key", text_color=COLORS["muted_soft"])
+                elif service == diagnostic_constants.SERVICE_PING0:
+                    count_label.configure(text="免费 Geo", text_color=COLORS["muted_soft"])
+                else:
+                    count_label.configure(text="缺 Key", text_color=COLORS["warning"])
+            card = self._service_cards.get(service)
+            if card:
+                if not service_settings.enabled:
+                    border = COLORS["border_soft"]
+                elif service not in OPTIONAL_KEY_SERVICES and not service_settings.api_keys:
+                    border = COLORS["warning"]
+                else:
+                    border = COLORS["success"]
+                card.configure(border_color=border)
+        if self._settings_status_label:
+            self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["muted_soft"])
+
+    def _set_settings_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for widget in list(self._settings_controls):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(state=state)
+            except Exception:
+                pass
+
+    def _save_detection_settings(self, show_message: bool = False):
+        settings = self._collect_detection_settings()
+        network_diagnostic_settings.save_settings(settings)
+        if self._settings_status_label:
+            self._settings_status_label.configure(text=self._settings_status_text(settings), text_color=COLORS["success"])
+        self._notify_settings_saved(settings)
+        if show_message:
+            show_toast(self.winfo_toplevel(), "代理质量检测设置已保存")
+        return settings
+
+    def _notify_settings_saved(self, settings):
+        if not self._on_settings_saved:
+            return
+        try:
+            self._on_settings_saved(settings)
+        except Exception:
+            pass
+
+    def _settings_status_text(self, settings) -> str:
+        enabled_labels = []
+        key_counts = []
+        direct_labels = []
+        missing_key_labels = []
+        for service in diagnostic_constants.VISIBLE_SERVICE_ORDER:
+            service_settings = settings.service(service)
+            label = diagnostic_constants.SERVICE_LABELS.get(service, service)
+            if service_settings.enabled:
+                enabled_labels.append(label)
+                if not service_settings.api_keys:
+                    if service in NO_KEY_SERVICES:
+                        direct_labels.append(f"{label} 免 Key")
+                    elif service in KEYLESS_SERVICES:
+                        direct_labels.append(label)
+                    elif service == diagnostic_constants.SERVICE_PING0:
+                        direct_labels.append("Ping0 免费 Geo")
+                    else:
+                        missing_key_labels.append(label)
+            if service_settings.api_keys:
+                key_counts.append(f"{label} {len(service_settings.api_keys)} 个 Key")
+        enabled_text = "、".join(enabled_labels) if enabled_labels else "未启用检测源"
+        parts = [f"当前方案: {self._settings_mode_label(settings)}", f"已启用: {enabled_text}"]
+        if key_counts:
+            parts.append("Key 池: " + "；".join(key_counts))
+        if direct_labels:
+            parts.append("可直接用: " + "、".join(direct_labels))
+        if missing_key_labels:
+            parts.append("缺 Key: " + "、".join(missing_key_labels))
+        return "  |  ".join(parts)
+
+    def _settings_mode_label(self, settings) -> str:
+        enabled = set(settings.enabled_services()) if hasattr(settings, "enabled_services") else set()
+        visible = set(diagnostic_constants.VISIBLE_SERVICE_ORDER)
+        ai_recommended = {diagnostic_constants.SERVICE_NETCOFFEE}
+        keyless = {
+            diagnostic_constants.SERVICE_NETCOFFEE,
+            diagnostic_constants.SERVICE_PROXYCHECK,
+            diagnostic_constants.SERVICE_IPAPI,
+        }
+        if enabled == ai_recommended:
+            return "AI 推荐（最快，默认）"
+        if enabled == keyless:
+            return "基础源（免 Key 多源校验）"
+        if enabled == visible:
+            return "全量检测"
+        if not enabled:
+            return "未启用"
+        return "自定义"
+
+    def refresh(self):
+        if self._last_report:
+            self._render_report(self._last_report)
+
+    def _start_detection(self):
+        if self._busy:
+            show_toast(self.winfo_toplevel(), "代理质量检测正在进行中", is_error=True)
+            return
+
+        self._busy = True
+        self._set_settings_enabled(False)
+        if self._run_button:
+            self._run_button.configure(text="检测中...", state="disabled")
+        if self._copy_button:
+            self._copy_button.configure(state="disabled")
+        if self._open_ping0_button:
+            self._open_ping0_button.configure(state="disabled")
+        try:
+            detection_settings = self._save_detection_settings(show_message=False)
+        except Exception as exc:
+            self._busy = False
+            self._set_settings_enabled(True)
+            if self._run_button:
+                self._run_button.configure(text="开始检测", state="normal")
+            self._set_status(f"保存检测设置失败: {exc}", "error")
+            show_toast(self.winfo_toplevel(), f"保存检测设置失败: {exc}", is_error=True)
+            return
+
+        enabled_services = detection_settings.enabled_services()
+        enabled_text = "、".join(diagnostic_constants.SERVICE_LABELS.get(item, item) for item in enabled_services) or "无"
+        self._set_status(f"正在测速公网出口；可连通后调用已启用检测源: {enabled_text}...")
+        self._clear_content()
+        self._add_info_card("检测中", [f"正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 调用: {enabled_text}。"])
+        self._set_report_text("检测中...")
+
+        def worker():
+            try:
+                report = network_diagnostics.detect_network(
+                    enabled_services=enabled_services,
+                    ping0_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_PING0),
+                    proxycheck_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_PROXYCHECK),
+                    ipapi_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_IPAPI),
+                    ipqs_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_IPQS),
+                    vpnapi_api_keys=detection_settings.keys_for(diagnostic_constants.SERVICE_VPNAPI),
+                )
+                payload = {"ok": True, "report": report, "error": ""}
+            except Exception as exc:
+                payload = {"ok": False, "report": None, "error": str(exc)}
+
+            def finish():
+                if not self._is_alive():
+                    return
+                self._busy = False
+                self._set_settings_enabled(True)
+                if self._run_button:
+                    self._run_button.configure(text="重新检测", state="normal")
+                if not payload["ok"]:
+                    self._set_status(f"检测失败: {payload['error']}", "error")
+                    self._clear_content()
+                    self._add_info_card("检测失败", [payload["error"]], COLORS["danger"])
+                    self._set_report_text(f"检测失败: {payload['error']}")
+                    return
+
+                self._last_report = payload["report"]
+                self._render_report(payload["report"])
+                if self._copy_button:
+                    self._copy_button.configure(state="normal")
+                if self._open_ping0_button and payload["report"].diagnostics:
+                    self._open_ping0_button.configure(state="normal")
+
+            run_on_ui_thread(self, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_empty(self):
+        self._clear_content()
+        self._add_info_card(
+            "待检测",
+            [
+                "当前页不会自动上传网络信息。",
+                "勾选的检测源才会被调用；开始检测前会自动保存当前设置。",
+                "支持 Key 的检测源可以通过“添加 Key”保存多个 API Key。",
+                "检测时会按顺序尝试 Key；遇到失败或限额会自动换下一个。",
+            ],
+        )
+
+    def _render_report(self, report: network_diagnostics.NetworkDiagnosticReport):
+        self._clear_content()
+        self._set_status(f"{report.generated_at}  |  {report.summary}", "success")
+
+        self._add_info_card(
+            "概览",
+            [
+                report.summary,
+                f"IPv4: {'已检测到' if report.has_ipv4 else '未检测到'}",
+                f"IPv6: {'已检测到' if report.has_ipv6 else '未检测到'}",
+            ],
+            COLORS["success"] if report.diagnostics else COLORS["warning"],
+        )
+
+        self._add_info_card(
+            "公开端点",
+            [self._format_probe(probe) for probe in report.probes],
+        )
+
+        for diagnostic in report.diagnostics:
+            self._add_diagnostic_card(diagnostic)
+
+        self._add_info_card("限制", report.notices + _collect_limitations(report), COLORS["warning"])
+        self._set_report_text(self._format_report(report))
+
+    def _add_diagnostic_card(self, diagnostic: network_diagnostics.IpDiagnostic):
+        cls = diagnostic.classification
+        geo = diagnostic.geo
+        border = _risk_border(cls.risk_score)
+        lines = [
+            f"测速: {self._format_seconds(diagnostic.probe.response_time)}",
+            f"类型: {cls.ip_type}  |  风险: {cls.risk_score}% {cls.risk_label}  |  置信度: {cls.confidence}",
+            f"Ping0: {diagnostic.ping0.quality_text()}",
+        ]
+        if diagnostic.reputation:
+            for item in diagnostic.reputation:
+                lines.append(f"信誉检测: {item.summary_text()}")
+                lines.extend(f"{item.source_label} Key: {attempt}" for attempt in item.attempts)
+        lines.extend(
+            [
+                f"位置: {geo.location_text()}",
+                f"ASN: {geo.owner_text()}",
+                f"企业/ISP: {geo.org or '-'} / {geo.isp or '-'}",
+                f"反向 DNS: {diagnostic.reverse_dns or '-'}",
+                f"Ping0 详情: {diagnostic.ping0.detail_url}",
+                f"Ping0 Ping: {diagnostic.ping0.ping_url}",
+            ]
+        )
+        if diagnostic.ping0.ok and diagnostic.ping0.source == "ping0-api":
+            lines.extend(
+                [
+                    f"Ping0 位置: {diagnostic.ping0.location or '-'}",
+                    f"Ping0 ASN: {diagnostic.ping0.asn or '-'} {diagnostic.ping0.asn_name or diagnostic.ping0.org or ''}".strip(),
+                ]
+            )
+            if diagnostic.ping0.attempts:
+                lines.extend(f"Ping0 Key: {attempt}" for attempt in diagnostic.ping0.attempts)
+        elif diagnostic.ping0.ok and diagnostic.ping0.source == "ping0-free-geo":
+            lines.append(f"Ping0 免费 Geo: {diagnostic.ping0.location or '-'} | {diagnostic.ping0.asn or '-'} | {diagnostic.ping0.org or '-'}")
+            if diagnostic.ping0.attempts:
+                lines.extend(f"Ping0 Key: {attempt}" for attempt in diagnostic.ping0.attempts)
+        elif diagnostic.ping0.error:
+            lines.append(f"Ping0 状态: {diagnostic.ping0.error}")
+        if geo.latitude is not None and geo.longitude is not None:
+            lines.append(f"经纬度: {geo.latitude}, {geo.longitude}")
+        if geo.timezone:
+            lines.append(f"时区: {geo.timezone}")
+        if cls.signals:
+            lines.extend(f"信号: {signal}" for signal in cls.signals)
+        self._add_info_card(f"{diagnostic.label}  {diagnostic.ip}", lines, border)
+
+    def _add_info_card(self, title: str, lines: list[str], border_color: str | None = None):
+        if not self._content_frame:
+            return
+        card = ctk.CTkFrame(self._content_frame, **card_frame_kwargs(border_color))
+        card.pack(fill="x", pady=5)
+        ctk.CTkLabel(
+            card,
+            text=title,
+            text_color=COLORS["text"],
+            font=font(14, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(12, 4))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="x", padx=14, pady=(0, 12))
+        clean_lines = [str(line) for line in (lines or []) if str(line)]
+        if not clean_lines:
+            clean_lines = ["-"]
+        for line in clean_lines:
+            label = ctk.CTkLabel(
+                body,
+                text=line,
+                text_color=COLORS["muted"],
+                font=font(12),
+                anchor="w",
+                justify="left",
+            )
+            label.pack(fill="x", pady=(1, 0))
+            bind_wraplength(body, label, padding=8)
+
+    def _clear_content(self):
+        if not self._content_frame:
+            return
+        for child in self._content_frame.winfo_children():
+            child.destroy()
+
+    def _is_alive(self) -> bool:
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _set_status(self, message: str, severity: str = "info"):
+        if not self._status_label:
+            return
+        color = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"],
+        }.get(severity, COLORS["muted"])
+        self._status_label.configure(text=message, text_color=color)
+
+    def _set_report_text(self, text: str):
+        self._pending_report_text = str(text or "")
+        if not self._report_box:
+            if self._report_placeholder_label:
+                try:
+                    preview = self._pending_report_text.splitlines()[0] if self._pending_report_text else "等待检测结果..."
+                    self._report_placeholder_label.configure(text=preview[:120])
+                except Exception:
+                    pass
+            return
+        try:
+            self._report_box.configure(state="normal")
+            self._report_box.delete("1.0", "end")
+            self._report_box.insert("1.0", self._pending_report_text)
+            self._report_box.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _copy_report(self):
+        if not self._last_report:
+            return
+        try:
+            text = self._format_report(self._last_report)
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            show_toast(self.winfo_toplevel(), "检测报告已复制")
+        except Exception as exc:
+            show_toast(self.winfo_toplevel(), f"复制报告失败: {exc}", is_error=True)
+
+    def _format_probe(self, probe: network_diagnostics.EndpointProbe) -> str:
+        elapsed = f"{probe.response_time:.2f}s" if probe.response_time is not None else "-"
+        if probe.ok:
+            return f"{probe.label}: {probe.ip}  |  {elapsed}"
+        return f"{probe.label}: 失败  |  {probe.error or '-'}  |  {elapsed}"
+
+    def _format_report(self, report: network_diagnostics.NetworkDiagnosticReport) -> str:
+        lines = [
+            f"生成时间: {report.generated_at}",
+            f"摘要: {report.summary}",
+            "",
+            "公开端点:",
+        ]
+        lines.extend(f"- {self._format_probe(probe)}" for probe in report.probes)
+        lines.append("")
+        lines.append("IP 诊断:")
+        for diagnostic in report.diagnostics:
+            geo = diagnostic.geo
+            cls = diagnostic.classification
+            lines.extend(
+                [
+                    f"- {diagnostic.label}: {diagnostic.ip}",
+                    f"  测速: {self._format_seconds(diagnostic.probe.response_time)}",
+                    f"  Ping0: {diagnostic.ping0.quality_text()}",
+                    f"  类型: {cls.ip_type}",
+                    f"  风险: {cls.risk_score}% {cls.risk_label}",
+                    f"  位置: {geo.location_text()}",
+                    f"  ASN: {geo.owner_text()}",
+                    f"  企业/ISP: {geo.org or '-'} / {geo.isp or '-'}",
+                    f"  反向 DNS: {diagnostic.reverse_dns or '-'}",
+                    f"  Ping0 详情: {diagnostic.ping0.detail_url}",
+                    f"  Ping0 Ping: {diagnostic.ping0.ping_url}",
+                ]
+            )
+            if diagnostic.reputation:
+                lines.append("  信誉检测:")
+                for item in diagnostic.reputation:
+                    lines.append(f"  - {item.summary_text()}")
+                    for attempt in item.attempts:
+                        lines.append(f"    Key 尝试: {attempt}")
+            if diagnostic.ping0.ok:
+                lines.append(f"  Ping0 数据源: {diagnostic.ping0.source}")
+                if diagnostic.ping0.location:
+                    lines.append(f"  Ping0 位置: {diagnostic.ping0.location}")
+                if diagnostic.ping0.asn or diagnostic.ping0.asn_name or diagnostic.ping0.org:
+                    lines.append(f"  Ping0 ASN/企业: {diagnostic.ping0.asn or '-'} {diagnostic.ping0.asn_name or diagnostic.ping0.org}")
+                for attempt in diagnostic.ping0.attempts:
+                    lines.append(f"  Ping0 Key 尝试: {attempt}")
+            elif diagnostic.ping0.error:
+                lines.append(f"  Ping0 状态: {diagnostic.ping0.error}")
+            for signal in cls.signals:
+                lines.append(f"  信号: {signal}")
+        lines.append("")
+        lines.append("限制:")
+        for notice in report.notices + _collect_limitations(report):
+            lines.append(f"- {notice}")
+        return "\n".join(lines)
+
+    def _open_fastest_ping0(self):
+        if not self._last_report or not self._last_report.diagnostics:
+            return
+        try:
+            fastest = min(
+                self._last_report.diagnostics,
+                key=lambda diagnostic: diagnostic.probe.response_time if diagnostic.probe.response_time is not None else float("inf"),
+            )
+            webbrowser.open(fastest.ping0.detail_url)
+            show_toast(self.winfo_toplevel(), "已打开最快出口的 Ping0 详情页")
+        except Exception as exc:
+            show_toast(self.winfo_toplevel(), f"打开 Ping0 失败: {exc}", is_error=True)
+
+    def _format_seconds(self, value: float | None) -> str:
+        try:
+            return f"{float(value):.2f}s" if value is not None else "-"
+        except (TypeError, ValueError):
+            return "-"
+
+
+def _risk_border(score: int) -> str:
+    if score >= 70:
+        return COLORS["danger"]
+    if score >= 50:
+        return COLORS["warning"]
+    if score <= 25:
+        return COLORS["success"]
+    return COLORS["border_soft"]
+
+
+def _collect_limitations(report: network_diagnostics.NetworkDiagnosticReport) -> list[str]:
+    limitations: list[str] = []
+    seen: set[str] = set()
+    for diagnostic in report.diagnostics:
+        for item in diagnostic.classification.limitations:
+            if item not in seen:
+                seen.add(item)
+                limitations.append(item)
+    return limitations

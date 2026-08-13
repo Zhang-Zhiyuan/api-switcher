@@ -1,0 +1,2728 @@
+import hashlib
+import json
+import logging
+import re
+import base64
+import copy
+import threading
+from datetime import datetime
+from urllib.parse import urlparse
+
+from config.paths import PROFILES_FILE, CLAUDE_CREDENTIALS
+from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_text
+from core.lazy_imports import LazyModule
+from models.profile import (
+    ClaudeProfile,
+    CodexProfile,
+    ClaudeAccountProfile,
+    CodexAccountProfile,
+    SSHProfile,
+    BrowserProfile,
+    normalize_claude_auth_scheme,
+)
+
+
+security = LazyModule("core.security")
+
+logger = logging.getLogger(__name__)
+_STORE_CACHE_LOCK = threading.RLock()
+_STORE_CACHE: dict | None = None
+_STORE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
+
+PROFILE_LIST_KEYS = (
+    "claude_profiles",
+    "codex_profiles",
+    "claude_account_profiles",
+    "codex_account_profiles",
+    "ssh_profiles",
+    "browser_profiles",
+)
+ACTIVE_PROFILE_KEYS = (
+    "active_claude_profile",
+    "active_codex_profile",
+    "active_claude_account",
+    "active_codex_account",
+    "active_ssh_profile",
+    "active_browser_profile",
+)
+
+# Only these model fields are allowed to own app-managed secrets.  Do not infer
+# ownership from arbitrary ``*_ref`` keys loaded from disk: unknown fields may
+# come from a newer/corrupt store and must never authorize secret deletion.
+PROFILE_SECRET_REF_FIELDS = {
+    "claude_profiles": ("auth_token_ref", "primary_api_key_ref"),
+    "codex_profiles": ("api_key_ref",),
+    "claude_account_profiles": ("credentials_ref",),
+    "codex_account_profiles": ("auth_json_ref",),
+    "ssh_profiles": ("password_ref", "private_key_passphrase_ref"),
+    "browser_profiles": (),
+}
+
+# App-owned secret namespaces for each schema field.  Profile renames in older
+# versions may leave the owner portion unchanged, so validate namespace and
+# field suffix without requiring it to equal the current profile name.
+PROFILE_SECRET_REF_SHAPES = {
+    "claude_profiles": {
+        "auth_token_ref": ("claude:", ":auth_token"),
+        "primary_api_key_ref": ("claude:", ":primary_api_key"),
+    },
+    "codex_profiles": {
+        "api_key_ref": ("codex:", ":api_key"),
+    },
+    "claude_account_profiles": {
+        "credentials_ref": ("claude-account:", ":credentials"),
+    },
+    "codex_account_profiles": {
+        "auth_json_ref": ("codex-account:", ":auth_json"),
+    },
+    "ssh_profiles": {
+        "password_ref": ("ssh:", ":password"),
+        "private_key_passphrase_ref": ("ssh:", ":key_passphrase"),
+    },
+}
+MAX_PROFILE_SECRET_REF_LENGTH = 512
+
+
+def _get_default_store() -> dict:
+    """Return default empty store structure."""
+    return {
+        "version": 5,  # provider fields plus local-only official account snapshots
+        "claude_profiles": [],
+        "codex_profiles": [],
+        "claude_account_profiles": [],
+        "codex_account_profiles": [],
+        "ssh_profiles": [],
+        "browser_profiles": [],
+        "active_claude_profile": None,
+        "active_codex_profile": None,
+        "active_claude_account": None,
+        "active_codex_account": None,
+        "active_ssh_profile": None,
+        "active_browser_profile": None,
+    }
+
+
+def clear_profile_store_cache() -> None:
+    """Clear the in-process profile store cache."""
+    global _STORE_CACHE, _STORE_CACHE_SIGNATURE
+    with _STORE_CACHE_LOCK:
+        _STORE_CACHE = None
+        _STORE_CACHE_SIGNATURE = None
+
+
+def _profile_store_signature() -> tuple[str, int | None, int | None]:
+    path = PROFILES_FILE
+    path_key = str(path.resolve(strict=False))
+    try:
+        stat = path.stat()
+        return (path_key, int(stat.st_mtime_ns), int(stat.st_size))
+    except FileNotFoundError:
+        return (path_key, None, None)
+
+
+def _clone_store(store: dict) -> dict:
+    return copy.deepcopy(store)
+
+
+def _cache_store(store: dict, signature: tuple[str, int | None, int | None] | None = None) -> None:
+    global _STORE_CACHE, _STORE_CACHE_SIGNATURE
+    _STORE_CACHE = _clone_store(store)
+    _STORE_CACHE_SIGNATURE = signature or _profile_store_signature()
+
+
+def _normalize_store(store: dict) -> bool:
+    """Normalize a loaded profile store in place. Returns True if changed."""
+    changed = False
+    defaults = _get_default_store()
+
+    for key, value in defaults.items():
+        if key not in store:
+            logger.warning(f"Missing key in store: {key}, adding default")
+            store[key] = value
+            changed = True
+
+    if not isinstance(store.get("version"), int):
+        logger.warning("Invalid profile store version, resetting to current version")
+        store["version"] = defaults["version"]
+        changed = True
+    elif store["version"] < defaults["version"]:
+        store["version"] = defaults["version"]
+        changed = True
+
+    for key in PROFILE_LIST_KEYS:
+        if not isinstance(store.get(key), list):
+            logger.warning(f"Invalid profile list field: {key}, resetting to empty list")
+            store[key] = []
+            changed = True
+            continue
+
+        cleaned_items = []
+        seen_names: set[str] = set()
+        for idx, item in enumerate(store.get(key, [])):
+            if not isinstance(item, dict):
+                logger.warning(f"Invalid profile entry in {key}[{idx}], removing")
+                changed = True
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                logger.warning(f"Profile entry in {key}[{idx}] has no valid name, removing")
+                changed = True
+                continue
+            normalized_name = name.strip()
+            if normalized_name != name:
+                item["name"] = normalized_name
+                name = normalized_name
+                changed = True
+            if name in seen_names:
+                logger.warning(f"Duplicate profile name {name!r} in {key}, keeping first entry")
+                changed = True
+                continue
+            seen_names.add(name)
+            cleaned_items.append(item)
+        if len(cleaned_items) != len(store.get(key, [])):
+            store[key] = cleaned_items
+
+    for key in ACTIVE_PROFILE_KEYS:
+        if store.get(key) is not None and not isinstance(store.get(key), str):
+            logger.warning(f"Invalid active profile field: {key}, resetting to None")
+            store[key] = None
+            changed = True
+        elif isinstance(store.get(key), str):
+            active_name = store[key].strip()
+            if active_name != store[key]:
+                store[key] = active_name or None
+                changed = True
+
+    active_links = {
+        "active_claude_profile": "claude_profiles",
+        "active_codex_profile": "codex_profiles",
+        "active_claude_account": "claude_account_profiles",
+        "active_codex_account": "codex_account_profiles",
+        "active_ssh_profile": "ssh_profiles",
+        "active_browser_profile": "browser_profiles",
+    }
+    for active_key, list_key in active_links.items():
+        active = store.get(active_key)
+        if active:
+            names = {
+                item.get("name")
+                for item in store.get(list_key, [])
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            if active not in names:
+                logger.warning(f"Active profile {active!r} was not found in {list_key}, resetting")
+                store[active_key] = None
+                changed = True
+
+    for profile in store.get("claude_profiles", []):
+        if not isinstance(profile, dict):
+            continue
+        if "provider" not in profile:
+            profile["provider"] = "anthropic"
+            changed = True
+        if "custom_provider_name" not in profile:
+            profile["custom_provider_name"] = None
+            changed = True
+
+    # A damaged or hand-edited store must not let one feature borrow another
+    # feature's secret namespace.  Clear the unsafe reference while preserving
+    # the rest of the profile so the user can repair its credentials in the UI.
+    for list_key, field_shapes in PROFILE_SECRET_REF_SHAPES.items():
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            for field_name in field_shapes:
+                ref = profile.get(field_name)
+                if ref and not _is_valid_profile_secret_ref(list_key, field_name, ref):
+                    logger.warning(
+                        "Ignoring invalid secret reference in %s.%s for profile %r",
+                        list_key,
+                        field_name,
+                        profile.get("name"),
+                    )
+                    profile[field_name] = None
+                    changed = True
+
+    return changed
+
+
+def _restore_store_from_backup(backup_file) -> dict | None:
+    """Load, normalize, and restore a profile store backup without clobbering it."""
+    try:
+        logger.info("Attempting to restore profiles from backup")
+        content = backup_file.read_text(encoding="utf-8")
+        store = json.loads(content)
+        if not isinstance(store, dict):
+            raise ValueError("Backup store is not a dictionary")
+        _normalize_store(store)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise
+    except Exception as backup_error:
+        logger.error(f"Failed to restore profiles from backup: {backup_error}")
+        return None
+    logger.info("Successfully restored profiles from backup")
+    _save_store(store, create_backup=False)
+    return store
+
+
+def _load_store() -> dict:
+    """Load profiles store with backup and recovery mechanism."""
+    with _STORE_CACHE_LOCK:
+        signature = _profile_store_signature()
+        if _STORE_CACHE is not None and _STORE_CACHE_SIGNATURE == signature:
+            return _clone_store(_STORE_CACHE)
+
+        if signature[1] is None:
+            logger.info("Profiles file does not exist, returning default store")
+            store = _get_default_store()
+            _cache_store(store, signature)
+            return _clone_store(store)
+
+        backup_file = PROFILES_FILE.with_suffix(".backup")
+
+        try:
+            content = PROFILES_FILE.read_text(encoding="utf-8")
+            store = json.loads(content)
+
+            # Validate basic structure
+            if not isinstance(store, dict):
+                raise ValueError("Store is not a dictionary")
+
+            changed = _normalize_store(store)
+
+            # Migrate old versions
+            version = store.get("version", 1)
+            if version == 1:
+                logger.info("Migrating store from version 1 to 4")
+                store["version"] = 4
+                changed = True
+                store["ssh_profiles"] = []
+                store["active_ssh_profile"] = None
+                store["browser_profiles"] = []
+                store["active_browser_profile"] = None
+                # 为所有 Claude profiles 添加默认 provider
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+            elif version == 2:
+                logger.info("Migrating store from version 2 to 4")
+                store["version"] = 4
+                changed = True
+                if "browser_profiles" not in store:
+                    store["browser_profiles"] = []
+                if "active_browser_profile" not in store:
+                    store["active_browser_profile"] = None
+                # 为所有 Claude profiles 添加默认 provider
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+            elif version == 3:
+                logger.info("Migrating store from version 3 to 4")
+                store["version"] = 4
+                changed = True
+                # 为所有 Claude profiles 添加默认 provider
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+            else:
+                # Ensure all required fields exist
+                if "browser_profiles" not in store:
+                    store["browser_profiles"] = []
+                    changed = True
+                if "active_browser_profile" not in store:
+                    store["active_browser_profile"] = None
+                    changed = True
+                # 确保所有 Claude profiles 都有 provider 字段
+                for profile in store.get("claude_profiles", []):
+                    if not isinstance(profile, dict):
+                        continue
+                    if "provider" not in profile:
+                        profile["provider"] = "anthropic"
+                        changed = True
+                    if "custom_provider_name" not in profile:
+                        profile["custom_provider_name"] = None
+                        changed = True
+
+            changed = _normalize_store(store) or changed
+
+            if changed:
+                _save_store(store)
+            else:
+                _cache_store(store, signature)
+
+            return _clone_store(store)
+
+        except FileNotFoundError:
+            logger.info("Profiles file no longer exists, returning default store")
+            store = _get_default_store()
+            _cache_store(store, _profile_store_signature())
+            return _clone_store(store)
+
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.error(f"JSON decode error in profiles file: {e}")
+            restored = _restore_store_from_backup(backup_file)
+            if restored is not None:
+                return restored
+
+            logger.warning("Returning default store due to corrupted profiles file")
+            store = _get_default_store()
+            _cache_store(store, signature)
+            return _clone_store(store)
+
+        except OSError:
+            raise
+
+        except RuntimeError:
+            # Automatic normalization/migration persists through _save_store,
+            # which wraps a failed atomic write as RuntimeError.  Never turn
+            # that I/O failure into an empty/default store.
+            raise
+
+        except Exception as e:
+            logger.error(f"Failed to load profiles: {e}")
+            restored = _restore_store_from_backup(backup_file)
+            if restored is not None:
+                return restored
+
+            store = _get_default_store()
+            _cache_store(store, signature)
+            return _clone_store(store)
+
+
+def _save_store(store: dict, create_backup: bool = True) -> None:
+    """Save profiles store with atomic write and backup."""
+    with _STORE_CACHE_LOCK:
+        try:
+            # Ensure parent directory exists
+            PROFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+            # Validate store structure before saving
+            if not isinstance(store, dict):
+                raise ValueError("Store must be a dictionary")
+
+            # Serialize to JSON
+            content = json.dumps(store, indent=2, ensure_ascii=False)
+
+            # Create backup of existing file
+            backup_file = PROFILES_FILE.with_suffix(".backup")
+            if create_backup and PROFILES_FILE.exists():
+                try:
+                    atomic_copy_file(PROFILES_FILE, backup_file)
+                    logger.debug(f"Created backup: {backup_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to create backup: {e}")
+
+            try:
+                atomic_write_text(PROFILES_FILE, content)
+            except Exception as e:
+                clear_profile_store_cache()
+                raise RuntimeError(f"Failed to save profiles: {e}") from e
+
+            # The disk commit is authoritative.  A cache refresh failure must
+            # not turn a successful atomic write into a reported save failure,
+            # otherwise callers may roll back secrets while the new metadata
+            # is already durable on disk.
+            try:
+                _cache_store(store)
+            except Exception as cache_error:
+                clear_profile_store_cache()
+                logger.warning(
+                    "Profile 已写入磁盘，但内存缓存刷新失败: %s",
+                    cache_error,
+                )
+            logger.debug(f"Successfully saved profiles to {PROFILES_FILE}")
+
+        except Exception as e:
+            logger.error(f"Error saving profiles store: {e}")
+            raise
+
+
+def _snapshot_profile_store_files() -> dict:
+    """Snapshot the exact store and backup bytes before a multi-resource save."""
+    paths = (PROFILES_FILE, PROFILES_FILE.with_suffix(".backup"))
+    snapshot = {}
+    for path in paths:
+        try:
+            snapshot[path] = (True, path.read_bytes())
+        except FileNotFoundError:
+            snapshot[path] = (False, b"")
+    return snapshot
+
+
+def _restore_profile_store_files(snapshot: dict) -> list[str]:
+    """Restore a profile-store snapshot without creating another backup."""
+    errors: list[str] = []
+    for path, (existed, content) in snapshot.items():
+        try:
+            if existed:
+                atomic_write_bytes(path, content)
+            else:
+                path.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"{path}: {exc}")
+    clear_profile_store_cache()
+    return errors
+
+
+# --- Claude Profile CRUD ---
+
+def _load_profile_list(items: list[dict], cls, label: str) -> list:
+    if not isinstance(items, list):
+        logger.warning(f"Skipping invalid {label} profile list: expected list")
+        return []
+
+    profiles = []
+    for idx, item in enumerate(items):
+        try:
+            profiles.append(cls.from_dict(item))
+        except Exception as e:
+            logger.warning(f"Skipping invalid {label} profile at index {idx}: {e}")
+    return profiles
+
+
+def _ensure_rename_target_available(
+    profiles: object,
+    new_name: str,
+    previous_name: str | None,
+    operation: str,
+) -> None:
+    """Reject renaming over a different existing profile.
+
+    Saves without ``previous_name`` remain upserts, and saving an edited
+    profile under its unchanged name remains valid.  Only a true rename may
+    not consume another profile's metadata and credentials.
+    """
+    if not previous_name or previous_name == new_name:
+        return
+    if isinstance(profiles, list) and any(
+        isinstance(item, dict) and item.get("name") == new_name
+        for item in profiles
+    ):
+        raise ValueError(f"{operation} 名称已存在: {new_name}")
+
+
+def detect_claude_provider(settings: dict) -> str:
+    """Infer the Claude provider from settings env fields."""
+    if not isinstance(settings, dict):
+        return "anthropic"
+
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        env = {}
+
+    base_url = str(env.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+
+    from core.providers import ProviderRegistry
+    for provider in ProviderRegistry.get_all_providers():
+        provider_base = str(provider.base_url_for_claude() or "").rstrip("/")
+        if provider_base and provider_base == base_url:
+            return provider.name
+
+    for provider in ProviderRegistry.get_all_providers():
+        if provider.claude_env and all(env.get(key) == value for key, value in provider.claude_env.items()):
+            return provider.name
+
+    if base_url and base_url not in {"https://api.anthropic.com", "https://api.anthropic.com/v1"}:
+        return "custom"
+
+    return "anthropic"
+
+
+def list_claude_profiles() -> list[ClaudeProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("claude_profiles", []), ClaudeProfile, "Claude")
+
+
+def is_third_party_claude_profile(profile: ClaudeProfile) -> bool:
+    return getattr(profile, "provider", "anthropic") != "anthropic"
+
+
+def list_switchable_claude_profiles() -> list[ClaudeProfile]:
+    return [p for p in list_claude_profiles() if is_third_party_claude_profile(p)]
+
+
+def get_quick_switch_summary() -> dict:
+    store = _load_store()
+    claude_profiles = [
+        profile
+        for profile in _load_profile_list(store.get("claude_profiles", []), ClaudeProfile, "Claude")
+        if is_third_party_claude_profile(profile)
+    ]
+    codex_profiles = [
+        profile
+        for profile in _load_profile_list(store.get("codex_profiles", []), CodexProfile, "Codex")
+        if is_third_party_codex_profile(profile)
+    ]
+
+    claude_current = None
+    try:
+        from core.parser import read_claude_config, read_claude_settings
+
+        settings = read_claude_settings()
+        config = read_claude_config()
+        if settings or config:
+            for profile in claude_profiles:
+                if _claude_profile_matches(profile, settings, config):
+                    claude_current = profile.name
+                    break
+    except Exception as exc:
+        logger.debug("Failed to detect current Claude quick-switch profile: %s", exc)
+
+    codex_current = None
+    try:
+        from core.auth_parser import read_codex_auth
+        from core.toml_parser import read_codex_config
+
+        config = read_codex_config()
+        auth = read_codex_auth()
+        if config or auth:
+            for profile in codex_profiles:
+                if _codex_profile_matches(profile, config, auth):
+                    codex_current = profile.name
+                    break
+    except Exception as exc:
+        logger.debug("Failed to detect current Codex quick-switch profile: %s", exc)
+
+    return {
+        "claude_names": [profile.name for profile in claude_profiles],
+        "claude_current": claude_current or store.get("active_claude_profile"),
+        "codex_names": [profile.name for profile in codex_profiles],
+        "codex_current": codex_current or store.get("active_codex_profile"),
+    }
+
+
+def get_active_claude_name() -> str | None:
+    return _load_store().get("active_claude_profile")
+
+
+def set_active_claude(name: str | None) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_claude_profile"] = name
+        _save_store(store)
+
+
+def _claude_env(settings: dict) -> dict:
+    env = settings.get("env", {})
+    return env if isinstance(env, dict) else {}
+
+
+def _claude_permissions(settings: dict) -> dict:
+    permissions = settings.get("permissions", {})
+    return permissions if isinstance(permissions, dict) else {}
+
+
+def _claude_auth_token_from_current(settings: dict, config: dict) -> str:
+    env = _claude_env(settings)
+    return (
+        env.get("ANTHROPIC_AUTH_TOKEN")
+        or env.get("ANTHROPIC_API_KEY")
+        or config.get("primaryApiKey")
+        or ""
+    )
+
+
+def _claude_primary_api_key(config: dict) -> str:
+    return config.get("primaryApiKey") or ""
+
+
+def _claude_auth_scheme_from_current(settings: dict, config: dict, provider: str) -> str:
+    env = _claude_env(settings)
+    if env.get("ANTHROPIC_AUTH_TOKEN"):
+        return "auth_token"
+    if env.get("ANTHROPIC_API_KEY") or config.get("primaryApiKey"):
+        return "api_key"
+    from core.providers import ProviderRegistry
+
+    return ProviderRegistry.get_claude_auth_scheme(provider)
+
+
+def _claude_auth_identity_from_current(settings: dict, config: dict) -> str:
+    token = _claude_auth_token_from_current(settings, config)
+    return f"auth-{_short_fingerprint(token)}" if token else "no-auth"
+
+
+def describe_claude_profile_identity(profile: ClaudeProfile) -> str:
+    """Return a non-secret auth identity label for display."""
+    token = security.get_secret(profile.auth_token_ref)
+    if not token:
+        token = security.get_secret(getattr(profile, "primary_api_key_ref", None))
+    return f"auth-{_short_fingerprint(token)}" if token else "no-auth"
+
+
+def _claude_additional_directories(settings: dict, permissions: dict | None = None) -> list:
+    if isinstance(settings.get("additionalDirectories"), list):
+        return settings.get("additionalDirectories", [])
+    permissions = permissions if permissions is not None else _claude_permissions(settings)
+    value = permissions.get("additionalDirectories")
+    return value if isinstance(value, list) else []
+
+
+def _claude_profile_kwargs_from_current(name: str, settings: dict, config: dict) -> dict:
+    env = _claude_env(settings)
+    permissions = _claude_permissions(settings)
+    provider = detect_claude_provider(settings)
+    token_ref = f"claude:{name}:auth_token"
+
+    return {
+        "name": name,
+        "auth_token_ref": token_ref,
+        "primary_api_key_ref": None,
+        "auth_scheme": _claude_auth_scheme_from_current(settings, config, provider),
+        "base_url": env.get("ANTHROPIC_BASE_URL", ""),
+        "model": settings.get("model", ""),
+        "effort_level": env.get("CLAUDE_CODE_EFFORT_LEVEL") or settings.get("effortLevel") or "high",
+        "permissions_mode": permissions.get("defaultMode", "default"),
+        "skip_dangerous_prompt": settings.get("skipDangerousModePermissionPrompt", False),
+        "permissions_allow": permissions.get("allow", []),
+        "additional_directories": _claude_additional_directories(settings, permissions),
+        "provider": provider,
+    }
+
+
+def _build_claude_import_name(settings: dict, config: dict) -> str:
+    provider = _safe_name_part(_claude_station_label(settings), "Claude-API")
+    model = _safe_name_part(settings.get("model"), "model")
+    if model and model != "model":
+        return f"Claude-{provider}-{model}"
+    identity = _safe_name_part(_claude_auth_identity_from_current(settings, config), "auth")
+    return f"Claude-{provider}-{identity}"
+
+
+def _claude_profile_config_matches(profile: ClaudeProfile, settings: dict) -> bool:
+    env = _claude_env(settings)
+    permissions = _claude_permissions(settings)
+
+    detected_provider = detect_claude_provider(settings)
+    if detected_provider == "anthropic" or not is_third_party_claude_profile(profile):
+        return False
+    if detected_provider != profile.provider:
+        return False
+    if (env.get("ANTHROPIC_BASE_URL") or "") != (profile.base_url or ""):
+        return False
+    if settings.get("model", "") != profile.model:
+        return False
+    from core.providers import ProviderRegistry
+
+    provider = ProviderRegistry.get_provider(profile.provider)
+    provider_env = provider.claude_env if provider else {}
+    expected_models = {
+        "ANTHROPIC_MODEL": profile.model,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": profile.model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": provider_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", profile.model),
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": provider_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", profile.model),
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": provider_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", profile.model),
+        "CLAUDE_CODE_SUBAGENT_MODEL": profile.model,
+    }
+    if any((env.get(key) or "") != value for key, value in expected_models.items()):
+        return False
+    if ProviderRegistry.supports_reasoning_effort(profile.provider):
+        settings_effort = str(settings.get("effortLevel") or "").strip()
+        env_effort = str(env.get("CLAUDE_CODE_EFFORT_LEVEL") or "").strip()
+        if env_effort != profile.effort_level:
+            return False
+        if profile.effort_level == "max":
+            if settings_effort:
+                return False
+        elif settings_effort != profile.effort_level:
+            return False
+    elif settings.get("effortLevel") or env.get("CLAUDE_CODE_EFFORT_LEVEL"):
+        return False
+    if permissions.get("defaultMode", "default") != profile.permissions_mode:
+        return False
+    if bool(settings.get("skipDangerousModePermissionPrompt", False)) != bool(profile.skip_dangerous_prompt):
+        return False
+    if (permissions.get("allow", []) or []) != (profile.permissions_allow or []):
+        return False
+    if (_claude_additional_directories(settings, permissions) or []) != (profile.additional_directories or []):
+        return False
+    return True
+
+
+def _claude_profile_auth_matches(profile: ClaudeProfile, settings: dict, config: dict) -> bool:
+    env = _claude_env(settings)
+    scheme = normalize_claude_auth_scheme(
+        getattr(profile, "auth_scheme", None),
+        "api_key" if profile.provider == "anthropic" else "auth_token",
+    )
+    expected_key = "ANTHROPIC_API_KEY" if scheme == "api_key" else "ANTHROPIC_AUTH_TOKEN"
+    unexpected_key = "ANTHROPIC_AUTH_TOKEN" if scheme == "api_key" else "ANTHROPIC_API_KEY"
+    current_token = env.get(expected_key) or ""
+    if env.get(unexpected_key):
+        return False
+    current_primary = _claude_primary_api_key(config)
+    stored_token = security.get_secret(profile.auth_token_ref) or ""
+    stored_primary = security.get_secret(getattr(profile, "primary_api_key_ref", None)) or ""
+    stored_values = {value for value in [stored_token, stored_primary] if value}
+
+    if current_token:
+        if current_token not in stored_values:
+            return False
+    if current_primary:
+        if scheme != "api_key":
+            return False
+        if current_primary not in stored_values:
+            return False
+    if current_token or current_primary:
+        return True
+    return not stored_values
+
+
+def _claude_profile_matches(profile: ClaudeProfile, settings: dict, config: dict) -> bool:
+    return _claude_profile_config_matches(profile, settings) and _claude_profile_auth_matches(profile, settings, config)
+
+
+def get_current_claude_name() -> str | None:
+    """Return the profile that matches the actual Claude files on disk."""
+    from core.parser import read_claude_settings, read_claude_config
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    if not settings and not config:
+        return None
+
+    for profile in list_switchable_claude_profiles():
+        if _claude_profile_matches(profile, settings, config):
+            return profile.name
+    return None
+
+
+def get_claude_runtime_summary() -> dict:
+    """Return display-safe details for the actual Claude settings/config on disk."""
+    from core.parser import read_claude_settings, read_claude_config
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    current_name = None
+    if settings or config:
+        for profile in list_switchable_claude_profiles():
+            if _claude_profile_matches(profile, settings, config):
+                current_name = profile.name
+                break
+
+    return {
+        "profile_name": current_name,
+        "stored_active": get_active_claude_name(),
+        "provider": detect_claude_provider(settings) if settings else "anthropic",
+        "model": settings.get("model", "") if settings else "",
+        "auth_identity": _claude_auth_identity_from_current(settings, config),
+        "has_settings": bool(settings),
+        "has_config": bool(config),
+    }
+
+
+def _pick_claude_import_name(settings: dict, config: dict) -> str:
+    base_name = _build_claude_import_name(settings, config)
+    profiles = list_claude_profiles()
+    generic_names = {"current", "claude-current"}
+    for profile in profiles:
+        if profile.name.lower() not in generic_names and _claude_profile_matches(profile, settings, config):
+            return profile.name
+
+    return _unique_profile_name({profile.name for profile in profiles}, base_name)
+
+
+def save_claude_profile(
+    profile: ClaudeProfile,
+    previous_name: str | None = None,
+    *,
+    activate: bool = False,
+) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("claude_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "Claude Profile",
+        )
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
+
+        replaced_refs: set[str] = set()
+        for existing in profiles:
+            if isinstance(existing, dict) and existing.get("name") in replaced_names:
+                replaced_refs.update(_profile_secret_refs(existing, "claude_profiles"))
+
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["claude_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("claude_profiles",))
+        if previous_name and store.get("active_claude_profile") == previous_name:
+            store["active_claude_profile"] = profile.name
+        if activate:
+            store["active_claude_profile"] = profile.name
+            store["active_claude_account"] = None
+        _save_store(store)
+
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Claude Profile 更新",
+        )
+
+
+def save_claude_profile_with_secrets(
+    profile: ClaudeProfile,
+    secret_updates: dict[str, str],
+    previous_name: str | None = None,
+    *,
+    activate: bool = False,
+) -> None:
+    """Save Claude metadata and edited secrets as one in-process transaction."""
+    _save_profile_with_secret_updates(
+        profile,
+        list_key="claude_profiles",
+        secret_updates=secret_updates,
+        operation="Claude Profile",
+        previous_name=previous_name,
+        save_callback=lambda: save_claude_profile(
+            profile,
+            previous_name=previous_name,
+            activate=activate,
+        ),
+    )
+
+
+def clone_claude_profile(name: str) -> ClaudeProfile:
+    with _STORE_CACHE_LOCK:
+        profiles = list_claude_profiles()
+        source = next((p for p in profiles if p.name == name), None)
+        if not source:
+            raise ValueError(f"Claude profile '{name}' not found")
+
+        new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
+        token_ref = f"claude:{new_name}:auth_token"
+
+        token_value = (
+            security.get_secret_strict(source.auth_token_ref)
+            or security.get_secret_strict(getattr(source, "primary_api_key_ref", None))
+            or ""
+        )
+        changes = {
+            ref: value
+            for ref, value in ((token_ref, token_value),)
+            if value
+        }
+        secret_snapshot = {
+            ref: security.get_secret_strict(ref)
+            for ref in changes
+        }
+
+        cloned = ClaudeProfile(
+            name=new_name,
+            auth_token_ref=token_ref,
+            primary_api_key_ref=None,
+            auth_scheme=source.auth_scheme,
+            base_url=source.base_url,
+            model=source.model,
+            effort_level=source.effort_level,
+            permissions_mode=source.permissions_mode,
+            skip_dangerous_prompt=source.skip_dangerous_prompt,
+            permissions_allow=list(source.permissions_allow or []),
+            additional_directories=list(source.additional_directories or []),
+            provider=source.provider,
+            custom_provider_name=source.custom_provider_name,
+        )
+        try:
+            for ref, value in changes.items():
+                security.set_secret(ref, value)
+            save_claude_profile(cloned)
+        except Exception as clone_error:
+            rollback_errors = _restore_secret_values(secret_snapshot)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Claude Profile 克隆失败，且密钥回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from clone_error
+            raise
+        return cloned
+
+
+def delete_claude_profile(name: str) -> None:
+    _delete_profile_with_secrets(
+        name,
+        list_key="claude_profiles",
+        active_key="active_claude_profile",
+        conventional_refs={
+            f"claude:{name}:auth_token",
+            f"claude:{name}:primary_api_key",
+        },
+    )
+
+
+# --- Claude Official Account CRUD ---
+
+def list_claude_account_profiles() -> list[ClaudeAccountProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("claude_account_profiles", []), ClaudeAccountProfile, "Claude account")
+
+
+def get_active_claude_account_name() -> str | None:
+    return _load_store().get("active_claude_account")
+
+
+def set_active_claude_account(name: str | None) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_claude_account"] = name
+        _save_store(store)
+
+
+def save_claude_account_profile(profile: ClaudeAccountProfile) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("claude_account_profiles", [])
+        replaced_refs = {
+            ref
+            for item in profiles
+            if isinstance(item, dict) and item.get("name") == profile.name
+            for ref in _profile_secret_refs(item, "claude_account_profiles")
+        }
+        profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+        profiles.append(profile.to_dict())
+        store["claude_account_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("claude_account_profiles",))
+        _save_store(store)
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Claude 账号快照更新",
+        )
+
+
+def save_claude_account_profile_with_credentials(
+    profile: ClaudeAccountProfile,
+    credentials: dict,
+) -> None:
+    """Save an imported Claude account and its credential secret atomically."""
+    if not isinstance(credentials, dict):
+        raise ValueError("Claude 账号快照格式异常")
+    ref = profile.credentials_ref
+    with _STORE_CACHE_LOCK:
+        original_store = _clone_store(_load_store())
+        previous_secret = security.get_secret_strict(ref)
+        try:
+            security.set_secret_json(ref, credentials)
+            save_claude_account_profile(profile)
+        except Exception as save_error:
+            rollback_errors = _restore_secret_values({ref: previous_secret})
+            try:
+                current_store = _load_store()
+                if current_store != original_store:
+                    _save_store(original_store, create_backup=False)
+            except Exception as store_restore_error:
+                clear_profile_store_cache()
+                rollback_errors.append(f"Profile: {store_restore_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Claude 账号快照保存失败，且自动回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from save_error
+            raise
+
+
+def get_claude_account_credentials(profile: ClaudeAccountProfile) -> dict | None:
+    return security.get_secret_json(profile.credentials_ref)
+
+
+def _validate_account_snapshot(data: object, label: str) -> tuple[bool, str]:
+    if data is None:
+        return False, f"{label}快照不可读取，可能已被删除或密钥存储损坏"
+    if not isinstance(data, dict):
+        return False, f"{label}快照格式异常"
+    if not data:
+        return False, f"{label}快照为空"
+    return True, "可用"
+
+
+def validate_claude_account_snapshot(profile: ClaudeAccountProfile) -> tuple[bool, str]:
+    credentials = get_claude_account_credentials(profile)
+    return _validate_claude_account_credentials(credentials)
+
+
+def _validate_claude_account_credentials(credentials: object) -> tuple[bool, str]:
+    ok, reason = _validate_account_snapshot(credentials, "Claude 账号")
+    if not ok:
+        return ok, reason
+    if not any(value.strip() for value in _iter_nested_strings(credentials)):
+        return False, "Claude 账号快照里没有可用凭据内容"
+    return True, reason
+
+
+def load_claude_account_credentials(profile: ClaudeAccountProfile) -> dict:
+    credentials = get_claude_account_credentials(profile)
+    ok, reason = _validate_claude_account_credentials(credentials)
+    if not ok:
+        raise ValueError(reason)
+    return credentials
+
+
+def _claude_account_identity_from_credentials(credentials: dict) -> str:
+    return _identity_from_json(credentials, "claude-login")
+
+
+def _claude_account_preferred_name(credentials: dict) -> str:
+    return _account_preferred_name_from_json(credentials, "claude-login")
+
+
+def _claude_account_identity_candidates(credentials: dict) -> set[str]:
+    return _account_identity_candidates_from_json(credentials, "claude-login")
+
+
+def _claude_account_matches_credentials(profile: ClaudeAccountProfile, credentials: dict) -> bool:
+    identity = _claude_account_identity_from_credentials(credentials)
+    if profile.identity == identity:
+        return True
+
+    saved = get_claude_account_credentials(profile)
+    if isinstance(saved, dict) and saved:
+        return _account_snapshots_match(saved, credentials, "claude-login")
+
+    stable_candidates = _account_stable_identity_candidates_from_json(credentials, "claude-login")
+    if stable_candidates:
+        return profile.identity in stable_candidates
+    return profile.identity in _claude_account_identity_candidates(credentials)
+
+
+def _claude_api_override_active(settings: dict, config: dict) -> bool:
+    env = _claude_env(settings)
+    override_keys = {
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+    }
+    if any(env.get(key) for key in override_keys):
+        return True
+    if config.get("primaryApiKey"):
+        return True
+    return detect_claude_provider(settings) != "anthropic"
+
+
+def _pick_claude_account_import_name(identity: str, preferred_name: str | None = None, credentials: dict | None = None) -> str:
+    profiles = list_claude_account_profiles()
+    for profile in profiles:
+        if profile.identity == identity:
+            return profile.name
+        if credentials and _claude_account_matches_credentials(profile, credentials):
+            return profile.name
+    return _account_import_name("Claude-账号", preferred_name or identity, {profile.name for profile in profiles})
+
+
+def import_current_claude_account() -> ClaudeAccountProfile | None:
+    """Import and transactionally persist the current Claude Code account."""
+    from core.parser import read_claude_credentials
+
+    credentials = read_claude_credentials()
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok:
+        return None
+
+    identity = _claude_account_identity_from_credentials(credentials)
+    preferred_name = _claude_account_preferred_name(credentials)
+    name = _pick_claude_account_import_name(identity, preferred_name, credentials)
+    ref = f"claude-account:{name}:credentials"
+    profile = ClaudeAccountProfile(
+        name=name,
+        credentials_ref=ref,
+        identity=identity,
+        created_at=_now_iso(),
+    )
+    save_claude_account_profile_with_credentials(profile, credentials)
+    return profile
+
+
+def delete_claude_account_profile(name: str) -> None:
+    _delete_profile_with_secrets(
+        name,
+        list_key="claude_account_profiles",
+        active_key="active_claude_account",
+        conventional_refs={f"claude-account:{name}:credentials"},
+    )
+
+
+def get_current_claude_account_name() -> str | None:
+    from core.parser import read_claude_settings, read_claude_config, read_claude_credentials
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    credentials = read_claude_credentials()
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok or _claude_api_override_active(settings, config):
+        return None
+
+    for profile in list_claude_account_profiles():
+        if _claude_account_matches_credentials(profile, credentials):
+            return profile.name
+    return None
+
+
+def get_claude_account_runtime_summary() -> dict:
+    from core.parser import read_claude_settings, read_claude_config, read_claude_credentials
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    credentials = read_claude_credentials()
+    override_active = _claude_api_override_active(settings, config)
+    credentials_ok, credentials_status = _validate_claude_account_credentials(credentials)
+    identity = _claude_account_identity_from_credentials(credentials) if credentials_ok else "no-login"
+    profile_name = None
+    if credentials_ok and not override_active:
+        for profile in list_claude_account_profiles():
+            if _claude_account_matches_credentials(profile, credentials):
+                profile_name = profile.name
+                break
+
+    return {
+        "profile_name": profile_name,
+        "stored_active": get_active_claude_account_name(),
+        "identity": identity,
+        "has_credentials": credentials_ok,
+        "credentials_status": credentials_status,
+        "credentials_path": str(CLAUDE_CREDENTIALS),
+        "api_override_active": override_active,
+    }
+
+
+# --- Codex Profile CRUD ---
+
+def list_codex_profiles() -> list[CodexProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("codex_profiles", []), CodexProfile, "Codex")
+
+
+def is_third_party_codex_profile(profile: CodexProfile) -> bool:
+    return getattr(profile, "model_provider", "openai") != "openai"
+
+
+def list_switchable_codex_profiles() -> list[CodexProfile]:
+    return [p for p in list_codex_profiles() if is_third_party_codex_profile(p)]
+
+
+def get_active_codex_name() -> str | None:
+    return _load_store().get("active_codex_profile")
+
+
+def set_active_codex(name: str | None) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_codex_profile"] = name
+        _save_store(store)
+
+
+def _codex_auth_mode(auth: dict) -> str:
+    mode = str(auth.get("auth_mode") or "").strip()
+    if mode == "chatgpt":
+        return "chatgpt"
+    if mode in {"apikey", "api_key"}:
+        return "api_key"
+    if auth.get("OPENAI_API_KEY"):
+        return "api_key"
+    return "chatgpt"
+
+
+def _short_fingerprint(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return "none"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _safe_name_part(value: object, fallback: str) -> str:
+    text = str(value or "").strip() or fallback
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"[^\w.-]+", "-", text, flags=re.UNICODE)
+    text = text.strip("-_.")
+    return (text or fallback)[:40]
+
+
+def _looks_like_url(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return "://" in text or text.startswith(("www.", "api."))
+
+
+def _looks_like_endpoint(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if _looks_like_url(text):
+        return True
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    host = text.split("/", 1)[0].split(":", 1)[0].strip("[]")
+    return host == "localhost" or ("." in host and re.fullmatch(r"[a-z0-9.-]+", host) is not None)
+
+
+def _usable_label(value: object, max_length: int = 160) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or len(text) > max_length:
+        return ""
+    if len(text.split(".")) >= 3 and not any(ch.isspace() for ch in text) and _decode_jwt_payload(text):
+        return ""
+    return text
+
+
+def _host_label(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"https://{text}"
+    try:
+        host = urlparse(text).hostname or ""
+    except Exception:
+        host = ""
+    host = host.lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _station_label_candidate(value: object) -> str:
+    text = _usable_label(value, max_length=80)
+    if not text:
+        return ""
+    if _looks_like_endpoint(text):
+        return _host_label(text)
+    generic = re.sub(r"[\s_-]+", "-", text.strip().lower())
+    if generic in {
+        "custom",
+        "api",
+        "openai",
+        "openai-compatible",
+        "custom-provider",
+        "default",
+        "provider",
+    }:
+        return ""
+    return text
+
+
+def _provider_display_name(provider_id: object, fallback: str = "custom") -> str:
+    provider_name = str(provider_id or "").strip() or fallback
+    try:
+        from core.providers import ProviderRegistry
+
+        provider = ProviderRegistry.get_provider(provider_name)
+        if provider and provider.display_name:
+            return provider.display_name
+    except Exception:
+        pass
+    return provider_name
+
+
+def _claude_station_label(settings: dict) -> str:
+    env = _claude_env(settings)
+    provider_id = detect_claude_provider(settings)
+    if provider_id == "custom":
+        return _station_label_candidate(env.get("ANTHROPIC_BASE_URL")) or "Custom"
+    return _provider_display_name(provider_id, provider_id)
+
+
+def _codex_station_label(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    for value in [custom.get("name"), custom.get("display_name")]:
+        label = _station_label_candidate(value)
+        if label:
+            return label
+    if provider_id == "custom" or custom:
+        return (
+            _station_label_candidate(custom.get("base_url"))
+            or _station_label_candidate(provider_id)
+            or _provider_display_name(provider_id, provider_id)
+        )
+    return _provider_display_name(provider_id, provider_id)
+
+
+def _unique_profile_name(existing: set[str], preferred: str) -> str:
+    base = str(preferred or "").strip() or "Profile"
+    if base not in existing:
+        return base
+
+    index = 2
+    while f"{base}-{index}" in existing:
+        index += 1
+    return f"{base}-{index}"
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _json_fingerprint(data: object) -> str:
+    try:
+        text = json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(data)
+    return _short_fingerprint(text)
+
+
+def _decode_jwt_payload(value: str) -> dict:
+    parts = str(value or "").split(".")
+    if len(parts) < 2:
+        return {}
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        data = json.loads(decoded.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _iter_nested_strings(value: object, limit: int = 200):
+    seen = 0
+    stack = [value]
+    while stack and seen < limit:
+        item = stack.pop()
+        if isinstance(item, str):
+            seen += 1
+            yield item
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
+def _account_identity_parts(data: dict, fallback_prefix: str = "official-login") -> dict:
+    human_keys = [
+        "name",
+        "display_name",
+        "displayName",
+        "full_name",
+        "nickname",
+        "preferred_username",
+        "username",
+    ]
+    id_keys = [
+        "email",
+        "user_email",
+        "account_email",
+        "userId",
+        "user_id",
+        "account_id",
+        "sub",
+    ]
+    human_values: list[str] = []
+    email_values: list[str] = []
+    stable_values: list[str] = []
+
+    def add_human(value: object) -> None:
+        label = _usable_label(value)
+        if label and not _looks_like_url(label) and "@" not in label:
+            human_values.append(label)
+
+    def add_id(value: object) -> None:
+        label = _usable_label(value)
+        if not label:
+            return
+        if "@" in label and len(label) <= 160:
+            email_values.append(label.lower())
+        else:
+            stable_values.append(label)
+
+    for key in human_keys:
+        add_human(data.get(key))
+    for key in id_keys:
+        add_id(data.get(key))
+
+    for value in _iter_nested_strings(data):
+        if "@" in value and len(value) <= 160:
+            add_id(value)
+        jwt_payload = _decode_jwt_payload(value)
+        for key in human_keys:
+            add_human(jwt_payload.get(key))
+        for key in id_keys:
+            add_id(jwt_payload.get(key))
+
+    display = next((value for value in human_values if value), "")
+    email = next((value for value in email_values if value), "")
+    stable = email or next((value for value in stable_values if value), "")
+    if stable and stable != email:
+        stable = f"id-{_short_fingerprint(stable)}"
+    if not stable:
+        stable = display or f"{fallback_prefix}-{_json_fingerprint(data)}"
+
+    stable_candidates = set(email_values)
+    stable_candidates.update(f"id-{_short_fingerprint(value)}" for value in stable_values if value)
+
+    candidates = {stable}
+    candidates.update(value for value in human_values if value)
+    candidates.update(value for value in email_values if value)
+    candidates.update(stable_candidates)
+
+    return {
+        "display": display,
+        "email": email,
+        "identity": stable,
+        "preferred_name": display or email or stable,
+        "stable_candidates": {value for value in stable_candidates if value},
+        "candidates": {value for value in candidates if value},
+    }
+
+
+def _identity_from_json(data: dict, fallback_prefix: str = "official-login") -> str:
+    if not isinstance(data, dict) or not data:
+        return f"{fallback_prefix}-empty"
+    return str(_account_identity_parts(data, fallback_prefix)["identity"])
+
+
+def _account_preferred_name_from_json(data: dict, fallback_prefix: str = "official-login") -> str:
+    if not isinstance(data, dict) or not data:
+        return f"{fallback_prefix}-empty"
+    return str(_account_identity_parts(data, fallback_prefix)["preferred_name"])
+
+
+def _account_identity_candidates_from_json(data: dict, fallback_prefix: str = "official-login") -> set[str]:
+    if not isinstance(data, dict) or not data:
+        return {f"{fallback_prefix}-empty"}
+    return set(_account_identity_parts(data, fallback_prefix)["candidates"])
+
+
+def _account_stable_identity_candidates_from_json(data: dict, fallback_prefix: str = "official-login") -> set[str]:
+    if not isinstance(data, dict) or not data:
+        return set()
+    return set(_account_identity_parts(data, fallback_prefix)["stable_candidates"])
+
+
+def _account_snapshots_match(saved: dict, current: dict, fallback_prefix: str = "official-login") -> bool:
+    if not isinstance(saved, dict) or not saved or not isinstance(current, dict) or not current:
+        return False
+
+    saved_parts = _account_identity_parts(saved, fallback_prefix)
+    current_parts = _account_identity_parts(current, fallback_prefix)
+    saved_stable = set(saved_parts["stable_candidates"])
+    current_stable = set(current_parts["stable_candidates"])
+    if saved_stable and current_stable:
+        return bool(saved_stable & current_stable)
+    return bool(set(saved_parts["candidates"]) & set(current_parts["candidates"]))
+
+
+def _account_import_name(prefix: str, identity: str, existing: set[str]) -> str:
+    safe_identity = _safe_name_part(identity, "official-login")
+    return _unique_profile_name(existing, f"{prefix}-{safe_identity}")
+
+
+def _codex_auth_identity_from_auth(auth: dict) -> str:
+    mode = _codex_auth_mode(auth)
+    if mode == "api_key":
+        api_key = auth.get("OPENAI_API_KEY")
+        return f"key-{_short_fingerprint(api_key)}" if api_key else "api-key"
+
+    tokens = auth.get("tokens", {})
+    return "official-login" if isinstance(tokens, dict) and tokens else "no-api-key"
+
+
+def describe_codex_profile_identity(profile: CodexProfile) -> str:
+    """Return a non-secret auth identity label for display."""
+    if getattr(profile, "custom_requires_openai_auth", False):
+        return "openai-auth"
+    api_key = security.get_secret(profile.api_key_ref)
+    return f"key-{_short_fingerprint(api_key)}" if api_key else "api-key"
+
+
+def _build_codex_import_name(config: dict, auth: dict) -> str:
+    provider = _safe_name_part(_codex_station_label(config), "Codex-API")
+    model = _safe_name_part(config.get("model"), "model")
+    if model and model != "model":
+        return f"Codex-{provider}-{model}"
+    identity = _safe_name_part(_codex_auth_identity_from_auth(auth), "auth")
+    return f"Codex-{provider}-{identity}"
+
+
+def _codex_model_providers(config: dict) -> dict:
+    model_providers = config.get("model_providers", {})
+    return model_providers if isinstance(model_providers, dict) else {}
+
+
+def _codex_provider_table(config: dict, provider_id: str) -> dict:
+    table = _codex_model_providers(config).get(provider_id, {})
+    return table if isinstance(table, dict) else {}
+
+
+def _codex_profile_kwargs_from_current(name: str, config: dict, auth: dict) -> dict:
+    profile_kwargs = {
+        "name": name,
+        "model": config.get("model", "gpt-5.5"),
+        "model_provider": config.get("model_provider", "openai"),
+        "model_reasoning_effort": config.get("model_reasoning_effort", "high"),
+        "approval_policy": config.get("approval_policy", "never"),
+        "sandbox_mode": config.get("sandbox_mode", "danger-full-access"),
+        "disable_response_storage": config.get("disable_response_storage", True),
+    }
+
+    provider_id = profile_kwargs["model_provider"]
+    custom = _codex_provider_table(config, provider_id)
+    if custom:
+        from core.providers import ProviderRegistry
+
+        profile_kwargs["custom_base_url"] = custom.get("base_url")
+        profile_kwargs["custom_name"] = custom.get("name")
+        profile_kwargs["custom_wire_api"] = ProviderRegistry.normalize_codex_wire_api(custom.get("wire_api")) or ""
+        profile_kwargs["custom_env_key"] = custom.get("env_key")
+        profile_kwargs["custom_requires_openai_auth"] = custom.get("requires_openai_auth", False)
+
+    return profile_kwargs
+
+
+def _codex_config_env_key(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    if custom.get("env_key"):
+        from core.providers import ProviderRegistry
+
+        return ProviderRegistry.validate_codex_env_key(custom.get("env_key"))
+    from core.providers import ProviderRegistry
+
+    return ProviderRegistry.get_codex_env_key(provider_id, custom_name=custom.get("name"))
+
+
+def _codex_config_explicit_env_key(config: dict) -> str:
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    return str(custom.get("env_key") or "").strip()
+
+
+def _codex_api_key_from_config_or_env(config: dict, auth: dict) -> tuple[str, str]:
+    env_key = _codex_config_env_key(config)
+    explicit_env_key = _codex_config_explicit_env_key(config)
+    auth_key = str(auth.get("OPENAI_API_KEY") or "") if isinstance(auth, dict) else ""
+
+    if not explicit_env_key and auth_key:
+        return auth_key, "OPENAI_API_KEY"
+
+    try:
+        from core import codex_env, persistent_env
+
+        env_value = persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+        if env_value:
+            return env_value, env_key
+    except Exception:
+        pass
+
+    if auth_key:
+        return auth_key, "OPENAI_API_KEY"
+    return "", env_key
+
+
+def _codex_expected_base_url(profile: CodexProfile) -> str:
+    if profile.custom_base_url:
+        return profile.custom_base_url
+    try:
+        from core.providers import ProviderRegistry
+
+        provider = ProviderRegistry.get_provider(profile.model_provider)
+        return provider.base_url_for_codex() if provider else ""
+    except Exception:
+        return ""
+
+
+def _same_optional(left: object, right: object) -> bool:
+    return (left or "") == (right or "")
+
+
+def _codex_expected_wire_api(profile: CodexProfile) -> str:
+    try:
+        from core.providers import ProviderRegistry
+
+        return ProviderRegistry.get_codex_wire_api_for_profile(profile)
+    except Exception:
+        return str(profile.custom_wire_api or "responses")
+
+
+def _codex_current_wire_api(config: dict, profile: CodexProfile, custom: dict) -> str:
+    try:
+        from core.providers import ProviderRegistry
+
+        raw_wire_api = custom.get("wire_api")
+        if raw_wire_api:
+            normalized = ProviderRegistry.normalize_codex_wire_api(str(raw_wire_api))
+            return normalized or f"invalid:{raw_wire_api}"
+        return ProviderRegistry.get_codex_wire_api(
+            profile.model_provider,
+            None,
+            custom.get("name"),
+        )
+    except Exception:
+        return str(custom.get("wire_api") or profile.custom_wire_api or "responses")
+
+
+def _codex_config_matches(profile: CodexProfile, config: dict) -> bool:
+    if not is_third_party_codex_profile(profile):
+        return False
+    if config.get("model_provider", "openai") == "openai":
+        return False
+    if profile.model != config.get("model", "gpt-5.5"):
+        return False
+    if profile.model_provider != config.get("model_provider", "openai"):
+        return False
+    if profile.model_reasoning_effort != config.get("model_reasoning_effort", "high"):
+        return False
+    if profile.approval_policy != config.get("approval_policy", "never"):
+        return False
+    if profile.sandbox_mode != config.get("sandbox_mode", "danger-full-access"):
+        return False
+    if profile.disable_response_storage != config.get("disable_response_storage", True):
+        return False
+
+    custom = _codex_provider_table(config, profile.model_provider)
+    current_base_url = custom.get("base_url")
+    expected_base_url = _codex_expected_base_url(profile)
+    if expected_base_url or current_base_url:
+        if not _same_optional(expected_base_url, current_base_url):
+            return False
+    if _codex_expected_wire_api(profile) != _codex_current_wire_api(config, profile, custom):
+        return False
+    try:
+        from core.providers import ProviderRegistry
+
+        expected_env_key = ProviderRegistry.get_codex_env_key_for_profile(profile)
+    except Exception:
+        expected_env_key = profile.custom_env_key or "OPENAI_API_KEY"
+    if bool(profile.custom_requires_openai_auth) != bool(custom.get("requires_openai_auth", False)):
+        return False
+    if profile.custom_requires_openai_auth:
+        if custom.get("env_key"):
+            return False
+    else:
+        current_env_key = custom.get("env_key") or expected_env_key
+        if current_env_key != expected_env_key:
+            return False
+    return True
+
+
+def _codex_auth_matches(profile: CodexProfile, auth: dict, config: dict | None = None) -> bool:
+    if not is_third_party_codex_profile(profile):
+        return False
+    if profile.custom_requires_openai_auth:
+        return True
+
+    explicit_env_key = _codex_config_explicit_env_key(config or {})
+    try:
+        from core import codex_env, persistent_env
+        from core.providers import ProviderRegistry
+
+        env_key = ProviderRegistry.get_codex_env_key_for_profile(profile)
+        if explicit_env_key:
+            current_key = persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+        else:
+            current_key = ""
+    except Exception:
+        current_key = ""
+    if not current_key and isinstance(auth, dict):
+        current_key = auth.get("OPENAI_API_KEY") or ""
+    if not current_key and not explicit_env_key:
+        try:
+            from core import codex_env, persistent_env
+            from core.providers import ProviderRegistry
+
+            env_key = ProviderRegistry.get_codex_env_key_for_profile(profile)
+            current_key = persistent_env._environment_value(env_key) or codex_env.get_codex_env_value(env_key)
+        except Exception:
+            current_key = ""
+    stored_key = security.get_secret(profile.api_key_ref) or ""
+    return bool(current_key and stored_key) and current_key == stored_key
+
+
+def codex_profile_matches_current(profile: CodexProfile) -> bool:
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    return _codex_profile_matches(profile, read_codex_config(), read_codex_auth())
+
+
+def _codex_profile_matches(profile: CodexProfile, config: dict, auth: dict) -> bool:
+    return _codex_config_matches(profile, config) and _codex_auth_matches(profile, auth, config)
+
+
+def get_current_codex_name() -> str | None:
+    """Return the profile that matches the actual Codex files on disk."""
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    auth = read_codex_auth()
+    if not config and not auth:
+        return None
+
+    for profile in list_switchable_codex_profiles():
+        if _codex_profile_matches(profile, config, auth):
+            return profile.name
+    return None
+
+
+def get_codex_runtime_summary() -> dict:
+    """Return display-safe details for the actual Codex config/auth on disk."""
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    auth = read_codex_auth()
+    current_name = None
+    if config or auth:
+        for profile in list_switchable_codex_profiles():
+            if _codex_profile_matches(profile, config, auth):
+                current_name = profile.name
+                break
+
+    return {
+        "profile_name": current_name,
+        "stored_active": get_active_codex_name(),
+        "provider": config.get("model_provider", "openai") if config else "openai",
+        "model": config.get("model", "gpt-5.5") if config else "gpt-5.5",
+        "auth_mode": _codex_auth_mode(auth),
+        "auth_identity": _codex_auth_identity_from_auth(auth),
+        "has_config": bool(config),
+        "has_auth": bool(auth),
+    }
+
+
+def _pick_codex_import_name(config: dict, auth: dict) -> str:
+    base_name = _build_codex_import_name(config, auth)
+    profiles = list_codex_profiles()
+    generic_names = {"current", "codex-current"}
+    for profile in profiles:
+        if profile.name.lower() not in generic_names and _codex_profile_matches(profile, config, auth):
+            return profile.name
+
+    return _unique_profile_name({profile.name for profile in profiles}, base_name)
+
+
+def save_codex_profile(
+    profile: CodexProfile,
+    previous_name: str | None = None,
+    *,
+    activate: bool = False,
+) -> None:
+    profile.validated_env_key()
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("codex_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "Codex Profile",
+        )
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
+
+        replaced_refs: set[str] = set()
+        for existing in profiles:
+            if isinstance(existing, dict) and existing.get("name") in replaced_names:
+                replaced_refs.update(_profile_secret_refs(existing, "codex_profiles"))
+
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["codex_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("codex_profiles",))
+        if previous_name and store.get("active_codex_profile") == previous_name:
+            store["active_codex_profile"] = profile.name
+        if activate:
+            store["active_codex_profile"] = profile.name
+            store["active_codex_account"] = None
+        _save_store(store)
+
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Codex Profile 更新",
+        )
+
+
+def save_codex_profile_with_secrets(
+    profile: CodexProfile,
+    secret_updates: dict[str, str],
+    previous_name: str | None = None,
+    *,
+    activate: bool = False,
+) -> None:
+    """Save Codex metadata and edited secrets as one in-process transaction."""
+    profile.validated_env_key()
+    _save_profile_with_secret_updates(
+        profile,
+        list_key="codex_profiles",
+        secret_updates=secret_updates,
+        operation="Codex Profile",
+        previous_name=previous_name,
+        save_callback=lambda: save_codex_profile(
+            profile,
+            previous_name=previous_name,
+            activate=activate,
+        ),
+    )
+
+
+def clone_codex_profile(name: str) -> CodexProfile:
+    with _STORE_CACHE_LOCK:
+        profiles = list_codex_profiles()
+        source = next((p for p in profiles if p.name == name), None)
+        if not source:
+            raise ValueError(f"Codex profile '{name}' not found")
+
+        new_name = _unique_profile_name({p.name for p in profiles}, f"{source.name}-copy")
+        api_key = security.get_secret_strict(source.api_key_ref) or ""
+        api_key_ref = f"codex:{new_name}:api_key" if api_key else None
+        secret_snapshot = (
+            {api_key_ref: security.get_secret_strict(api_key_ref)}
+            if api_key_ref
+            else {}
+        )
+
+        cloned = CodexProfile(
+            name=new_name,
+            api_key_ref=api_key_ref,
+            model=source.model,
+            model_provider=source.model_provider,
+            model_reasoning_effort=source.model_reasoning_effort,
+            approval_policy=source.approval_policy,
+            sandbox_mode=source.sandbox_mode,
+            custom_base_url=source.custom_base_url,
+            custom_name=source.custom_name,
+            custom_wire_api=source.custom_wire_api,
+            custom_env_key=source.custom_env_key,
+            custom_requires_openai_auth=source.custom_requires_openai_auth,
+            disable_response_storage=source.disable_response_storage,
+        )
+        try:
+            if api_key_ref:
+                security.set_secret(api_key_ref, api_key)
+            save_codex_profile(cloned)
+        except Exception as clone_error:
+            rollback_errors = _restore_secret_values(secret_snapshot)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Codex Profile 克隆失败，且密钥回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from clone_error
+            raise
+        return cloned
+
+
+def delete_codex_profile(name: str) -> None:
+    _delete_profile_with_secrets(
+        name,
+        list_key="codex_profiles",
+        active_key="active_codex_profile",
+        conventional_refs={
+            f"codex:{name}:api_key",
+            f"codex:{name}:openai_auth_key",
+            f"codex:{name}:oauth_tokens",
+            f"codex:{name}:oauth_meta",
+            f"codex:{name}:auth_data",
+        },
+    )
+
+
+# --- Codex Official Account CRUD ---
+
+def list_codex_account_profiles() -> list[CodexAccountProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("codex_account_profiles", []), CodexAccountProfile, "Codex account")
+
+
+def get_active_codex_account_name() -> str | None:
+    return _load_store().get("active_codex_account")
+
+
+def set_active_codex_account(name: str | None) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_codex_account"] = name
+        _save_store(store)
+
+
+def save_codex_account_profile(profile: CodexAccountProfile) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("codex_account_profiles", [])
+        replaced_refs = {
+            ref
+            for item in profiles
+            if isinstance(item, dict) and item.get("name") == profile.name
+            for ref in _profile_secret_refs(item, "codex_account_profiles")
+        }
+        profiles = [p for p in profiles if isinstance(p, dict) and p.get("name") != profile.name]
+        profiles.append(profile.to_dict())
+        store["codex_account_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("codex_account_profiles",))
+        _save_store(store)
+        _delete_secrets_best_effort(
+            replaced_refs - _store_secret_refs(store),
+            "Codex 账号快照更新",
+        )
+
+
+def save_codex_account_profile_with_auth(
+    profile: CodexAccountProfile,
+    auth: dict,
+) -> None:
+    """Save an imported Codex account and its auth secret transactionally."""
+    if not isinstance(auth, dict):
+        raise ValueError("Codex 账号快照格式异常")
+    ref = profile.auth_json_ref
+    with _STORE_CACHE_LOCK:
+        original_store = _clone_store(_load_store())
+        previous_secret = security.get_secret_strict(ref)
+        try:
+            security.set_secret_json(ref, auth)
+            save_codex_account_profile(profile)
+        except Exception as save_error:
+            rollback_errors = _restore_secret_values({ref: previous_secret})
+            try:
+                current_store = _load_store()
+                if current_store != original_store:
+                    _save_store(original_store, create_backup=False)
+            except Exception as store_restore_error:
+                clear_profile_store_cache()
+                rollback_errors.append(f"Profile: {store_restore_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Codex 账号快照保存失败，且自动回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from save_error
+            raise
+
+
+def get_codex_account_auth(profile: CodexAccountProfile) -> dict | None:
+    return security.get_secret_json(profile.auth_json_ref)
+
+
+def _codex_official_auth_available(auth: dict) -> bool:
+    if not isinstance(auth, dict):
+        return False
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict):
+        return False
+    token_keys = {
+        "access_token",
+        "accessToken",
+        "refresh_token",
+        "refreshToken",
+        "id_token",
+        "idToken",
+    }
+    return any(bool(tokens.get(key)) for key in token_keys)
+
+
+def _normalize_codex_official_auth(auth: dict) -> dict:
+    if not isinstance(auth, dict):
+        raise ValueError("Codex 账号快照格式异常")
+    if not _codex_official_auth_available(auth):
+        raise ValueError("Codex 账号快照里没有可用 ChatGPT 登录 token")
+
+    normalized = dict(auth)
+    normalized["auth_mode"] = "chatgpt"
+    normalized.pop("OPENAI_API_KEY", None)
+    return normalized
+
+
+def _validate_codex_account_auth(auth: object) -> tuple[bool, str]:
+    ok, reason = _validate_account_snapshot(auth, "Codex 账号")
+    if not ok:
+        return ok, reason
+    if not _codex_official_auth_available(auth):
+        return False, "Codex 账号快照里没有可用 ChatGPT 登录 token"
+    return True, "可用"
+
+
+def validate_codex_account_snapshot(profile: CodexAccountProfile) -> tuple[bool, str]:
+    return _validate_codex_account_auth(get_codex_account_auth(profile))
+
+
+def load_codex_account_auth(profile: CodexAccountProfile) -> dict:
+    auth = get_codex_account_auth(profile)
+    ok, reason = _validate_codex_account_auth(auth)
+    if not ok:
+        raise ValueError(reason)
+    return _normalize_codex_official_auth(auth)
+
+
+def _codex_account_identity_from_auth(auth: dict) -> str:
+    return _identity_from_json(auth, "codex-login")
+
+
+def _codex_account_preferred_name(auth: dict) -> str:
+    return _account_preferred_name_from_json(auth, "codex-login")
+
+
+def _codex_account_identity_candidates(auth: dict) -> set[str]:
+    return _account_identity_candidates_from_json(auth, "codex-login")
+
+
+def _codex_account_matches_auth(profile: CodexAccountProfile, auth: dict) -> bool:
+    identity = _codex_account_identity_from_auth(auth)
+    if profile.identity == identity:
+        return True
+
+    saved = get_codex_account_auth(profile)
+    if isinstance(saved, dict) and saved:
+        return _account_snapshots_match(saved, auth, "codex-login")
+
+    stable_candidates = _account_stable_identity_candidates_from_json(auth, "codex-login")
+    if stable_candidates:
+        return profile.identity in stable_candidates
+    return profile.identity in _codex_account_identity_candidates(auth)
+
+
+def _codex_account_override_active(config: dict, auth: dict) -> bool:
+    if not _codex_official_auth_available(auth):
+        return True
+    if _codex_auth_mode(auth) == "api_key":
+        return True
+    return config.get("model_provider", "openai") != "openai"
+
+
+def _pick_codex_account_import_name(identity: str, preferred_name: str | None = None, auth: dict | None = None) -> str:
+    profiles = list_codex_account_profiles()
+    for profile in profiles:
+        if profile.identity == identity:
+            return profile.name
+        if auth and _codex_account_matches_auth(profile, auth):
+            return profile.name
+    return _account_import_name("Codex-账号", preferred_name or identity, {profile.name for profile in profiles})
+
+
+def _codex_credentials_store(config: dict) -> str:
+    """Return Codex's configured credential backend, defaulting to safe ``auto``.
+
+    An ``auth.json`` file can remain on disk after Codex starts using the OS
+    keyring.  Only an explicit ``file`` setting proves that the file is the
+    active credential source; ``auto`` and unknown values therefore fail
+    closed for account export/import.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("Codex config.toml 格式异常")
+    raw_value = config.get("cli_auth_credentials_store", "auto")
+    store = str(raw_value or "").strip().lower()
+    if store not in {"auto", "file", "keyring"}:
+        raise ValueError(f"Codex 凭据存储方式无效: {raw_value!r}")
+    return store
+
+
+def _require_exportable_codex_file_credentials(config: dict) -> None:
+    store = _codex_credentials_store(config)
+    if store == "file":
+        return
+    if store == "keyring":
+        raise ValueError(
+            "当前 Codex 登录凭据保存在系统密钥环（keyring），"
+            "Codex 未提供安全导出接口，无法导入账号快照"
+        )
+    raise ValueError(
+        "当前 Codex 凭据存储为 auto，无法确认 auth.json 是否为当前登录。"
+        "如需导出快照，请先在 config.toml 中明确设置 cli_auth_credentials_store = \"file\""
+    )
+
+
+def import_current_codex_account() -> CodexAccountProfile | None:
+    """Import the active file-backed Codex account as one transaction."""
+    from core.auth_parser import read_codex_auth
+    from core.toml_parser import read_codex_config
+
+    config = read_codex_config()
+    _require_exportable_codex_file_credentials(config)
+    auth = read_codex_auth()
+    if not _codex_official_auth_available(auth):
+        return None
+    auth = _normalize_codex_official_auth(auth)
+
+    identity = _codex_account_identity_from_auth(auth)
+    preferred_name = _codex_account_preferred_name(auth)
+    name = _pick_codex_account_import_name(identity, preferred_name, auth)
+    ref = f"codex-account:{name}:auth_json"
+    profile = CodexAccountProfile(
+        name=name,
+        auth_json_ref=ref,
+        identity=identity,
+        created_at=_now_iso(),
+    )
+    save_codex_account_profile_with_auth(profile, auth)
+    return profile
+
+
+def delete_codex_account_profile(name: str) -> None:
+    _delete_profile_with_secrets(
+        name,
+        list_key="codex_account_profiles",
+        active_key="active_codex_account",
+        conventional_refs={f"codex-account:{name}:auth_json"},
+    )
+
+
+def get_current_codex_account_name() -> str | None:
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    if _codex_credentials_store(config) != "file":
+        return None
+    auth = read_codex_auth()
+    if not _codex_official_auth_available(auth) or _codex_account_override_active(config, auth):
+        return None
+
+    for profile in list_codex_account_profiles():
+        if _codex_account_matches_auth(profile, auth):
+            return profile.name
+    return None
+
+
+def get_codex_account_runtime_summary() -> dict:
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    credentials_store = _codex_credentials_store(config)
+    auth = read_codex_auth() if credentials_store == "file" else {}
+    has_official_auth = _codex_official_auth_available(auth)
+    override_active = _codex_account_override_active(config, auth)
+    identity = _codex_account_identity_from_auth(auth) if has_official_auth else "no-login"
+    profile_name = None
+    if has_official_auth and not override_active:
+        for profile in list_codex_account_profiles():
+            if _codex_account_matches_auth(profile, auth):
+                profile_name = profile.name
+                break
+
+    return {
+        "profile_name": profile_name,
+        "stored_active": get_active_codex_account_name(),
+        "identity": identity,
+        "has_auth": bool(auth),
+        "has_official_auth": has_official_auth,
+        "api_override_active": override_active,
+        "credentials_store": credentials_store,
+    }
+
+
+# --- Import from current config ---
+
+def import_current_claude() -> ClaudeProfile | None:
+    """Import and activate the current third-party Claude API atomically."""
+    from core.parser import read_claude_settings, read_claude_config
+
+    settings = read_claude_settings()
+    config = read_claude_config()
+    if not settings and not config:
+        return None
+    if detect_claude_provider(settings) == "anthropic":
+        return None
+
+    name = _pick_claude_import_name(settings, config)
+    token = _claude_auth_token_from_current(settings, config)
+    profile = ClaudeProfile(**_claude_profile_kwargs_from_current(name, settings, config))
+    secret_updates = {profile.auth_token_ref: token} if token else {}
+    save_claude_profile_with_secrets(profile, secret_updates, activate=True)
+    return profile
+
+
+def import_current_codex() -> CodexProfile | None:
+    """Import and activate the current third-party Codex API atomically."""
+    from core.toml_parser import read_codex_config
+    from core.auth_parser import read_codex_auth
+
+    config = read_codex_config()
+    auth = read_codex_auth()
+    if not config and not auth:
+        return None
+    if config.get("model_provider", "openai") == "openai":
+        return None
+    provider_id = str(config.get("model_provider") or "openai")
+    custom = _codex_provider_table(config, provider_id)
+    requires_openai_auth = bool(custom.get("requires_openai_auth", False))
+    api_key, env_key = ("", "")
+    auth_for_import = dict(auth)
+    if requires_openai_auth:
+        auth_for_import = dict(auth)
+    else:
+        api_key, env_key = _codex_api_key_from_config_or_env(config, auth)
+        if not api_key:
+            return None
+        auth_for_import["auth_mode"] = "apikey"
+        auth_for_import["OPENAI_API_KEY"] = api_key
+    name = _pick_codex_import_name(config, auth_for_import)
+    profile_kwargs = _codex_profile_kwargs_from_current(name, config, auth_for_import)
+    if api_key and env_key != "OPENAI_API_KEY":
+        profile_kwargs["custom_env_key"] = env_key
+    secret_updates = {}
+    if api_key:
+        ref = f"codex:{name}:api_key"
+        profile_kwargs["api_key_ref"] = ref
+        secret_updates[ref] = api_key
+    profile = CodexProfile(**profile_kwargs)
+    save_codex_profile_with_secrets(profile, secret_updates, activate=True)
+    return profile
+
+
+# --- Browser Profile CRUD ---
+
+def list_browser_profiles() -> list[BrowserProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("browser_profiles", []), BrowserProfile, "Browser")
+
+
+def get_active_browser_name() -> str | None:
+    return _load_store().get("active_browser_profile")
+
+
+def get_browser_profiles_summary() -> dict:
+    store = _load_store()
+    return {
+        "profiles": _load_profile_list(store.get("browser_profiles", []), BrowserProfile, "Browser"),
+        "active": store.get("active_browser_profile"),
+    }
+
+
+def set_active_browser(name: str) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_browser_profile"] = name
+        _save_store(store)
+
+
+def save_browser_profile(profile: BrowserProfile, previous_name: str | None = None) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("browser_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "浏览器 Profile",
+        )
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["browser_profiles"] = profiles
+        if previous_name and store.get("active_browser_profile") == previous_name:
+            store["active_browser_profile"] = profile.name
+        _save_store(store)
+
+
+def delete_browser_profile(name: str) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["browser_profiles"] = [
+            p for p in store.get("browser_profiles", [])
+            if isinstance(p, dict) and p.get("name") != name
+        ]
+        if store.get("active_browser_profile") == name:
+            store["active_browser_profile"] = None
+        _save_store(store)
+
+
+def list_ssh_profiles() -> list[SSHProfile]:
+    store = _load_store()
+    return _load_profile_list(store.get("ssh_profiles", []), SSHProfile, "SSH")
+
+
+def get_active_ssh_name() -> str | None:
+    return _load_store().get("active_ssh_profile")
+
+
+def get_ssh_profiles_summary() -> dict:
+    store = _load_store()
+    return {
+        "profiles": _load_profile_list(store.get("ssh_profiles", []), SSHProfile, "SSH"),
+        "active": store.get("active_ssh_profile"),
+    }
+
+
+def set_active_ssh(name: str) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        store["active_ssh_profile"] = name
+        _save_store(store)
+
+
+def _disconnect_ssh_profiles(names: set[str]) -> None:
+    if not names:
+        return
+    try:
+        from core.ssh_manager import ssh_manager
+
+        for name in names:
+            if name:
+                ssh_manager.disconnect(name)
+    except Exception as e:
+        logger.debug(f"Failed to disconnect SSH profiles after profile update: {e}")
+
+
+def _profile_secret_refs(profile: object, list_key: str | None = None) -> set[str]:
+    """Return only schema-owned secret references for a profile.
+
+    Dictionaries require their profile-list key so unknown ``*_ref`` fields
+    cannot gain secret ownership merely by being present in profiles.json.
+    Dataclass instances can be identified safely from their concrete type.
+    """
+    if list_key is None:
+        if isinstance(profile, ClaudeProfile):
+            list_key = "claude_profiles"
+        elif isinstance(profile, CodexProfile):
+            list_key = "codex_profiles"
+        elif isinstance(profile, ClaudeAccountProfile):
+            list_key = "claude_account_profiles"
+        elif isinstance(profile, CodexAccountProfile):
+            list_key = "codex_account_profiles"
+        elif isinstance(profile, SSHProfile):
+            list_key = "ssh_profiles"
+        elif isinstance(profile, BrowserProfile):
+            list_key = "browser_profiles"
+
+    ref_fields = PROFILE_SECRET_REF_FIELDS.get(list_key or "", ())
+    if hasattr(profile, "to_dict"):
+        data = profile.to_dict()
+    elif isinstance(profile, dict):
+        data = profile
+    else:
+        data = {}
+    refs: set[str] = set()
+    for field_name in ref_fields:
+        ref = data.get(field_name)
+        if not isinstance(ref, str) or not ref:
+            continue
+        if _is_valid_profile_secret_ref(list_key or "", field_name, ref):
+            refs.add(ref)
+        else:
+            logger.warning(
+                "Ignoring invalid secret reference in %s.%s",
+                list_key or "unknown profile",
+                field_name,
+            )
+    return refs
+
+
+def _is_valid_profile_secret_ref(list_key: str, field_name: str, ref: object) -> bool:
+    shape = PROFILE_SECRET_REF_SHAPES.get(list_key, {}).get(field_name)
+    if shape is None or not isinstance(ref, str) or len(ref) > MAX_PROFILE_SECRET_REF_LENGTH:
+        return False
+    prefix, suffix = shape
+    if (
+        not ref.startswith(prefix)
+        or not ref.endswith(suffix)
+        or len(ref) <= len(prefix) + len(suffix)
+    ):
+        return False
+    owner = ref[len(prefix):-len(suffix)]
+    return bool(
+        owner
+        and owner == owner.strip()
+        and not any(ord(char) < 32 or ord(char) == 127 for char in owner)
+    )
+
+
+def validate_profile_secret_refs(
+    store: dict,
+    *,
+    list_keys: tuple[str, ...] | None = None,
+) -> None:
+    """Reject profile secret references outside their schema-owned namespace."""
+    selected_keys = list_keys or tuple(PROFILE_SECRET_REF_SHAPES)
+    for list_key in selected_keys:
+        field_shapes = PROFILE_SECRET_REF_SHAPES.get(list_key, {})
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_name = str(profile.get("name") or "")
+            for field_name in field_shapes:
+                ref = profile.get(field_name)
+                if ref is None or ref == "":
+                    continue
+                if not _is_valid_profile_secret_ref(list_key, field_name, ref):
+                    raise ValueError(
+                        f"Profile {profile_name} 的密钥引用不属于字段 {field_name}"
+                    )
+
+
+def _store_secret_refs(store: dict) -> set[str]:
+    refs: set[str] = set()
+    for list_key in PROFILE_LIST_KEYS:
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if isinstance(profile, dict):
+                refs.update(_profile_secret_refs(profile, list_key))
+    return refs
+
+
+def _delete_secrets_best_effort(refs: set[str], operation: str) -> None:
+    """Clean obsolete secrets without reporting a committed save as failed."""
+    for ref in sorted(refs):
+        try:
+            security.delete_secret(ref)
+        except Exception as exc:
+            logger.warning("%s已保存，但旧密钥 %s 清理失败: %s", operation, ref, exc)
+
+
+def _restore_secret_values(snapshot: dict[str, str | None]) -> list[str]:
+    errors: list[str] = []
+    for ref, previous_value in snapshot.items():
+        try:
+            if previous_value is None:
+                security.delete_secret(ref)
+            else:
+                security.set_secret(ref, previous_value)
+        except Exception as exc:
+            errors.append(f"{ref}: {exc}")
+    return errors
+
+
+def _save_profile_with_secret_updates(
+    profile: object,
+    *,
+    list_key: str,
+    secret_updates: dict[str, str],
+    operation: str,
+    previous_name: str | None,
+    save_callback,
+) -> None:
+    """Apply secret edits and profile metadata with rollback on save failure.
+
+    UI editors used to update the keyring before writing ``profiles.json``.
+    A disk-write failure therefore reported "save failed" after irreversibly
+    changing the credential referenced by the old Profile.  Snapshot every
+    touched secret with the strict API while holding the Profile store lock,
+    then restore it if either a secret write or metadata save fails.
+    """
+    if not isinstance(secret_updates, dict):
+        raise ValueError("Profile 密钥更新格式无效")
+
+    allowed_refs = _profile_secret_refs(profile, list_key)
+    updates: dict[str, str] = {}
+    for ref, value in secret_updates.items():
+        if ref not in allowed_refs:
+            raise ValueError(f"{operation} 密钥引用不属于当前 Profile: {ref}")
+        if not isinstance(value, str):
+            raise ValueError(f"{operation} 密钥内容无效: {ref}")
+        updates[ref] = value
+
+    with _STORE_CACHE_LOCK:
+        original_store = _load_store()
+        store_file_snapshot = _snapshot_profile_store_files()
+        _ensure_rename_target_available(
+            original_store.get(list_key, []),
+            str(getattr(profile, "name", "")),
+            previous_name,
+            operation,
+        )
+        secret_snapshot = {
+            ref: security.get_secret_strict(ref)
+            for ref in sorted(updates)
+        }
+        try:
+            for ref, value in updates.items():
+                security.set_secret(ref, value)
+            save_callback()
+        except Exception as save_error:
+            rollback_errors = _restore_secret_values(secret_snapshot)
+            # Reintroduce the old metadata only after every old secret is back.
+            # Otherwise a failed secret rollback could make the restored
+            # Profile point at a missing or partially updated credential.
+            if not rollback_errors:
+                rollback_errors.extend(_restore_profile_store_files(store_file_snapshot))
+            if rollback_errors:
+                raise RuntimeError(
+                    f"{operation} 保存失败，且自动回滚不完整: "
+                    + "；".join(rollback_errors)
+                ) from save_error
+            raise
+
+
+def _delete_profile_with_secrets(
+    name: str,
+    *,
+    list_key: str,
+    active_key: str,
+    conventional_refs: set[str] | None = None,
+) -> bool:
+    """Delete one profile and its now-unreferenced secrets transactionally.
+
+    The profile store is committed before secrets are removed.  If a secret
+    backend reports a deletion failure, the previous secret values and profile
+    store are restored.  Unknown fields never participate in secret ownership.
+    """
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get(list_key, [])
+        if not isinstance(profiles, list):
+            profiles = []
+        removed_profiles = [
+            profile
+            for profile in profiles
+            if isinstance(profile, dict) and profile.get("name") == name
+        ]
+        if not removed_profiles:
+            return False
+
+        original_store = _clone_store(store)
+        candidate_refs = set(conventional_refs or ())
+        for profile in removed_profiles:
+            candidate_refs.update(_profile_secret_refs(profile, list_key))
+
+        store[list_key] = [
+            profile
+            for profile in profiles
+            if not (isinstance(profile, dict) and profile.get("name") == name)
+        ]
+        if store.get(active_key) == name:
+            store[active_key] = None
+
+        refs_to_delete = candidate_refs - _store_secret_refs(store)
+        secret_snapshot = {
+            ref: security.get_secret_strict(ref)
+            for ref in sorted(refs_to_delete)
+        }
+
+        # Atomic store writes guarantee that a failed save leaves the old
+        # profile references in place, so no secret may be removed beforehand.
+        _save_store(store)
+
+        try:
+            for ref in sorted(refs_to_delete):
+                security.delete_secret(ref)
+        except Exception as delete_error:
+            rollback_errors: list[str] = []
+            for ref, previous_value in secret_snapshot.items():
+                if previous_value is None:
+                    continue
+                try:
+                    security.set_secret(ref, previous_value)
+                except Exception as restore_error:
+                    rollback_errors.append(f"密钥 {ref}: {restore_error}")
+
+            # Reintroduce profile references only after every previously
+            # present secret has been restored successfully.
+            if not rollback_errors:
+                try:
+                    _save_store(original_store, create_backup=False)
+                except Exception as restore_error:
+                    clear_profile_store_cache()
+                    rollback_errors.append(f"Profile: {restore_error}")
+
+            if rollback_errors:
+                details = "；".join(rollback_errors)
+                raise RuntimeError(f"Profile 删除失败，且自动回滚不完整: {details}") from delete_error
+            raise
+
+        return True
+
+
+def save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> None:
+    with _STORE_CACHE_LOCK:
+        store = _load_store()
+        profiles = store.get("ssh_profiles", [])
+        _ensure_rename_target_available(
+            profiles,
+            profile.name,
+            previous_name,
+            "SSH Profile",
+        )
+        replaced_names = {profile.name}
+        if previous_name:
+            replaced_names.add(previous_name)
+
+        replaced_refs: set[str] = set()
+        for existing in profiles:
+            if isinstance(existing, dict) and existing.get("name") in replaced_names:
+                replaced_refs.update(_profile_secret_refs(existing, "ssh_profiles"))
+
+        profiles = [
+            p for p in profiles
+            if isinstance(p, dict) and p.get("name") not in replaced_names
+        ]
+        profiles.append(profile.to_dict())
+        store["ssh_profiles"] = profiles
+        validate_profile_secret_refs(store, list_keys=("ssh_profiles",))
+        if previous_name and store.get("active_ssh_profile") == previous_name:
+            store["active_ssh_profile"] = profile.name
+        _save_store(store)
+
+        remaining_refs = _store_secret_refs(store)
+        refs_to_delete = replaced_refs - remaining_refs
+        if previous_name and previous_name != profile.name:
+            refs_to_delete.update({
+                ref
+                for suffix in ("password", "key_passphrase")
+                if (ref := f"ssh:{previous_name}:{suffix}") not in remaining_refs
+            })
+        _delete_secrets_best_effort(refs_to_delete, "SSH Profile 更新")
+
+    _disconnect_ssh_profiles(replaced_names | {profile.name})
+
+
+def save_ssh_profile_with_secrets(
+    profile: SSHProfile,
+    secret_updates: dict[str, str],
+    previous_name: str | None = None,
+) -> None:
+    """Save SSH metadata and edited secrets as one in-process transaction."""
+    _save_profile_with_secret_updates(
+        profile,
+        list_key="ssh_profiles",
+        secret_updates=secret_updates,
+        operation="SSH Profile",
+        previous_name=previous_name,
+        save_callback=lambda: save_ssh_profile(profile, previous_name=previous_name),
+    )
+
+
+def delete_ssh_profile(name: str) -> None:
+    deleted = _delete_profile_with_secrets(
+        name,
+        list_key="ssh_profiles",
+        active_key="active_ssh_profile",
+        conventional_refs={
+            f"ssh:{name}:password",
+            f"ssh:{name}:key_passphrase",
+        },
+    )
+    if deleted:
+        _disconnect_ssh_profiles({name})
