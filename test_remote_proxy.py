@@ -1955,6 +1955,191 @@ def test_assess_proxy_node_qualities_single_flights_same_ip_and_reports_progress
     assert all(result.quality_signature for result in results.values())
 
 
+def test_assess_proxy_node_qualities_groups_by_ip_before_provider_calls(monkeypatch, tmp_path):
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        "proxies:\n"
+        "  - { name: same-a, type: vless, server: a.example.com, port: 443 }\n"
+        "  - { name: same-b, type: vless, server: b.example.com, port: 443 }\n"
+        "  - { name: other, type: vless, server: c.example.com, port: 443 }\n"
+    )
+    host_ips = {
+        "a.example.com": "8.8.4.101",
+        "b.example.com": "8.8.4.101",
+        "c.example.com": "8.8.4.102",
+    }
+    provider_ips = []
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_PROXYCHECK},
+        {},
+    )
+
+    def resolver(host, *_args, **_kwargs):
+        return [(None, None, None, "", (host_ips[host], 0))]
+
+    def http_get(url, _timeout):
+        if "proxycheck.io" in url:
+            ip = url.rsplit("/", 1)[-1].split("?", 1)[0]
+            provider_ips.append(ip)
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "status": "ok",
+                        ip: {
+                            "network": {"type": "Residential", "provider": "Example Fiber", "asn": "64500"},
+                            "detections": {"proxy": False, "vpn": False, "tor": False, "hosting": False, "risk": 6},
+                        },
+                    }
+                ),
+            )
+        if "ipwho.is" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps({"success": True, "country_code": "US", "country": "United States"}),
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    results = remote_proxy.assess_proxy_node_qualities(
+        nodes,
+        http_get=http_get,
+        resolver=resolver,
+        settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_PROXYCHECK],
+        max_workers=3,
+    )
+
+    assert sorted(provider_ips) == ["8.8.4.101", "8.8.4.102"]
+    same_results = [result for result in results.values() if result.ip == "8.8.4.101"]
+    assert len(same_results) == 2
+    assert sum("同一 IP 批次复用" in result.detail for result in same_results) == 1
+    assert all(result.ok and result.coverage_complete for result in results.values())
+
+
+def test_assess_proxy_node_qualities_incremental_cancel_stops_new_quality_work(monkeypatch, tmp_path):
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        "proxies:\n"
+        + "\n".join(
+            f"  - {{ name: node-{index}, type: vless, server: node-{index}.example.com, port: 443 }}"
+            for index in range(5)
+        )
+    )
+    cancel_event = threading.Event()
+    provider_calls = []
+    progress = []
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_PROXYCHECK},
+        {},
+    )
+
+    def resolver(host, *_args, **_kwargs):
+        index = host.split("-", 1)[1].split(".", 1)[0]
+        return [(None, None, None, "", (f"8.8.4.{110 + int(index)}", 0))]
+
+    def fake_assess(node, *_args, **_kwargs):
+        provider_calls.append(node["name"])
+        if len(provider_calls) == 1:
+            cancel_event.set()
+        return remote_proxy.ProxyNodeQualityResult(
+            remote_proxy.proxy_node_key(node),
+            True,
+            host=node["server"],
+            ip="8.8.4.110",
+            ip_type="家庭宽带/住宅 IP",
+            risk_score=8,
+            risk_label="低风险",
+            quality_score=92,
+            quality_label="家宽高质",
+            confidence="中",
+            sources=(network_diagnostic_settings.SERVICE_PROXYCHECK,),
+            attempted_sources=(network_diagnostic_settings.SERVICE_PROXYCHECK,),
+            coverage_complete=True,
+            assessment_scope=remote_proxy.PROXY_QUALITY_ASSESSMENT_SCOPE_SERVER,
+            classification_basis="信誉源网络/风险字段",
+            quality_signature="sig",
+        )
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy, "assess_proxy_node_quality", fake_assess)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    results = remote_proxy.assess_proxy_node_qualities(
+        nodes,
+        resolver=resolver,
+        settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_PROXYCHECK],
+        max_workers=1,
+        cancel_event=cancel_event,
+        progress_callback=lambda completed, total, result: progress.append((completed, total, result.quality_label)),
+    )
+
+    assert provider_calls == ["node-0"]
+    assert len(results) == 5
+    assert sum(remote_proxy.proxy_node_quality_cancelled(result) for result in results.values()) == 4
+    assert progress[-1][:2] == (5, 5)
+
+
+def test_assess_proxy_node_qualities_parse_failure_does_not_block_grouped_results(monkeypatch, tmp_path):
+    nodes = remote_proxy.parse_proxy_subscription_content(
+        "proxies:\n"
+        "  - { name: bad, type: vless, server: bad.example.com, port: 443 }\n"
+        "  - { name: good-a, type: vless, server: good-a.example.com, port: 443 }\n"
+        "  - { name: good-b, type: vless, server: good-b.example.com, port: 443 }\n"
+    )
+    provider_calls = []
+    settings = network_diagnostic_settings.settings_from_values(
+        {network_diagnostic_settings.SERVICE_PROXYCHECK},
+        {},
+    )
+
+    def resolver(host, *_args, **_kwargs):
+        if host == "bad.example.com":
+            raise OSError("dns boom")
+        return [(None, None, None, "", ("8.8.4.121", 0))]
+
+    def http_get(url, _timeout):
+        if "proxycheck.io" in url:
+            provider_calls.append(url)
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps(
+                    {
+                        "status": "ok",
+                        "8.8.4.121": {
+                            "network": {"type": "Residential", "provider": "Example Fiber", "asn": "64500"},
+                            "detections": {"proxy": False, "vpn": False, "tor": False, "hosting": False, "risk": 5},
+                        },
+                    }
+                ),
+            )
+        if "ipwho.is" in url:
+            return network_diagnostics.HttpResult(
+                url=url,
+                ok=True,
+                text=json.dumps({"success": True, "country_code": "US", "country": "United States"}),
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    results = remote_proxy.assess_proxy_node_qualities(
+        nodes,
+        http_get=http_get,
+        resolver=resolver,
+        settings=settings,
+        enabled_services=[network_diagnostic_settings.SERVICE_PROXYCHECK],
+    )
+
+    bad_key = remote_proxy.proxy_subscription_node_key(nodes[0])
+    assert results[bad_key].quality_label == "解析失败"
+    assert len(provider_calls) == 1
+    assert sum(result.ok for result in results.values()) == 2
+    assert sum("同一 IP 批次复用" in result.detail for result in results.values()) == 1
+
+
 def test_assess_proxy_node_qualities_honors_pre_cancelled_batch(monkeypatch, tmp_path):
     nodes = remote_proxy.parse_proxy_subscription_content(
         """
