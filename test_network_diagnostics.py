@@ -1675,3 +1675,86 @@ def test_probe_public_ip_rejects_invalid_endpoint_response():
 
     assert result.ok is False
     assert "有效 IP" in result.error
+
+
+def test_residential_proxy_network_type_is_not_plain_home_broadband():
+    ip = "203.0.113.90"
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="proxycheck",
+                ok=True,
+                network_type="Residential Proxy",
+                risk_score=8,
+            ),
+        ],
+    )
+
+    assert classification.ip_type == "住宅代理/匿名出口可疑"
+    assert classification.risk_score >= 78
+    assert classification.confidence == "中"
+
+
+def test_proxycheck_nested_residential_proxy_sets_anonymity_flag():
+    ip = "203.0.113.91"
+    mapping = {
+        f"https://proxycheck.io/v3/{ip}?p=0&tag=0&ver=24-June-2026": {
+            "status": "ok",
+            ip: {
+                "network": {
+                    "type": "Residential Proxy",
+                    "provider": "Example Residential Network",
+                },
+                "detections": {
+                    "proxy": False,
+                    "vpn": False,
+                    "tor": False,
+                    "risk": 7,
+                },
+            },
+        },
+    }
+
+    info = network_diagnostics.lookup_proxycheck_reputation(
+        ip,
+        1.0,
+        _fake_http_get(mapping),
+    )
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[info],
+    )
+
+    assert info.network_type == "Residential Proxy"
+    assert info.flags["residential_proxy"] is True
+    assert classification.ip_type == "住宅代理/匿名出口可疑"
+
+
+def test_high_shared_device_count_downgrades_multisource_residential_confidence():
+    ip = "203.0.113.92"
+    classification = network_diagnostics.classify_ip(
+        network_diagnostics.GeoInfo(ip=ip, ok=True),
+        reputation=[
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="proxycheck",
+                ok=True,
+                network_type="Residential",
+                risk_score=7,
+                shared_count=25,
+            ),
+            network_diagnostics.ReputationInfo(
+                ip=ip,
+                source="ipqs",
+                ok=True,
+                network_type="Residential",
+                risk_score=9,
+            ),
+        ],
+    )
+
+    assert classification.ip_type == "家庭宽带/住宅 IP"
+    assert classification.confidence == "中"
+    assert classification.risk_score >= 48

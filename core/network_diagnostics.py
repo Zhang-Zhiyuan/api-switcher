@@ -959,7 +959,9 @@ def _lookup_proxycheck_reputation_once(
         )
     if _proxycheck_anonymous_type(record_type):
         info.flags[record_type.strip().lower()] = True
-    if _network_type_category(record_type) == "residential_proxy":
+    if _network_type_category(record_type) == "residential_proxy" or _network_type_category(
+        info.network_type
+    ) == "residential_proxy":
         info.flags["residential_proxy"] = True
     if info.network_type:
         info.signals.append(f"ProxyCheck network.type={info.network_type}")
@@ -1444,6 +1446,7 @@ def _classify_from_reputation(
         item
         for item in ok_results
         if _has_anonymity_flag(item.flags)
+        or _network_type_category(item.network_type) == "residential_proxy"
         or _has_abuse_flag(item.flags)
         or _reputation_score_is_suspicious(item)
     ]
@@ -1451,13 +1454,24 @@ def _classify_from_reputation(
         ping0 and ping0.has_paid_quality and ping0.iprisk is not None and ping0.iprisk >= 70
     )
     if suspicious or ping0_suspicious:
-        has_anonymity_signal = any(_has_anonymity_flag(item.flags) for item in suspicious)
+        has_anonymity_signal = any(
+            _has_anonymity_flag(item.flags)
+            or _network_type_category(item.network_type) == "residential_proxy"
+            for item in suspicious
+        )
         risk_values = [_reputation_score(item, 78) for item in suspicious]
         if ping0_suspicious and ping0 and ping0.iprisk is not None:
             risk_values.append(ping0.iprisk)
         risk = max(78, max(risk_values or [78]))
         risk = max(0, min(100, risk))
-        residentialish = bool(categories["residential"] or categories["mobile"])
+        residentialish = bool(
+            categories["residential"]
+            or categories["mobile"]
+            or any(
+                _network_type_category(item.network_type) == "residential_proxy"
+                for item in suspicious
+            )
+        )
         if has_anonymity_signal and residentialish:
             ip_type = "住宅代理/匿名出口可疑"
         elif has_anonymity_signal:
