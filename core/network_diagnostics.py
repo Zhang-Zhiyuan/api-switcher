@@ -1048,14 +1048,41 @@ def _lookup_ipapi_reputation_once(
     info.network_type = _ipapi_network_type(payload, company, asn_data)
     info.provider = (
         _first_text(company, "name", "org", "organization")
+        or _first_text(payload, "company_name", "company", "isp")
         or _first_text(asn_data, "org", "name", "descr", "description")
+        or _first_text(payload, "asn_org", "asn_name", "org")
     )
-    info.organization = info.provider
-    info.asn = _normalize_asn(_first_value(asn_data, "asn", "as") or _first_value(company, "asn", "as"))
-    info.country_code = _geo_country_code(location, "country_code")
-    info.country = _geo_text(location, "country")
-    info.region = _geo_text(location, "state", "region", "province")
-    info.city = _geo_text(location, "city")
+    info.organization = (
+        _first_text(company, "organization", "org")
+        or _first_text(asn_data, "org", "name", "descr", "description")
+        or _first_text(payload, "asn_org", "asn_name", "org")
+        or _first_text(company, "name")
+        or _first_text(payload, "company_name", "company")
+        or info.provider
+    )
+    info.asn = _normalize_asn(
+        _first_value(asn_data, "asn", "as")
+        or _first_value(company, "asn", "as")
+        or _first_value(payload, "asn_num", "asn_number", "as_number", "asn", "as")
+    )
+    info.country_code = _geo_country_code(location, "country_code", "countryCode", "cc") or _geo_country_code(
+        payload,
+        "country_code",
+        "countryCode",
+        "cc",
+    )
+    info.country = _geo_text(location, "country", "country_name") or _geo_text(
+        payload,
+        "country",
+        "country_name",
+    )
+    info.region = _geo_text(location, "state", "region", "province") or _geo_text(
+        payload,
+        "state",
+        "region",
+        "province",
+    )
+    info.city = _geo_text(location, "city") or _geo_text(payload, "city")
     info.flags = _ipapi_flags(payload)
     info.risk_score = _ipapi_risk_score(info, payload, company, asn_data)
 
@@ -1073,8 +1100,11 @@ def _lookup_ipapi_reputation_once(
         info.signals.append("ipapi.is flags: " + ", ".join(active))
     if info.risk_score is not None:
         info.signals.append(f"ipapi.is risk={info.risk_score}")
-    if info.asn or info.provider:
-        info.signals.append(f"ipapi.is ASN={info.asn or '-'} {info.provider or ''}".strip())
+    if info.asn or info.provider or info.organization:
+        owner = info.provider or info.organization
+        if info.organization and info.organization != info.provider:
+            owner = f"{owner} / {info.organization}" if owner else info.organization
+        info.signals.append(f"ipapi.is ASN={info.asn or '-'} {owner}".strip())
     return info
 
 
@@ -2197,7 +2227,15 @@ def _ipapi_network_type(payload: dict[str, Any], company: dict[str, Any], asn_da
     if _optional_boolish(payload.get("is_mobile")) is True:
         return "mobile"
     for data in (company, asn_data, payload):
-        network_type = _first_text(data, "type", "connection_type", "network_type", "asn_type")
+        network_type = _first_text(
+            data,
+            "type",
+            "connection_type",
+            "network_type",
+            "company_type",
+            "asn_type",
+            "asn_kind",
+        )
         if network_type and _network_type_category(network_type):
             return network_type
     return ""
