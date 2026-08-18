@@ -3530,9 +3530,17 @@ class SSHTab(ctk.CTkScrollableFrame):
                     if completed != total and completed != 1 and completed - progress["reported"] < report_step:
                         return
                     progress["reported"] = completed
+                    reused = max(
+                        0,
+                        completed
+                        - progress["cached"]
+                        - progress["complete"]
+                        - progress["partial"]
+                        - progress["failed"],
+                    )
                     message = (
                         f"正在检测 {scope_label}: {completed}/{total}；"
-                        f"缓存 {progress['cached']}，完整 {progress['complete']}，"
+                        f"缓存 {progress['cached']}，同 IP 复用 {reused}，完整 {progress['complete']}，"
                         f"部分 {progress['partial']}，失败 {progress['failed']}..."
                     )
                     self._run_on_ui_thread(lambda text=message: self._set_proxy_status(text))
@@ -3607,6 +3615,12 @@ class SSHTab(ctk.CTkScrollableFrame):
                     if remote_proxy.proxy_node_quality_cached(item)
                     and not remote_proxy.proxy_node_quality_cancelled(item)
                 )
+                reused_ip_count = sum(
+                    1
+                    for item in batch_results.values()
+                    if "同一 IP 批次复用" in remote_proxy.proxy_node_quality_detail(item)
+                    and not remote_proxy.proxy_node_quality_cancelled(item)
+                )
                 self._proxy_quality_results = dict(payload.get("merged_result") or self._proxy_quality_results)
                 self._proxy_prefer_quality_sort = True
                 save_error = str(payload.get("save_error") or "")
@@ -3647,6 +3661,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                     )
                     if cached_count:
                         message += f"，缓存命中 {cached_count}"
+                    if reused_ip_count:
+                        message += f"，同 IP 复用 {reused_ip_count}"
                     message += "；暂无可自动选择的非香港高质量结果。香港节点仍可手动选择。"
                     if save_error:
                         message += f" 质量结果缓存失败: {save_error}"
@@ -3674,6 +3690,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 )
                 if cached_count:
                     message += f" 缓存命中 {cached_count} 个。"
+                if reused_ip_count:
+                    message += f" 同 IP 复用 {reused_ip_count} 个。"
                 if preserved_complete_count:
                     message += f" 本次 {preserved_complete_count} 个部分结果未覆盖上次完整证据。"
                 message += " 检测未切换远端代理；确认后点击“使用当前”并按需部署。"

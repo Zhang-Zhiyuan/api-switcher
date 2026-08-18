@@ -2015,6 +2015,107 @@ def _proxy_quality_batch_resolver(resolver=None):
     return resolve
 
 
+def _proxy_quality_report_progress(
+    progress_callback,
+    completed: int,
+    total: int,
+    result: ProxyNodeQualityResult,
+) -> None:
+    if not progress_callback:
+        return
+    try:
+        progress_callback(completed, total, result)
+    except Exception:
+        pass
+
+
+def _proxy_quality_cancelled_result(node: dict) -> ProxyNodeQualityResult:
+    return _proxy_node_quality_error_result(
+        node,
+        "已取消",
+        "用户已取消本次家宽检测",
+    )
+
+
+def _proxy_quality_result_from_exception(node: dict, exc: Exception) -> ProxyNodeQualityResult:
+    return _proxy_node_quality_error_result(
+        node,
+        "检测失败",
+        str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
+    )
+
+
+def _proxy_quality_resolve_groups(
+    items: list[dict],
+    *,
+    resolver=None,
+    max_workers: int = 8,
+    progress_callback=None,
+    cancel_event=None,
+) -> tuple[list[tuple[str, list[dict]]], dict[str, ProxyNodeQualityResult]]:
+    groups_by_ip: dict[str, list[dict]] = {}
+    ordered_ips: list[str] = []
+    results: dict[str, ProxyNodeQualityResult] = {}
+    if not items:
+        return [], results
+
+    shared_resolver = _proxy_quality_batch_resolver(resolver)
+    worker_count = min(max(1, _int_or_default(max_workers, 8)), len(items))
+    completed = 0
+    total = len(items)
+
+    def record(result: ProxyNodeQualityResult) -> None:
+        nonlocal completed
+        results[result.node_key] = result
+        completed += 1
+        _proxy_quality_report_progress(progress_callback, completed, total, result)
+
+    if cancel_event is not None and cancel_event.is_set():
+        for node in items:
+            record(_proxy_quality_cancelled_result(node))
+        return [], results
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(_resolve_proxy_node_ip, node, resolver=shared_resolver): node
+            for node in items
+        }
+        for future in as_completed(futures):
+            node = futures[future]
+            if cancel_event is not None and cancel_event.is_set():
+                record(_proxy_quality_cancelled_result(node))
+                continue
+            try:
+                ip = future.result()
+            except Exception as exc:
+                record(
+                    ProxyNodeQualityResult(
+                        node_key=proxy_node_key(node),
+                        ok=False,
+                        host=str(node.get("server") or ""),
+                        region=proxy_node_region(node),
+                        quality_label="解析失败",
+                        detail=str(exc).splitlines()[0][:180] or "节点服务器解析失败",
+                        checked_at=_now_iso(),
+                    )
+                )
+                continue
+            if ip not in groups_by_ip:
+                groups_by_ip[ip] = []
+                ordered_ips.append(ip)
+            groups_by_ip[ip].append(node)
+    if cancel_event is not None and cancel_event.is_set():
+        existing_result_keys = set(results)
+        for nodes_for_ip in groups_by_ip.values():
+            for node in nodes_for_ip:
+                key = proxy_node_key(node)
+                if key not in existing_result_keys:
+                    record(_proxy_quality_cancelled_result(node))
+                    existing_result_keys.add(key)
+        return [], results
+    return [(ip, groups_by_ip[ip]) for ip in ordered_ips], results
+
+
 def assess_proxy_node_qualities(
     nodes,
     timeout: float = 5.0,
@@ -2052,48 +2153,102 @@ def assess_proxy_node_qualities(
         services = settings.enabled_services()
     else:
         services = []
+    effective_services = proxy_quality_effective_services(settings, services)
+    if not effective_services:
+        results: dict[str, ProxyNodeQualityResult] = {}
+        for node in items:
+            try:
+                result = assess_proxy_node_quality(
+                    node,
+                    timeout,
+                    http_get=http_get,
+                    resolver=resolver,
+                    settings=settings,
+                    enabled_services=services,
+                    use_cache=False,
+                    cancel_event=cancel_event,
+                )
+            except Exception as exc:
+                result = _proxy_quality_result_from_exception(node, exc)
+            results[result.node_key] = result
+            _proxy_quality_report_progress(progress_callback, len(results), len(items), result)
+        return results
+
+    groups, results = _proxy_quality_resolve_groups(
+        items,
+        resolver=resolver,
+        max_workers=max_workers,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
+    total = len(items)
+    completed = len(results)
+    if not groups:
+        return results
+
     cached_quality_results = load_proxy_subscription_qualities()
     cache_index = _build_proxy_quality_cache_index(cached_quality_results)
-    worker_count = _proxy_quality_batch_worker_count(max_workers, len(items), services)
+    worker_count = _proxy_quality_batch_worker_count(max_workers, len(groups), effective_services)
     batch_flights: dict[tuple[str, str], Future] = {}
     batch_flights_lock = threading.Lock()
-    shared_resolver = _proxy_quality_batch_resolver(resolver)
-    results: dict[str, ProxyNodeQualityResult] = {}
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {
+    pending_groups = iter(groups)
+    futures: dict[Future, tuple[str, list[dict]]] = {}
+
+    def submit_next(executor) -> bool:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        try:
+            ip, grouped_nodes = next(pending_groups)
+        except StopIteration:
+            return False
+        primary = grouped_nodes[0]
+        futures[
             executor.submit(
                 assess_proxy_node_quality,
-                node,
+                primary,
                 timeout,
                 http_get=http_get,
-                resolver=shared_resolver,
+                resolver=lambda *_args, **_kwargs: [(None, None, None, "", (ip, 0))],
                 settings=settings,
-                enabled_services=services,
+                enabled_services=effective_services,
                 cached_quality_results=cached_quality_results,
                 cache_ttl_seconds=PROXY_QUALITY_CACHE_TTL_SECONDS,
                 cache_index=cache_index,
                 batch_flights=batch_flights,
                 batch_flights_lock=batch_flights_lock,
                 cancel_event=cancel_event,
-            ): node
-            for node in items
-        }
-        for future in as_completed(futures):
-            node = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                result = _proxy_node_quality_error_result(
-                    node,
-                    "检测失败",
-                    str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
-                )
-            results[result.node_key] = result
-            if progress_callback:
+            )
+        ] = (ip, grouped_nodes)
+        return True
+
+    def record(result: ProxyNodeQualityResult) -> None:
+        nonlocal completed
+        results[result.node_key] = result
+        completed += 1
+        _proxy_quality_report_progress(progress_callback, completed, total, result)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for _ in range(worker_count):
+            if not submit_next(executor):
+                break
+        while futures:
+            for future in as_completed(tuple(futures)):
+                _ip, grouped_nodes = futures.pop(future)
+                primary = grouped_nodes[0]
                 try:
-                    progress_callback(len(results), len(items), result)
-                except Exception:
-                    pass
+                    primary_result = future.result()
+                except Exception as exc:
+                    primary_result = _proxy_quality_result_from_exception(primary, exc)
+                record(primary_result)
+                for node in grouped_nodes[1:]:
+                    rebound = _proxy_node_quality_result_for_node(primary_result, node)
+                    record(rebound)
+                submit_next(executor)
+                break
+        if cancel_event is not None and cancel_event.is_set():
+            for _ip, grouped_nodes in pending_groups:
+                for node in grouped_nodes:
+                    record(_proxy_quality_cancelled_result(node))
     return results
 
 
