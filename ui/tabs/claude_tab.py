@@ -747,10 +747,10 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 or ""
             )
         except Exception as exc:
-            show_toast(self.winfo_toplevel(), f"读取 Auth Token 失败: {exc}", is_error=True)
+            show_toast(self.winfo_toplevel(), f"读取 API Key/Auth Token 失败: {exc}", is_error=True)
             return
         if not api_key:
-            show_toast(self.winfo_toplevel(), "该 API 配置没有可用 Auth Token", is_error=True)
+            show_toast(self.winfo_toplevel(), "该 API 配置没有可用 API Key/Auth Token", is_error=True)
             return
 
         inflight.add(name)

@@ -5,7 +5,7 @@ from pathlib import Path
 from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG, CLAUDE_CREDENTIALS
 from core.atomic_io import atomic_write_text
 from core.file_cache import CACHE_MISS, FileValueCache
-from core.providers import CLAUDE_CODE_MODEL_ALIASES
+from core.providers import CLAUDE_CODE_MODEL_ALIASES, CLAUDE_OFFICIAL_DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 _JSON_FILE_CACHE = FileValueCache()
@@ -111,7 +111,7 @@ def clear_claude_api_overrides(settings: dict) -> dict:
     # fall back to the current app default if the model clearly belongs elsewhere.
     model = str(settings.get("model") or "").strip()
     if model and not _is_claude_code_model(model):
-        settings["model"] = "claude-sonnet-4"
+        settings["model"] = CLAUDE_OFFICIAL_DEFAULT_MODEL
 
     effort = str(settings.get("effortLevel") or "").strip()
     # ``max`` is valid only as CLAUDE_CODE_EFFORT_LEVEL (or a session

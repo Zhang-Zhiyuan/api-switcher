@@ -74,6 +74,25 @@ def test_openai_codex_preset_uses_responses_wire_api():
     assert "model_providers" not in config or not config.get("model_providers")
 
 
+def test_anthropic_provider_defaults_to_current_claude_models():
+    provider = ProviderRegistry.get_provider("anthropic")
+
+    assert provider is not None
+    assert provider.default_model == "claude-opus-5"
+    assert provider.claude_auth_scheme == "api_key"
+    assert provider.supported_models[:6] == [
+        "opus",
+        "opus[1m]",
+        "opusplan",
+        "sonnet",
+        "sonnet[1m]",
+        "haiku",
+    ]
+    assert "claude-opus-5" in provider.supported_models
+    assert "claude-fable-5" in provider.supported_models
+    assert "claude-sonnet-5" in provider.supported_models
+
+
 def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
     provider = ProviderRegistry.get_provider("deepseek")
     assert provider is not None

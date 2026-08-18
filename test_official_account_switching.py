@@ -82,11 +82,11 @@ def test_switch_claude_account_clears_api_overrides_and_resets_third_party_model
 
     settings = parser.read_claude_settings()
     assert settings.get("env") is None
-    assert settings["model"] == "claude-sonnet-4"
+    assert settings["model"] == "claude-opus-5"
     assert settings["effortLevel"] == "high"
     assert "primaryApiKey" not in parser.read_claude_config()
     assert vscode_parser.read_vscode_settings() == {
-        "claudeCode.selectedModel": "claude-sonnet-4",
+        "claudeCode.selectedModel": "claude-opus-5",
         "claudeCode.initialPermissionMode": "default",
         "claudeCode.allowDangerouslySkipPermissions": False,
         "keep": "value",
@@ -118,7 +118,7 @@ def test_switch_claude_account_preserves_official_model_aliases(isolated_account
         assert settings["model"] == model
 
     settings = parser.clear_claude_api_overrides({"model": "gpt-5.5", "env": {}})
-    assert settings["model"] == "claude-sonnet-4"
+    assert settings["model"] == "claude-opus-5"
 
 
 def test_switch_claude_account_normalizes_session_only_max_reasoning_effort(isolated_accounts):
@@ -131,11 +131,12 @@ def test_switch_claude_account_normalizes_session_only_max_reasoning_effort(isol
     assert settings["effortLevel"] == "high"
 
 
-def test_anthropic_presets_include_opus_1m_alias():
+def test_anthropic_presets_prioritize_opus_and_keep_1m_alias():
     provider = ProviderRegistry.get_provider("anthropic")
     assert provider is not None
-    assert "opus[1m]" in provider.supported_models
-    assert provider.supported_models.index("opus[1m]") < provider.supported_models.index("opus")
+    assert provider.default_model == "claude-opus-5"
+    assert provider.supported_models[:3] == ["opus", "opus[1m]", "opusplan"]
+    assert "claude-opus-5" in provider.supported_models
 
 
 def test_switch_codex_account_normalizes_mixed_auth_and_provider(isolated_accounts):
@@ -247,11 +248,11 @@ def test_import_current_api_configs_use_station_names(isolated_accounts):
             "ANTHROPIC_AUTH_TOKEN": "relay-token",
             "ANTHROPIC_BASE_URL": "https://relay.example.com/anthropic",
         },
-        "model": "claude-sonnet-4",
+        "model": "claude-opus-5",
     })
     claude_profile = profile_manager.import_current_claude()
     assert claude_profile is not None
-    assert claude_profile.name == "Claude-relay.example.com-claude-sonnet-4"
+    assert claude_profile.name == "Claude-relay.example.com-claude-opus-5"
     assert claude_profile.provider == "custom"
 
     toml_parser.write_codex_config({

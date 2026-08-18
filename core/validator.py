@@ -412,6 +412,7 @@ class ConfigValidator:
     def _validate_api_connections(self):
         """验证 API 连接"""
         from core.api_tester import APITester
+        from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL
         from core import profile_manager, security
 
         # 测试 Claude API
@@ -434,7 +435,7 @@ class ConfigValidator:
                         result = APITester.test_claude_api(
                             api_key,
                             profile.base_url or "https://api.anthropic.com",
-                            profile.model or "claude-sonnet-4",
+                            profile.model or CLAUDE_OFFICIAL_DEFAULT_MODEL,
                             timeout=10,
                             auth_scheme=profile.auth_scheme,
                         )

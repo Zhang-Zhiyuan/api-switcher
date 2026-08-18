@@ -2,7 +2,7 @@ import customtkinter as ctk
 from ui.widgets.masked_entry import MaskedEntry
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 from ui.ui_dispatch import run_on_ui_thread
-from core.providers import ProviderRegistry
+from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL, ProviderRegistry
 from core.url_validation import validate_api_base_url
 from models.profile import (
     CODEX_APPROVAL_POLICIES,
@@ -766,7 +766,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             model = data.get("model") or ""
 
             if not api_key:
-                self._show_error("请先输入 Auth Token，或保存过带密钥的 API 配置")
+                self._show_error("请先输入 API Key/Auth Token，或保存过带密钥的 API 配置")
                 return
             if not base_url:
                 self._show_error("请先填写 API 端点")
@@ -1052,7 +1052,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             models = self._remote_models_for_selection(result.models, fallback_models, provider)
             preferred = result.recommended_model
             if provider and getattr(provider, "name", "") == "anthropic":
-                preferred = "opus[1m]" if "opus[1m]" in models else preferred
+                preferred = "opus" if "opus" in models else ("opus[1m]" if "opus[1m]" in models else preferred)
             self._apply_model_list(
                 models,
                 result.message,
@@ -1118,7 +1118,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             normalized = str(model).strip()
             if normalized:
                 return normalized
-        return "gpt-5.5" if is_codex else "claude-sonnet-4"
+        return "gpt-5.5" if is_codex else CLAUDE_OFFICIAL_DEFAULT_MODEL
 
     def _save(self):
         data = self._collect_data()
@@ -1130,7 +1130,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             "auth_token",
             getattr(getattr(self, "_profile", None), "auth_token_ref", None),
         ):
-            self._show_error("请先输入 Auth Token")
+            self._show_error("请先输入 API Key/Auth Token")
             return
 
         # 处理 Claude API 配置的 provider 字段

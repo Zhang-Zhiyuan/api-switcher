@@ -246,7 +246,7 @@ def test_profile_model_for_save_uses_loaded_and_bundled_values_deterministically
     dialog._fields = {"model": (_ModelControl([""]), "combo")}
     fallback_provider = SimpleNamespace(default_model="", supported_models=[None, "supported-first"])
     assert ProfileEditorDialog._model_for_save(dialog, fallback_provider, is_codex=False) == "supported-first"
-    assert ProfileEditorDialog._model_for_save(dialog, None, is_codex=False) == "claude-sonnet-4"
+    assert ProfileEditorDialog._model_for_save(dialog, None, is_codex=False) == "claude-opus-5"
     assert ProfileEditorDialog._model_for_save(dialog, None, is_codex=True) == "gpt-5.5"
 
 

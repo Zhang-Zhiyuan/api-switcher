@@ -282,7 +282,7 @@ def switch_claude_profile(name: str) -> None:
     if not profile_manager.is_third_party_claude_profile(target):
         raise ValueError("只能切换第三方 Claude API 配置")
     if not (security.get_secret(target.auth_token_ref) or security.get_secret(getattr(target, "primary_api_key_ref", None))):
-        raise ValueError("Claude API 配置需要 Auth Token")
+        raise ValueError("Claude API 配置需要 API Key 或 Auth Token")
     _ensure_switch_target_healthy("claude_api", name)
 
     backup_manager.create_backup(f"切换 Claude 到: {name}")

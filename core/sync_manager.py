@@ -1054,7 +1054,7 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
     claude_profile = deepcopy(claude_profile)
     claude_profile.base_url = claude_base_url
     if not (security.get_secret(claude_profile.auth_token_ref) or security.get_secret(getattr(claude_profile, "primary_api_key_ref", None))):
-        raise ValueError("Claude API Profile 需要 Auth Token")
+        raise ValueError("Claude API Profile 需要 API Key 或 Auth Token")
 
     ssh_profile, client = _connect_ssh(ssh_name)
 

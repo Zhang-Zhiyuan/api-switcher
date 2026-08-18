@@ -222,7 +222,7 @@ def build_claude_account_preview(name: str) -> SwitchPreview:
         PreviewChange("Claude 官方账号", current_account, target.name, important=True),
         PreviewChange("账号身份", _display(account_runtime.get("identity")), _display(target.identity)),
         PreviewChange("第三方 API 状态", current_api, "会清理 API Key/Base URL 覆盖", "切回官方账号后新终端会话生效。", True),
-        PreviewChange("模型兜底", _display(runtime.get("model")), "保留 Claude 官方模型和别名；非 Claude 模型会重置为 claude-sonnet-4"),
+        PreviewChange("模型兜底", _display(runtime.get("model")), f"保留 Claude 官方模型和别名；非 Claude 模型会重置为 {CLAUDE_OFFICIAL_DEFAULT_MODEL}"),
     ]
 
     checks = _validate_claude_account_target(target)

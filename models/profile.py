@@ -2,6 +2,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
+from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL
+
 
 def _profile_fields(cls) -> set[str]:
     return set(cls.__dataclass_fields__)
@@ -133,7 +135,7 @@ class ClaudeProfile:
     base_url: str
     primary_api_key_ref: Optional[str] = None
     auth_scheme: str = "auth_token"
-    model: str = "claude-sonnet-4"
+    model: str = CLAUDE_OFFICIAL_DEFAULT_MODEL
     effort_level: str = "high"
     permissions_mode: str = "default"
     skip_dangerous_prompt: bool = False
@@ -156,7 +158,7 @@ class ClaudeProfile:
             base_url=_clean_str(item.get("base_url")),
             primary_api_key_ref=_clean_optional_str(item.get("primary_api_key_ref")),
             auth_scheme=normalize_claude_auth_scheme(item.get("auth_scheme"), default_auth_scheme),
-            model=_clean_str(item.get("model"), "claude-sonnet-4"),
+            model=_clean_str(item.get("model"), CLAUDE_OFFICIAL_DEFAULT_MODEL),
             effort_level=_clean_str(item.get("effort_level"), "high"),
             permissions_mode=_clean_str(item.get("permissions_mode"), "default"),
             skip_dangerous_prompt=_clean_bool(item.get("skip_dangerous_prompt"), False),
