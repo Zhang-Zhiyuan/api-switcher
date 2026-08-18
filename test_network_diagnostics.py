@@ -518,6 +518,38 @@ def test_ipapi_hosting_vpn_abuser_classifies_suspicious_exit():
     assert any("ipapi.is flags" in signal for signal in classification.signals)
 
 
+def test_ipapi_flat_payload_preserves_provider_asn_and_location():
+    ip = "203.0.113.45"
+    mapping = {
+        f"https://api.ipapi.is?q={ip}": {
+            "ip": ip,
+            "is_datacenter": False,
+            "is_vpn": False,
+            "is_proxy": False,
+            "is_tor": False,
+            "is_abuser": False,
+            "company_name": "Example Fiber Network",
+            "asn_num": 64511,
+            "asn_org": "Example Telecom",
+            "cc": "cn",
+        },
+    }
+
+    info = network_diagnostics.lookup_ipapi_reputation(ip, 1.0, _fake_http_get(mapping))
+
+    assert info.ok is True
+    assert info.provider == "Example Fiber Network"
+    assert info.organization == "Example Telecom"
+    assert info.asn == "AS64511"
+    assert info.country_code == "CN"
+    assert info.network_type == ""
+    assert info.risk_score is None
+    assert any(
+        "ipapi.is ASN=AS64511 Example Fiber Network / Example Telecom" in signal
+        for signal in info.signals
+    )
+
+
 def test_ipapi_isp_type_is_auxiliary_not_proof_of_home_broadband():
     ip = "198.51.100.50"
     mapping = {
