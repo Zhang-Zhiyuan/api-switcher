@@ -141,14 +141,11 @@ def apply_codex_official_account(config: dict) -> dict:
     config = sanitize_codex_config(config)
     previous_provider = config.get("model_provider", "openai")
     config.pop("openai_base_url", None)
-    model_providers = config.get("model_providers")
-    if isinstance(model_providers, dict) and "openai" in model_providers:
-        model_providers = dict(model_providers)
-        model_providers.pop("openai", None)
-        if model_providers:
-            config["model_providers"] = model_providers
-        else:
-            config.pop("model_providers", None)
+    # The official provider does not consume any model_providers table.
+    # Remove every stale third-party table, not just an ``openai`` entry:
+    # leaving an old custom table behind makes the runtime config look like a
+    # mixed API/official setup and can be picked up by newer Codex builds.
+    config.pop("model_providers", None)
     config["model_provider"] = "openai"
     config["cli_auth_credentials_store"] = "file"
     if previous_provider != "openai":

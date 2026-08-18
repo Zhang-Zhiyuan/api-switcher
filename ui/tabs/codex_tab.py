@@ -831,6 +831,11 @@ class CodexTab(ctk.CTkScrollableFrame):
                 custom_wire_api=data.get("custom_wire_api") or None,
                 custom_env_key=data.get("custom_env_key") or None,
                 custom_requires_openai_auth=data.get("custom_requires_openai_auth", False),
+                disable_response_storage=(
+                    getattr(old_profile, "disable_response_storage", True)
+                    if old_profile is not None
+                    else True
+                ),
                 approval_policy=data.get("approval_policy", "never"),
                 sandbox_mode=data.get("sandbox_mode", "danger-full-access"),
             )

@@ -180,6 +180,22 @@ def test_apply_codex_official_account_preserves_existing_official_model():
     assert updated["cli_auth_credentials_store"] == "file"
 
 
+def test_apply_codex_official_account_removes_stale_provider_tables():
+    updated = toml_parser.apply_codex_official_account({
+        "model_provider": "custom",
+        "model": "relay-model",
+        "model_providers": {
+            "custom": {"base_url": "https://relay.example.test/v1", "env_key": "RELAY_API_KEY"},
+            "deepseek": {"base_url": "https://api.deepseek.com", "env_key": "DEEPSEEK_API_KEY"},
+        },
+    })
+
+    assert updated["model_provider"] == "openai"
+    assert "model" not in updated
+    assert "model_providers" not in updated
+    assert updated["cli_auth_credentials_store"] == "file"
+
+
 def test_switch_codex_account_clears_local_api_environment(isolated_accounts, monkeypatch):
     from models.profile import CodexProfile
 
