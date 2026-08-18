@@ -303,6 +303,7 @@ def test_codex_create_and_edit_defer_secrets_to_profile_transaction(monkeypatch)
         name="CodexOld",
         api_key_ref="codex:CodexOld:api_key",
         model_provider="custom",
+        disable_response_storage=False,
     )
     transactions = []
     monkeypatch.setattr(
@@ -346,6 +347,7 @@ def test_codex_create_and_edit_defer_secrets_to_profile_transaction(monkeypatch)
         "codex:CodexRenamed:api_key": "edited-secret",
     }
     assert transactions[0][2] == "CodexOld"
+    assert transactions[0][0].disable_response_storage is False
     assert transactions[1][1] == {
         "codex:CodexNew:api_key": "new-secret",
     }
