@@ -945,9 +945,22 @@ def _lookup_proxycheck_reputation_once(
         ),
     )
     if not info.flags:
-        info.flags = _extract_bool_flags(record, ("anonymous", "proxy", "vpn", "tor", "relay", "hosting"))
+        info.flags = _extract_bool_flags(
+            record,
+            (
+                "anonymous",
+                "proxy",
+                "vpn",
+                "tor",
+                "relay",
+                "hosting",
+                "residential_proxy",
+            ),
+        )
     if _proxycheck_anonymous_type(record_type):
         info.flags[record_type.strip().lower()] = True
+    if _network_type_category(record_type) == "residential_proxy":
+        info.flags["residential_proxy"] = True
     if info.network_type:
         info.signals.append(f"ProxyCheck network.type={info.network_type}")
     active = _active_flag_names(info.flags)
@@ -1606,6 +1619,13 @@ def _reputation_score_is_suspicious(result: ReputationInfo) -> bool:
 def _category_vote_confidence(votes: list[ReputationInfo | str]) -> str:
     if any(isinstance(vote, str) and vote.startswith("Ping0 ") for vote in votes):
         return "高"
+    if any(
+        isinstance(vote, ReputationInfo)
+        and _reputation_shared_peak(vote) is not None
+        and (_reputation_shared_peak(vote) or 0) >= 20
+        for vote in votes
+    ):
+        return "中"
     sources = {
         vote.source
         for vote in votes
@@ -1616,17 +1636,21 @@ def _category_vote_confidence(votes: list[ReputationInfo | str]) -> str:
     return "中"
 
 
+def _reputation_shared_peak(result: ReputationInfo) -> Optional[int]:
+    shared_values = [
+        value
+        for value in (result.shared_count, result.subnet_shared_count)
+        if isinstance(value, int)
+    ]
+    return max(shared_values) if shared_values else None
+
+
 def _category_vote_risk(result: ReputationInfo | str, default: int) -> int:
     if isinstance(result, ReputationInfo):
         risk = _reputation_score(result, default)
         if result.flags.get("shared_connection"):
             risk = max(risk, 42)
-        shared_values = [
-            value
-            for value in (result.shared_count, result.subnet_shared_count)
-            if isinstance(value, int)
-        ]
-        shared_peak = max(shared_values) if shared_values else None
+        shared_peak = _reputation_shared_peak(result)
         if shared_peak is not None:
             if shared_peak >= 50:
                 risk = max(risk, 65)
@@ -2316,6 +2340,8 @@ def _risk_label(score: int) -> str:
 
 def _network_type_label(value: str) -> str:
     category = _network_type_category(value)
+    if category == "residential_proxy":
+        return "住宅代理/匿名出口"
     if category == "residential":
         return "家庭宽带/住宅"
     if category == "business":
@@ -2329,6 +2355,15 @@ def _network_type_label(value: str) -> str:
 
 def _network_type_category(value: str) -> str:
     normalized = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    if normalized in {
+        "residential proxy",
+        "residential proxies",
+        "residential vpn",
+        "residential relay",
+        "residential exit",
+        "residentialproxy",
+    }:
+        return "residential_proxy"
     if normalized in {
         "residential",
         "consumer",
