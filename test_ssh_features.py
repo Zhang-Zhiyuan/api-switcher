@@ -1168,7 +1168,7 @@ def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrid
 
     assert writes["credentials"][-1] == (fake_client, credentials, profile_manager.list_ssh_profiles()[0])
     assert "env" not in writes["settings"][-1][1]
-    assert writes["settings"][-1][1]["model"] == "claude-sonnet-4"
+    assert writes["settings"][-1][1]["model"] == "claude-opus-5"
     assert "primaryApiKey" not in writes["config"][-1][1]
     assert "ssh.example.com" in message
 
@@ -1298,7 +1298,7 @@ def test_sync_claude_account_vscode_readback_failure_rolls_back_every_channel(
     _state, _writes = _install_claude_sync_state(
         monkeypatch,
         isolated_ssh,
-        settings={"model": "claude-sonnet-4"},
+        settings={"model": "claude-opus-5"},
     )
     paths = [path.replace("~", "/home/test", 1) for path in remote_config.REMOTE_VSCODE_SETTINGS_PATHS]
     files = isolated_ssh.remote_files
@@ -1532,7 +1532,7 @@ def test_clear_remote_claude_api_info_removes_overrides_and_env(isolated_ssh, mo
 
     assert writes["settings"][-1][0] is fake_client
     assert writes["settings"][-1][1]["env"] == {"KEEP_ME": "yes"}
-    assert writes["settings"][-1][1]["model"] == "claude-sonnet-4"
+    assert writes["settings"][-1][1]["model"] == "claude-opus-5"
     assert writes["settings"][-1][1]["effortLevel"] == "high"
     assert "primaryApiKey" not in writes["config"][-1][1]
     assert set(deleted["names"]).issuperset({"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"})
@@ -1601,7 +1601,7 @@ def test_inspect_remote_configs_marks_importable_and_skipped_configs(isolated_ss
                 "ANTHROPIC_AUTH_TOKEN": "sk-remote",
                 "ANTHROPIC_BASE_URL": "https://relay.example.com",
             },
-            "model": "claude-sonnet-4",
+            "model": "claude-opus-5",
         },
     )
     monkeypatch.setattr(remote_config, "read_remote_claude_config", lambda client, profile=None: {})
@@ -2653,7 +2653,7 @@ def test_remote_config_uses_sftp_home_fallback_when_home_env_is_empty():
     sftp = _FakeSFTP()
     client = _FakeClient(sftp, command_outputs=["", "", "", "", ""])
 
-    remote_config.write_remote_claude_settings(client, {"model": "claude-sonnet-4"})
+    remote_config.write_remote_claude_settings(client, {"model": "claude-opus-5"})
 
     assert "/home/fallback/.claude/settings.json" in sftp.files
 

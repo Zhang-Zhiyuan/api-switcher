@@ -7,6 +7,7 @@ from pathlib import Path
 
 from config import paths
 from core import auth_parser, parser, profile_manager, security, toml_parser, vscode_parser
+from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL
 from core.url_validation import validate_api_base_url
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile
 
