@@ -2940,11 +2940,16 @@ class SSHTab(ctk.CTkScrollableFrame):
                             show_toast(self.winfo_toplevel(), message, is_error=True)
                         return
 
+                    result = payload["result"]
+                    proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
+
                     if payload["profile_changed"]:
                         message = (
                             f"SSH 代理{mode}热更新已刷新原分组缓存；"
                             "检测到当前订阅分组已切换，未修改远端运行节点"
                         )
+                        if proxy_warning:
+                            message = f"{proxy_warning}；{message}"
                         self._set_proxy_status(message, "warning")
                         if manual:
                             show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -2956,6 +2961,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                             f"SSH 代理{mode}热更新已完成，但当前分组已切换；"
                             "新节点保存在原分组，当前界面保持不变"
                         )
+                        if proxy_warning:
+                            message = f"{proxy_warning}；{message}"
                         self._set_proxy_status(message, "warning")
                         if manual:
                             show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -2977,7 +2984,6 @@ class SSHTab(ctk.CTkScrollableFrame):
                         if len(server_names) == 1
                         else selected_key_before
                     )
-                    result = payload["result"]
                     self._set_proxy_subscription_nodes(result.nodes, preserve_key=selected_key)
                     self._set_proxy_cache_status(
                         f"本机缓存: SSH {mode}热更新已保存 {len(result.nodes)} 个节点",
@@ -3023,6 +3029,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                         else:
                             message = f"SSH 代理{mode}热更新未执行: 无运行中代理需要更新"
                             severity = "warning"
+                    if proxy_warning:
+                        message = f"{proxy_warning}；{message}"
+                        severity = "warning"
                     self._set_proxy_status(message, severity)
                     if manual:
                         show_toast(self.winfo_toplevel(), message, is_error=severity != "success")
@@ -3317,6 +3326,10 @@ class SSHTab(ctk.CTkScrollableFrame):
                         f"订阅已保存到本机缓存；识别到 {len(result.nodes)} 个节点。"
                         "没有可自动选择的非香港节点；香港节点仍可手动选择。"
                     )
+                    severity = "warning"
+                proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
+                if proxy_warning:
+                    message = f"{proxy_warning}；{message}"
                     severity = "warning"
                 self._set_proxy_status(message, severity)
                 if show_message:

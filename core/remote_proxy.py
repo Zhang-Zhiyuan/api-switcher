@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+from email.utils import parsedate_to_datetime
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import hashlib
 import ipaddress
 import json
+import os
 import posixpath
 import re
 import shlex
@@ -205,6 +207,7 @@ def _strict_privacy_dns_config() -> dict:
 
 
 PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS = frozenset({400, 401, 404, 405, 410, 414, 422})
+PROXY_SUBSCRIPTION_RETRYABLE_HTTP_ERRORS = frozenset({403, 406, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524})
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -379,11 +382,39 @@ class ProxyNodeQualityResult:
 
 
 @dataclass(frozen=True)
+class ProxyEnvironmentDiagnostic:
+    """Result of checking environment proxies used by a subscription request."""
+
+    invalid_variables: tuple[str, ...] = ()
+    invalid_proxy_urls: tuple[str, ...] = ()
+
+    @property
+    def has_invalid_proxy(self) -> bool:
+        return bool(self.invalid_variables)
+
+    def warning(self, *, bypassed: bool = True) -> str:
+        if not self.has_invalid_proxy:
+            return ""
+        variables = ", ".join(self.invalid_variables)
+        proxies = ", ".join(self.invalid_proxy_urls)
+        action = (
+            "本次订阅请求已临时绕过该代理"
+            if bypassed
+            else "当前严格隐私模式未绕过该代理"
+        )
+        return (
+            f"检测到无效本机代理配置（{variables}={proxies}，回环端口无法连接）；"
+            f"{action}，未修改系统环境变量"
+        )
+
+
+@dataclass(frozen=True)
 class ProxySubscriptionResult:
     nodes: tuple[ProxySubscriptionNode, ...]
     saved_path: str
     url: str = ""
     last_fetched_at: str = ""
+    proxy_warning: str = ""
 
 
 def parse_proxy_node(text: str) -> dict:
@@ -469,6 +500,7 @@ def fetch_proxy_subscription(
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError("订阅链接必须是 http 或 https 地址")
     normalized_url = urlparse.urlunparse(parsed_url)
+    proxy_diagnostic = _subscription_proxy_environment_diagnostic(normalized_url)
 
     request = urlrequest.Request(
         normalized_url,
@@ -489,6 +521,7 @@ def fetch_proxy_subscription(
         retries=retries,
         retry_base_delay=retry_base_delay,
         allow_direct_fallback=allow_direct_fallback,
+        proxy_diagnostic=proxy_diagnostic,
     )
     text = _decode_subscription_bytes(payload, charset)
     nodes = parse_proxy_subscription_content(text)
@@ -541,6 +574,7 @@ def fetch_proxy_subscription(
         saved_path=str(saved_path) if saved_path is not None else "",
         url=normalized_url,
         last_fetched_at=fetched_at,
+        proxy_warning=proxy_diagnostic.warning(bypassed=allow_direct_fallback),
     )
 
 
@@ -5010,6 +5044,7 @@ def _download_proxy_subscription(
     retries: int,
     retry_base_delay: float,
     allow_direct_fallback: bool = True,
+    proxy_diagnostic: ProxyEnvironmentDiagnostic | None = None,
 ) -> tuple[bytes, str, str]:
     try:
         attempts = max(1, int(retries))
@@ -5017,10 +5052,14 @@ def _download_proxy_subscription(
         attempts = 3
     attempts = max(1, attempts)
     last_error: Exception | None = None
-    direct_recovery_attempted = False
+    proxy_diagnostic = proxy_diagnostic or _subscription_proxy_environment_diagnostic(
+        request.full_url
+    )
+    force_direct = proxy_diagnostic.has_invalid_proxy and allow_direct_fallback
+    direct_recovery_attempted = bool(force_direct)
     timeout_seconds = _normalize_subscription_timeout(timeout)
     deadline = time.monotonic() + timeout_seconds
-    proxy_configured = _subscription_proxy_is_configured()
+    proxy_configured = _subscription_proxy_is_configured() and not force_direct
     strict_proxy_map: dict[str, str] | None = None
     if not allow_direct_fallback:
         strict_proxy_map = _strict_subscription_proxy_map(request)
@@ -5047,6 +5086,7 @@ def _download_proxy_subscription(
                 deadline=deadline - direct_recovery_reserve,
                 max_bytes=max_bytes,
                 proxy_map=strict_proxy_map,
+                direct=force_direct,
             )
         except HTTPError as exc:
             if exc.code in PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS:
@@ -5086,10 +5126,18 @@ def _download_proxy_subscription(
                 last_error = exc
 
         if attempt < attempts:
-            delay = 0.0 if _subscription_error_allows_immediate_retry(last_error) else _retry_delay_seconds(
-                retry_base_delay,
-                attempt,
-            )
+            if _subscription_error_is_retryable(last_error):
+                retry_after = _subscription_retry_after_seconds(last_error)
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else _retry_delay_seconds(retry_base_delay, attempt)
+                )
+            else:
+                delay = 0.0 if _subscription_error_allows_immediate_retry(last_error) else _retry_delay_seconds(
+                    retry_base_delay,
+                    attempt,
+                )
             delay = min(delay, max(0.0, deadline - time.monotonic()))
             if delay > 0:
                 time.sleep(delay)
@@ -5107,7 +5155,14 @@ def _download_proxy_subscription(
         else ""
     )
     privacy_suffix = "；已禁止绕过代理直连回退" if not allow_direct_fallback else ""
-    raise RuntimeError(f"订阅下载失败{suffix}{privacy_suffix}: {last_error}") from last_error
+    proxy_suffix = (
+        f"；{proxy_diagnostic.warning(bypassed=allow_direct_fallback)}"
+        if proxy_diagnostic.has_invalid_proxy
+        else ""
+    )
+    raise RuntimeError(
+        f"订阅下载失败{suffix}{privacy_suffix}{proxy_suffix}: {last_error}"
+    ) from last_error
 
 
 def _open_proxy_subscription_request(
@@ -5132,10 +5187,17 @@ def _open_proxy_subscription_request(
     open_request = opener.open if opener is not None else urlrequest.urlopen
     with open_request(request, timeout=timeout) as response:
         status = _int_or_default(getattr(response, "status", getattr(response, "code", 200)), 200)
-        if 400 <= status < 500:
-            raise ValueError(f"订阅链接返回 HTTP {status}，请检查订阅地址是否有效")
-        if status >= 500:
-            raise RuntimeError(f"订阅服务器返回 HTTP {status}")
+        if status >= 400:
+            # Keep the status and response headers available to the retry layer.
+            # In particular, 429 providers commonly return Retry-After and
+            # should not be treated like a permanently invalid subscription.
+            raise HTTPError(
+                request.full_url,
+                status,
+                f"订阅服务器返回 HTTP {status}",
+                getattr(response, "headers", None),
+                None,
+            )
 
         limit = _normalize_subscription_max_bytes(max_bytes)
         read_deadline = (
@@ -5254,6 +5316,32 @@ def _subscription_error_allows_immediate_retry(error: Exception | None) -> bool:
     return isinstance(error, HTTPError) and error.code in {403, 406}
 
 
+def _subscription_retry_after_seconds(error: Exception | None) -> float | None:
+    """Read a bounded Retry-After delay from a transient HTTP response."""
+    if not isinstance(error, HTTPError):
+        return None
+    headers = getattr(error, "headers", None)
+    raw = _header_value(headers, "Retry-After")
+    if not raw:
+        return None
+    value = str(raw).strip()
+    try:
+        return min(30.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        target = parsedate_to_datetime(value)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        return min(30.0, max(0.0, target.timestamp() - time.time()))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _subscription_error_is_retryable(error: Exception | None) -> bool:
+    return isinstance(error, HTTPError) and error.code in PROXY_SUBSCRIPTION_RETRYABLE_HTTP_ERRORS
+
+
 def _subscription_error_is_timeout(error: Exception | None) -> bool:
     current = error
     seen = set()
@@ -5273,6 +5361,104 @@ def _subscription_proxy_is_configured() -> bool:
     except Exception:
         return False
     return any(str(proxies.get(key) or "").strip() for key in ("http", "https", "all"))
+
+
+_SUBSCRIPTION_PROXY_ENV_KEYS = {
+    "http": ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"),
+    "https": ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"),
+}
+_LOOPBACK_PROXY_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _subscription_proxy_url_signature(value: str) -> tuple[str, str, int | None] | None:
+    """Normalize a proxy value enough to compare it with an environment value."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = raw if "://" in raw else f"http://{raw}"
+    try:
+        parsed = urlparse.urlparse(candidate)
+        host = str(parsed.hostname or "").strip().casefold()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if not host:
+        return None
+    if port is None:
+        port = 443 if parsed.scheme.casefold() == "https" else 80
+    return parsed.scheme.casefold(), host, int(port)
+
+
+def _subscription_proxy_display_url(value: str) -> str:
+    """Return a credential-free proxy URL for user-facing diagnostics."""
+
+    signature = _subscription_proxy_url_signature(value)
+    if signature is None:
+        return "本机代理"
+    scheme, host, port = signature
+    display_host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{display_host}:{port}"
+
+
+def _subscription_proxy_environment_diagnostic(url: str) -> ProxyEnvironmentDiagnostic:
+    """Detect an unreachable loopback proxy without touching process settings.
+
+    Only values that are both selected by ``urllib`` and still present in the
+    corresponding environment variable are considered. This avoids treating
+    an explicitly supplied/managed opener as a stale Windows environment
+    variable and keeps the check limited to the local endpoints known to cause
+    WinError 10061.
+    """
+
+    try:
+        proxies = urlrequest.getproxies()
+    except Exception:
+        return ProxyEnvironmentDiagnostic()
+    parsed_url = urlparse.urlparse(str(url or ""))
+    scheme = parsed_url.scheme.casefold()
+    if scheme not in _SUBSCRIPTION_PROXY_ENV_KEYS:
+        return ProxyEnvironmentDiagnostic()
+    candidate = str(
+        proxies.get(scheme)
+        or proxies.get("all")
+        or ""
+    ).strip()
+    signature = _subscription_proxy_url_signature(candidate)
+    if signature is None:
+        return ProxyEnvironmentDiagnostic()
+    _proxy_scheme, host, port = signature
+    if host not in _LOOPBACK_PROXY_HOSTS or port is None:
+        return ProxyEnvironmentDiagnostic()
+
+    env_names = _SUBSCRIPTION_PROXY_ENV_KEYS[scheme]
+    env_name_set = {name.casefold() for name in env_names}
+    matching_names: list[str] = []
+    for key, value in list(os.environ.items()):
+        if str(key).casefold() not in env_name_set:
+            continue
+        if _subscription_proxy_url_signature(value) == signature:
+            matching_names.append(key)
+    if not matching_names:
+        return ProxyEnvironmentDiagnostic()
+
+    try:
+        connection = socket.create_connection((host, port), timeout=0.25)
+        try:
+            return ProxyEnvironmentDiagnostic()
+        finally:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
+    except (OSError, TimeoutError):
+        # Preserve the original value in the message, but never expose
+        # credentials or mutate the user's environment.
+        return ProxyEnvironmentDiagnostic(
+            invalid_variables=tuple(sorted(set(matching_names))),
+            invalid_proxy_urls=(_subscription_proxy_display_url(candidate),),
+        )
 
 
 def _strict_subscription_proxy_map(request: urlrequest.Request) -> dict[str, str]:

@@ -94,6 +94,64 @@ def test_switch_claude_account_clears_api_overrides_and_resets_third_party_model
     assert profile_manager.get_current_claude_account_name() == account.name
 
 
+def test_switch_claude_accounts_preserves_rotated_live_tokens(isolated_accounts):
+    account_a_initial = {
+        "claudeAiOauth": {
+            "accessToken": _jwt({"email": "claude-a@example.test", "version": "initial"}),
+            "refreshToken": "refresh-a-initial",
+        }
+    }
+    account_a_refreshed = {
+        "claudeAiOauth": {
+            "accessToken": _jwt({"email": "claude-a@example.test", "version": "refreshed"}),
+            "refreshToken": "refresh-a-refreshed",
+        }
+    }
+    account_b = {
+        "claudeAiOauth": {
+            "accessToken": _jwt({"email": "claude-b@example.test"}),
+            "refreshToken": "refresh-b",
+        }
+    }
+
+    parser.write_claude_credentials(account_a_initial)
+    saved_a = profile_manager.import_current_claude_account()
+    parser.write_claude_credentials(account_b)
+    saved_b = profile_manager.import_current_claude_account()
+    assert saved_a is not None and saved_b is not None
+
+    # Model the CLI rotating A's access and refresh tokens after import.
+    parser.write_claude_credentials(account_a_refreshed)
+    switcher.switch_claude_account(saved_b.name)
+
+    refreshed_a = next(
+        item for item in profile_manager.list_claude_account_profiles()
+        if item.name == saved_a.name
+    )
+    assert profile_manager.get_claude_account_credentials(refreshed_a) == account_a_refreshed
+
+    switcher.switch_claude_account(saved_a.name)
+    assert parser.read_claude_credentials() == account_a_refreshed
+
+
+def test_switch_claude_account_auto_saves_unimported_live_login(isolated_accounts):
+    saved_credentials = {"token": _jwt({"email": "saved-claude@example.test"})}
+    live_credentials = {"token": _jwt({"email": "live-claude@example.test"})}
+
+    parser.write_claude_credentials(saved_credentials)
+    saved = profile_manager.import_current_claude_account()
+    assert saved is not None
+    parser.write_claude_credentials(live_credentials)
+
+    switcher.switch_claude_account(saved.name)
+
+    live_snapshot = next(
+        item for item in profile_manager.list_claude_account_profiles()
+        if item.identity == "live-claude@example.test"
+    )
+    assert profile_manager.get_claude_account_credentials(live_snapshot) == live_credentials
+
+
 def test_json_readers_reject_non_object_json(isolated_accounts):
     parser.CLAUDE_SETTINGS.parent.mkdir(parents=True)
     auth_parser.CODEX_AUTH.parent.mkdir(parents=True)
@@ -166,6 +224,76 @@ def test_switch_codex_account_normalizes_mixed_auth_and_provider(isolated_accoun
     assert "model" not in config
     assert config["cli_auth_credentials_store"] == "file"
     assert profile_manager.get_current_codex_account_name() == account.name
+
+
+def test_switch_codex_accounts_preserves_rotated_live_tokens(isolated_accounts):
+    account_a_initial = {
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": _jwt({"email": "codex-a@example.test"}),
+            "access_token": "access-a-initial",
+            "refresh_token": "refresh-a-initial",
+        },
+    }
+    account_a_refreshed = {
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": _jwt({"email": "codex-a@example.test"}),
+            "access_token": "access-a-refreshed",
+            "refresh_token": "refresh-a-refreshed",
+        },
+    }
+    account_b = {
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": _jwt({"email": "codex-b@example.test"}),
+            "access_token": "access-b",
+            "refresh_token": "refresh-b",
+        },
+    }
+    toml_parser.write_codex_config({"cli_auth_credentials_store": "file"})
+    auth_parser.write_codex_auth(account_a_initial)
+    saved_a = profile_manager.import_current_codex_account()
+    auth_parser.write_codex_auth(account_b)
+    saved_b = profile_manager.import_current_codex_account()
+    assert saved_a is not None and saved_b is not None
+
+    # Model Codex rotating A's access and refresh tokens after import.
+    auth_parser.write_codex_auth(account_a_refreshed)
+    switcher.switch_codex_account(saved_b.name)
+
+    refreshed_a = next(
+        item for item in profile_manager.list_codex_account_profiles()
+        if item.name == saved_a.name
+    )
+    assert profile_manager.get_codex_account_auth(refreshed_a) == account_a_refreshed
+
+    switcher.switch_codex_account(saved_a.name)
+    assert auth_parser.read_codex_auth() == account_a_refreshed
+
+
+def test_switch_codex_account_auto_saves_unimported_file_login(isolated_accounts):
+    saved_auth = {
+        "auth_mode": "chatgpt",
+        "tokens": {"id_token": _jwt({"email": "saved-codex@example.test"})},
+    }
+    live_auth = {
+        "auth_mode": "chatgpt",
+        "tokens": {"id_token": _jwt({"email": "live-codex@example.test"})},
+    }
+    toml_parser.write_codex_config({"cli_auth_credentials_store": "file"})
+    auth_parser.write_codex_auth(saved_auth)
+    saved = profile_manager.import_current_codex_account()
+    assert saved is not None
+    auth_parser.write_codex_auth(live_auth)
+
+    switcher.switch_codex_account(saved.name)
+
+    live_snapshot = next(
+        item for item in profile_manager.list_codex_account_profiles()
+        if item.identity == "live-codex@example.test"
+    )
+    assert profile_manager.get_codex_account_auth(live_snapshot) == live_auth
 
 
 def test_apply_codex_official_account_preserves_existing_official_model():

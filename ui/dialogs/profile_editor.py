@@ -3,6 +3,7 @@ from ui.widgets.masked_entry import MaskedEntry
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 from ui.ui_dispatch import run_on_ui_thread
 from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL, ProviderRegistry
+from core.api_config_parser import ParsedAPIConfig, parse_api_config_text
 from core.url_validation import validate_api_base_url
 from models.profile import (
     CODEX_APPROVAL_POLICIES,
@@ -48,12 +49,21 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
-        ctk.CTkLabel(
+        title_label = ctk.CTkLabel(
             header,
             text=title,
             text_color=COLORS["text"],
             font=font(18, "bold"),
-        ).pack(anchor="w")
+        )
+        title_label.pack(side="left", anchor="w", fill="x", expand=True)
+        self._paste_parse_button = ctk.CTkButton(
+            header,
+            text="粘贴解析",
+            width=92,
+            command=self._paste_parse_from_clipboard,
+            **button_style("secondary", compact=True),
+        )
+        self._paste_parse_button.pack(side="right", padx=(10, 0))
 
         scroll = ctk.CTkScrollableFrame(
             self,
@@ -111,6 +121,92 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._schedule_responsive_layout(delay_ms=0)
         center_window(self, master)
+
+    def _paste_parse_from_clipboard(self) -> None:
+        """Read clipboard text and fill the current profile editor safely."""
+
+        try:
+            text = self.clipboard_get()
+        except Exception as exc:
+            self._show_error(f"读取剪贴板失败: {exc}")
+            return
+        try:
+            parsed = parse_api_config_text(text, self._profile_type)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
+        self._apply_parsed_api_config(parsed)
+
+    def _apply_parsed_api_config(self, parsed: ParsedAPIConfig) -> None:
+        """Apply parser output after provider callbacks have reset defaults."""
+
+        if parsed.profile_type != self._profile_type:
+            self._show_error(
+                f"剪贴板内容识别为 {parsed.profile_type.title()} 配置，当前编辑器是 {self._profile_type.title()}"
+            )
+            return
+
+        if self._profile_type == "claude":
+            provider = ProviderRegistry.get_provider(parsed.provider_id)
+            if provider and provider.name not in {"anthropic", "openai"}:
+                display = provider.display_name
+            else:
+                display = ProviderRegistry.get_provider("custom").display_name
+            self._fields["provider"][0].set(display)
+            self._on_claude_provider_change(display)
+            self._set_entry_value("name", parsed.name)
+            self._set_entry_value("base_url", parsed.base_url)
+            self._set_entry_value("auth_token", parsed.token)
+            self._fields["auth_scheme"][0].set(
+                CLAUDE_AUTH_SCHEME_LABELS.get(
+                    parsed.auth_scheme,
+                    CLAUDE_AUTH_SCHEME_LABELS["auth_token"],
+                )
+            )
+            if parsed.model:
+                self._fields["model"][0].set(parsed.model)
+            self._set_entry_value("custom_provider_name", parsed.provider_name)
+            self._refresh_reasoning_effort_options(
+                "effort_level", self._current_claude_provider(), force_model_default=False
+            )
+        else:
+            provider = ProviderRegistry.get_provider(parsed.provider_id)
+            if provider and provider.name not in {"openai"} and provider in self._codex_editor_providers():
+                display = provider.display_name
+            else:
+                display = ProviderRegistry.get_provider("custom").display_name
+            self._fields["codex_provider"][0].set(display)
+            self._on_codex_provider_change(display)
+            self._set_entry_value("name", parsed.name)
+            self._set_entry_value("custom_base_url", parsed.base_url)
+            self._set_entry_value("api_key", parsed.token)
+            self._set_entry_value("custom_name", parsed.provider_name)
+            self._set_entry_value("custom_env_key", parsed.env_key or "OPENAI_API_KEY")
+            if parsed.model:
+                self._fields["model"][0].set(parsed.model)
+            self._refresh_reasoning_effort_options(
+                "model_reasoning_effort", self._current_codex_provider(), force_model_default=False
+            )
+            self._sync_codex_auth_fields(self._current_codex_provider())
+
+        source_note = "，URL 已从文本自动补全" if parsed.url_inferred else ""
+        self._show_status(
+            f"已解析 {len(parsed.matched_keys)} 个关键配置{source_note}；密钥仅填入当前编辑器，保存后才会写入密钥库",
+            "success",
+        )
+
+    def _set_entry_value(self, key: str, value: str) -> None:
+        if key not in self._fields or value is None:
+            return
+        widget, field_type = self._fields[key]
+        if field_type == "masked":
+            widget.set(str(value))
+            return
+        try:
+            widget.delete(0, "end")
+            widget.insert(0, str(value))
+        except AttributeError:
+            widget.set(str(value))
 
     def destroy(self):
         self._destroyed = True

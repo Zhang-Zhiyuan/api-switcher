@@ -4,6 +4,7 @@ import base64
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -3175,6 +3176,75 @@ def test_fetch_proxy_subscription_bypasses_failed_configured_proxy_without_chang
 
     assert result.nodes[0].node["name"] == "direct"
     assert calls == ["configured-proxy", "ProxyHandler", "direct"]
+
+
+def test_fetch_proxy_subscription_detects_stale_loopback_environment_proxy(
+    monkeypatch,
+    tmp_path,
+):
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
+
+    calls = []
+
+    class DirectOpener:
+        def open(self, _request, **_kwargs):
+            calls.append("direct")
+            return Response()
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:17897")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:17897"},
+    )
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionRefusedError(10061, "refused")),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale proxy must be bypassed before urlopen")
+        ),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+    )
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retry_base_delay=0,
+    )
+
+    assert result.nodes[0].node["name"] == "direct"
+    assert "HTTPS_PROXY" in result.proxy_warning
+    assert "临时绕过" in result.proxy_warning
+    assert calls == ["ProxyHandler", "direct"]
+    assert os.environ.get("HTTPS_PROXY") == "http://127.0.0.1:17897"
 
 
 @pytest.mark.parametrize("status", [502, 503, 504])
@@ -7194,3 +7264,50 @@ def test_stop_local_proxy_keeps_restore_state_when_restore_fails(monkeypatch, tm
     assert saved_states[-1]["previous_env"] == state["previous_env"]
     assert "pid" not in saved_states[-1]
     assert "env restore failed" in saved_states[-1]["last_restore_error"]
+
+
+def test_fetch_proxy_subscription_honors_retry_after_for_rate_limit(monkeypatch, tmp_path):
+    class Headers(dict):
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: rate-limited, type: vless, server: example.com, port: 443 }\n"
+
+    calls = 0
+    sleeps = []
+
+    def fake_urlopen(request, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            headers = Headers({"Retry-After": "2"})
+            raise remote_proxy.HTTPError(request.full_url, 429, "Too Many Requests", headers, None)
+        return Response()
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", fake_urlopen)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(remote_proxy.time, "sleep", lambda delay: sleeps.append(delay))
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        timeout=10,
+        retry_base_delay=0,
+    )
+
+    assert calls == 2
+    assert sleeps == [2.0]
+    assert result.nodes[0].node["name"] == "rate-limited"

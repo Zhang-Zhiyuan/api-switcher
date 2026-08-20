@@ -285,6 +285,10 @@ def switch_claude_profile(name: str) -> None:
         raise ValueError("Claude API 配置需要 API Key 或 Auth Token")
     _ensure_switch_target_healthy("claude_api", name)
 
+    # OAuth credentials can rotate while Claude Code is running. Snapshot the
+    # live official login before API mode clears the account marker, so a later
+    # switch back restores the newest refresh token rather than an old import.
+    profile_manager.preserve_current_claude_account_snapshot()
     backup_manager.create_backup(f"切换 Claude 到: {name}")
 
     with _local_switch_transaction(
@@ -336,6 +340,9 @@ def switch_codex_profile(name: str) -> None:
         raise ValueError("Codex API 配置需要 API Key")
     _ensure_switch_target_healthy("codex_api", name)
 
+    # Codex may rotate the file-backed ChatGPT refresh token between switches.
+    # Preserve it before replacing the auth/config state with API mode.
+    profile_manager.preserve_current_codex_account_snapshot()
     backup_manager.create_backup(f"切换 Codex 到: {name}")
 
     current_config = toml_parser.read_codex_config()
@@ -403,6 +410,12 @@ def switch_claude_account(name: str) -> None:
     if not target:
         raise ValueError(f"Claude account '{name}' not found")
 
+    # OAuth access/refresh tokens may have rotated since the account was first
+    # imported.  Preserve the live credentials (and an unimported current
+    # login) before this switch replaces the shared credentials file.
+    profile_manager.preserve_current_claude_account_snapshot()
+    profiles = profile_manager.list_claude_account_profiles()
+    target = next((p for p in profiles if p.name == name), target)
     credentials = profile_manager.load_claude_account_credentials(target)
 
     backup_manager.create_backup(f"切换 Claude 官方账号到 {name}")
@@ -452,6 +465,12 @@ def switch_codex_account(name: str) -> None:
     if not target:
         raise ValueError(f"Codex account '{name}' not found")
 
+    # Codex rotates ChatGPT tokens in auth.json.  Save the latest file-backed
+    # state before restoring another account, otherwise switching back later
+    # can resurrect an expired refresh token and appear to log the user out.
+    profile_manager.preserve_current_codex_account_snapshot()
+    profiles = profile_manager.list_codex_account_profiles()
+    target = next((p for p in profiles if p.name == name), target)
     auth = profile_manager.load_codex_account_auth(target)
 
     backup_manager.create_backup(f"切换 Codex 官方账号到 {name}")

@@ -2091,9 +2091,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                             return
 
                         result = payload["result"]
+                        proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
                         profile_snapshot = payload.get("profile") or {}
                         if payload["profile_changed"]:
                             message = f"Win11 代理{mode}热更新完成；{payload['apply']}"
+                            if proxy_warning:
+                                message = f"{proxy_warning}；{message}"
                             self._set_status(message, "warning")
                             if manual:
                                 show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -2105,6 +2108,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                                 f"Win11 代理{mode}热更新已完成，但当前分组已切换；"
                                 "新节点保存在原分组，当前界面保持不变"
                             )
+                            if proxy_warning:
+                                message = f"{proxy_warning}；{message}"
                             self._set_status(message, "warning")
                             if manual:
                                 show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -2137,6 +2142,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         else:
                             message = f"Win11 代理{mode}热更新完成；{payload['apply']}"
                             severity = self._periodic_update_message_severity(payload["apply"])
+                        if proxy_warning:
+                            message = f"{proxy_warning}；{message}"
+                            severity = "warning"
                         self._set_status(message, severity)
                         if manual:
                             show_toast(self.winfo_toplevel(), message, is_error=severity != "success")
@@ -2405,6 +2413,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     return
 
                 result = payload["result"]
+                proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
                 state = current_state
                 self._latency_results = remote_proxy.load_proxy_subscription_latencies(state)
                 self._quality_results = remote_proxy.load_proxy_subscription_qualities(state)
@@ -2428,6 +2437,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         f"订阅已保存到本机缓存；识别到 {len(result.nodes)} 个节点。"
                         "没有可自动选择的非香港节点；香港节点仍可手动选择。"
                     )
+                    severity = "warning"
+                if proxy_warning:
+                    message = f"{proxy_warning}；{message}"
                     severity = "warning"
                 self._set_status(message, severity)
                 if show_message:
