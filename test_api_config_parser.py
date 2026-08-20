@@ -36,6 +36,20 @@ def test_parse_powershell_and_codex_aliases():
     assert parsed.url_inferred is False
 
 
+def test_parse_unquoted_cmd_set_block():
+    parsed = parse_api_config_text(
+        "set ANTHROPIC_BASE_URL=https://proapi.vivijane.pro\n"
+        "set ANTHROPIC_AUTH_TOKEN=sk-cmd-unquoted\n"
+        "set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n"
+        "set CLAUDE_CODE_ATTRIBUTION_HEADER=0",
+        "claude",
+    )
+
+    assert parsed.base_url == "https://proapi.vivijane.pro"
+    assert parsed.token == "sk-cmd-unquoted"
+    assert parsed.auth_scheme == "auth_token"
+
+
 def test_parse_json_env_and_infer_url_from_bare_text():
     parsed = parse_api_config_text(
         '{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-json",'
@@ -47,6 +61,27 @@ def test_parse_json_env_and_infer_url_from_bare_text():
     assert parsed.token == "sk-json"
     assert parsed.provider_id == "deepseek"
     assert parsed.base_url == "https://api.deepseek.com"
+    assert parsed.url_inferred is True
+
+
+def test_parse_markdown_json_fence_and_ignore_schema_url_when_endpoint_is_inferred():
+    parsed = parse_api_config_text(
+        '''配置如下：
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-fenced",
+    "PROVIDER": "deepseek"
+  }
+}
+```''',
+        "claude",
+    )
+
+    assert parsed.token == "sk-fenced"
+    assert parsed.provider_id == "deepseek"
+    assert parsed.base_url == "https://api.deepseek.com/anthropic"
     assert parsed.url_inferred is True
 
 
