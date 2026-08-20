@@ -103,6 +103,12 @@ _PROVIDER_KEY_HINTS = (
     ("glm", ("GLM", "ZHIPU", "BIGMODEL")),
 )
 
+_NON_API_URL_HOST_HINTS = (
+    "json.schemastore.org",
+    "schemastore.org",
+    "opencode.ai",
+)
+
 
 @dataclass(frozen=True)
 class ParsedAPIConfig:
@@ -147,6 +153,40 @@ def _flatten_json(value: object, prefix: str = "") -> dict[str, str]:
     return flattened
 
 
+def _json_candidates(text: str) -> list[str]:
+    """Find complete JSON objects in plain text or Markdown code fences."""
+
+    raw = str(text or "").strip().strip("`").strip()
+    candidates: list[str] = []
+    if raw:
+        candidates.append(raw)
+
+    lines = str(text or "").splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    fenced = "\n".join(lines).strip()
+    if fenced and fenced not in candidates:
+        candidates.append(fenced)
+
+    # A copied config is often surrounded by a label or prose. JSONDecoder
+    # can locate a nested object without evaluating any shell content.
+    decoder = json.JSONDecoder()
+    source = str(text or "")
+    for index, character in enumerate(source):
+        if character != "{":
+            continue
+        try:
+            _parsed, end = decoder.raw_decode(source[index:])
+        except (TypeError, ValueError):
+            continue
+        candidate = source[index : index + end].strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
 def _extract_values(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for match in _ASSIGNMENT_RE.finditer(text):
@@ -163,7 +203,7 @@ def _extract_values(text: str) -> dict[str, str]:
     # JSON fragments are common in copied config/auth files. Try the complete
     # payload first for pretty-printed JSON, then compact JSON lines embedded
     # in surrounding prose.
-    json_candidates = [text.strip().strip("`")]
+    json_candidates = _json_candidates(text)
     json_candidates.extend(line.strip().strip("`;") for line in text.splitlines())
     for candidate in json_candidates:
         if not (candidate.startswith("{") and candidate.endswith("}")):
@@ -208,6 +248,42 @@ def _url_candidates(text: str) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _choose_url_candidate(urls: list[str], profile_type: str) -> str:
+    """Prefer an API-looking URL over schema/documentation links."""
+
+    api_urls = [
+        url
+        for url in urls
+        if not any(
+            (urlsplit(url).hostname or "").casefold() == hint
+            or (urlsplit(url).hostname or "").casefold().endswith("." + hint)
+            for hint in _NON_API_URL_HOST_HINTS
+        )
+    ]
+    if not api_urls:
+        return ""
+    urls = api_urls
+
+    def score(url: str) -> tuple[int, int]:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").casefold()
+        path = parsed.path.casefold()
+        value = 0
+        if any(host == hint or host.endswith("." + hint) for hint in _NON_API_URL_HOST_HINTS):
+            value -= 100
+        if path.endswith((".json", ".yaml", ".yml")):
+            value -= 20
+        if "/v1" in path or "api" in host or "endpoint" in path:
+            value += 20
+        if profile_type == "claude" and any(marker in host for marker in ("anthropic", "claude")):
+            value += 15
+        if profile_type == "codex" and any(marker in host for marker in ("openai", "codex")):
+            value += 15
+        return value, -len(url)
+
+    return max(urls, key=score, default="")
 
 
 def _normalize_url(value: str, *, profile_type: str, inferred: bool) -> str:
@@ -292,7 +368,7 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
         )
     urls = _url_candidates(raw)
     url_inferred = not bool(explicit_url)
-    url_value = explicit_url or (urls[0] if urls else "")
+    url_value = explicit_url or _choose_url_candidate(urls, target_type)
 
     token_keys = _CLAUDE_TOKEN_KEYS if target_type == "claude" else _CODEX_TOKEN_KEYS
     token, token_key = _pick_value(values, token_keys)
