@@ -4200,7 +4200,7 @@ def test_inspect_ai_proxy_strict_detail_does_not_claim_live_config_loaded(monkey
         ("yes", "yes", "yes", "yes", True, ""),
         ("no", "yes", "yes", "yes", False, "不是本工具配置"),
         ("yes", "no", "unknown", "yes", False, "端口已监听，但 pid 文件未更新"),
-        ("yes", "yes", "no", "yes", False, "pid 文件指向非 mihomo/clash 进程"),
+        ("yes", "yes", "no", "yes", False, "pid 文件指向非本工具受管"),
         ("yes", "yes", "unknown", "yes", False, "无法确认 pid 进程"),
         ("yes", "yes", "yes", "no", False, "进程存在，但端口未监听"),
         ("yes", "yes", "yes", "unknown", False, "缺少 ss/netstat"),
@@ -4281,7 +4281,7 @@ def test_start_script_checks_port_with_netstat_when_ss_is_missing():
     assert script.count("cleanup_new_process\n") == 2
     assert 'rm -f "$PID_FILE"' in script
     assert "kill -9" in script
-    assert "pid file points to unmanaged process" in script
+    assert "pid file does not identify this tool's managed process" in script
     assert "port $PORT is already listening before starting mihomo" in script
 
 
@@ -5087,6 +5087,112 @@ def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_manage
     assert "VS Code settings JSON" in command
     assert "kill -9" in command
     assert "backed_up_configs" in command
+    assert "systemctl --user show-environment" in command
+    assert "systemctl --user unset-environment" in command
+    assert 'grep -Fx -- "$key=$PROXY_URL"' in command
+    assert '[ "$config_owned" = "yes" ] || return 1' in command
+    assert '*mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*' in command
+    assert "tr -cd '0-9'" not in command
+
+
+def test_dead_proxy_reconcile_requires_owned_config_and_preserves_live_proxy():
+    command = remote_proxy._build_dead_proxy_reconcile_command("/home/me", 7890)
+
+    assert 'grep -qF "$CONFIG_MARKER" "$CONFIG_FILE"' in command
+    assert '*mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*' in command
+    assert '[ "$config_owned" = "yes" ] || return 1' in command
+    assert 'reason=foreign_listener' in command
+    assert 'reason=managed_proxy_on_other_port' in command
+    assert 'repaired_pid=yes' in command
+    assert 'working=yes' in command
+    assert command.index('if [ "$port_listening" = "yes" ]') < command.index('stop_managed_pid "$saved_pid"')
+    assert "tr -cd '0-9'" not in command
+    assert "\0" not in command
+
+
+def test_dead_proxy_reconcile_blocks_unknown_listener_without_killing(monkeypatch):
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "execute_command_with_status",
+        lambda *_args, **_kwargs: (
+            0,
+            "conflict=yes\nreason=foreign_listener\nlistener_pids=2468\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="为避免误杀，已停止部署"):
+        remote_proxy._reconcile_dead_ai_proxy_runtime(object(), "/home/me", 7890)
+
+
+def test_install_auto_cleans_only_confirmed_dead_managed_state(monkeypatch):
+    events = []
+    fake_client = object()
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(remote_proxy.ssh_manager, "read_remote_file", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        remote_proxy,
+        "_reconcile_dead_ai_proxy_runtime",
+        lambda *_args, **_kwargs: events.append("reconcile") or {"dirty": "yes", "working": "no"},
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "cleanup_ai_proxy",
+        lambda *_args, **_kwargs: events.append("cleanup") or "cleaned",
+    )
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "write_remote_file",
+        lambda *_args, **_kwargs: events.append("write"),
+    )
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "execute_command_with_status",
+        lambda *_args, **_kwargs: (0, "proxy=http://127.0.0.1:7890\n", ""),
+    )
+    monkeypatch.setattr(remote_proxy, "_write_shell_profile_block", lambda *_args: None)
+    monkeypatch.setattr(remote_proxy, "_write_vscode_proxy_entrypoints", lambda *_args: 1)
+
+    message = remote_proxy.install_ai_proxy(
+        "server",
+        "{ name: node, type: vless, server: example.com, port: 443 }",
+    )
+
+    assert events[:2] == ["reconcile", "cleanup"]
+    assert events.count("write") == 3
+    assert "自动清理确认失效" in message
+
+
+def test_install_repairs_live_managed_proxy_and_uses_hot_reload(monkeypatch):
+    fake_client = object()
+    writes = []
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(remote_proxy.ssh_manager, "read_remote_file", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        remote_proxy,
+        "_reconcile_dead_ai_proxy_runtime",
+        lambda *_args, **_kwargs: {"dirty": "no", "working": "yes", "repaired_pid": "yes"},
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "reload_ai_proxy",
+        lambda *_args, **_kwargs: "hot reloaded",
+    )
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "write_remote_file",
+        lambda *_args, **_kwargs: writes.append(True),
+    )
+
+    message = remote_proxy.install_ai_proxy(
+        "server",
+        "{ name: node, type: vless, server: example.com, port: 443 }",
+    )
+
+    assert writes == []
+    assert "正常工作的代理未终止" in message
 
 
 def test_remove_vscode_proxy_settings_only_removes_managed_values():
@@ -5464,6 +5570,8 @@ def test_isolated_candidate_command_is_bounded_locked_and_cleans_everything():
     assert "ai-proxy.env" not in command
     assert "server-env-setup" not in command
     assert "API_KEY" not in command
+    assert "\0" not in command
+    assert r"tr '\0' ' '" in command
 
 
 def test_isolated_candidate_probe_transfers_0600_template_and_accepts_all_results(monkeypatch):
@@ -6275,6 +6383,19 @@ def test_proxy_env_entrypoints_cover_vscode_shells_and_terminals():
     assert "Loaded by VS Code Remote Server" in vscode_setup
     assert remote_proxy.VSCODE_ENV_BLOCK_START in vscode_setup
     assert "set -gx HTTP_PROXY http://127.0.0.1:7890" in fish_config
+
+
+def test_managed_proxy_process_does_not_inherit_its_own_proxy_environment():
+    script = remote_proxy._build_start_script(
+        "/home/me/.config/mihomo",
+        "/home/me/.config/api-switcher",
+        "/home/me/.local/bin",
+        7890,
+    )
+
+    unset_line = "unset " + " ".join(remote_proxy.PROXY_ENV_KEYS)
+    assert unset_line in script
+    assert script.index(unset_line) < script.index('nohup "$BIN"')
 
 
 def test_vscode_server_env_setup_preserves_custom_content_and_replaces_managed_block():
