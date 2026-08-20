@@ -4283,6 +4283,29 @@ def test_start_script_checks_port_with_netstat_when_ss_is_missing():
     assert "kill -9" in script
     assert "pid file does not identify this tool's managed process" in script
     assert "port $PORT is already listening before starting mihomo" in script
+    assert "command -v clash-meta" in script
+
+
+def test_shell_profile_writer_rejects_unclosed_managed_block(monkeypatch):
+    commands = []
+    monkeypatch.setattr(remote_proxy.ssh_manager, "write_remote_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "execute_command_with_status",
+        lambda _client, command, **_kwargs: commands.append(command) or (0, "", ""),
+    )
+
+    remote_proxy._write_shell_profile_block(
+        object(),
+        "/home/me",
+        "/home/me/.config/api-switcher/ai-proxy.env",
+        "/home/me/.config/api-switcher/start-ai-proxy.sh",
+        7890,
+    )
+
+    assert commands
+    assert "END {if (skip == 1) exit 2}" in commands[0]
+    assert "无法安全更新" in commands[0]
 
 
 def test_remote_install_command_retries_mihomo_downloads_with_user_agent():
@@ -4299,6 +4322,7 @@ def test_remote_install_command_retries_mihomo_downloads_with_user_agent():
     assert "API-Switcher/1.0" in command
     assert "for attempt in range(1, 4)" in command
     assert "download failed after 3 attempts" in command
+    assert "command -v clash-meta" in command
 
 
 def test_remote_reload_command_calls_mihomo_controller():
@@ -5092,6 +5116,7 @@ def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_manage
     assert 'grep -Fx -- "$key=$PROXY_URL"' in command
     assert '[ "$config_owned" = "yes" ] || return 1' in command
     assert '*mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*' in command
+    assert '$4 ~ (port "$")' in command
     assert "tr -cd '0-9'" not in command
 
 

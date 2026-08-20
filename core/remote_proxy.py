@@ -6136,10 +6136,10 @@ PORT={mixed_port}
 RESTART="${{1:-}}"
 BIN="$LOCAL_BIN_DIR/mihomo"
 if [ ! -x "$BIN" ]; then
-  BIN="$(command -v mihomo 2>/dev/null || command -v clash 2>/dev/null || true)"
+  BIN="$(command -v mihomo 2>/dev/null || command -v clash-meta 2>/dev/null || command -v clash 2>/dev/null || true)"
 fi
 if [ -z "$BIN" ]; then
-  echo "mihomo/clash not found" >&2
+  echo "mihomo/clash-meta/clash not found" >&2
   exit 1
 fi
 pid_managed() {{
@@ -6514,12 +6514,12 @@ if command -v lsof >/dev/null 2>&1; then
   done
 fi
 if command -v ss >/dev/null 2>&1; then
-  for pid in $(ss -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $0}' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u); do
+  for pid in $(ss -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ (port "$") {print $0}' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u); do
     stop_pid_if_proxy "$pid"
   done
 fi
 if command -v netstat >/dev/null 2>&1; then
-  for pid in $(netstat -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $7}' | sed -n 's#/.*##p' | sort -u); do
+  for pid in $(netstat -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ (port "$") {print $7}' | sed -n 's#/.*##p' | sort -u); do
     stop_pid_if_proxy "$pid"
   done
 fi
@@ -6710,10 +6710,10 @@ fi
 still_listening=no
 listener_detail=""
 if command -v ss >/dev/null 2>&1; then
-  listener_detail="$(ss -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $0}' | head -n 3)"
+  listener_detail="$(ss -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ (port "$") {print $0}' | head -n 3)"
   [ -n "$listener_detail" ] && still_listening=yes
 elif command -v netstat >/dev/null 2>&1; then
-  listener_detail="$(netstat -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ port {print $0}' | head -n 3)"
+  listener_detail="$(netstat -ltnp 2>/dev/null | awk -v port=":$PORT" '$4 ~ (port "$") {print $0}' | head -n 3)"
   [ -n "$listener_detail" ] && still_listening=yes
 else
   still_listening=unknown
@@ -7149,7 +7149,7 @@ START_SCRIPT={shlex.quote(start_path)}
 PORT={mixed_port}
 BIN="$LOCAL_BIN_DIR/mihomo"
 mkdir -p "$CONFIG_DIR" "$APP_DIR" "$LOCAL_BIN_DIR"
-if [ ! -x "$BIN" ] && ! command -v mihomo >/dev/null 2>&1; then
+if [ ! -x "$BIN" ] && ! command -v mihomo >/dev/null 2>&1 && ! command -v clash-meta >/dev/null 2>&1 && ! command -v clash >/dev/null 2>&1; then
   arch="$(uname -m 2>/dev/null || echo unknown)"
   case "$arch" in
     x86_64|amd64) pattern="linux-amd64" ;;
@@ -7211,16 +7211,16 @@ os.chmod(target, 0o755)
 print("downloaded=" + url)
 PY
     then
-      if command -v clash >/dev/null 2>&1; then
-        echo "mihomo 下载失败，回退使用远端已有 clash" >&2
+      if command -v clash-meta >/dev/null 2>&1 || command -v clash >/dev/null 2>&1; then
+        echo "mihomo 下载失败，回退使用远端已有 clash 兼容二进制" >&2
       else
         exit 4
       fi
     fi
-  elif command -v clash >/dev/null 2>&1; then
-    echo "远端未安装 python3，回退使用已有 clash" >&2
+  elif command -v clash-meta >/dev/null 2>&1 || command -v clash >/dev/null 2>&1; then
+    echo "远端未安装 python3，回退使用已有 clash 兼容二进制" >&2
   else
-    echo "远端未安装 python3，且未找到 mihomo/clash，无法自动下载 mihomo" >&2
+    echo "远端未安装 python3，且未找到 mihomo/clash-meta/clash，无法自动下载 mihomo" >&2
     exit 2
   fi
 fi
@@ -7275,11 +7275,16 @@ BLOCK={shlex.quote(block)}
 for file in {quoted_paths}; do
   touch "$file"
   tmp="$file.tmp.$$"
-  awk -v start="$BLOCK_START" -v end="$BLOCK_END" '
+  if ! awk -v start="$BLOCK_START" -v end="$BLOCK_END" '
     $0 == start {{skip=1; next}}
     $0 == end {{skip=0; next}}
     skip != 1 {{print}}
-  ' "$file" > "$tmp"
+    END {{if (skip == 1) exit 2}}
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    echo "无法安全更新 $file：检测到未闭合的 API-Switcher 代理环境块" >&2
+    exit 2
+  fi
   printf "\\n%s\\n" "$BLOCK" >> "$tmp"
   mv "$tmp" "$file"
 done
