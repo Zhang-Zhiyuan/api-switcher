@@ -1142,14 +1142,11 @@ def _pick_claude_account_import_name(identity: str, preferred_name: str | None =
     return _account_import_name("Claude-账号", preferred_name or identity, {profile.name for profile in profiles})
 
 
-def import_current_claude_account() -> ClaudeAccountProfile | None:
-    """Import and transactionally persist the current Claude Code account."""
-    from core.parser import read_claude_credentials
-
-    credentials = read_claude_credentials()
+def _save_current_claude_account_credentials(credentials: dict) -> ClaudeAccountProfile:
+    """Persist already-validated Claude credentials as a refreshed snapshot."""
     ok, _reason = _validate_claude_account_credentials(credentials)
     if not ok:
-        return None
+        raise ValueError(_reason)
 
     identity = _claude_account_identity_from_credentials(credentials)
     preferred_name = _claude_account_preferred_name(credentials)
@@ -1163,6 +1160,39 @@ def import_current_claude_account() -> ClaudeAccountProfile | None:
     )
     save_claude_account_profile_with_credentials(profile, credentials)
     return profile
+
+
+def import_current_claude_account() -> ClaudeAccountProfile | None:
+    """Import and transactionally persist the current Claude Code account."""
+    from core.parser import read_claude_credentials
+
+    credentials = read_claude_credentials()
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok:
+        return None
+    return _save_current_claude_account_credentials(credentials)
+
+
+def preserve_current_claude_account_snapshot() -> ClaudeAccountProfile | None:
+    """Save the live Claude login before another account can overwrite it.
+
+    Claude Code can rotate OAuth tokens after the user originally imported an
+    account.  Refreshing the matching snapshot here prevents a later switch
+    from restoring those older tokens.  A valid but previously unimported
+    login is saved as a new account so switching remains lossless.
+    """
+    from core.parser import read_claude_credentials
+
+    try:
+        credentials = read_claude_credentials()
+    except (OSError, ValueError) as exc:
+        logger.warning("Unable to preserve current Claude account credentials: %s", exc)
+        return None
+
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok:
+        return None
+    return _save_current_claude_account_credentials(credentials)
 
 
 def delete_claude_account_profile(name: str) -> None:
@@ -2160,16 +2190,8 @@ def _require_exportable_codex_file_credentials(config: dict) -> None:
     )
 
 
-def import_current_codex_account() -> CodexAccountProfile | None:
-    """Import the active file-backed Codex account as one transaction."""
-    from core.auth_parser import read_codex_auth
-    from core.toml_parser import read_codex_config
-
-    config = read_codex_config()
-    _require_exportable_codex_file_credentials(config)
-    auth = read_codex_auth()
-    if not _codex_official_auth_available(auth):
-        return None
+def _save_current_codex_account_auth(auth: dict) -> CodexAccountProfile:
+    """Persist already-validated Codex auth as a refreshed snapshot."""
     auth = _normalize_codex_official_auth(auth)
 
     identity = _codex_account_identity_from_auth(auth)
@@ -2184,6 +2206,43 @@ def import_current_codex_account() -> CodexAccountProfile | None:
     )
     save_codex_account_profile_with_auth(profile, auth)
     return profile
+
+
+def import_current_codex_account() -> CodexAccountProfile | None:
+    """Import the active file-backed Codex account as one transaction."""
+    from core.auth_parser import read_codex_auth
+    from core.toml_parser import read_codex_config
+
+    config = read_codex_config()
+    _require_exportable_codex_file_credentials(config)
+    auth = read_codex_auth()
+    if not _codex_official_auth_available(auth):
+        return None
+    return _save_current_codex_account_auth(auth)
+
+
+def preserve_current_codex_account_snapshot() -> CodexAccountProfile | None:
+    """Save the live file-backed Codex login before replacing ``auth.json``.
+
+    ``auto`` and ``keyring`` credentials are deliberately not exported because
+    a leftover auth.json may be stale.  Switching to a saved file snapshot does
+    not delete the OS-keyring credential, so skipping those stores is safe.
+    """
+    from core.auth_parser import read_codex_auth
+    from core.toml_parser import read_codex_config
+
+    try:
+        config = read_codex_config()
+        if _codex_credentials_store(config) != "file":
+            return None
+        auth = read_codex_auth()
+    except (OSError, ValueError) as exc:
+        logger.warning("Unable to preserve current Codex account auth: %s", exc)
+        return None
+
+    if not _codex_official_auth_available(auth):
+        return None
+    return _save_current_codex_account_auth(auth)
 
 
 def delete_codex_account_profile(name: str) -> None:

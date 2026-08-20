@@ -220,7 +220,13 @@ def build_claude_account_preview(name: str) -> SwitchPreview:
     current_account = _account_runtime_label(account_runtime, "has_credentials")
 
     changes = [
-        PreviewChange("Claude 官方账号", current_account, target.name, important=True),
+        PreviewChange(
+            "Claude 官方账号",
+            current_account,
+            target.name,
+            "切换前会先加密保存当前磁盘登录态，避免 OAuth token 刷新后旧快照失效。",
+            True,
+        ),
         PreviewChange("账号身份", _display(account_runtime.get("identity")), _display(target.identity)),
         PreviewChange("第三方 API 状态", current_api, "会清理 API Key/Base URL 覆盖", "切回官方账号后新终端会话生效。", True),
         PreviewChange("模型兜底", _display(runtime.get("model")), f"保留 Claude 官方模型和别名；非 Claude 模型会重置为 {CLAUDE_OFFICIAL_DEFAULT_MODEL}"),
@@ -259,7 +265,13 @@ def build_codex_account_preview(name: str) -> SwitchPreview:
     current_account = _account_runtime_label(account_runtime, "has_official_auth")
 
     changes = [
-        PreviewChange("Codex 官方账号", current_account, target.name, important=True),
+        PreviewChange(
+            "Codex 官方账号",
+            current_account,
+            target.name,
+            "切换前会先保存当前 file 登录态；keyring 登录不会被删除。",
+            True,
+        ),
         PreviewChange("账号身份", _display(account_runtime.get("identity")), _display(target.identity)),
         PreviewChange("第三方 API 状态", current_api, "会切回 openai/file 登录", "切回官方账号后新终端会话生效。", True),
         PreviewChange("认证模式", _display(runtime.get("auth_mode")), "chatgpt/file"),
