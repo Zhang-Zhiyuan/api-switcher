@@ -19,6 +19,18 @@ from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProf
 from ui.tabs.ssh_tab import SSHTab, _format_server_batch_item
 
 
+class _ExecFailureClient:
+    def exec_command(self, *_args, **_kwargs):
+        raise EOFError()
+
+
+def test_ssh_command_error_keeps_empty_transport_exception_actionable():
+    manager = SSHManager()
+
+    with pytest.raises(RuntimeError, match=r"执行远程命令失败: EOFError"):
+        manager.execute_command_with_status(_ExecFailureClient(), "true")
+
+
 class _RemoteSecretStore(dict):
     def __init__(self):
         super().__init__()

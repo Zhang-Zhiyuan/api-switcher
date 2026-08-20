@@ -3103,7 +3103,7 @@ for stale_dir in "$BASE"/candidate.*; do
   if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
     stale_cmd="$(ps -p "$stale_pid" -o args= 2>/dev/null || true)"
     if [ -z "$stale_cmd" ] && [ -r "/proc/$stale_pid/cmdline" ]; then
-      stale_cmd="$(tr '\0' ' ' < "/proc/$stale_pid/cmdline" 2>/dev/null || true)"
+      stale_cmd="$(tr '\\0' ' ' < "/proc/$stale_pid/cmdline" 2>/dev/null || true)"
     fi
     case "$stale_cmd" in
       *mihomo*"$stale_dir"*|*clash*"$stale_dir"*|*"$stale_dir"*mihomo*|*"$stale_dir"*clash*)
@@ -3284,6 +3284,44 @@ def probe_ai_proxy_candidate_isolated(
     )
 
 
+def _reconcile_dead_ai_proxy_runtime(client, home: str, mixed_port: int) -> dict[str, str]:
+    """Repair or identify stale managed runtime state without touching live foreign proxies."""
+
+    command = _build_dead_proxy_reconcile_command(home, mixed_port)
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=30,
+        log_command=False,
+    )
+    if status != 0:
+        detail = (stderr or stdout or str(status)).strip()
+        raise RuntimeError(f"远端死代理识别失败: {detail}")
+    values = _parse_key_values(stdout)
+    if values.get("conflict") == "yes":
+        reason = values.get("reason") or "unknown_owner"
+        if reason == "managed_proxy_on_other_port":
+            configured_port = values.get("configured_port") or "其他"
+            raise RuntimeError(
+                f"检测到本工具代理正在端口 {configured_port} 正常运行；"
+                f"拒绝将同一受管配置目录覆盖到端口 {mixed_port}，正常代理未终止"
+            )
+        listeners = values.get("listener_pids") or "无法读取"
+        reason_labels = {
+            "foreign_listener": "监听进程不属于本工具",
+            "unowned_config": "监听进程使用的配置没有本工具标记",
+            "multiple_managed_listeners": "检测到多个受管监听进程",
+            "unknown_owner": "无法确认监听进程身份",
+            "listener_check_unavailable": "远端缺少端口识别工具",
+        }
+        raise RuntimeError(
+            f"远端端口 {mixed_port} 已占用且不能安全自动清理："
+            f"{reason_labels.get(reason, reason)}（PID: {listeners}）。"
+            "为避免误杀，已停止部署"
+        )
+    return values
+
+
 def install_ai_proxy(
     ssh_name: str,
     proxy_text: str,
@@ -3304,6 +3342,26 @@ def install_ai_proxy(
 
     old_config = ssh_manager.read_remote_file(client, config_path) or ""
     effective_strict_privacy = _resolve_managed_strict_privacy(strict_privacy, old_config)
+    reconcile = _reconcile_dead_ai_proxy_runtime(client, home, mixed_port)
+    if reconcile.get("working") == "yes":
+        reload_message = reload_ai_proxy(
+            ssh_name,
+            proxy_text,
+            mixed_port,
+            persist_selection=False,
+            strict_privacy=effective_strict_privacy,
+        )
+        repair_note = (
+            "；部署前已修复受管代理 PID 状态，正常工作的代理未终止"
+            if reconcile.get("repaired_pid") == "yes"
+            else "；部署前检测到正常工作的受管代理，已改用热更新且未终止进程"
+        )
+        return reload_message + repair_note
+
+    cleanup_note = ""
+    if reconcile.get("dirty") == "yes":
+        cleanup_ai_proxy(ssh_name, mixed_port, include_legacy_config=False)
+        cleanup_note = "；部署前已自动清理确认失效的受管代理与死代理环境"
     ssh_manager.write_remote_file(
         client,
         config_path,
@@ -3333,7 +3391,7 @@ def install_ai_proxy(
     suffix = f"；{result[-1]}" if result else ""
     return (
         f"AI 代理已部署到 {ssh_name}: http://127.0.0.1:{mixed_port}"
-        f"{suffix}；已写入 VS Code Remote/Codex/Claude Code 环境入口 {vscode_targets} 处；"
+        f"{suffix}{cleanup_note}；已写入 VS Code Remote/Codex/Claude Code 环境入口 {vscode_targets} 处；"
         + (
             "应用层严格隐私已开启（非 VPN/TUN）"
             if effective_strict_privacy
@@ -3908,6 +3966,7 @@ def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStat
     )
     command = f"""
 CONFIG={shlex.quote(config_path)}
+CONFIG_DIR={shlex.quote(posixpath.dirname(config_path))}
 ENV_FILE={shlex.quote(env_path)}
 START_SCRIPT={shlex.quote(start_path)}
 PID_FILE={shlex.quote(pid_path)}
@@ -3931,16 +3990,21 @@ if [ -s "$CONFIG" ]; then
 fi
 if [ -s "$PID_FILE" ]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    pid_running=yes
-    if command -v ps >/dev/null 2>&1; then
-      cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
-      case "$cmd" in
-        *mihomo*|*clash*) pid_managed=yes ;;
-        *) pid_managed=no ;;
-      esac
-    fi
-  fi
+  case "$pid" in
+    ''|*[!0-9]*) pid_managed=no ;;
+    *)
+      if kill -0 "$pid" 2>/dev/null; then
+        pid_running=yes
+        if command -v ps >/dev/null 2>&1; then
+          cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+          case "$cmd" in
+            *mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*) pid_managed=yes ;;
+            *) pid_managed=no ;;
+          esac
+        fi
+      fi
+      ;;
+  esac
 fi
 if command -v ss >/dev/null 2>&1; then
   port_listening=no
@@ -3988,7 +4052,7 @@ printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_liste
     )
     detail_parts = []
     if values.get("pid_running") == "yes" and values.get("pid_managed") == "no":
-        detail_parts.append("pid 文件指向非 mihomo/clash 进程")
+        detail_parts.append("pid 文件指向非本工具受管的 mihomo/clash 进程")
     elif values.get("pid_running") == "yes" and values.get("pid_managed") != "yes":
         detail_parts.append("无法确认 pid 进程是 mihomo/clash，已按未运行处理")
     if values.get("pid_running") == "yes" and values.get("port_listening") == "no":
@@ -4135,6 +4199,7 @@ def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_confi
     removed_files = _int_or_default(values.get("removed_files"), 0)
     removed_blocks = _int_or_default(values.get("removed_blocks"), 0)
     removed_settings = _int_or_default(values.get("removed_settings"), 0)
+    removed_systemd_env = _int_or_default(values.get("removed_systemd_env"), 0)
     backed_up_configs = _int_or_default(values.get("backed_up_configs"), 0)
     if removed_files:
         pieces.append(f"移除受管文件 {removed_files} 个")
@@ -4142,6 +4207,8 @@ def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_confi
         pieces.append(f"移除 shell/VS Code Remote 入口 {removed_blocks} 处")
     if removed_settings:
         pieces.append(f"清理 VS Code settings {removed_settings} 处")
+    if removed_systemd_env:
+        pieces.append(f"清理 systemd 用户会话代理变量 {removed_systemd_env} 个")
     if backed_up_configs:
         backup_dir = values.get("backup_dir") or ""
         pieces.append(f"备份并移走旧代理配置 {backed_up_configs} 个" + (f"到 {backup_dir}" if backup_dir else ""))
@@ -4151,7 +4218,7 @@ def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_confi
         pieces.append("代理端口未监听")
     skipped_pids = values.get("skipped_pids", "")
     if skipped_pids:
-        pieces.append(f"跳过非 mihomo/clash 进程 {skipped_pids}")
+        pieces.append(f"跳过无法确认属于本工具的进程 {skipped_pids}")
     notes = values.get("notes", "")
     if notes:
         pieces.append(notes)
@@ -6057,6 +6124,7 @@ def _build_env_file(mixed_port: int) -> str:
 
 def _build_start_script(config_dir: str, app_dir: str, local_bin_dir: str, mixed_port: int) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    proxy_unset = "unset " + " ".join(PROXY_ENV_KEYS)
     return f"""#!/bin/sh
 set -eu
 CONFIG_DIR={shlex.quote(config_dir)}
@@ -6086,7 +6154,7 @@ pid_managed() {{
   fi
   cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
   case "$cmd" in
-    *mihomo*|*clash*) return 0 ;;
+    *mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*) return 0 ;;
     *) return 1 ;;
   esac
 }}
@@ -6103,6 +6171,7 @@ port_listening() {{
 }}
 if [ -f "$PID_FILE" ]; then
   old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  case "$old_pid" in ''|*[!0-9]*) old_pid="" ;; esac
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
     if pid_managed "$old_pid"; then
       if [ "$RESTART" = "restart" ]; then
@@ -6120,7 +6189,7 @@ if [ -f "$PID_FILE" ]; then
     else
       rm -f "$PID_FILE"
       if port_listening; then
-        echo "port $PORT is already listening, but pid file points to unmanaged process $old_pid" >&2
+        echo "port $PORT is already listening, but pid file does not identify this tool's managed process $old_pid" >&2
         exit 5
       fi
     fi
@@ -6134,6 +6203,7 @@ if port_listening; then
 fi
 mkdir -p "$APP_DIR"
 printf '\\n--- API-Switcher AI proxy start %s ---\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date 2>/dev/null || true)" >>"$LOG_FILE"
+{proxy_unset}
 nohup "$BIN" -d "$CONFIG_DIR" >>"$LOG_FILE" 2>&1 &
 echo "$!" > "$PID_FILE"
 sleep 2
@@ -6158,7 +6228,7 @@ if [ -z "$new_pid" ] || ! kill -0 "$new_pid" 2>/dev/null; then
 fi
 if ! pid_managed "$new_pid"; then
   cleanup_new_process
-  echo "started process is not recognized as mihomo/clash; see $LOG_FILE" >&2
+  echo "started process is not recognized as this tool's managed mihomo/clash; see $LOG_FILE" >&2
   exit 7
 fi
 for _ in 1 2 3 4 5; do
@@ -6174,6 +6244,189 @@ if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
 fi
 echo "mihomo is running; ss/netstat not found, skipped port listening verification"
 exit 0
+"""
+
+
+def _build_dead_proxy_reconcile_command(home: str, mixed_port: int) -> str:
+    """Build a fail-safe pre-deploy check for stale managed proxy state."""
+
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    config_dir = posixpath.join(home, ".config", "mihomo")
+    app_dir = posixpath.join(home, ".config", "api-switcher")
+    shell_paths = " ".join(shlex.quote(path) for path in _shell_proxy_profile_paths(home))
+    vscode_paths = " ".join(
+        shlex.quote(posixpath.join(home, path[2:]) if path.startswith("~/") else path)
+        for path in VSCODE_SERVER_ENV_SETUP_PATHS
+    )
+    proxy_url = _proxy_env_values(mixed_port)["API_SWITCHER_AI_PROXY_URL"]
+    return fr"""set +e
+CONFIG_DIR={shlex.quote(config_dir)}
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
+APP_DIR={shlex.quote(app_dir)}
+PID_FILE="$APP_DIR/ai-proxy.pid"
+ENV_FILE="$APP_DIR/ai-proxy.env"
+START_SCRIPT="$APP_DIR/start-ai-proxy.sh"
+PORT={mixed_port}
+PROXY_URL={shlex.quote(proxy_url)}
+CONFIG_MARKER={shlex.quote(AI_PROXY_CONFIG_MARKER)}
+dirty=no
+working=no
+repaired_pid=no
+removed_pid=no
+stopped_pid=""
+skipped_pid=""
+conflict=no
+reason=""
+port_listening=unknown
+listener_pids=""
+managed_listener_pids=""
+foreign_listener_pids=""
+config_owned=no
+configured_port=""
+
+if [ -s "$CONFIG_FILE" ] && grep -qF "$CONFIG_MARKER" "$CONFIG_FILE" 2>/dev/null; then
+  config_owned=yes
+  configured_port="$(sed -n 's/^[[:space:]]*mixed-port:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$CONFIG_FILE" 2>/dev/null | head -n 1)"
+fi
+
+is_managed_pid() {{
+  pid="$1"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  command -v ps >/dev/null 2>&1 || return 1
+  cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
+  case "$cmd" in
+    *mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}}
+
+stop_managed_pid() {{
+  pid="$1"
+  [ "$config_owned" = "yes" ] || return 1
+  is_managed_pid "$pid" || return 1
+  kill -TERM "$pid" 2>/dev/null || true
+  wait_count=0
+  while kill -0 "$pid" 2>/dev/null && [ "$wait_count" -lt 20 ]; do
+    sleep 0.1
+    wait_count=$((wait_count + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  stopped_pid="$pid"
+  return 0
+}}
+
+if command -v ss >/dev/null 2>&1; then
+  port_listening=no
+  listener_lines="$(ss -ltnp 2>/dev/null | awk -v suffix=":$PORT" '$4 ~ suffix "$" {{print}}')"
+  [ -n "$listener_lines" ] && port_listening=yes
+  listener_pids="$(printf '%s\n' "$listener_lines" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u | xargs 2>/dev/null)"
+elif command -v netstat >/dev/null 2>&1; then
+  port_listening=no
+  listener_lines="$(netstat -ltnp 2>/dev/null | awk -v suffix=":$PORT" '$4 ~ suffix "$" {{print}}')"
+  [ -n "$listener_lines" ] && port_listening=yes
+  listener_pids="$(printf '%s\n' "$listener_lines" | awk '{{print $7}}' | sed -n 's#/.*##p' | sort -u | xargs 2>/dev/null)"
+fi
+if [ -z "$listener_pids" ] && command -v lsof >/dev/null 2>&1; then
+  listener_pids="$(lsof -nP -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | sort -u | xargs 2>/dev/null)"
+fi
+if [ -z "$listener_pids" ] && command -v fuser >/dev/null 2>&1; then
+  listener_pids="$(fuser -n tcp "$PORT" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs 2>/dev/null)"
+fi
+
+for pid in $listener_pids; do
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  if is_managed_pid "$pid"; then
+    managed_listener_pids="$managed_listener_pids $pid"
+  else
+    foreign_listener_pids="$foreign_listener_pids $pid"
+  fi
+done
+managed_listener_pids="$(printf '%s' "$managed_listener_pids" | xargs 2>/dev/null)"
+foreign_listener_pids="$(printf '%s' "$foreign_listener_pids" | xargs 2>/dev/null)"
+
+if [ "$port_listening" = "yes" ]; then
+  if [ -z "$listener_pids" ]; then
+    conflict=yes
+    reason=unknown_owner
+  elif [ -n "$foreign_listener_pids" ]; then
+    conflict=yes
+    reason=foreign_listener
+  elif [ "$config_owned" != "yes" ]; then
+    conflict=yes
+    reason=unowned_config
+  else
+    set -- $managed_listener_pids
+    if [ "$#" -ne 1 ]; then
+      conflict=yes
+      reason=multiple_managed_listeners
+    else
+      live_pid="$1"
+      saved_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+      if [ "$saved_pid" != "$live_pid" ]; then
+        mkdir -p "$APP_DIR"
+        printf '%s\n' "$live_pid" > "$PID_FILE"
+        chmod 600 "$PID_FILE" 2>/dev/null || true
+        repaired_pid=yes
+      fi
+      working=yes
+    fi
+  fi
+elif [ "$port_listening" = "no" ]; then
+  if [ -e "$PID_FILE" ]; then
+    saved_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    preserve_pid=no
+    case "$saved_pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        if kill -0 "$saved_pid" 2>/dev/null; then
+          configured_port_listening=no
+          case "$configured_port" in
+            ''|*[!0-9]*|"$PORT") ;;
+            *)
+              if command -v ss >/dev/null 2>&1; then
+                ss -ltnp 2>/dev/null | awk -v suffix=":$configured_port" '$4 ~ suffix "$" {{print}}' | grep -q "pid=$saved_pid," && configured_port_listening=yes
+              elif command -v netstat >/dev/null 2>&1; then
+                netstat -ltnp 2>/dev/null | awk -v suffix=":$configured_port" '$4 ~ suffix "$" {{print $7}}' | grep -q "^$saved_pid/" && configured_port_listening=yes
+              fi
+              ;;
+          esac
+          if [ "$configured_port_listening" = "yes" ] && is_managed_pid "$saved_pid"; then
+            conflict=yes
+            reason=managed_proxy_on_other_port
+            preserve_pid=yes
+          elif ! stop_managed_pid "$saved_pid"; then
+            skipped_pid="$saved_pid"
+          fi
+        fi
+        ;;
+    esac
+    if [ "$preserve_pid" != "yes" ]; then
+      rm -f "$PID_FILE"
+      removed_pid=yes
+      dirty=yes
+    fi
+  fi
+  if [ "$config_owned" = "yes" ] || [ -e "$ENV_FILE" ] || [ -e "$START_SCRIPT" ]; then
+    dirty=yes
+  fi
+  for file in {shell_paths}; do
+    [ -f "$file" ] && grep -qF "# >>> API切换器 AI proxy >>>" "$file" 2>/dev/null && dirty=yes
+  done
+  for file in {vscode_paths}; do
+    [ -f "$file" ] && grep -qF {shlex.quote(VSCODE_ENV_BLOCK_START)} "$file" 2>/dev/null && dirty=yes
+  done
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment 2>/dev/null | grep -Fx -- "API_SWITCHER_AI_PROXY_URL=$PROXY_URL" >/dev/null 2>&1; then
+    dirty=yes
+  fi
+else
+  conflict=yes
+  reason=listener_check_unavailable
+fi
+
+printf 'dirty=%s\nworking=%s\nrepaired_pid=%s\nremoved_pid=%s\nstopped_pid=%s\nskipped_pid=%s\nconflict=%s\nreason=%s\nport_listening=%s\nlistener_pids=%s\nmanaged_listener_pids=%s\nforeign_listener_pids=%s\nconfig_owned=%s\nconfigured_port=%s\n' "$dirty" "$working" "$repaired_pid" "$removed_pid" "$stopped_pid" "$skipped_pid" "$conflict" "$reason" "$port_listening" "$listener_pids" "$managed_listener_pids" "$foreign_listener_pids" "$config_owned" "$configured_port"
 """
 
 
@@ -6197,11 +6450,17 @@ LOG_FILE="$APP_DIR/ai-proxy.log"
 removed_files=0
 removed_blocks=0
 removed_settings=0
+removed_systemd_env=0
 backed_up_configs=0
 stopped_pids=""
 skipped_pids=""
 notes=""
 backup_dir=""
+config_owned=no
+
+if [ -s "$CONFIG_FILE" ] && grep -qF "$CONFIG_MARKER" "$CONFIG_FILE" 2>/dev/null; then
+  config_owned=yes
+fi
 
 append_note() {
   if [ -n "$notes" ]; then
@@ -6211,16 +6470,17 @@ append_note() {
   fi
 }
 
-is_proxy_pid() {
+is_managed_proxy_pid() {
   pid="$1"
   [ -n "$pid" ] || return 1
+  [ "$config_owned" = "yes" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   if ! command -v ps >/dev/null 2>&1; then
     return 1
   fi
   cmd="$(ps -p "$pid" -o comm= -o args= 2>/dev/null || true)"
   case "$cmd" in
-    *mihomo*|*clash*) return 0 ;;
+    *mihomo*"$CONFIG_DIR"*|*clash*"$CONFIG_DIR"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -6228,7 +6488,7 @@ is_proxy_pid() {
 stop_pid_if_proxy() {
   pid="$1"
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  if is_proxy_pid "$pid"; then
+  if is_managed_proxy_pid "$pid"; then
     kill "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5; do
       kill -0 "$pid" 2>/dev/null || break
@@ -6244,7 +6504,9 @@ stop_pid_if_proxy() {
 }
 
 if [ -s "$PID_FILE" ]; then
-  stop_pid_if_proxy "$(cat "$PID_FILE" 2>/dev/null | tr -cd '0-9' | head -c 20)"
+  saved_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  case "$saved_pid" in ''|*[!0-9]*) saved_pid="" ;; esac
+  [ -z "$saved_pid" ] || stop_pid_if_proxy "$saved_pid"
 fi
 if command -v lsof >/dev/null 2>&1; then
   for pid in $(lsof -nP -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | sort -u); do
@@ -6336,6 +6598,32 @@ fi
 for file in "$HOME_DIR/.vscode-server/server-env-setup" "$HOME_DIR/.vscode-server-insiders/server-env-setup" "$HOME_DIR/.cursor-server/server-env-setup"; do
   remove_block "$file" "# >>> API切换器 AI proxy VS Code >>>" "# <<< API切换器 AI proxy VS Code <<<"
 done
+
+# Desktop sessions may import ~/.profile into the systemd user manager.  Clear
+# only values that still point at this tool's loopback proxy; the managed marker
+# proves ownership before NO_PROXY is removed as well.
+if command -v systemctl >/dev/null 2>&1; then
+  systemd_env="$(systemctl --user show-environment 2>/dev/null || true)"
+  unset_keys=""
+  managed_systemd_env=no
+  for key in API_SWITCHER_AI_PROXY_URL HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+    if printf '%s\n' "$systemd_env" | grep -Fx -- "$key=$PROXY_URL" >/dev/null 2>&1; then
+      unset_keys="$unset_keys $key"
+      [ "$key" = "API_SWITCHER_AI_PROXY_URL" ] && managed_systemd_env=yes
+    fi
+  done
+  if [ "$managed_systemd_env" = "yes" ]; then
+    unset_keys="$unset_keys NO_PROXY no_proxy"
+  fi
+  if [ -n "$unset_keys" ]; then
+    if systemctl --user unset-environment $unset_keys >/dev/null 2>&1; then
+      set -- $unset_keys
+      removed_systemd_env=$#
+    else
+      append_note "未能清理 systemd 用户会话中的代理变量"
+    fi
+  fi
+fi
 
 if command -v python3 >/dev/null 2>&1; then
   settings_count="$(python3 - "$PROXY_URL" "$NO_PROXY_VALUE" <<'PY'
@@ -6431,7 +6719,7 @@ else
   still_listening=unknown
 fi
 
-printf 'removed_files=%s\nremoved_blocks=%s\nremoved_settings=%s\nbacked_up_configs=%s\nbackup_dir=%s\nstopped_pids=%s\nskipped_pids=%s\nstill_listening=%s\n' "$removed_files" "$removed_blocks" "$removed_settings" "$backed_up_configs" "$backup_dir" "$(echo "$stopped_pids" | xargs 2>/dev/null)" "$(echo "$skipped_pids" | xargs 2>/dev/null)" "$still_listening"
+printf 'removed_files=%s\nremoved_blocks=%s\nremoved_settings=%s\nremoved_systemd_env=%s\nbacked_up_configs=%s\nbackup_dir=%s\nstopped_pids=%s\nskipped_pids=%s\nstill_listening=%s\n' "$removed_files" "$removed_blocks" "$removed_settings" "$removed_systemd_env" "$backed_up_configs" "$backup_dir" "$(echo "$stopped_pids" | xargs 2>/dev/null)" "$(echo "$skipped_pids" | xargs 2>/dev/null)" "$still_listening"
 if [ -n "$listener_detail" ]; then
   printf 'listener_detail=%s\n' "$(echo "$listener_detail" | tr '\n' ' ' | cut -c 1-500)"
 fi

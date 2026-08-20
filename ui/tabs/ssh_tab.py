@@ -4065,6 +4065,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "并写入 VS Code Remote/Codex/Claude Code 远端环境入口。\n"
                 f"识别到节点: {node_summary}\n"
                 f"{privacy_description}\n"
+                "部署前会自动清理能确认属于本工具且已经无监听的死代理；正常监听或身份不明的进程不会被终止。\n"
                 "注意：这不是 VPN/TUN，只保护进入 mihomo 的流量；不能阻止忽略代理的程序、"
                 "系统 DNS/IPv6 或 WebRTC/UDP 绕过。\n"
                 "部署后会立即做真实连通验证；如果当前节点不可用，会从订阅节点里按远端测速自动尝试可用节点。确定继续吗？"
@@ -4147,7 +4148,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             title="清理远端 AI 代理",
             message=(
                 f"将清理 {target_label} 上由本工具写入的远端 AI 代理入口，"
-                "停止识别为 mihomo/clash 的代理进程，并移除 VS Code Remote 代理设置。\n"
+                "仅停止同时匹配本工具配置标记与配置目录的 mihomo/clash 进程，并移除 VS Code Remote 代理设置。\n"
                 "检测到的旧 mihomo/clash 配置会先备份到 ~/.config/api-switcher/proxy-cleanup-backup-* 再移走。确定继续吗？"
             ),
             on_confirm=do_cleanup,

@@ -12,6 +12,13 @@ from models.profile import SSHProfile
 logger = logging.getLogger(__name__)
 
 
+def _ssh_exception_detail(exc: BaseException) -> str:
+    """Keep transport errors actionable even when their string is empty."""
+
+    detail = str(exc).strip()
+    return detail or type(exc).__name__
+
+
 class SSHManager:
     """Manages SSH connections and remote file operations with retry and timeout mechanisms."""
 
@@ -400,7 +407,7 @@ class SSHManager:
 
         except Exception as e:
             logger.error(f"Error executing command: {e}")
-            raise RuntimeError(f"执行远程命令失败: {e}") from e
+            raise RuntimeError(f"执行远程命令失败: {_ssh_exception_detail(e)}") from e
 
     def execute_command_with_status(
         self,
@@ -436,7 +443,7 @@ class SSHManager:
 
         except Exception as e:
             logger.error(f"Error executing command: {e}")
-            raise RuntimeError(f"执行远程命令失败: {e}") from e
+            raise RuntimeError(f"执行远程命令失败: {_ssh_exception_detail(e)}") from e
 
     def test_connection(
         self,
