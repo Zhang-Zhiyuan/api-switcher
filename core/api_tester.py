@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import logging
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +32,7 @@ class TestResult:
     error_details: Optional[str] = None
     selected_model: Optional[str] = None
     recommended_wire_api: Optional[str] = None
+    proxy_warning: Optional[str] = None
 
 
 @dataclass
@@ -52,6 +55,7 @@ class ModelListResult:
     response_time: Optional[float] = None
     status_code: Optional[int] = None
     error_details: Optional[str] = None
+    proxy_warning: Optional[str] = None
 
 
 class APITester:
@@ -60,6 +64,15 @@ class APITester:
     MAX_REQUEST_TIMEOUT = 30
     MAX_BENCHMARK_REPEAT = 5
     MAX_STREAM_EVENTS = 1200
+    # Model-list and message/response probes can both incur gateway queueing;
+    # keep the high-level UI test from reporting a healthy but slow relay as a
+    # false timeout.  Low-level request helpers retain their shorter default.
+    DEFAULT_API_TEST_TIMEOUT = 30
+    INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
+    USER_AGENT = "API-Switcher/2.4"
+
+    _proxy_check_lock = threading.RLock()
+    _proxy_check_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
     _SENSITIVE_HEADER_NAMES = {
         "authorization",
@@ -511,6 +524,86 @@ class APITester:
         )
 
     @staticmethod
+    def _attach_proxy_warning(result: TestResult, warning: str) -> TestResult:
+        """Attach a proxy diagnostic to every result, including failures."""
+        if warning:
+            result.proxy_warning = warning
+        return result
+
+    @staticmethod
+    def _local_proxy_endpoint(proxy_url: object) -> tuple[str, int] | None:
+        """Return a loopback proxy host/port, or ``None`` for other proxies."""
+
+        text = str(proxy_url or "").strip()
+        if not text or text.casefold() in {"direct", "none"}:
+            return None
+        if "://" not in text:
+            text = f"http://{text}"
+        try:
+            parsed = urllib.parse.urlsplit(text)
+            hostname = parsed.hostname
+            port = parsed.port
+        except (TypeError, ValueError):
+            return None
+        if not hostname:
+            return None
+        normalized_host = hostname.casefold().rstrip(".")
+        try:
+            is_loopback = ipaddress.ip_address(normalized_host).is_loopback
+        except ValueError:
+            is_loopback = normalized_host == "localhost"
+        if not is_loopback:
+            return None
+        if port is None:
+            port = 443 if parsed.scheme.casefold() == "https" else 80
+        if not 1 <= port <= 65535:
+            return None
+        return normalized_host, port
+
+    @classmethod
+    def _invalid_local_proxy_warning(cls, url: str) -> str:
+        """Detect a refused loopback proxy without changing persistent env vars."""
+
+        try:
+            parsed_url = urllib.parse.urlsplit(str(url or ""))
+            scheme = parsed_url.scheme.casefold() or "http"
+            proxies = urllib.request.getproxies()
+        except (TypeError, ValueError, OSError):
+            return ""
+
+        proxy_url = str(proxies.get(scheme) or proxies.get("all") or "").strip()
+        endpoint = cls._local_proxy_endpoint(proxy_url)
+        if not endpoint:
+            return ""
+        host, port = endpoint
+        cache_key = (scheme, proxy_url.casefold())
+        now = time.monotonic()
+        with cls._proxy_check_lock:
+            cached = cls._proxy_check_cache.get(cache_key)
+            if cached and now - cached[0] < cls.INVALID_LOCAL_PROXY_CACHE_TTL:
+                available = cached[1]
+            else:
+                try:
+                    with socket.create_connection((host, port), timeout=0.25):
+                        available = True
+                except OSError:
+                    available = False
+                cls._proxy_check_cache[cache_key] = (now, available)
+        if available:
+            return ""
+        return f"检测到失效本机代理 {host}:{port}，本次请求已临时直连"
+
+    @classmethod
+    def _urlopen(cls, request: urllib.request.Request, timeout: int):
+        """Open a request, bypassing only a refused loopback proxy."""
+
+        warning = cls._invalid_local_proxy_warning(request.full_url)
+        if warning:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            return opener.open(request, timeout=timeout), warning
+        return urllib.request.urlopen(request, timeout=timeout), ""
+
+    @staticmethod
     def _is_timeout_error(error: object) -> bool:
         if isinstance(error, (TimeoutError, socket.timeout)):
             return True
@@ -592,11 +685,18 @@ class APITester:
         timeout = APITester._coerce_timeout(timeout)
         start_time = time.time()
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        request_secrets = APITester._sensitive_header_values(headers)
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", APITester.USER_AGENT)
+        req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+        request_secrets = APITester._sensitive_header_values(request_headers)
 
+        # Compute before opening so the diagnostic is retained even when the
+        # direct retry itself fails (``opener.open`` raises before returning).
+        proxy_warning = APITester._invalid_local_proxy_warning(url)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            response, detected_proxy_warning = APITester._urlopen(req, timeout)
+            proxy_warning = detected_proxy_warning or proxy_warning
+            with response:
                 response_time = (time.time() - start_time) * 1000
                 body = response.read().decode("utf-8", errors="replace")
                 try:
@@ -607,52 +707,57 @@ class APITester:
                     snippet = APITester._redact_sensitive_text(body.strip(), request_secrets)
                     if snippet:
                         details = f"{details}\nBody: {snippet}"
-                    return False, None, TestResult(
+                    return False, None, APITester._attach_proxy_warning(TestResult(
                         success=False,
                         message="响应不是 JSON，可能 Base URL 指向了网页入口或路径不正确",
                         response_time=response_time,
                         status_code=response.getcode(),
                         error_details=details,
-                    )
+                    ), proxy_warning)
                 return True, parsed, TestResult(
                     success=True,
                     message="连接成功",
                     response_time=response_time,
                     status_code=response.getcode(),
+                    proxy_warning=proxy_warning or None,
                 )
         except urllib.error.HTTPError as e:
             response_time = (time.time() - start_time) * 1000
             error_body = e.read().decode("utf-8", errors="replace")
-            return False, None, TestResult(
+            return False, None, APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=APITester._http_error_message(e.code, model_hint=True),
                 response_time=response_time,
                 status_code=e.code,
                 error_details=APITester._parse_error_body(error_body, request_secrets),
-            )
+            ), proxy_warning)
         except (TimeoutError, socket.timeout):
-            return False, None, APITester._timeout_result(timeout)
+            return False, None, APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
         except urllib.error.URLError as e:
             reason = e.reason
             if APITester._is_timeout_error(reason):
-                return False, None, APITester._timeout_result(timeout)
-            return False, None, TestResult(
+                return False, None, APITester._attach_proxy_warning(
+                    APITester._timeout_result(timeout), proxy_warning
+                )
+            return False, None, APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message="网络错误，无法连接到服务器",
                 error_details=APITester._redact_sensitive_text(e.reason, request_secrets),
-            )
+            ), proxy_warning)
         except Exception as e:
             if APITester._is_timeout_error(e):
-                return False, None, APITester._timeout_result(timeout)
+                return False, None, APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
             if APITester._is_network_transport_error(e):
-                return False, None, APITester._network_error_result(e, secrets=request_secrets)
+                return False, None, APITester._attach_proxy_warning(
+                    APITester._network_error_result(e, secrets=request_secrets), proxy_warning
+                )
             safe_error = APITester._redact_sensitive_text(e, request_secrets)
             logger.error("API request failed (%s): %s", type(e).__name__, safe_error)
-            return False, None, TestResult(
+            return False, None, APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=f"测试失败: {type(e).__name__}",
                 error_details=safe_error,
-            )
+            ), proxy_warning)
 
     @staticmethod
     def _request_event_stream(
@@ -664,11 +769,16 @@ class APITester:
         timeout = APITester._coerce_timeout(timeout)
         start_time = time.time()
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        request_secrets = APITester._sensitive_header_values(headers)
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", APITester.USER_AGENT)
+        req = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
+        request_secrets = APITester._sensitive_header_values(request_headers)
 
+        proxy_warning = APITester._invalid_local_proxy_warning(url)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            response, detected_proxy_warning = APITester._urlopen(req, timeout)
+            proxy_warning = detected_proxy_warning or proxy_warning
+            with response:
                 status_code = response.getcode()
                 content_type = response.headers.get("Content-Type", "") or response.headers.get("content-type", "")
                 snippet_parts: list[str] = []
@@ -695,7 +805,7 @@ class APITester:
                         or re.search(r'"type"\s*:\s*"error"', lowered)
                     ):
                         response_time = (time.time() - start_time) * 1000
-                        return TestResult(
+                        return APITester._attach_proxy_warning(TestResult(
                             success=False,
                             message="Streaming response returned an error",
                             response_time=response_time,
@@ -703,7 +813,7 @@ class APITester:
                             error_details=APITester._redact_sensitive_text(
                                 "".join(snippet_parts).strip(), request_secrets
                             ),
-                        )
+                        ), proxy_warning)
 
                     if (
                         "response.completed" in lowered
@@ -716,14 +826,15 @@ class APITester:
                             message="Streaming response completed",
                             response_time=response_time,
                             status_code=status_code,
+                            proxy_warning=proxy_warning or None,
                         )
 
                     if time.time() - start_time >= timeout:
-                        return APITester._timeout_result(timeout)
+                        return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
 
                     if event_count >= APITester.MAX_STREAM_EVENTS:
                         response_time = (time.time() - start_time) * 1000
-                        return TestResult(
+                        return APITester._attach_proxy_warning(TestResult(
                             success=False,
                             message="Streaming response exceeded event limit before completion",
                             response_time=response_time,
@@ -731,68 +842,68 @@ class APITester:
                             error_details=APITester._redact_sensitive_text(
                                 "".join(snippet_parts).strip(), request_secrets
                             ),
-                        )
+                        ), proxy_warning)
 
                 response_time = (time.time() - start_time) * 1000
                 snippet = APITester._redact_sensitive_text(
                     "".join(snippet_parts).strip(), request_secrets
                 )
                 if not snippet:
-                    return TestResult(
+                    return APITester._attach_proxy_warning(TestResult(
                         success=False,
                         message="Streaming response was empty",
                         response_time=response_time,
                         status_code=status_code,
-                    )
+                    ), proxy_warning)
 
-                return TestResult(
+                return APITester._attach_proxy_warning(TestResult(
                     success=False,
                     message="Streaming response ended before completion",
                     response_time=response_time,
                     status_code=status_code,
                     error_details=f"Content-Type: {content_type or 'unknown'}\nBody: {snippet}",
-                )
+                ), proxy_warning)
         except urllib.error.HTTPError as e:
             response_time = (time.time() - start_time) * 1000
             error_body = e.read().decode("utf-8", errors="replace")
-            return TestResult(
+            return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=APITester._http_error_message(e.code, model_hint=True),
                 response_time=response_time,
                 status_code=e.code,
                 error_details=APITester._parse_error_body(error_body, request_secrets),
-            )
+            ), proxy_warning)
         except (TimeoutError, socket.timeout):
-            return APITester._timeout_result(timeout)
+            return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
         except urllib.error.URLError as e:
             reason = e.reason
             if APITester._is_timeout_error(reason):
-                return APITester._timeout_result(timeout)
-            return TestResult(
+                return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
+            return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message="Network error: unable to connect to the server",
                 error_details=APITester._redact_sensitive_text(e.reason, request_secrets),
-            )
+            ), proxy_warning)
         except Exception as e:
             if APITester._is_timeout_error(e):
-                return APITester._timeout_result(timeout)
+                return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
             if APITester._is_stream_disconnect_error(e):
-                return TestResult(
+                return APITester._attach_proxy_warning(TestResult(
                     success=False,
                     message="Streaming response disconnected before completion",
                     error_details=APITester._redact_sensitive_text(e, request_secrets),
-                )
+                ), proxy_warning)
             safe_error = APITester._redact_sensitive_text(e, request_secrets)
             logger.error("API stream request failed (%s): %s", type(e).__name__, safe_error)
-            return TestResult(
+            return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=f"Streaming test failed: {type(e).__name__}",
                 error_details=safe_error,
-            )
+            ), proxy_warning)
 
     @staticmethod
     def fetch_openai_models(api_key: str, base_url: str = "https://api.openai.com/v1",
-                            timeout: int = 10) -> ModelListResult:
+                            timeout: int = DEFAULT_API_TEST_TIMEOUT) -> ModelListResult:
         """Fetch models from an OpenAI-compatible /models endpoint."""
         if not api_key or not api_key.strip():
             return ModelListResult(success=False, message="API Key 为空")
@@ -813,6 +924,7 @@ class APITester:
                 response_time=result.response_time,
                 status_code=result.status_code,
                 error_details=result.error_details,
+                proxy_warning=result.proxy_warning,
             )
 
         model_infos = APITester._extract_model_infos(data)
@@ -829,11 +941,12 @@ class APITester:
             model_metadata=model_metadata,
             response_time=result.response_time,
             status_code=result.status_code,
+            proxy_warning=result.proxy_warning,
         )
 
     @staticmethod
     def fetch_claude_models(api_key: str, base_url: str = "https://api.anthropic.com",
-                            timeout: int = 10, auth_scheme: str = "api_key") -> ModelListResult:
+                            timeout: int = DEFAULT_API_TEST_TIMEOUT, auth_scheme: str = "api_key") -> ModelListResult:
         """Fetch models from an Anthropic-compatible /v1/models endpoint."""
         if not api_key or not api_key.strip():
             return ModelListResult(success=False, message="API Key 为空")
@@ -854,6 +967,7 @@ class APITester:
                 response_time=result.response_time,
                 status_code=result.status_code,
                 error_details=result.error_details,
+                proxy_warning=result.proxy_warning,
             )
 
         model_infos = APITester._extract_model_infos(data)
@@ -870,6 +984,7 @@ class APITester:
             model_metadata=model_metadata,
             response_time=result.response_time,
             status_code=result.status_code,
+            proxy_warning=result.proxy_warning,
         )
 
     @staticmethod
@@ -974,7 +1089,7 @@ class APITester:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         model: str = "",
-        timeout: int = 10,
+        timeout: int = DEFAULT_API_TEST_TIMEOUT,
         repeat_count: int = 3,
         wire_apis: tuple[str, ...] = ("chat", "responses"),
     ) -> TestResult:
@@ -995,6 +1110,7 @@ class APITester:
                 message="无法自动选择模型",
                 status_code=model_list.status_code,
                 error_details=model_list.error_details or model_list.message,
+                proxy_warning=model_list.proxy_warning,
             )
 
         repeat_count = APITester._coerce_repeat_count(repeat_count)
@@ -1003,6 +1119,7 @@ class APITester:
         best_score = (-1, -1.0)
         best_avg = None
         best_status = None
+        proxy_warnings: list[str] = []
 
         for wire_api in wire_apis:
             wire_api = (wire_api or "").strip().lower()
@@ -1017,6 +1134,8 @@ class APITester:
             statuses = []
             for _index in range(repeat_count):
                 result = APITester._probe_openai_wire_api(api_key, base_url, selected_model, wire_api, timeout)
+                if result.proxy_warning:
+                    proxy_warnings.append(result.proxy_warning)
                 if result.status_code is not None:
                     statuses.append(str(result.status_code))
                 if result.success:
@@ -1049,6 +1168,7 @@ class APITester:
                 status_code=best_status,
                 error_details="\n".join(summaries),
                 selected_model=selected_model,
+                proxy_warning=proxy_warnings[-1] if proxy_warnings else model_list.proxy_warning,
             )
 
         return TestResult(
@@ -1059,11 +1179,12 @@ class APITester:
             error_details="\n".join(summaries),
             selected_model=selected_model,
             recommended_wire_api=best_wire,
+            proxy_warning=proxy_warnings[-1] if proxy_warnings else model_list.proxy_warning,
         )
 
     @staticmethod
     def test_claude_api(api_key: str, base_url: str = "https://api.anthropic.com",
-                        model: str = "", timeout: int = 10,
+                        model: str = "", timeout: int = DEFAULT_API_TEST_TIMEOUT,
                         auth_scheme: str = "api_key") -> TestResult:
         """Test an Anthropic-compatible API by checking /v1/models, then fallback to /v1/messages."""
         if not api_key or not api_key.strip():
@@ -1085,11 +1206,14 @@ class APITester:
                     message="无法自动选择模型",
                     response_time=model_list.response_time,
                     status_code=model_list.status_code,
+                    proxy_warning=model_list.proxy_warning,
                 )
             probe = APITester._probe_claude_message(
                 api_key, base_url, model, timeout, auth_scheme=auth_scheme
             )
             probe.selected_model = model
+            if not probe.proxy_warning:
+                probe.proxy_warning = model_list.proxy_warning
             if probe.success:
                 probe.message = (
                     f"连接成功，已自动选择最新模型: {model}"
@@ -1110,6 +1234,7 @@ class APITester:
                 response_time=model_list.response_time,
                 status_code=model_list.status_code,
                 error_details=model_list.error_details,
+                proxy_warning=model_list.proxy_warning,
             )
 
         if not model:
@@ -1119,16 +1244,19 @@ class APITester:
                 response_time=model_list.response_time,
                 status_code=model_list.status_code,
                 error_details=model_list.error_details or model_list.message,
+                proxy_warning=model_list.proxy_warning,
             )
         result = APITester._probe_claude_message(
             api_key, base_url, model, timeout, auth_scheme=auth_scheme
         )
         result.selected_model = model
+        if not result.proxy_warning:
+            result.proxy_warning = model_list.proxy_warning
         return result
 
     @staticmethod
     def test_openai_api(api_key: str, base_url: str = "https://api.openai.com/v1",
-                        model: str = "", timeout: int = 10, wire_api: str = "chat") -> TestResult:
+                        model: str = "", timeout: int = DEFAULT_API_TEST_TIMEOUT, wire_api: str = "chat") -> TestResult:
         """Test an OpenAI-compatible API by checking /models, then fallback to /chat/completions."""
         if not api_key or not api_key.strip():
             return TestResult(success=False, message="API Key 为空")
@@ -1147,11 +1275,14 @@ class APITester:
                     message="无法自动选择模型",
                     response_time=model_list.response_time,
                     status_code=model_list.status_code,
+                    proxy_warning=model_list.proxy_warning,
                 )
             selected_wire_api = "responses" if (wire_api or "").strip().lower() == "responses" else "chat"
             probe = APITester._probe_openai_wire_api(api_key, base_url, model, selected_wire_api, timeout)
             probe.selected_model = model
             probe.recommended_wire_api = selected_wire_api
+            if not probe.proxy_warning:
+                probe.proxy_warning = model_list.proxy_warning
             if probe.success:
                 probe.message = (
                     f"连接成功，已自动选择最新模型: {model}"
@@ -1181,11 +1312,14 @@ class APITester:
                 response_time=model_list.response_time,
                 status_code=model_list.status_code,
                 error_details=model_list.error_details or model_list.message,
+                proxy_warning=model_list.proxy_warning,
             )
         selected_wire_api = "responses" if (wire_api or "").strip().lower() == "responses" else "chat"
         result = APITester._probe_openai_wire_api(api_key, base_url, model, selected_wire_api, timeout)
         result.selected_model = model
         result.recommended_wire_api = selected_wire_api
+        if not result.proxy_warning:
+            result.proxy_warning = model_list.proxy_warning
         return result
 
     @staticmethod
@@ -1197,39 +1331,48 @@ class APITester:
         except ValueError as exc:
             return APITester._invalid_base_url_result(exc)
         start_time = time.time()
+        proxy_warning = APITester._invalid_local_proxy_warning(url)
         try:
-            req = urllib.request.Request(url, method="HEAD")
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            req = urllib.request.Request(url, headers={"User-Agent": APITester.USER_AGENT}, method="HEAD")
+            response, detected_proxy_warning = APITester._urlopen(req, timeout)
+            proxy_warning = detected_proxy_warning or proxy_warning
+            with response:
                 return TestResult(
                     success=True,
-                    message=f"可访问 (HTTP {response.getcode()})",
+                    message=(
+                        f"可访问 (HTTP {response.getcode()})"
+                        + (f"；{proxy_warning}" if proxy_warning else "")
+                    ),
                     response_time=(time.time() - start_time) * 1000,
                     status_code=response.getcode(),
+                    proxy_warning=proxy_warning or None,
                 )
         except urllib.error.HTTPError as e:
-            return TestResult(
+            return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=f"HTTP {e.code}",
                 response_time=(time.time() - start_time) * 1000,
                 status_code=e.code,
-            )
+            ), proxy_warning)
         except (TimeoutError, socket.timeout):
-            return APITester._timeout_result(timeout)
+            return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
         except urllib.error.URLError as e:
             if APITester._is_timeout_error(e.reason):
-                return APITester._timeout_result(timeout)
-            return TestResult(
+                return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
+            return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message="无法访问",
                 error_details=str(e.reason)[:400],
-            )
+            ), proxy_warning)
         except Exception as e:
             if APITester._is_timeout_error(e):
-                return APITester._timeout_result(timeout)
+                return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
             if APITester._is_network_transport_error(e):
-                return APITester._network_error_result(e, message="无法访问")
-            return TestResult(
+                return APITester._attach_proxy_warning(
+                    APITester._network_error_result(e, message="无法访问"), proxy_warning
+                )
+            return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message="测试失败",
                 error_details=str(e)[:400],
-            )
+            ), proxy_warning)

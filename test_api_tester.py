@@ -194,6 +194,7 @@ def test_openai_responses_probe_uses_stream_and_requires_completion(monkeypatch)
         seen["url"] = request.full_url
         seen["payload"] = json.loads(request.data.decode("utf-8"))
         seen["accept"] = request.headers.get("Accept")
+        seen["user_agent"] = request.get_header("User-agent")
         return _FakeStreamResponse(
             "event: response.output_text.delta\n"
             'data: {"delta":"OK"}\n\n'
@@ -208,6 +209,7 @@ def test_openai_responses_probe_uses_stream_and_requires_completion(monkeypatch)
     assert result.success is True
     assert result.selected_model == "gpt-5.5"
     assert seen["url"] == "https://relay.example.com/v1/responses"
+    assert seen["user_agent"] == APITester.USER_AGENT
     assert seen["payload"]["stream"] is True
     assert seen["payload"]["max_output_tokens"] == 96
     assert seen["accept"] == "text/event-stream"
