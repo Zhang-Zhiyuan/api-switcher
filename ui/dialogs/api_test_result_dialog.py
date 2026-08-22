@@ -1,5 +1,6 @@
 """Dialog for displaying API test results."""
 import customtkinter as ctk
+from core.api_tester import APITester
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, textbox_style
 
 
@@ -24,6 +25,9 @@ class APITestResultDialog(ctk.CTkToplevel):
 
     def _build_ui(self, result, profile_name: str):
         """Build the dialog UI."""
+        self._invalid_proxy_env_names = ()
+        self._proxy_cleanup_button = None
+
         # Container
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=20, pady=20)
@@ -110,6 +114,7 @@ class APITestResultDialog(ctk.CTkToplevel):
         proxy_warning = getattr(result, "proxy_warning", None)
         if proxy_warning:
             self._add_detail_row(scroll_frame, "网络提示", proxy_warning, COLORS["warning"])
+            self._invalid_proxy_env_names = APITester.invalid_local_proxy_env_names()
 
         # Error details / benchmark details
         if result.error_details:
@@ -156,6 +161,57 @@ class APITestResultDialog(ctk.CTkToplevel):
             **button_style("primary")
         )
         close_btn.pack(side="right")
+
+        if self._invalid_proxy_env_names:
+            self._proxy_cleanup_button = ctk.CTkButton(
+                button_frame,
+                text="清理失效代理变量",
+                width=180,
+                command=self._confirm_proxy_cleanup,
+                **button_style("warning"),
+            )
+            self._proxy_cleanup_button.pack(side="left")
+
+    def _confirm_proxy_cleanup(self) -> None:
+        """Ask before deleting invalid loopback proxy variables."""
+        names = APITester.invalid_local_proxy_env_names()
+        if not names:
+            self._invalid_proxy_env_names = ()
+            if self._proxy_cleanup_button is not None:
+                self._proxy_cleanup_button.configure(state="disabled", text="代理已恢复")
+            return
+
+        from ui.dialogs.confirm_dialog import ConfirmDialog
+
+        listed = "、".join(names)
+
+        def cleanup() -> None:
+            try:
+                removed = APITester.clear_invalid_local_proxy_env()
+                if not removed:
+                    message = "未发现仍然失效的本机代理变量"
+                else:
+                    message = f"已清理失效代理变量: {'、'.join(removed)}；新开的终端会立即生效"
+                self._invalid_proxy_env_names = ()
+                if self._proxy_cleanup_button is not None:
+                    self._proxy_cleanup_button.configure(state="disabled", text="已清理")
+                from ui.widgets.toast import show_toast
+
+                show_toast(self, message)
+            except Exception as error:
+                from ui.widgets.toast import show_toast
+
+                show_toast(self, f"清理失效代理变量失败: {error}", is_error=True)
+
+        ConfirmDialog(
+            self,
+            title="清理失效代理环境变量",
+            message=(
+                f"将删除当前检测到连接被拒绝的本机代理变量：\n{listed}\n\n"
+                "只会清理指向失效 127.0.0.1/localhost 端口的变量，不会修改正常代理、NO_PROXY 或系统级代理。"
+            ),
+            on_confirm=cleanup,
+        )
 
     def _add_detail_row(self, parent, label: str, value: str, value_color: str = None):
         """Add a detail row to the dialog."""

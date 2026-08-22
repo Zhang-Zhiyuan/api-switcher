@@ -1,7 +1,9 @@
 """Regression tests for API tester proxy diagnostics."""
 
 import urllib.request
+import os
 
+from core import api_tester
 from core.api_tester import APITester
 
 
@@ -69,3 +71,55 @@ def test_urlopen_bypasses_refused_loopback_proxy(monkeypatch):
     assert isinstance(response, Response)
     assert calls == [(request.full_url, 7)]
     assert "localhost:17897" in warning
+
+
+def test_invalid_local_proxy_env_names_only_returns_refused_loopback_values(monkeypatch):
+    APITester._proxy_check_cache.clear()
+    for name in APITester.LOCAL_PROXY_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:17897")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:17897")
+
+    def refused(*_args, **_kwargs):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(api_tester.socket, "create_connection", refused)
+
+    names = APITester.invalid_local_proxy_env_names()
+
+    assert set(names) == {"HTTPS_PROXY", "ALL_PROXY"}
+    assert os.environ["HTTP_PROXY"] == "http://proxy.example:8080"
+
+
+def test_clear_invalid_local_proxy_env_changes_only_process_values(monkeypatch):
+    APITester._proxy_check_cache.clear()
+    monkeypatch.setattr(APITester, "invalid_local_proxy_env_names", classmethod(lambda _cls: ("HTTPS_PROXY",)))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:17897")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+
+    removed = APITester.clear_invalid_local_proxy_env()
+
+    assert removed == ("HTTPS_PROXY",)
+    assert "HTTPS_PROXY" not in os.environ
+    assert os.environ["HTTP_PROXY"] == "http://proxy.example:8080"
+
+
+def test_clear_invalid_local_proxy_env_deletes_windows_user_values(monkeypatch):
+    APITester._proxy_check_cache.clear()
+    deleted = []
+    monkeypatch.setattr(APITester, "invalid_local_proxy_env_names", classmethod(lambda _cls: ("HTTPS_PROXY", "ALL_PROXY")))
+    monkeypatch.setattr(api_tester.os, "name", "nt")
+    monkeypatch.setattr(
+        "core.persistent_env.delete_local_user_env",
+        lambda names: deleted.append(tuple(names)),
+    )
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:17897")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:17897")
+
+    removed = APITester.clear_invalid_local_proxy_env()
+
+    assert removed == ("HTTPS_PROXY", "ALL_PROXY")
+    assert deleted == [("HTTPS_PROXY", "ALL_PROXY")]
+    assert "HTTPS_PROXY" not in os.environ
+    assert "ALL_PROXY" not in os.environ

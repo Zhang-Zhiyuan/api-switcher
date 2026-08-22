@@ -5,6 +5,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 import ssl
@@ -70,6 +71,16 @@ class APITester:
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
     USER_AGENT = "API-Switcher/2.4"
+    # Keep both common casings: Windows environment names are case-insensitive,
+    # while copied shell variables on Unix often use lowercase names.
+    LOCAL_PROXY_ENV_NAMES = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
 
     _proxy_check_lock = threading.RLock()
     _proxy_check_cache: dict[tuple[str, str], tuple[float, bool]] = {}
@@ -561,6 +572,92 @@ class APITester:
         return normalized_host, port
 
     @classmethod
+    def _check_loopback_proxy(cls, proxy_url: object) -> tuple[tuple[str, int] | None, bool]:
+        """Return ``(endpoint, available)`` for a loopback proxy URL."""
+        endpoint = cls._local_proxy_endpoint(proxy_url)
+        if not endpoint:
+            return None, False
+
+        cache_key = ("loopback", str(proxy_url or "").strip().casefold())
+        now = time.monotonic()
+        with cls._proxy_check_lock:
+            cached = cls._proxy_check_cache.get(cache_key)
+            if cached and now - cached[0] < cls.INVALID_LOCAL_PROXY_CACHE_TTL:
+                return endpoint, cached[1]
+            host, port = endpoint
+            try:
+                with socket.create_connection((host, port), timeout=0.25):
+                    available = True
+            except OSError:
+                available = False
+            cls._proxy_check_cache[cache_key] = (now, available)
+            return endpoint, available
+
+    @classmethod
+    def _local_proxy_env_values(cls) -> dict[str, str]:
+        """Collect process and Windows-user proxy variables without values in logs."""
+        names = {name.casefold() for name in cls.LOCAL_PROXY_ENV_NAMES}
+        values: dict[str, str] = {}
+        for name, value in os.environ.items():
+            if name.casefold() in names and str(value or "").strip():
+                values[name] = str(value).strip()
+
+        # A stale value may only exist in HKCU\Environment and therefore not
+        # be visible to this already-running process.  Read it only on Windows;
+        # the helper safely returns None on other platforms.
+        if os.name == "nt":
+            try:
+                from core import persistent_env
+
+                present = {name.casefold() for name in values}
+                for canonical in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+                    if canonical.casefold() in present:
+                        continue
+                    value = persistent_env._local_user_env_value_strict(canonical)
+                    if value and value.strip():
+                        values[canonical] = value.strip()
+            except Exception as error:
+                logger.debug("Failed to read persistent proxy environment variables: %s", error)
+        return values
+
+    @classmethod
+    def invalid_local_proxy_env_names(cls) -> tuple[str, ...]:
+        """Return proxy variables pointing at refused loopback endpoints."""
+        invalid: list[str] = []
+        for name, value in cls._local_proxy_env_values().items():
+            endpoint, available = cls._check_loopback_proxy(value)
+            if endpoint and not available:
+                invalid.append(name)
+        return tuple(invalid)
+
+    @classmethod
+    def clear_invalid_local_proxy_env(cls) -> tuple[str, ...]:
+        """Remove only currently invalid loopback proxy variables.
+
+        The operation is intentionally narrow: non-loopback proxies, working
+        loopback services, ``NO_PROXY``, system-wide settings, and unrelated
+        environment variables are left untouched.
+        """
+        names = cls.invalid_local_proxy_env_names()
+        if not names:
+            return ()
+
+        if os.name == "nt":
+            from core import persistent_env
+
+            # Delete the persistent values first.  The helper also updates
+            # this process and broadcasts WM_SETTINGCHANGE for new terminals.
+            persistent_env.delete_local_user_env(names)
+        # Keep the process view deterministic even when a platform adapter
+        # only implements the registry part of persistent deletion.
+        for name in names:
+            os.environ.pop(name, None)
+
+        with cls._proxy_check_lock:
+            cls._proxy_check_cache.clear()
+        return names
+
+    @classmethod
     def _invalid_local_proxy_warning(cls, url: str) -> str:
         """Detect a refused loopback proxy without changing persistent env vars."""
 
@@ -572,23 +669,10 @@ class APITester:
             return ""
 
         proxy_url = str(proxies.get(scheme) or proxies.get("all") or "").strip()
-        endpoint = cls._local_proxy_endpoint(proxy_url)
+        endpoint, available = cls._check_loopback_proxy(proxy_url)
         if not endpoint:
             return ""
         host, port = endpoint
-        cache_key = (scheme, proxy_url.casefold())
-        now = time.monotonic()
-        with cls._proxy_check_lock:
-            cached = cls._proxy_check_cache.get(cache_key)
-            if cached and now - cached[0] < cls.INVALID_LOCAL_PROXY_CACHE_TTL:
-                available = cached[1]
-            else:
-                try:
-                    with socket.create_connection((host, port), timeout=0.25):
-                        available = True
-                except OSError:
-                    available = False
-                cls._proxy_check_cache[cache_key] = (now, available)
         if available:
             return ""
         return f"检测到失效本机代理 {host}:{port}，本次请求已临时直连"
