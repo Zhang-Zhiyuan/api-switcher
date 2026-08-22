@@ -1,6 +1,6 @@
 """Claude Code API profile contract regression tests."""
 
-from core import parser, security
+from core import parser, profile_manager, security
 from core.api_tester import APITester
 from core.providers import ProviderRegistry
 from models.profile import ClaudeProfile
@@ -52,6 +52,44 @@ def test_apply_claude_profile_writes_only_x_api_key_contract(monkeypatch):
 
     assert applied["env"]["ANTHROPIC_API_KEY"] == "secret"
     assert "ANTHROPIC_AUTH_TOKEN" not in applied["env"]
+
+
+def test_fable5_profile_matches_cc_switch_runtime_contract(monkeypatch):
+    monkeypatch.setattr(security, "get_secret", lambda ref: "secret" if ref else None)
+    profile = ClaudeProfile(
+        name="fable",
+        auth_token_ref="claude:fable:auth_token",
+        base_url="https://api.code-tab.com/v1",
+        model="claude-fable-5",
+        provider="custom",
+        auth_scheme="auth_token",
+        effort_level="max",
+    )
+
+    applied = parser.apply_claude_profile({"env": {}}, profile)
+    env = applied["env"]
+
+    assert applied["model"] == "opus"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.code-tab.com"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "secret"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_MODEL" not in env
+    for key in (
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert env[key] == "claude-fable-5[1M]"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-fable-5"
+    for key in (
+        "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+    ):
+        assert env[key] == "claude-fable-5"
+    assert profile_manager._claude_profile_config_matches(profile, applied)
 
 
 def test_claude_legacy_primary_api_key_is_read_compatible_but_not_written():

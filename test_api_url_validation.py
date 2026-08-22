@@ -225,7 +225,8 @@ def test_profile_editor_persists_the_same_canonical_url_used_by_preview(profile_
 
     assert errors == []
     assert destroyed == [True]
-    assert saves[0][expected_field] == "https://api.example.test/v1"
+    expected_url = "https://api.example.test" if profile_type == "claude" else "https://api.example.test/v1"
+    assert saves[0][expected_field] == expected_url
 
 
 @pytest.mark.parametrize("profile_type", ["claude", "codex"])

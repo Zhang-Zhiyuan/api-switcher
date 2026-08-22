@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
-from core.url_validation import validate_api_base_url
+from core.url_validation import normalize_claude_base_url, validate_api_base_url
 
 
 _ASSIGNMENT_RE = re.compile(
@@ -307,7 +307,10 @@ def _normalize_url(value: str, *, profile_type: str, inferred: bool) -> str:
                 path = path[: -len(suffix)] + replacement
                 break
         normalized = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
-        normalized = validate_api_base_url(normalized)
+        if profile_type == "claude":
+            normalized = normalize_claude_base_url(normalized)
+        else:
+            normalized = validate_api_base_url(normalized)
     except (TypeError, ValueError):
         return ""
 
