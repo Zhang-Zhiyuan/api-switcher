@@ -641,6 +641,15 @@ def _restore_remote_file_snapshot(client, snapshot: dict[str, str | None]) -> li
     return errors
 
 
+def _validate_remote_files_unchanged(client, snapshot: dict[str, str | None], paths) -> None:
+    """Ensure a helper did not modify files outside its documented target."""
+    for path in paths:
+        expected = snapshot.get(path)
+        actual = remote_config.read_remote_text(client, path)
+        if actual != expected:
+            raise RuntimeError(f"远程文件被意外修改: {path}")
+
+
 def _run_remote_transaction(client, snapshot: dict[str, str | None], label: str, operation) -> None:
     try:
         operation()
@@ -1100,11 +1109,19 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
     settings_path = remote_config._remote_path("claude_settings", ssh_profile, client)
     config_path = remote_config._remote_path("claude_config", ssh_profile, client)
     persistent_env_path = _remote_persistent_env_path(client)
+    shell_env_paths = _remote_shell_env_paths(client)
     is_root = _is_root_ssh_user(ssh_profile, client)
     vscode_paths = _remote_vscode_paths(client)
     snapshot = _remote_file_snapshot(
         client,
-        (credentials_path, settings_path, config_path, persistent_env_path, *vscode_paths),
+        (
+            credentials_path,
+            settings_path,
+            config_path,
+            persistent_env_path,
+            *shell_env_paths,
+            *vscode_paths,
+        ),
     )
     _validate_existing_remote_json_texts(client, snapshot, vscode_paths)
     # Strictly parse every existing destination before the first mutation.
@@ -1136,6 +1153,7 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
         _validate_remote_claude_account(client, ssh_profile, credentials, settings, config)
         if remote_config.read_remote_text(client, persistent_env_path) != persistent_expected:
             raise RuntimeError("远程 Claude 持久环境变量清理后回读不一致")
+        _validate_remote_files_unchanged(client, snapshot, shell_env_paths)
         vscode_root_adjusted = _sync_remote_vscode_official_account(
             client,
             ssh_profile,
@@ -1186,22 +1204,54 @@ def sync_codex_to_server(ssh_name: str, codex_name: str, wire_api_mode: str | No
     )
     config = _strict_remote_read(remote_config.read_remote_codex_config, client, ssh_profile) or {}
     auth = _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile) or {}
+    previous_api_env_names = _remote_codex_active_api_env_names(config)
     config = toml_parser.apply_codex_profile(config, codex_profile)
     if wire_api_mode in CODEX_WIRE_API_VALUES:
         _set_remote_codex_wire_api(config, codex_profile, wire_api_mode)
     auth = auth_parser.apply_codex_apikey(auth, codex_profile)
     env_keys = [] if target_env_key is None else [target_env_key]
+    stale_env_names = [
+        name
+        for name in previous_api_env_names
+        if name not in env_keys
+        # A provider explicitly requiring OpenAI auth intentionally relies on
+        # the existing official OpenAI credential; do not delete its key.
+        and not (uses_openai_auth and name == "OPENAI_API_KEY")
+    ]
+    old_codex_env = snapshot[codex_env_path]
+    from core import codex_env, persistent_env
+    old_persistent_env = snapshot[persistent_env_path]
+    codex_before_values = codex_env.parse_codex_env_text(old_codex_env or "")
+    persistent_before_values = codex_env.parse_codex_env_text(old_persistent_env or "")
+    stale_env_present = any(
+        name in codex_before_values or name in persistent_before_values
+        for name in stale_env_names
+    )
     benchmark = None
 
     def write_and_verify():
         nonlocal benchmark
         remote_config.write_remote_codex_config(client, config, ssh_profile)
         remote_config.write_remote_codex_auth(client, auth, ssh_profile)
+        if stale_env_present:
+            persistent_env.delete_remote_user_env(client, stale_env_names)
+            if old_codex_env is not None:
+                remote_config.write_remote_codex_env(
+                    client,
+                    codex_env.merge_codex_env_text(old_codex_env, deletes=stale_env_names),
+                    ssh_profile,
+                )
         persisted_env_keys = _persist_remote_codex_env(client, codex_profile, api_key, ssh_profile)
         if persisted_env_keys != env_keys:
             raise RuntimeError("远程 Codex 环境变量写入目标不一致")
         _validate_remote_codex_api(client, ssh_profile, config, auth)
         _validate_remote_codex_env(client, ssh_profile, persistent_env_path, env_keys, api_key)
+        _validate_remote_codex_env_removed(
+            client,
+            ssh_profile,
+            persistent_env_path,
+            stale_env_names,
+        )
         if wire_api_mode == CODEX_WIRE_API_AUTO and api_key:
             benchmark = _remote_benchmark_codex_wire_api(client, codex_profile, config, api_key)
             if benchmark.success and benchmark.recommended_wire_api:
@@ -1253,7 +1303,11 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
     config_path = remote_config._remote_path("codex_config", ssh_profile, client)
     codex_env_path = remote_config._remote_path("codex_env", ssh_profile, client)
     persistent_env_path = _remote_persistent_env_path(client)
-    snapshot = _remote_file_snapshot(client, (auth_path, config_path, codex_env_path, persistent_env_path))
+    shell_env_paths = _remote_shell_env_paths(client)
+    snapshot = _remote_file_snapshot(
+        client,
+        (auth_path, config_path, codex_env_path, persistent_env_path, *shell_env_paths),
+    )
     _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile)
     old_config = _strict_remote_read(remote_config.read_remote_codex_config, client, ssh_profile)
     old_codex_env = snapshot[codex_env_path]
@@ -1288,6 +1342,7 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
         ):
             raise RuntimeError("远程 Codex 官方账号配置写入后校验失败")
         _validate_remote_codex_env_removed(client, ssh_profile, persistent_env_path, env_names)
+        _validate_remote_files_unchanged(client, snapshot, shell_env_paths)
 
         validation_ok, validation_output = _remote_codex_login_status(
             client,
@@ -1334,33 +1389,74 @@ def sync_all_to_server(ssh_name: str, codex_wire_api_mode: str | None = CODEX_WI
     results = []
     failures = []
 
+    def choose_target(
+        current_api: str | None,
+        current_account: str | None,
+        stored_api: str | None,
+        stored_account: str | None,
+        api_names: set[str],
+        account_names: set[str],
+        label: str,
+    ) -> tuple[str, str] | None:
+        """Prefer runtime detection and reject ambiguous stale markers."""
+        if current_api in api_names and current_account in account_names:
+            raise RuntimeError(f"{label}同时检测到 API 和官方账号配置，已停止同步以保护登录状态")
+        if current_api in api_names:
+            return "api", current_api
+        if current_account in account_names:
+            return "account", current_account
+
+        stored_api_ok = stored_api in api_names
+        stored_account_ok = stored_account in account_names
+        if stored_api_ok and stored_account_ok:
+            raise RuntimeError(f"{label}的本地生效标记同时指向 API 和官方账号，已停止同步以保护登录状态")
+        if stored_api_ok:
+            return "api", stored_api
+        if stored_account_ok:
+            return "account", stored_account
+        return None
+
     claude_api = {p.name for p in profile_manager.list_switchable_claude_profiles()}
     claude_accounts = {p.name for p in profile_manager.list_claude_account_profiles()}
-    active_claude_api = profile_manager.get_current_claude_name() or profile_manager.get_active_claude_name()
-    active_claude_account = profile_manager.get_current_claude_account_name() or profile_manager.get_active_claude_account_name()
-    if active_claude_api in claude_api:
+    claude_target = choose_target(
+        profile_manager.get_current_claude_name(),
+        profile_manager.get_current_claude_account_name(),
+        profile_manager.get_active_claude_name(),
+        profile_manager.get_active_claude_account_name(),
+        claude_api,
+        claude_accounts,
+        "Claude",
+    )
+    if claude_target and claude_target[0] == "api":
         try:
-            results.append(sync_claude_to_server(ssh_name, active_claude_api))
+            results.append(sync_claude_to_server(ssh_name, claude_target[1]))
         except Exception as e:
             failures.append(f"Claude: {e}")
-    elif active_claude_account in claude_accounts:
+    elif claude_target and claude_target[0] == "account":
         try:
-            results.append(sync_claude_account_to_server(ssh_name, active_claude_account))
+            results.append(sync_claude_account_to_server(ssh_name, claude_target[1]))
         except Exception as e:
             failures.append(f"Claude 账号: {e}")
 
     codex_api = {p.name for p in profile_manager.list_switchable_codex_profiles()}
     codex_accounts = {p.name for p in profile_manager.list_codex_account_profiles()}
-    active_codex_api = profile_manager.get_current_codex_name() or profile_manager.get_active_codex_name()
-    active_codex_account = profile_manager.get_current_codex_account_name() or profile_manager.get_active_codex_account_name()
-    if active_codex_api in codex_api:
+    codex_target = choose_target(
+        profile_manager.get_current_codex_name(),
+        profile_manager.get_current_codex_account_name(),
+        profile_manager.get_active_codex_name(),
+        profile_manager.get_active_codex_account_name(),
+        codex_api,
+        codex_accounts,
+        "Codex",
+    )
+    if codex_target and codex_target[0] == "api":
         try:
-            results.append(sync_codex_to_server(ssh_name, active_codex_api, codex_wire_api_mode))
+            results.append(sync_codex_to_server(ssh_name, codex_target[1], codex_wire_api_mode))
         except Exception as e:
             failures.append(f"Codex: {e}")
-    elif active_codex_account in codex_accounts:
+    elif codex_target and codex_target[0] == "account":
         try:
-            results.append(sync_codex_account_to_server(ssh_name, active_codex_account))
+            results.append(sync_codex_account_to_server(ssh_name, codex_target[1]))
         except Exception as e:
             failures.append(f"Codex 账号: {e}")
 
@@ -1379,9 +1475,10 @@ def _clear_remote_claude_api_info(client, ssh_profile) -> str:
     settings_path = remote_config._remote_path("claude_settings", ssh_profile, client)
     config_path = remote_config._remote_path("claude_config", ssh_profile, client)
     persistent_env_path = _remote_persistent_env_path(client)
+    shell_env_paths = _remote_shell_env_paths(client)
     snapshot = _remote_file_snapshot(
         client,
-        (settings_path, config_path, persistent_env_path),
+        (settings_path, config_path, persistent_env_path, *shell_env_paths),
     )
     settings = _strict_remote_read(remote_config.read_remote_claude_settings, client, ssh_profile)
     config = _strict_remote_read(remote_config.read_remote_claude_config, client, ssh_profile)
@@ -1424,6 +1521,7 @@ def _clear_remote_claude_api_info(client, ssh_profile) -> str:
             raise RuntimeError("远程 Claude API 信息清理后回读不一致")
         if remote_config.read_remote_text(client, persistent_env_path) != persistent_expected:
             raise RuntimeError("远程 Claude 持久环境变量清理后回读不一致")
+        _validate_remote_files_unchanged(client, snapshot, shell_env_paths)
 
     _run_remote_transaction(client, snapshot, "远程 Claude API 信息清理", write_and_verify)
 
@@ -1473,6 +1571,49 @@ def _remote_codex_account_switch_env_names(config: dict | None) -> tuple[str, ..
     return tuple(sorted(names))
 
 
+def _remote_codex_active_api_env_names(config: dict | None) -> tuple[str, ...]:
+    """Return API environment names belonging to the current remote target.
+
+    API profiles are allowed to share the managed environment file with other
+    tools.  During an API-to-API switch remove only the previous active
+    provider's keys, leaving unrelated user variables untouched.
+    """
+    names = {"OPENAI_API_KEY", "OPENAI_BASE_URL"}
+    if isinstance(config, dict):
+        provider_id = str(config.get("model_provider") or "").strip()
+        model_providers = config.get("model_providers")
+        provider_table = {}
+        if provider_id and isinstance(model_providers, dict):
+            maybe_table = model_providers.get(provider_id)
+            if isinstance(maybe_table, dict):
+                provider_table = maybe_table
+                env_key = str(maybe_table.get("env_key") or "").strip()
+                if env_key:
+                    try:
+                        names.add(ProviderRegistry.validate_codex_env_key(env_key))
+                    except ValueError as error:
+                        logger.warning(
+                            "Skipping unsafe remote Codex API env cleanup target %r: %s",
+                            env_key,
+                            error,
+                        )
+        if provider_id and provider_id != "openai":
+            try:
+                names.add(
+                    ProviderRegistry.get_codex_env_key(
+                        provider_id,
+                        custom_name=provider_table.get("name"),
+                    )
+                )
+            except ValueError as error:
+                logger.warning(
+                    "Skipping unsafe remote Codex provider env cleanup target %r: %s",
+                    provider_id,
+                    error,
+                )
+    return tuple(sorted(name for name in names if name))
+
+
 def _clear_remote_codex_api_info(client, ssh_profile) -> str:
     from core import codex_env, persistent_env
 
@@ -1480,9 +1621,10 @@ def _clear_remote_codex_api_info(client, ssh_profile) -> str:
     auth_path = remote_config._remote_path("codex_auth", ssh_profile, client)
     codex_env_path = remote_config._remote_path("codex_env", ssh_profile, client)
     persistent_env_path = _remote_persistent_env_path(client)
+    shell_env_paths = _remote_shell_env_paths(client)
     snapshot = _remote_file_snapshot(
         client,
-        (config_path, auth_path, codex_env_path, persistent_env_path),
+        (config_path, auth_path, codex_env_path, persistent_env_path, *shell_env_paths),
     )
     config = _strict_remote_read(remote_config.read_remote_codex_config, client, ssh_profile)
     auth = _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile)
@@ -1538,6 +1680,7 @@ def _clear_remote_codex_api_info(client, ssh_profile) -> str:
             raise RuntimeError("远程 Codex .env 清理后回读不一致")
         if remote_config.read_remote_text(client, persistent_env_path) != persistent_expected:
             raise RuntimeError("远程 Codex 持久环境变量清理后回读不一致")
+        _validate_remote_files_unchanged(client, snapshot, shell_env_paths)
 
     _run_remote_transaction(client, snapshot, "远程 Codex API 信息清理", write_and_verify)
 
