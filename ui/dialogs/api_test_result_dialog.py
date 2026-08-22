@@ -107,6 +107,10 @@ class APITestResultDialog(ctk.CTkToplevel):
         if recommended_wire_api:
             self._add_detail_row(scroll_frame, "推荐 Wire API", recommended_wire_api, COLORS["success"])
 
+        proxy_warning = getattr(result, "proxy_warning", None)
+        if proxy_warning:
+            self._add_detail_row(scroll_frame, "网络提示", proxy_warning, COLORS["warning"])
+
         # Error details / benchmark details
         if result.error_details:
             detail_label = "测试明细" if recommended_wire_api else "错误详情"

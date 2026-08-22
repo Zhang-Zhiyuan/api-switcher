@@ -1144,6 +1144,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         if not self.winfo_exists():
             return
         self._set_refresh_busy(False)
+        proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
+        warning_suffix = f"；{proxy_warning}" if proxy_warning else ""
         if result.success and result.models:
             models = self._remote_models_for_selection(result.models, fallback_models, provider)
             preferred = result.recommended_model
@@ -1151,7 +1153,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 preferred = "opus" if "opus" in models else ("opus[1m]" if "opus[1m]" in models else preferred)
             self._apply_model_list(
                 models,
-                result.message,
+                result.message + warning_suffix,
                 is_error=False,
                 preferred_model=preferred,
                 model_metadata=getattr(result, "model_metadata", None),
@@ -1160,10 +1162,14 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         if fallback_models:
             details = f": {result.error_details}" if result.error_details else ""
-            self._apply_model_list(fallback_models, f"刷新失败，已使用内置模型列表。{result.message}{details}", is_error=True)
+            self._apply_model_list(
+                fallback_models,
+                f"刷新失败，已使用内置模型列表。{result.message}{warning_suffix}{details}",
+                is_error=True,
+            )
         else:
             details = f": {result.error_details}" if result.error_details else ""
-            self._show_error(f"刷新模型失败。{result.message}{details}")
+            self._show_error(f"刷新模型失败。{result.message}{warning_suffix}{details}")
 
     def _model_for_save(self, provider, is_codex: bool) -> str:
         """Choose an already-loaded or bundled model without blocking Tk on I/O."""
