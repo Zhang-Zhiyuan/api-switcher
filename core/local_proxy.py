@@ -703,6 +703,11 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         {
             "mixed_port": mixed_port,
             "proxy_url": proxy_url,
+            "managed_proxy_env": {
+                "owner": "api-switcher",
+                "proxy_url": proxy_url,
+                "variables": list(remote_proxy.PROXY_ENV_KEYS),
+            },
             "config_path": str(config_path),
             "binary_path": str(binary_path),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
@@ -742,6 +747,11 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
         {
             "mixed_port": mixed_port,
             "proxy_url": proxy_url,
+            "managed_proxy_env": {
+                "owner": "api-switcher",
+                "proxy_url": proxy_url,
+                "variables": list(remote_proxy.PROXY_ENV_KEYS),
+            },
             "config_path": str(config_path),
             "binary_path": str(binary_path),
             "pid": applied_pid,

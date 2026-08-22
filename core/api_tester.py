@@ -16,7 +16,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Iterable, Optional
 
 from core.url_validation import validate_api_base_url
 
@@ -631,15 +632,108 @@ class APITester:
         return tuple(invalid)
 
     @classmethod
-    def clear_invalid_local_proxy_env(cls) -> tuple[str, ...]:
+    def _program_owned_invalid_local_proxy_env_names(
+        cls,
+        invalid_names: Iterable[str],
+        values: dict[str, str],
+        endpoint: tuple[str, int],
+    ) -> tuple[str, ...]:
+        """Return invalid proxy variables proven to be written by this app.
+
+        The local AI proxy keeps a restore checkpoint and, in newer state
+        files, an explicit ownership marker.  Requiring that state plus an
+        exact endpoint match lets us auto-clean only the proxy this program
+        configured; an unrelated loopback proxy still requires confirmation.
+        """
+        if os.name != "nt":
+            return ()
+
+        try:
+            from core import local_proxy
+
+            state = local_proxy._load_state()
+        except Exception as error:
+            logger.debug("Failed to inspect managed local proxy state: %s", error)
+            return ()
+
+        if not isinstance(state, dict):
+            return ()
+
+        marker = state.get("managed_proxy_env")
+        marker_owned = (
+            isinstance(marker, dict)
+            and str(marker.get("owner") or "").strip().casefold() == "api-switcher"
+        )
+        legacy_owned = isinstance(state.get("previous_env"), dict) and bool(
+            str(state.get("proxy_url") or "").strip()
+        )
+        fallback_owned = False
+        fallback_url = ""
+        if not marker_owned and not legacy_owned:
+            # A damaged/old state file can still be proven app-owned by the
+            # app-specific environment marker plus the managed config marker.
+            fallback_url = str(os.environ.get("API_SWITCHER_AI_PROXY_URL") or "").strip()
+            fallback_endpoint = cls._local_proxy_endpoint(fallback_url)
+            if fallback_endpoint:
+                try:
+                    config_path = Path(local_proxy.LOCAL_PROXY_CONFIG_DIR) / "config.yaml"
+                    config_text = config_path.read_text(encoding="utf-8", errors="replace")
+                    fallback_owned = local_proxy.remote_proxy.AI_PROXY_CONFIG_MARKER in config_text
+                except OSError:
+                    fallback_owned = False
+            if not fallback_owned:
+                return ()
+
+        managed_url = ""
+        if marker_owned:
+            managed_url = str(marker.get("proxy_url") or "").strip()
+        managed_url = managed_url or str(state.get("proxy_url") or "").strip() or fallback_url
+        managed_endpoint = cls._local_proxy_endpoint(managed_url)
+        if managed_endpoint != endpoint:
+            return ()
+
+        if marker_owned:
+            raw_variables = marker.get("variables")
+            if isinstance(raw_variables, (list, tuple, set)):
+                managed_names = {str(name).casefold() for name in raw_variables}
+            else:
+                managed_names = set()
+        else:
+            # State written before the explicit marker was introduced still
+            # has the complete restore checkpoint and exact proxy URL.
+            managed_names = {name.casefold() for name in cls.LOCAL_PROXY_ENV_NAMES}
+
+        owned: list[str] = []
+        for name in invalid_names:
+            normalized_name = str(name or "").strip()
+            if not normalized_name or normalized_name.casefold() not in managed_names:
+                continue
+            if cls._local_proxy_endpoint(values.get(name)) != managed_endpoint:
+                continue
+            owned.append(normalized_name)
+        return tuple(dict.fromkeys(owned))
+
+    @classmethod
+    def clear_invalid_local_proxy_env(cls, names: Iterable[str] | None = None) -> tuple[str, ...]:
         """Remove only currently invalid loopback proxy variables.
 
         The operation is intentionally narrow: non-loopback proxies, working
         loopback services, ``NO_PROXY``, system-wide settings, and unrelated
         environment variables are left untouched.
         """
-        names = cls.invalid_local_proxy_env_names()
-        if not names:
+        invalid_names = cls.invalid_local_proxy_env_names()
+        if names is None:
+            names_to_clear = invalid_names
+        else:
+            invalid_by_fold = {name.casefold(): name for name in invalid_names}
+            names_to_clear = tuple(
+                dict.fromkeys(
+                    invalid_by_fold.get(str(name or "").strip().casefold())
+                    for name in names
+                    if invalid_by_fold.get(str(name or "").strip().casefold())
+                )
+            )
+        if not names_to_clear:
             return ()
 
         if os.name == "nt":
@@ -647,15 +741,15 @@ class APITester:
 
             # Delete the persistent values first.  The helper also updates
             # this process and broadcasts WM_SETTINGCHANGE for new terminals.
-            persistent_env.delete_local_user_env(names)
+            persistent_env.delete_local_user_env(names_to_clear)
         # Keep the process view deterministic even when a platform adapter
         # only implements the registry part of persistent deletion.
-        for name in names:
+        for name in names_to_clear:
             os.environ.pop(name, None)
 
         with cls._proxy_check_lock:
             cls._proxy_check_cache.clear()
-        return names
+        return names_to_clear
 
     @classmethod
     def _invalid_local_proxy_warning(cls, url: str) -> str:
@@ -675,6 +769,46 @@ class APITester:
         host, port = endpoint
         if available:
             return ""
+
+        values = cls._local_proxy_env_values()
+        # ``urllib.getproxies()`` also consults Windows WinINET settings.
+        # This feature is scoped to process environment variables; persistent
+        # user values are inspected for the explicit cleanup action below,
+        # while an unrelated system proxy must not change request behavior.
+        proxy_env_names = {item.casefold() for item in cls.LOCAL_PROXY_ENV_NAMES}
+        process_proxy_values = [
+            str(value).strip()
+            for name, value in os.environ.items()
+            if name.casefold() in proxy_env_names
+            and str(value or "").strip()
+        ]
+        if not any(cls._local_proxy_endpoint(value) == endpoint for value in process_proxy_values):
+            return ""
+
+        invalid_names = cls.invalid_local_proxy_env_names()
+        owned_names = cls._program_owned_invalid_local_proxy_env_names(
+            invalid_names,
+            values,
+            endpoint,
+        )
+        if owned_names:
+            try:
+                removed = cls.clear_invalid_local_proxy_env(owned_names)
+            except Exception as error:
+                logger.warning("Failed to auto-clean managed invalid proxy variables: %s", error)
+                return (
+                    f"检测到本程序配置的失效本机代理 {host}:{port}，本次请求已临时直连；"
+                    f"自动清理失败，请手动清理变量（{ '、'.join(owned_names) }）"
+                )
+            if removed:
+                remaining = tuple(
+                    name for name in invalid_names if name.casefold() not in {item.casefold() for item in removed}
+                )
+                suffix = f"；另有来源不明变量待确认（{ '、'.join(remaining) }）" if remaining else ""
+                return (
+                    f"检测到本程序配置的失效本机代理 {host}:{port}，已自动清理变量"
+                    f"（{ '、'.join(removed) }），本次请求已直连{suffix}"
+                )
         return f"检测到失效本机代理 {host}:{port}，本次请求已临时直连"
 
     @classmethod
