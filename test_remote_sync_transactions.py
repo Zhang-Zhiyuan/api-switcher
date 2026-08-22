@@ -240,6 +240,31 @@ def test_remote_claude_account_clears_only_managed_persistent_env(monkeypatch):
     assert state["/home/test/.api_switcher_env"] == "export KEEP='yes'\n"
 
 
+def test_remote_claude_account_rollback_restores_shell_startup_files(monkeypatch):
+    state, _ssh, _client = _install_remote(monkeypatch, "never")
+    state["/home/test/.api_switcher_env"] = "export ANTHROPIC_AUTH_TOKEN='old'\n"
+    before = dict(state)
+    target = SimpleNamespace(name="official")
+    credentials = {"claudeAiOauth": {"accessToken": "new"}}
+    monkeypatch.setattr(profile_manager, "list_claude_account_profiles", lambda: [target])
+    monkeypatch.setattr(profile_manager, "load_claude_account_credentials", lambda _target: credentials)
+    monkeypatch.setattr(profile_manager, "_validate_claude_account_credentials", lambda _data: (True, ""))
+
+    def delete_remote_env(_client, names):
+        state["/home/test/.api_switcher_env"] = persistent_env._remove_env_exports(
+            state["/home/test/.api_switcher_env"], names
+        )
+        state["/home/test/.profile"] = "# accidentally changed\n"
+        raise OSError("injected shell mutation")
+
+    monkeypatch.setattr(persistent_env, "delete_remote_user_env", delete_remote_env)
+
+    with pytest.raises(OSError, match="injected shell mutation"):
+        sync_manager.sync_claude_account_to_server("remote", "official")
+
+    assert state == before
+
+
 @pytest.mark.parametrize("failure_stage", ["codex_config", "auth", "persistent", "dotenv"])
 def test_remote_codex_api_failure_restores_config_auth_and_both_env_files(monkeypatch, failure_stage):
     state, _ssh, _client = _install_remote(monkeypatch, failure_stage)
@@ -464,6 +489,43 @@ def test_unsafe_old_codex_env_key_is_not_added_to_cleanup_targets():
     assert "SAFE; rm -rf /" not in names
     assert "OPENAI_API_KEY" in names
     assert "SAFE; rm -rf /" not in sync_manager._remote_codex_api_env_names(config)
+
+
+def test_remote_codex_active_api_cleanup_targets_only_current_provider():
+    config = {
+        "model_provider": "deepseek",
+        "model_providers": {
+            "deepseek": {"name": "DeepSeek", "env_key": "DEEPSEEK_API_KEY"},
+            "other": {"env_key": "OTHER_KEY"},
+        },
+    }
+
+    names = sync_manager._remote_codex_active_api_env_names(config)
+
+    assert set(names) == {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"}
+    assert "OTHER_KEY" not in names
+
+
+def test_sync_all_rejects_conflicting_stored_api_and_account_markers(monkeypatch):
+    monkeypatch.setattr(
+        profile_manager,
+        "list_switchable_claude_profiles",
+        lambda: [SimpleNamespace(name="claude-api")],
+    )
+    monkeypatch.setattr(
+        profile_manager,
+        "list_claude_account_profiles",
+        lambda: [SimpleNamespace(name="claude-account")],
+    )
+    monkeypatch.setattr(profile_manager, "get_current_claude_name", lambda: None)
+    monkeypatch.setattr(profile_manager, "get_current_claude_account_name", lambda: None)
+    monkeypatch.setattr(profile_manager, "get_active_claude_name", lambda: "claude-api")
+    monkeypatch.setattr(profile_manager, "get_active_claude_account_name", lambda: "claude-account")
+    monkeypatch.setattr(profile_manager, "list_switchable_codex_profiles", lambda: [])
+    monkeypatch.setattr(profile_manager, "list_codex_account_profiles", lambda: [])
+
+    with pytest.raises(RuntimeError, match="Claude.*同时指向"):
+        sync_manager.sync_all_to_server("remote")
 
 
 @pytest.mark.parametrize(
