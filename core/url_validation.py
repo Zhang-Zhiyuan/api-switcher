@@ -119,6 +119,34 @@ def validate_api_base_url(
     )
 
 
+def normalize_claude_base_url(
+    value: object,
+    *,
+    default: object = "",
+    allow_implicit_https: bool = True,
+) -> str:
+    """Canonicalize a Claude Code base URL and remove a duplicate ``/v1``.
+
+    Claude Code appends the Anthropic API version to ``ANTHROPIC_BASE_URL``
+    when constructing requests.  A number of OpenCode/AI SDK examples expose
+    the same gateway as ``https://host/v1``; copying that value verbatim into
+    Claude Code would produce ``/v1/v1/messages``.  Only an exact final
+    ``/v1`` segment is removed.  Provider-specific prefixes such as
+    ``/anthropic`` or ``/api/v1`` are retained because they are part of the
+    gateway contract.
+    """
+
+    normalized = validate_api_base_url(
+        value,
+        default=default,
+        allow_implicit_https=allow_implicit_https,
+    )
+    parsed = urlsplit(normalized)
+    if parsed.path.rstrip("/").casefold() == "/v1":
+        normalized = urlunsplit(parsed._replace(path=""))
+    return normalized
+
+
 def is_valid_api_base_url(
     value: object,
     *,

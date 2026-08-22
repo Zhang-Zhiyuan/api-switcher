@@ -20,6 +20,7 @@ from models.profile import (
     BrowserProfile,
     normalize_claude_auth_scheme,
 )
+from core.url_validation import normalize_claude_base_url
 
 
 security = LazyModule("core.security")
@@ -692,8 +693,10 @@ def _claude_profile_kwargs_from_current(name: str, settings: dict, config: dict)
         "auth_token_ref": token_ref,
         "primary_api_key_ref": None,
         "auth_scheme": _claude_auth_scheme_from_current(settings, config, provider),
-        "base_url": env.get("ANTHROPIC_BASE_URL", ""),
-        "model": settings.get("model", ""),
+        "base_url": normalize_claude_base_url(env.get("ANTHROPIC_BASE_URL", ""))
+        if env.get("ANTHROPIC_BASE_URL")
+        else "",
+        "model": _claude_model_from_settings(settings),
         "effort_level": env.get("CLAUDE_CODE_EFFORT_LEVEL") or settings.get("effortLevel") or "high",
         "permissions_mode": permissions.get("defaultMode", "default"),
         "skip_dangerous_prompt": settings.get("skipDangerousModePermissionPrompt", False),
@@ -701,6 +704,14 @@ def _claude_profile_kwargs_from_current(name: str, settings: dict, config: dict)
         "additional_directories": _claude_additional_directories(settings, permissions),
         "provider": provider,
     }
+
+
+def _claude_model_from_settings(settings: dict) -> str:
+    """Resolve Claude's top-level alias to its provider model when available."""
+
+    from core.parser import claude_model_from_settings
+
+    return claude_model_from_settings(settings)
 
 
 def _build_claude_import_name(settings: dict, config: dict) -> str:
@@ -721,22 +732,25 @@ def _claude_profile_config_matches(profile: ClaudeProfile, settings: dict) -> bo
         return False
     if detected_provider != profile.provider:
         return False
-    if (env.get("ANTHROPIC_BASE_URL") or "") != (profile.base_url or ""):
-        return False
-    if settings.get("model", "") != profile.model:
+    current_base_url = normalize_claude_base_url(env.get("ANTHROPIC_BASE_URL", "")) if env.get("ANTHROPIC_BASE_URL") else ""
+    expected_base_url = normalize_claude_base_url(profile.base_url) if profile.base_url else ""
+    if current_base_url != expected_base_url:
         return False
     from core.providers import ProviderRegistry
 
     provider = ProviderRegistry.get_provider(profile.provider)
     provider_env = provider.claude_env if provider else {}
-    expected_models = {
-        "ANTHROPIC_MODEL": profile.model,
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": profile.model,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": provider_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", profile.model),
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": provider_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", profile.model),
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": provider_env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", profile.model),
-        "CLAUDE_CODE_SUBAGENT_MODEL": profile.model,
-    }
+    from core.parser import (
+        CLAUDE_MODEL_ENV_KEYS,
+        CLAUDE_MODEL_NAME_ENV_KEYS,
+        claude_model_settings,
+    )
+
+    expected_top_model, expected_env = claude_model_settings(profile.model, provider_env)
+    if settings.get("model", "") != expected_top_model:
+        return False
+    expected_model_keys = set((*CLAUDE_MODEL_ENV_KEYS, *CLAUDE_MODEL_NAME_ENV_KEYS))
+    expected_models = {key: value for key, value in expected_env.items() if key in expected_model_keys}
     if any((env.get(key) or "") != value for key, value in expected_models.items()):
         return False
     if ProviderRegistry.supports_reasoning_effort(profile.provider):
@@ -1122,6 +1136,10 @@ def _claude_api_override_active(settings: dict, config: dict) -> bool:
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
         "CLAUDE_CODE_SUBAGENT_MODEL",
         "CLAUDE_CODE_EFFORT_LEVEL",
     }

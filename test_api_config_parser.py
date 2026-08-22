@@ -102,7 +102,8 @@ def test_parse_opencode_anthropic_provider_options():
         "claude",
     )
 
-    assert parsed.base_url == "https://proapi.vivijane.pro/v1"
+    # OpenCode commonly includes /v1, while Claude Code appends /v1 itself.
+    assert parsed.base_url == "https://proapi.vivijane.pro"
     assert parsed.token == "sk-opencode"
     assert parsed.auth_scheme == "api_key"
 

@@ -1,11 +1,13 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 from config.paths import CLAUDE_SETTINGS, CLAUDE_CONFIG, CLAUDE_CREDENTIALS
 from core.atomic_io import atomic_write_text
 from core.file_cache import CACHE_MISS, FileValueCache
 from core.providers import CLAUDE_CODE_MODEL_ALIASES, CLAUDE_OFFICIAL_DEFAULT_MODEL
+from core.url_validation import normalize_claude_base_url
 
 logger = logging.getLogger(__name__)
 _JSON_FILE_CACHE = FileValueCache()
@@ -20,8 +22,31 @@ CLAUDE_MODEL_OVERRIDE_ENV_KEYS = (
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_EFFORT_LEVEL",
+)
+
+CLAUDE_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+CLAUDE_MODEL_NAME_ENV_KEYS = (
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+)
+_FABLE_MODEL_RE = re.compile(
+    r"^(?:claude[-_ ]*)?fable[-_ ]*5(?:\[(?:1m)\])?$",
+    re.IGNORECASE,
 )
 
 
@@ -129,6 +154,78 @@ def _is_claude_code_model(model: str) -> bool:
     return normalized.startswith("claude-")
 
 
+def _fable_model_parts(model: object) -> tuple[str, str] | None:
+    """Return the runtime and display names for Claude Code Fable 5.
+
+    Fable is selected through Claude Code's stable ``opus`` alias.  The
+    gateway model itself is kept in the default-model environment variables;
+    this is the shape emitted by CC Switch and avoids Claude Code rejecting a
+    provider-specific model name as the top-level model selection.
+    """
+
+    text = str(model or "").strip()
+    if not text or not _FABLE_MODEL_RE.fullmatch(text):
+        return None
+    return "claude-fable-5[1M]", "claude-fable-5"
+
+
+def claude_model_settings(model: object, provider_env: dict | None = None) -> tuple[str, dict[str, str]]:
+    """Build the Claude Code model fields for a profile.
+
+    Fable 5 needs an alias plus explicit default-model mappings.  Other
+    providers retain the legacy direct model fields for compatibility, while
+    stale Fable ``*_MODEL_NAME`` fields are always removed by the caller.
+    """
+
+    text = str(model or "").strip()
+    fable = _fable_model_parts(text)
+    if fable:
+        runtime_model, display_model = fable
+        env = {
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": runtime_model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": runtime_model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": runtime_model,
+            # CC Switch intentionally keeps the Haiku fallback on the
+            # non-1M model; some gateways do not expose a Haiku 1M variant.
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": display_model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": runtime_model,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": display_model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": display_model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": display_model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": display_model,
+        }
+        if provider_env:
+            # Explicit provider mappings (for example GLM's Haiku fallback)
+            # remain authoritative when a provider supplies them.
+            env.update({str(key): str(value) for key, value in provider_env.items()})
+        return "opus", env
+
+    env = {key: text for key in CLAUDE_MODEL_ENV_KEYS} if text else {}
+    if provider_env:
+        env.update({str(key): str(value) for key, value in provider_env.items()})
+    return text, env
+
+
+def claude_model_from_settings(settings: dict) -> str:
+    """Resolve a profile model from Claude settings, including alias mappings."""
+
+    if not isinstance(settings, dict):
+        return ""
+    env = settings.get("env")
+    env = env if isinstance(env, dict) else {}
+    model = str(settings.get("model") or "").strip()
+    alias_keys = {
+        "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "opus[1m]": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "opusplan": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "sonnet[1m]": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    }
+    mapped = str(env.get(alias_keys.get(model.casefold(), "")) or "").strip()
+    return mapped or str(env.get("ANTHROPIC_MODEL") or model).strip()
+
+
 def clear_claude_config_auth(config: dict) -> dict:
     """Remove API-key auth fields from Claude config while preserving other settings."""
     config = dict(config)
@@ -171,26 +268,20 @@ def apply_claude_profile(settings: dict, profile) -> dict:
         settings["env"][env_key] = token
 
     if profile.base_url:
-        settings["env"]["ANTHROPIC_BASE_URL"] = profile.base_url
+        # Claude Code appends /v1 itself.  Normalize copied OpenCode-style
+        # ``.../v1`` values so the runtime never requests ``/v1/v1/...``.
+        settings["env"]["ANTHROPIC_BASE_URL"] = normalize_claude_base_url(profile.base_url)
     else:
         settings["env"].pop("ANTHROPIC_BASE_URL", None)
 
     for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS:
         settings["env"].pop(key, None)
-    if profile.model:
-        for key in (
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_DEFAULT_FABLE_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "CLAUDE_CODE_SUBAGENT_MODEL",
-        ):
-            settings["env"][key] = profile.model
-    if provider and provider.claude_env:
-        settings["env"].update(provider.claude_env)
-
-    settings["model"] = profile.model
+    settings["model"], model_env = claude_model_settings(
+        profile.model,
+        provider.claude_env if provider else None,
+    )
+    if model_env:
+        settings["env"].update(model_env)
 
     # 根据提供商决定是否设置 effortLevel
     # 不支持推理力度的提供商会跳过该字段，避免向 API 发送无效参数。

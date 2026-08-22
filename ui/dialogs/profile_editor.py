@@ -4,7 +4,7 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo
 from ui.ui_dispatch import run_on_ui_thread
 from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL, ProviderRegistry
 from core.api_config_parser import ParsedAPIConfig, parse_api_config_text
-from core.url_validation import validate_api_base_url
+from core.url_validation import normalize_claude_base_url, validate_api_base_url
 from models.profile import (
     CODEX_APPROVAL_POLICIES,
     CODEX_SANDBOX_MODES,
@@ -1319,7 +1319,11 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         base_url_field = "base_url" if self._profile_type == "claude" else "custom_base_url"
         if base_url_field in data:
             try:
-                data[base_url_field] = validate_api_base_url(data.get(base_url_field))
+                data[base_url_field] = (
+                    normalize_claude_base_url(data.get(base_url_field))
+                    if self._profile_type == "claude"
+                    else validate_api_base_url(data.get(base_url_field))
+                )
             except ValueError as exc:
                 self._show_error(f"API 端点无效: {exc}")
                 return
