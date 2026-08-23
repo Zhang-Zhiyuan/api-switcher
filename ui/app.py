@@ -61,6 +61,15 @@ def main_layout_mode(width: int) -> str:
     return "narrow"
 
 
+def global_action_columns(width: int) -> int:
+    """Choose a toolbar grid that remains visible at the current width."""
+
+    # Four fixed-width buttons do not fit reliably once the header wraps. A
+    # 2x2 grid lets the parent shrink without retaining an oversized request
+    # width, so no action is clipped on compact or narrow windows.
+    return 4 if main_layout_mode(int(width)) == "wide" else 2
+
+
 def app_status_severity(message: str) -> str:
     """Infer a concise visual state for status-bar messages."""
 
@@ -434,7 +443,7 @@ class App(ctk.CTk):
             self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
             self._claude_switch_group.grid_configure(row=0, column=1, sticky="w", padx=(0, 10))
             self._codex_switch_group.grid_configure(row=0, column=2, sticky="w", padx=0)
-            action_columns = 4
+            action_columns = global_action_columns(self._logical_main_width())
         else:
             shell_padding = 12 if mode == "compact" else 8
             self._shell.pack_configure(padx=shell_padding, pady=(12, 10))
@@ -446,14 +455,14 @@ class App(ctk.CTk):
                 self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
                 self._claude_switch_group.grid_configure(row=0, column=1, sticky="w", padx=(0, 10))
                 self._codex_switch_group.grid_configure(row=0, column=2, sticky="w", padx=0)
-                action_columns = 4
+                action_columns = global_action_columns(self._logical_main_width())
             else:
                 self._switch_frame.grid_columnconfigure(0, weight=1)
                 self._switch_frame.grid_columnconfigure(1, weight=1)
                 self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=2, sticky="w", padx=0, pady=(0, 3))
                 self._claude_switch_group.grid_configure(row=1, column=0, sticky="w", padx=(0, 6))
                 self._codex_switch_group.grid_configure(row=1, column=1, sticky="w", padx=0)
-                action_columns = 2
+                action_columns = global_action_columns(self._logical_main_width())
 
         for column in range(action_columns):
             self._button_group.grid_columnconfigure(column, weight=1, uniform="global-actions")
