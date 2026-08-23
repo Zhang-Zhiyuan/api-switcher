@@ -108,6 +108,226 @@ def test_parse_opencode_anthropic_provider_options():
     assert parsed.auth_scheme == "api_key"
 
 
+def test_parse_opencode_openai_provider_options_infers_codex_and_safe_env_key():
+    parsed = parse_api_config_text(
+        '''{
+          "provider": {
+            "openai": {
+              "options": {
+                "baseURL": "https://relay.example.test/v1/responses",
+                "apiKey": "sk-opencode-openai"
+              }
+            }
+          },
+          "$schema": "https://opencode.ai/config.json"
+        }'''
+    )
+
+    assert parsed.profile_type == "codex"
+    assert parsed.base_url == "https://relay.example.test/v1"
+    assert parsed.token == "sk-opencode-openai"
+    assert parsed.env_key == "OPENAI_API_KEY"
+    assert parsed.provider_id == "openai"
+
+
+def test_parse_custom_provider_json_uses_explicit_env_key_and_model():
+    parsed = parse_api_config_text(
+        '''{
+          "providers": {
+            "My Relay": {
+              "options": {
+                "endpoint": "https://relay.example.test/v1/chat/completions",
+                "api_key": "sk-custom-provider",
+                "envKey": "MY_RELAY_API_KEY",
+                "defaultModel": "gpt-relay"
+              }
+            }
+          }
+        }''',
+        "codex",
+    )
+
+    assert parsed.base_url == "https://relay.example.test/v1"
+    assert parsed.env_key == "MY_RELAY_API_KEY"
+    assert parsed.model == "gpt-relay"
+    assert parsed.provider_id == "custom"
+    assert parsed.provider_name == "My Relay"
+
+
+def test_parse_generic_nested_api_key_never_uses_json_path_as_codex_env_key():
+    parsed = parse_api_config_text(
+        '''{
+          "providers": {
+            "relay": {
+              "options": {
+                "base_url": "https://relay.example.test/v1",
+                "api_key": "sk-generic-nested"
+              }
+            }
+          }
+        }''',
+        "codex",
+    )
+
+    assert parsed.token == "sk-generic-nested"
+    assert parsed.env_key == "OPENAI_API_KEY"
+    assert "OPTIONS" not in parsed.env_key
+
+
+def test_parse_rejects_strong_type_mismatch_but_selects_from_mixed_text():
+    claude = (
+        "export ANTHROPIC_BASE_URL=https://claude.example.test\n"
+        "export ANTHROPIC_AUTH_TOKEN=sk-claude-mixed"
+    )
+    codex = (
+        "export OPENAI_BASE_URL=https://codex.example.test/v1\n"
+        "export OPENAI_API_KEY=sk-codex-mixed"
+    )
+
+    with pytest.raises(ValueError, match="Claude API 配置"):
+        parse_api_config_text(claude, "codex")
+    with pytest.raises(ValueError, match="同时检测到 Claude 和 Codex"):
+        parse_api_config_text(f"{claude}\n{codex}")
+
+    parsed_claude = parse_api_config_text(f"{claude}\n{codex}", "claude")
+    parsed_codex = parse_api_config_text(f"{claude}\n{codex}", "codex")
+    assert parsed_claude.token == "sk-claude-mixed"
+    assert parsed_claude.base_url == "https://claude.example.test"
+    assert parsed_codex.token == "sk-codex-mixed"
+    assert parsed_codex.base_url == "https://codex.example.test/v1"
+
+
+@pytest.mark.parametrize(
+    ("text", "profile_type", "expected_url", "expected_env_key"),
+    [
+        (
+            "setx OPENAI_BASE_URL=https://relay.example.test/v1/responses & "
+            "setx OPENAI_API_KEY=sk-setx-equals /M",
+            "codex",
+            "https://relay.example.test/v1",
+            "OPENAI_API_KEY",
+        ),
+        (
+            "client --base-url https://relay.example.test/v1/chat/completions "
+            "--api-key sk-cli-example --model gpt-relay",
+            "codex",
+            "https://relay.example.test/v1",
+            "OPENAI_API_KEY",
+        ),
+        (
+            'api_key: "sk-local-example"\nendpoint: localhost:8080/v1/models',
+            "codex",
+            "http://localhost:8080/v1",
+            "OPENAI_API_KEY",
+        ),
+        (
+            "$Env:OPENAI_BASE_URL='https://relay.example.test/v1'; "
+            "$Env:OPENAI_API_KEY='sk-powershell-case'",
+            "codex",
+            "https://relay.example.test/v1",
+            "OPENAI_API_KEY",
+        ),
+        (
+            "SET OPENAI_BASE_URL=https://relay.example.test/v1\n"
+            "SET OPENAI_API_KEY=sk-cmd-case",
+            "codex",
+            "https://relay.example.test/v1",
+            "OPENAI_API_KEY",
+        ),
+        (
+            "client = OpenAI(base_url='https://relay.example.test/v1/responses', "
+            "api_key='sk-python-inline', model='gpt-inline')",
+            "codex",
+            "https://relay.example.test/v1",
+            "OPENAI_API_KEY",
+        ),
+        (
+            "set -gx OPENAI_BASE_URL https://relay.example.test/v1\n"
+            "set -gx OPENAI_API_KEY sk-fish-shell",
+            "codex",
+            "https://relay.example.test/v1",
+            "OPENAI_API_KEY",
+        ),
+    ],
+)
+def test_parse_additional_command_and_local_endpoint_formats(
+    text, profile_type, expected_url, expected_env_key
+):
+    parsed = parse_api_config_text(text, profile_type)
+
+    assert parsed.base_url == expected_url
+    assert parsed.env_key == expected_env_key
+    assert parsed.token.startswith("sk-")
+
+
+@pytest.mark.parametrize(
+    ("profile_type", "endpoint", "expected"),
+    [
+        ("claude", "https://relay.example.test/v1/messages", "https://relay.example.test"),
+        ("claude", "https://relay.example.test/anthropic/v1/messages", "https://relay.example.test/anthropic/v1"),
+        ("codex", "https://relay.example.test/v1/models", "https://relay.example.test/v1"),
+        ("codex", "https://relay.example.test/responses", "https://relay.example.test"),
+    ],
+)
+def test_parse_normalizes_resource_urls_to_api_base(profile_type, endpoint, expected):
+    key = "ANTHROPIC_AUTH_TOKEN" if profile_type == "claude" else "OPENAI_API_KEY"
+    parsed = parse_api_config_text(
+        f"{key}=sk-resource-path\nBASE_URL={endpoint}",
+        profile_type,
+    )
+
+    assert parsed.base_url == expected
+
+
+def test_parse_invalid_explicit_url_falls_back_to_best_valid_sniffed_candidate():
+    parsed = parse_api_config_text(
+        "API_KEY=sk-valid-fallback\n"
+        "BASE_URL=http://remote.example.test\n"
+        "API endpoint: https://api.relay.example.test/v1/responses",
+        "codex",
+    )
+
+    assert parsed.base_url == "https://api.relay.example.test/v1"
+    assert parsed.url_inferred is True
+
+
+def test_parse_ignores_documentation_links_when_provider_fallback_is_available():
+    parsed = parse_api_config_text(
+        "DEEPSEEK_API_KEY=sk-doc-link\n"
+        "See https://github.com/example/project and https://docs.openai.com/example",
+        "codex",
+    )
+
+    assert parsed.base_url == "https://api.deepseek.com"
+    assert parsed.provider_id == "deepseek"
+
+
+def test_parse_derives_readable_provider_name_for_common_country_suffix():
+    parsed = parse_api_config_text(
+        "API_KEY=sk-country-domain\nBASE_URL=https://api.relaycorp.co.uk/v1",
+        "codex",
+    )
+
+    assert parsed.provider_name == "relaycorp"
+    assert parsed.name == "relaycorp Codex"
+
+
+def test_parse_does_not_hide_an_invalid_explicit_port_by_sniffing_its_hostname():
+    with pytest.raises(ValueError, match="未找到 API 端点"):
+        parse_api_config_text(
+            "API_KEY=sk-invalid-port\nBASE_URL=localhost:not-a-port",
+            "codex",
+        )
+
+
+def test_parse_vendor_key_uses_provider_fallback_and_claude_auth_contract():
+    parsed = parse_api_config_text("DEEPSEEK_API_KEY=sk-deepseek-only", "claude")
+
+    assert parsed.provider_id == "deepseek"
+    assert parsed.base_url == "https://api.deepseek.com/anthropic"
+    assert parsed.auth_scheme == "auth_token"
+
+
 @pytest.mark.parametrize(
     ("text", "profile_type", "expected_url", "expected_key"),
     [
