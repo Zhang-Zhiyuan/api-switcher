@@ -177,6 +177,12 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 display = ProviderRegistry.get_provider("custom").display_name
             self._fields["codex_provider"][0].set(display)
             self._on_codex_provider_change(display)
+            # Parsed snippets always contain an API key/token.  When editing
+            # an existing Custom profile, do not let its old OpenAI-login
+            # switch keep the key fields disabled and silently discard the
+            # newly parsed secret on save.
+            self._set_codex_openai_auth_mode(False)
+            self._sync_codex_auth_fields(self._current_codex_provider())
             self._set_entry_value("name", parsed.name)
             self._set_entry_value("custom_base_url", parsed.base_url)
             self._set_entry_value("api_key", parsed.token)
@@ -673,6 +679,16 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 widget.toggle_btn.configure(state=state)
             else:
                 widget.configure(state=state)
+        except Exception:
+            pass
+
+    def _set_codex_openai_auth_mode(self, enabled: bool) -> None:
+        auth_field = self._fields.get("custom_requires_openai_auth")
+        if not auth_field:
+            return
+        auth_switch, _ = auth_field
+        try:
+            auth_switch.select() if enabled else auth_switch.deselect()
         except Exception:
             pass
 
