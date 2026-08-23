@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from ui import theme
-from ui.app import MAIN_LAYOUT_COMPACT_MIN_WIDTH, MAIN_LAYOUT_WIDE_MIN_WIDTH, app_status_severity, main_layout_mode
+from ui.app import (
+    MAIN_LAYOUT_COMPACT_MIN_WIDTH,
+    MAIN_LAYOUT_WIDE_MIN_WIDTH,
+    app_status_severity,
+    global_action_columns,
+    main_layout_mode,
+)
 from ui.dialogs.auto_continue_settings import _auto_continue_settings_layout
 from ui.tabs.common_tab import _storage_action_columns
 from ui.widgets.adaptive_tab_bar import AdaptiveTabBar, adaptive_tab_columns, adaptive_tab_uses_dropdown
@@ -164,6 +170,13 @@ def test_main_layout_breakpoints_are_stable():
     assert main_layout_mode(MAIN_LAYOUT_COMPACT_MIN_WIDTH) == "compact"
     assert main_layout_mode(MAIN_LAYOUT_WIDE_MIN_WIDTH - 1) == "compact"
     assert main_layout_mode(MAIN_LAYOUT_WIDE_MIN_WIDTH) == "wide"
+
+
+def test_global_action_toolbar_wraps_on_compact_windows():
+    assert global_action_columns(MAIN_LAYOUT_WIDE_MIN_WIDTH) == 4
+    assert global_action_columns(MAIN_LAYOUT_WIDE_MIN_WIDTH - 1) == 2
+    assert global_action_columns(MAIN_LAYOUT_COMPACT_MIN_WIDTH) == 2
+    assert global_action_columns(480) == 2
 
 
 def test_adaptive_tab_columns_wrap_all_destinations():

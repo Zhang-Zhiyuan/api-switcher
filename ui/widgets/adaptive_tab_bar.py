@@ -166,8 +166,13 @@ class AdaptiveTabBar(ctk.CTkFrame):
         if not self._buttons:
             return
         logical_width = self._logical_width()
-        mode = "dropdown" if adaptive_tab_uses_dropdown(logical_width, len(self._values)) else "buttons"
-        columns = 1 if mode == "dropdown" else adaptive_tab_columns(logical_width, len(self._values))
+        # Each button is laid out with 2px padding on both sides.  Reserve
+        # that spacing before deciding how many columns fit; otherwise a
+        # nominally exact one-row layout can exceed the parent by a few
+        # pixels and make the final tab unreachable on real windows.
+        layout_width = max(1, logical_width - len(self._values) * 4)
+        mode = "dropdown" if adaptive_tab_uses_dropdown(layout_width, len(self._values)) else "buttons"
+        columns = 1 if mode == "dropdown" else adaptive_tab_columns(layout_width, len(self._values))
         if mode == self._layout_mode and columns == self._column_count:
             return
 
