@@ -203,6 +203,22 @@ def test_failed_start_cleans_new_process_and_pid_file(monkeypatch, tmp_path):
     assert not pid_path.exists()
 
 
+def test_mihomo_failure_tail_is_bounded_to_current_start(monkeypatch, tmp_path):
+    log_path = tmp_path / "mihomo.log"
+    old = "old upstream timeout that must not be blamed on this start\n"
+    marker = "--- API切换器 start now port=17897 ---\n"
+    current = "current startup diagnostic\n"
+    log_path.write_text(old + marker + current, encoding="utf-8")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_LOG_PATH", log_path)
+    offset = len((old + marker).encode("utf-8"))
+
+    message = local_proxy._mihomo_failure_message("mihomo 启动失败", start_offset=offset)
+
+    assert "本次启动日志" in message
+    assert "current startup diagnostic" in message
+    assert "old upstream timeout" not in message
+
+
 def test_invalid_config_is_rejected_before_existing_proxy_is_stopped(monkeypatch, tmp_path):
     stopped = []
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_DIR", tmp_path)

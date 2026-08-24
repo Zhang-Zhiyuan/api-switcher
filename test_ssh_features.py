@@ -2299,6 +2299,81 @@ def test_ssh_connect_closes_every_failed_retry_client(isolated_ssh, monkeypatch)
     assert all(client.closed for client in clients)
 
 
+def test_ssh_connect_serializes_same_profile_and_reuses_single_client(isolated_ssh, monkeypatch):
+    import threading
+    import time
+
+    import core.ssh_manager as ssh_core
+
+    created = []
+    first_connect_entered = threading.Event()
+    release_first_connect = threading.Event()
+
+    class _ActiveTransport:
+        def is_active(self):
+            return True
+
+    class _SlowSSHClient:
+        def __init__(self):
+            created.append(self)
+
+        def set_missing_host_key_policy(self, _policy):
+            pass
+
+        def connect(self, **_kwargs):
+            first_connect_entered.set()
+            assert release_first_connect.wait(timeout=2)
+
+        def get_transport(self):
+            return _ActiveTransport()
+
+        def close(self):
+            pass
+
+    ref = "ssh:parallel:password"
+    profile = SSHProfile(
+        name="parallel",
+        host="ssh.example.com",
+        username="root",
+        auth_type="password",
+        password_ref=ref,
+    )
+    manager = SSHManager()
+    monkeypatch.setattr(ssh_core.paramiko, "SSHClient", _SlowSSHClient)
+    monkeypatch.setattr(security, "get_secret", lambda _ref: "secret")
+    results = []
+
+    first = threading.Thread(target=lambda: results.append(manager.connect(profile, max_retries=1)))
+    second = threading.Thread(target=lambda: results.append(manager.connect(profile, max_retries=1)))
+    first.start()
+    assert first_connect_entered.wait(timeout=1)
+    second.start()
+    time.sleep(0.05)
+    assert len(created) == 1
+    release_first_connect.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert len(created) == 1
+    assert results == [created[0], created[0]]
+
+
+def test_ssh_connection_test_does_not_duplicate_failure_prefix(monkeypatch):
+    manager = SSHManager()
+    profile = SSHProfile(name="remote", host="ssh.example.com", username="root")
+    monkeypatch.setattr(
+        manager,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("连接失败: timed out")),
+    )
+
+    success, message = manager.test_connection(profile)
+
+    assert success is False
+    assert message == "连接失败: timed out"
+
+
 def test_ssh_connection_test_closes_ephemeral_override_client(monkeypatch):
     class _Client:
         def __init__(self):

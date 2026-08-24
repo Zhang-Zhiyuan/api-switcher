@@ -10,6 +10,7 @@ import http.client
 import ipaddress
 import io
 import json
+import logging
 import os
 import platform
 import re
@@ -50,6 +51,7 @@ from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_te
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITE_IDS, LOCAL_PROXY_BUILTIN_SITES
 
 
+logger = logging.getLogger(__name__)
 DEFAULT_LOCAL_MIXED_PORT = 17897
 LOCAL_PORT_CANDIDATES = tuple(range(DEFAULT_LOCAL_MIXED_PORT, DEFAULT_LOCAL_MIXED_PORT + 50))
 LOCAL_PROXY_DIR = STORAGE_DIR / "local_ai_proxy"
@@ -858,7 +860,22 @@ def auto_start_local_ai_proxy_if_enabled() -> str:
     node = preferences.get("last_node") or _read_local_managed_proxy_node()
     if not node:
         return "Win11 本机代理自启已开启，但还没有保存过可启动节点"
-    return install_local_ai_proxy(remote_proxy.format_proxy_node(node))
+    # Rebuilding from only ``last_node`` used to silently collapse a verified
+    # multi-node fallback group to one Selector after reboot.  Reuse only nodes
+    # from our marked, bounded local config; the helper validates and
+    # de-duplicates every connection before it is handed to the config builder.
+    fallback_nodes = _existing_local_proxy_fallback_nodes(node)
+    if not fallback_nodes:
+        # Older versions may already have collapsed that config to one node.
+        # Rebuild from the managed offline subscription cache only when its
+        # selected-node fingerprint exactly matches ``last_node``. This strong
+        # linkage prevents a manually entered node from being mixed with an
+        # unrelated active subscription and requires no startup network call.
+        fallback_nodes = _cached_subscription_fallback_nodes(node)
+    return install_local_ai_proxy(
+        remote_proxy.format_proxy_node(node),
+        fallback_nodes=fallback_nodes,
+    )
 
 
 @_serialized_local_proxy_operation("更新 mihomo 内核")
@@ -2769,6 +2786,31 @@ def _existing_local_proxy_fallback_nodes(primary_node: dict) -> tuple[dict, ...]
         selected.append(normalized)
         seen.add(connection_key)
     return tuple(selected)
+
+
+def _cached_subscription_fallback_nodes(primary_node: dict) -> tuple[dict, ...]:
+    """Recover an older collapsed pool from its linked managed cache."""
+
+    try:
+        primary_key = remote_proxy.proxy_node_key(primary_node)
+        subscription_state = remote_proxy.load_proxy_subscription_state()
+        selected_key = str(subscription_state.get("selected_node_key") or "").strip()
+        if not selected_key or not hmac.compare_digest(primary_key, selected_key):
+            return ()
+        cached = remote_proxy.load_cached_proxy_subscription(subscription_state)
+        if cached is None:
+            return ()
+        qualities = remote_proxy.load_proxy_subscription_qualities(subscription_state)
+        return _local_proxy_fallback_nodes(primary_node, cached.nodes, qualities)
+    except Exception as exc:
+        # Cached subscription recovery is optional. Starting the explicitly
+        # saved primary node is safer than turning a damaged cache into an
+        # auto-start failure.
+        logger.warning(
+            "Unable to rebuild local proxy fallback pool from managed cache: %s",
+            type(exc).__name__,
+        )
+        return ()
 
 
 def _save_last_proxy_node(proxy_node: dict) -> None:
@@ -4743,8 +4785,11 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
     LOCAL_PROXY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _rotate_local_mihomo_log()
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    run_log_offset = 0
     with LOCAL_PROXY_LOG_PATH.open("ab") as log_handle:
         log_handle.write(f"\n--- API切换器 start {remote_proxy._now_iso()} port={mixed_port} ---\n".encode("utf-8"))
+        log_handle.flush()
+        run_log_offset = log_handle.tell()
         process = subprocess.Popen(
             [str(binary_path), "-d", str(LOCAL_PROXY_CONFIG_DIR)],
             cwd=str(LOCAL_PROXY_DIR),
@@ -4757,13 +4802,18 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
         atomic_write_text(LOCAL_PROXY_PID_PATH, str(process.pid))
         time.sleep(1.5)
         if process.poll() is not None:
-            raise RuntimeError(_mihomo_failure_message("mihomo 启动失败"))
+            raise RuntimeError(
+                _mihomo_failure_message("mihomo 启动失败", start_offset=run_log_offset)
+            )
         for _ in range(10):
             if _is_port_listening(mixed_port):
                 return
             time.sleep(0.5)
         raise RuntimeError(
-            _mihomo_failure_message(f"mihomo 已启动但端口 {mixed_port} 未监听")
+            _mihomo_failure_message(
+                f"mihomo 已启动但端口 {mixed_port} 未监听",
+                start_offset=run_log_offset,
+            )
         )
     except Exception as exc:
         stopped = True
@@ -4783,31 +4833,61 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
 
 
 def _rotate_local_mihomo_log(max_bytes: int = 8 * 1024 * 1024) -> None:
-    """Keep one bounded previous mihomo log instead of growing forever."""
+    """Keep one genuinely bounded previous mihomo log.
+
+    Renaming an oversized log used to leave the complete (potentially very
+    large) file as ``mihomo.log.1`` forever once silent logging was enabled.
+    Copy only the newest bounded tail before the next detached process opens a
+    fresh log. This also avoids reading a multi-gigabyte historical log into
+    memory.
+    """
 
     try:
-        if LOCAL_PROXY_LOG_PATH.stat().st_size <= max(1024, int(max_bytes)):
+        limit = max(1024, int(max_bytes))
+        size = LOCAL_PROXY_LOG_PATH.stat().st_size
+        if size <= limit:
             return
         rotated = LOCAL_PROXY_LOG_PATH.with_suffix(LOCAL_PROXY_LOG_PATH.suffix + ".1")
-        rotated.unlink(missing_ok=True)
-        replace_with_retry(LOCAL_PROXY_LOG_PATH, rotated)
+        with LOCAL_PROXY_LOG_PATH.open("rb") as source:
+            source.seek(max(0, size - limit))
+            tail = source.read(limit)
+        atomic_write_bytes(rotated, tail)
+        LOCAL_PROXY_LOG_PATH.unlink()
     except (OSError, TypeError, ValueError):
         # Logging must never prevent the proxy from starting.
         return
 
 
-def _mihomo_failure_message(prefix: str) -> str:
-    tail = _read_log_tail()
+def _mihomo_failure_message(prefix: str, *, start_offset: int = 0) -> str:
+    tail = _read_log_tail(start_offset=start_offset)
     if not tail:
-        return f"{prefix}，详见日志: {LOCAL_PROXY_LOG_PATH}"
-    return f"{prefix}，详见日志: {LOCAL_PROXY_LOG_PATH}；最近日志: {tail}"
+        suffix = "；本次启动未输出额外诊断" if start_offset else ""
+        return f"{prefix}，详见日志: {LOCAL_PROXY_LOG_PATH}{suffix}"
+    label = "本次启动日志" if start_offset else "最近日志"
+    return f"{prefix}，详见日志: {LOCAL_PROXY_LOG_PATH}；{label}: {tail}"
 
 
-def _read_log_tail(max_lines: int = 8, max_chars: int = 1000) -> str:
+def _read_log_tail(
+    max_lines: int = 8,
+    max_chars: int = 1000,
+    *,
+    start_offset: int = 0,
+    max_scan_bytes: int = 64 * 1024,
+) -> str:
     try:
-        text = LOCAL_PROXY_LOG_PATH.read_text(encoding="utf-8", errors="replace")
+        with LOCAL_PROXY_LOG_PATH.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            normalized_start = max(0, min(int(start_offset or 0), size))
+            scan_start = max(normalized_start, size - max(1024, int(max_scan_bytes)))
+            handle.seek(scan_start)
+            payload = handle.read(max(1024, int(max_scan_bytes)))
     except Exception:
         return ""
+    text = payload.decode("utf-8", errors="replace")
+    # A bounded seek may start in the middle of a UTF-8/log line.  It is only a
+    # context line, so discard it instead of displaying a misleading fragment.
+    if scan_start > normalized_start and "\n" in text:
+        text = text.split("\n", 1)[1]
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-max(1, max_lines):])
     if len(tail) > max_chars:

@@ -132,5 +132,27 @@ def test_write_data_dir_pointer_falls_back_to_user_pointer(monkeypatch, tmp_path
         paths.STORAGE_DIR = original_storage_dir
 
 
+def test_explicit_data_directory_does_not_import_unrelated_legacy_storage(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    legacy = tmp_path / "app" / "storage"
+    destination = tmp_path / "isolated"
+    legacy.mkdir(parents=True)
+    (legacy / "profiles.json").write_text("legacy", encoding="utf-8")
+
+    monkeypatch.setattr(paths, "LEGACY_STORAGE_DIRS", [legacy])
+    monkeypatch.setattr(paths, "STORAGE_DIR", destination)
+    monkeypatch.setattr(paths, "BACKUPS_DIR", destination / "backups")
+    monkeypatch.setattr(paths, "SECRETS_DIR", destination / "secrets")
+    monkeypatch.setattr(paths, "STORAGE_DIR_SOURCE", paths.ENV_DATA_DIR)
+
+    migrated = paths.ensure_storage_dirs()
+
+    assert migrated == []
+    assert not (destination / "profiles.json").exists()
+    assert destination.is_dir()
+
+
 if __name__ == "__main__":
     main()

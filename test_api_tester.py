@@ -161,6 +161,42 @@ def test_request_json_classifies_connection_reset_as_network_error(monkeypatch):
     assert "connection reset" in result.error_details
 
 
+def test_request_json_rejects_non_ascii_secret_before_network(monkeypatch):
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not run")),
+    )
+
+    ok, data, result = APITester._request_json(
+        "https://relay.example.com/v1/models",
+        headers={"Authorization": "Bearer 请粘贴密钥"},
+    )
+
+    assert ok is False
+    assert data is None
+    assert result.message == "API Key/Auth Token格式无效"
+    assert "中文说明" in result.error_details
+
+
+def test_event_stream_rejects_multiline_secret_before_network(monkeypatch):
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not run")),
+    )
+
+    result = APITester._request_event_stream(
+        "https://relay.example.com/v1/responses",
+        headers={"Authorization": "Bearer sk-valid\nexport OTHER=value"},
+        payload={"model": "gpt-test"},
+    )
+
+    assert result.success is False
+    assert result.message == "API Key/Auth Token格式无效"
+    assert "换行" in result.error_details
+
+
 def test_openai_blank_model_uses_latest_from_models(monkeypatch):
     seen_payloads = []
 
