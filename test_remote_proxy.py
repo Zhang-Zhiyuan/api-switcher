@@ -4874,7 +4874,7 @@ def test_reload_local_ai_proxy_verified_restores_previous_node_when_candidates_f
             "本机 AI 代理已配置，运行中: http://127.0.0.1:17897；AI 连通性 3/3 可达",
         ]
     )
-    def fake_reload(text):
+    def fake_reload(text, **_kwargs):
         reloads.append(remote_proxy.parse_proxy_node(text)["name"])
         return f"本机 AI 代理已热更新节点为 {reloads[-1]}"
 
@@ -4914,7 +4914,7 @@ def test_reload_local_ai_proxy_verified_restores_previous_node_when_initial_prob
         ]
     )
 
-    def fake_reload(text, *, profile_id=""):
+    def fake_reload(text, *, profile_id="", **_kwargs):
         reloads.append((remote_proxy.parse_proxy_node(text)["name"], profile_id))
         return f"本机 AI 代理已热更新节点为 {reloads[-1][0]}"
 
@@ -5033,7 +5033,7 @@ def test_reload_local_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
         ]
     )
 
-    def fake_reload(text):
+    def fake_reload(text, **_kwargs):
         name = remote_proxy.parse_proxy_node(text)["name"]
         reloads.append(name)
         return f"reloaded {name}"
@@ -6212,7 +6212,7 @@ def test_install_local_proxy_verified_reports_failed_original_restore(monkeypatc
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda _state: False)
 
-    def fake_install(text, _port=17897):
+    def fake_install(text, _port=17897, **_kwargs):
         name = remote_proxy.parse_proxy_node(text)["name"]
         calls.append(name)
         if name == "requested" and calls.count("requested") > 1:

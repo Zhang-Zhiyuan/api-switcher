@@ -3469,6 +3469,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     if strict_privacy
                     else "严格隐私未开启：未命中代理规则的流量可能 DIRECT。\n"
                 )
+                + "如果当前订阅有合格候选，会一并装载最多 4 个备用节点，主节点失效后由 mihomo 为新连接自动切换。\n"
                 + "这不是 VPN/TUN，无法阻止忽略代理的程序、WebRTC/UDP 或系统 DNS/IPv6 绕过。"
                 "启动后请重启 Codex、Claude Code、VS Code 并打开新终端。"
             ),

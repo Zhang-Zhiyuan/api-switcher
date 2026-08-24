@@ -27,7 +27,9 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote as url_quote
 from urllib.parse import urlparse
 
 from config.paths import STORAGE_DIR
@@ -51,6 +53,7 @@ LOCAL_PROXY_APPLIED_CONFIG_STATE_KEYS = (
     "applied_config_mixed_port",
     "applied_config_at",
 )
+LOCAL_PROXY_INSTALL_TRANSACTION_GRACE_SECONDS = 60
 MIHOMO_DOWNLOAD_RETRIES = 3
 MIHOMO_RELEASE_API_URL = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 MIHOMO_RELEASE_STATE_PATH = LOCAL_PROXY_BIN_DIR / "mihomo-release.json"
@@ -120,12 +123,26 @@ class LocalAIProxyStatus:
     # ``active`` is trusted only after validating the running managed config.
     strict_privacy_active: bool = False
     strict_privacy_desired: bool = False
+    network_healthy: bool | None = None
+    fallback_candidates: int = 0
+    fallback_active: bool = False
 
     def summary(self) -> str:
-        state = "运行中" if self.running else "未运行"
+        if self.running and self.network_healthy is False:
+            state = "进程运行，但上游健康检查失败"
+        else:
+            state = "运行中" if self.running else "未运行"
         installed = "已配置" if self.installed else "未配置"
         detail = f"；{self.detail}" if self.detail else ""
         return f"本机 AI 代理{installed}，{state}: {self.proxy_url}{detail}"
+
+
+@dataclass(frozen=True)
+class _LocalMihomoFailoverStatus:
+    detail: str = ""
+    healthy: bool | None = None
+    candidates: int = 0
+    active_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -802,7 +819,12 @@ def _repair_local_runtime_state_for_core_restart(
         }
 
 
-def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> str:
+def install_local_ai_proxy(
+    proxy_text: str,
+    mixed_port: int = DEFAULT_LOCAL_MIXED_PORT,
+    *,
+    fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
+) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
     # This preflight must precede directory/binary/state/config/process/env
@@ -814,6 +836,13 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     config_path = LOCAL_PROXY_CONFIG_DIR / "config.yaml"
     binary_path = _ensure_mihomo_binary()
     proxy_url = _proxy_url(mixed_port)
+    config_content = _build_local_mihomo_config(
+        proxy_node,
+        mixed_port,
+        preferences=routing_preferences,
+        fallback_nodes=fallback_nodes,
+    )
+    fallback_candidates = _managed_proxy_pool_size(config_content)
 
     state = _load_state()
     if not isinstance(state.get("previous_env"), dict):
@@ -834,6 +863,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
             "config_path": str(config_path),
             "binary_path": str(binary_path),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "fallback_candidates": fallback_candidates,
             "installing": True,
             "updated_at": remote_proxy._now_iso(),
         }
@@ -841,14 +871,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     _save_state(state)
 
     try:
-        config_path.write_text(
-            _build_local_mihomo_config(
-                proxy_node,
-                mixed_port,
-                preferences=routing_preferences,
-            ),
-            encoding="utf-8",
-        )
+        config_path.write_text(config_content, encoding="utf-8")
         _start_local_mihomo(binary_path, mixed_port)
         applied_pid = _read_pid()
         applied_config_sha256 = _local_config_sha256(config_path)
@@ -882,6 +905,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
             "node_key": remote_proxy.proxy_node_key(proxy_node),
             "node_name": str(proxy_node.get("name") or ""),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "fallback_candidates": fallback_candidates,
             "installing": False,
             "updated_at": remote_proxy._now_iso(),
         }
@@ -899,7 +923,7 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     return (
         f"本机 AI 代理已启动: {proxy_url}；"
         + (f"{core_detail}；" if core_detail else "")
-        +
+        + f"内核故障切换池 {fallback_candidates} 个节点；"
         "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
         "并临时关闭系统 PAC/自动检测代理；新终端或重开的 VS Code 窗口生效"
     )
@@ -997,7 +1021,12 @@ def install_local_ai_proxy_verified(
         )
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
     requested_key = remote_proxy.proxy_node_key(requested_node)
-    install_message = install_local_ai_proxy(proxy_text)
+    fallback_nodes = _local_proxy_fallback_nodes(
+        requested_node,
+        candidate_nodes,
+        quality_results,
+    )
+    install_message = install_local_ai_proxy(proxy_text, fallback_nodes=fallback_nodes)
     probe_message = probe_local_ai_proxy()
     if remote_proxy._probe_summary_all_ok(probe_message):
         return f"{install_message}；验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
@@ -1038,7 +1067,15 @@ def install_local_ai_proxy_verified(
         latencies.get(remote_proxy.proxy_subscription_node_key(selected))
     )
     try:
-        install_local_ai_proxy(remote_proxy.format_proxy_node(selected.node))
+        selected_fallback_nodes = _local_proxy_fallback_nodes(
+            selected.node,
+            candidate_nodes,
+            quality_results,
+        )
+        install_local_ai_proxy(
+            remote_proxy.format_proxy_node(selected.node),
+            fallback_nodes=selected_fallback_nodes,
+        )
         candidate_probe = probe_local_ai_proxy()
     except Exception as exc:
         candidate_probe = f"候选应用或验证执行失败: {exc}"
@@ -1071,6 +1108,7 @@ def reload_local_ai_proxy(
     mixed_port: int = DEFAULT_LOCAL_MIXED_PORT,
     *,
     profile_id: str = "",
+    fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
 ) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
@@ -1088,6 +1126,8 @@ def reload_local_ai_proxy(
     if not status.running:
         return "本机 AI 代理未运行，已跳过热更新"
     proxy_node = remote_proxy.parse_proxy_node(proxy_text)
+    if fallback_nodes is None:
+        fallback_nodes = _existing_local_proxy_fallback_nodes(proxy_node)
     config_path = Path(status.config_path)
     old_config = config_path.read_text(encoding="utf-8", errors="replace") if config_path.exists() else ""
     if not old_config.strip():
@@ -1096,6 +1136,7 @@ def reload_local_ai_proxy(
         proxy_node,
         mixed_port,
         preferences=routing_preferences,
+        fallback_nodes=fallback_nodes,
     )
     current_pid = _read_pid()
     same_config = old_config.strip() == new_config.strip()
@@ -1151,6 +1192,7 @@ def reload_local_ai_proxy(
             "node_key": remote_proxy.proxy_node_key(proxy_node),
             "node_name": str(proxy_node.get("name") or ""),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "fallback_candidates": _managed_proxy_pool_size(new_config),
             "updated_at": remote_proxy._now_iso(),
         }
     )
@@ -1163,7 +1205,11 @@ def reload_local_ai_proxy(
     _save_state(state)
     _save_last_proxy_node(proxy_node)
     _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
-    return f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}"
+    fallback_candidates = _managed_proxy_pool_size(new_config)
+    return (
+        f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}；"
+        f"内核故障切换池 {fallback_candidates} 个节点"
+    )
 
 
 def reload_local_ai_proxy_verified(
@@ -1180,6 +1226,11 @@ def reload_local_ai_proxy_verified(
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
     requested_key = remote_proxy.proxy_node_key(requested_node)
     original_node = _read_local_managed_proxy_node()
+    fallback_nodes = _local_proxy_fallback_nodes(
+        requested_node,
+        candidate_nodes,
+        quality_results,
+    )
     if automatic_update and not _prevalidated_local_candidate_matches(
         requested_node,
         _prevalidated_result,
@@ -1195,9 +1246,16 @@ def reload_local_ai_proxy_verified(
             return "本机 AI 代理当前运行节点在深测期间已变化，已放弃自动更新且未切换节点"
     try:
         if profile_id:
-            reload_message = reload_local_ai_proxy(proxy_text, profile_id=profile_id)
+            reload_message = reload_local_ai_proxy(
+                proxy_text,
+                profile_id=profile_id,
+                fallback_nodes=fallback_nodes,
+            )
         else:
-            reload_message = reload_local_ai_proxy(proxy_text)
+            reload_message = reload_local_ai_proxy(
+                proxy_text,
+                fallback_nodes=fallback_nodes,
+            )
     except Exception as exc:
         return f"本机 AI 代理自动更新跳过，{exc}"
     if "跳过" in reload_message:
@@ -1268,13 +1326,22 @@ def reload_local_ai_proxy_verified(
         selected_result,
     ):
         try:
+            selected_fallback_nodes = _local_proxy_fallback_nodes(
+                selected.node,
+                candidate_nodes,
+                quality_results,
+            )
             if profile_id:
                 reload_local_ai_proxy(
                     remote_proxy.format_proxy_node(selected.node),
                     profile_id=profile_id,
+                    fallback_nodes=selected_fallback_nodes,
                 )
             else:
-                reload_local_ai_proxy(remote_proxy.format_proxy_node(selected.node))
+                reload_local_ai_proxy(
+                    remote_proxy.format_proxy_node(selected.node),
+                    fallback_nodes=selected_fallback_nodes,
+                )
             candidate_probe = probe_local_ai_proxy()
         except Exception as exc:
             candidate_probe = f"候选应用或验证执行失败: {exc}"
@@ -1392,6 +1459,122 @@ def current_local_ai_proxy_node_key() -> str:
         return ""
 
 
+def _local_mihomo_failover_status(
+    config_path: Path,
+    mixed_port: int,
+) -> _LocalMihomoFailoverStatus:
+    try:
+        content = config_path.read_text(encoding="utf-8", errors="replace")
+        parsed = remote_proxy.yaml.safe_load(content)
+    except Exception:
+        return _LocalMihomoFailoverStatus()
+    if not isinstance(parsed, dict) or remote_proxy.AI_PROXY_CONFIG_MARKER not in content:
+        return _LocalMihomoFailoverStatus()
+    groups = parsed.get("proxy-groups")
+    group = next(
+        (
+            item
+            for item in groups or ()
+            if isinstance(item, dict) and str(item.get("name") or "").strip() == "AI-PROXY"
+        ),
+        None,
+    )
+    if not isinstance(group, dict):
+        return _LocalMihomoFailoverStatus()
+    raw_names = group.get("proxies")
+    names = (
+        [str(name or "").strip() for name in raw_names]
+        if isinstance(raw_names, list)
+        else []
+    )
+    if not names or any(not name for name in names):
+        return _LocalMihomoFailoverStatus()
+    candidates = len(names)
+    group_type = str(group.get("type") or "").strip().casefold()
+    if group_type != "fallback":
+        detail = (
+            f"内核自动故障切换未启用（当前仅 {candidates or 1} 个静态候选）"
+            if candidates <= 1
+            else f"内核自动故障切换未启用（{candidates} 个静态候选）"
+        )
+        return _LocalMihomoFailoverStatus(detail=detail, candidates=candidates)
+
+    controller_port = remote_proxy.mihomo_controller_port(mixed_port)
+    try:
+        group_state = _read_local_mihomo_controller_json(
+            controller_port,
+            "/proxies/AI-PROXY",
+        )
+        active_name = str(group_state.get("now") or "").strip()
+        active_state = (
+            _read_local_mihomo_controller_json(
+                controller_port,
+                "/proxies/" + url_quote(active_name, safe=""),
+            )
+            if active_name
+            else {}
+        )
+    except Exception:
+        return _LocalMihomoFailoverStatus(
+            detail=f"内核自动故障切换已配置（{candidates} 个候选），控制器健康状态暂不可读",
+            candidates=candidates,
+        )
+
+    history = active_state.get("history") if isinstance(active_state, dict) else None
+    if not isinstance(history, list) or not history:
+        history = group_state.get("history") if isinstance(group_state, dict) else None
+    history = history if isinstance(history, list) else []
+    active_index = names.index(active_name) + 1 if active_name in names else 0
+    active_fallback = active_index > 1
+    if not history:
+        detail = f"内核自动故障切换已启用（{candidates} 个候选），端到端健康检查初始化中"
+        return _LocalMihomoFailoverStatus(
+            detail=detail,
+            candidates=candidates,
+            active_fallback=active_fallback,
+        )
+    last = history[-1] if isinstance(history[-1], dict) else {}
+    try:
+        delay_ms = max(0, int(last.get("delay") or 0))
+    except (TypeError, ValueError):
+        delay_ms = 0
+    alive_value = (
+        active_state.get("alive")
+        if isinstance(active_state, dict) and "alive" in active_state
+        else group_state.get("alive")
+    )
+    healthy = bool(alive_value) and delay_ms > 0
+    active_label = f"当前第 {active_index} 个" if active_index else "当前候选未知"
+    if healthy:
+        suffix = f"，已切到备用节点，健康延迟 {delay_ms}ms" if active_fallback else f"，健康延迟 {delay_ms}ms"
+        detail = f"内核自动故障切换已启用（{candidates} 个候选，{active_label}）{suffix}"
+    else:
+        detail = f"内核自动故障切换池健康检查失败（{candidates} 个候选，{active_label}）"
+    return _LocalMihomoFailoverStatus(
+        detail=detail,
+        healthy=healthy,
+        candidates=candidates,
+        active_fallback=active_fallback,
+    )
+
+
+def _read_local_mihomo_controller_json(controller_port: int, path: str) -> dict:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{int(controller_port)}{path}",
+        headers={"Accept": "application/json"},
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=1.5) as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        if status < 200 or status >= 300:
+            raise RuntimeError(f"mihomo controller HTTP {status}")
+        payload = _read_bounded_response(response, max_bytes=1024 * 1024, label="mihomo 控制器")
+    parsed = json.loads(payload.decode("utf-8", errors="strict"))
+    if not isinstance(parsed, dict):
+        raise RuntimeError("mihomo 控制器响应不是对象")
+    return parsed
+
+
 def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalAIProxyStatus:
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
@@ -1415,6 +1598,11 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         pid=pid,
     )
     strict_privacy_active = strict_config_contract and applied_config_matches
+    failover_status = (
+        _local_mihomo_failover_status(config_path, mixed_port)
+        if running
+        else _LocalMihomoFailoverStatus()
+    )
     details = [
         _local_proxy_privacy_posture_detail(
             desired=strict_privacy_desired,
@@ -1426,6 +1614,8 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
     core_detail = _local_mihomo_core_status_detail()
     if core_detail:
         details.append(core_detail)
+    if failover_status.detail:
+        details.append(failover_status.detail)
     stored_config_path = str(state.get("config_path") or "").strip()
     if stored_config_path and _normalize_existing_path(stored_config_path) != _normalize_existing_path(config_path):
         details.append("状态文件中的非受管配置路径已忽略")
@@ -1459,6 +1649,9 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         detail="；".join(details),
         strict_privacy_active=strict_privacy_active,
         strict_privacy_desired=strict_privacy_desired,
+        network_healthy=failover_status.healthy,
+        fallback_candidates=failover_status.candidates,
+        fallback_active=failover_status.active_fallback,
     )
 
 
@@ -2312,12 +2505,109 @@ def _build_local_mihomo_config(
     mixed_port: int,
     *,
     preferences: dict | None = None,
+    fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
 ) -> str:
     return remote_proxy.build_mihomo_config(
         proxy_node,
         mixed_port,
+        fallback_proxy_nodes=fallback_nodes,
+        health_checked_group=True,
+        # A long-running detached process cannot safely rotate an inherited
+        # Windows stdout handle while it is open.  Controller health state and
+        # explicit probes provide bounded diagnostics without an unbounded log
+        # containing destination metadata.
+        log_level="silent",
         **_routing_options_from_preferences(preferences),
     )
+
+
+def _managed_proxy_pool_size(config_content: str) -> int:
+    try:
+        parsed = remote_proxy.yaml.safe_load(str(config_content or ""))
+    except Exception:
+        return 0
+    proxies = parsed.get("proxies") if isinstance(parsed, dict) else None
+    return len(proxies) if isinstance(proxies, list) else 0
+
+
+def _local_proxy_fallback_nodes(
+    primary_node: dict,
+    candidate_nodes,
+    quality_results: dict[str, remote_proxy.ProxyNodeQualityResult | dict] | None = None,
+) -> tuple[dict, ...]:
+    """Build a bounded, policy-safe pool; mihomo performs live health checks."""
+
+    try:
+        primary_connection_key = remote_proxy._proxy_node_connection_key(primary_node)
+    except (TypeError, ValueError):
+        return ()
+    qualities = quality_results or {}
+    candidates = remote_proxy.ranked_proxy_subscription_nodes_for_ai_probe(
+        remote_proxy.automatic_proxy_subscription_nodes(candidate_nodes, qualities),
+        qualities,
+    )
+    selected = []
+    seen = {primary_connection_key}
+    limit = max(0, remote_proxy.AI_PROXY_FALLBACK_MAX_NODES - 1)
+    for item in candidates:
+        if len(selected) >= limit:
+            break
+        item_key = remote_proxy.proxy_subscription_node_key(item)
+        quality = qualities.get(item_key)
+        if (
+            remote_proxy.proxy_node_quality_decisive_for_ai_proxy(quality)
+            and not remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality)
+        ):
+            continue
+        try:
+            normalized = remote_proxy._normalize_proxy_node(item.node)
+            connection_key = remote_proxy._proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip():
+            continue
+        if connection_key in seen:
+            continue
+        selected.append(normalized)
+        seen.add(connection_key)
+    return tuple(selected)
+
+
+def _existing_local_proxy_fallback_nodes(primary_node: dict) -> tuple[dict, ...]:
+    """Preserve the current bounded pool across routing-only hot reloads."""
+
+    state = _load_state()
+    config_path = _managed_local_config_path(state)
+    try:
+        content = config_path.read_text(encoding="utf-8", errors="replace")
+        parsed = remote_proxy.yaml.safe_load(content)
+        proxy_nodes = parsed.get("proxies") if isinstance(parsed, dict) else None
+        primary_key = remote_proxy._proxy_node_connection_key(primary_node)
+    except Exception:
+        return ()
+    if (
+        remote_proxy.AI_PROXY_CONFIG_MARKER not in content
+        or not isinstance(proxy_nodes, list)
+    ):
+        return ()
+
+    selected = []
+    seen = {primary_key}
+    for node in proxy_nodes:
+        if len(selected) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES - 1:
+            break
+        if not isinstance(node, dict):
+            continue
+        try:
+            normalized = remote_proxy._normalize_proxy_node(node)
+            connection_key = remote_proxy._proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
+            continue
+        selected.append(normalized)
+        seen.add(connection_key)
+    return tuple(selected)
 
 
 def _save_last_proxy_node(proxy_node: dict) -> None:
@@ -2512,10 +2802,136 @@ def _apply_local_env(mixed_port: int) -> None:
     persistent_env.set_local_user_env(_local_proxy_env_values(mixed_port))
 
 
+def _state_owns_local_proxy_settings(state: dict, mixed_port: int) -> bool:
+    ownership = state.get("managed_proxy_env") if isinstance(state, dict) else None
+    if not isinstance(ownership, dict):
+        return False
+    owned_names = {
+        str(name or "").strip()
+        for name in ownership.get("variables") or ()
+        if str(name or "").strip()
+    }
+    return bool(
+        str(ownership.get("owner") or "").strip().casefold() == "api-switcher"
+        and str(ownership.get("proxy_url") or "").strip() == _proxy_url(mixed_port)
+        and set(remote_proxy.PROXY_ENV_KEYS).issubset(owned_names)
+    )
+
+
+def reconcile_running_local_ai_proxy_settings() -> str:
+    """Repair only missing environment values owned by a verified live proxy.
+
+    A non-empty different value is treated as an intentional external change
+    and is never overwritten by startup reconciliation.
+    """
+
+    if os.name != "nt":
+        return ""
+    state = _load_state()
+    try:
+        mixed_port = remote_proxy._normalize_port(
+            state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+            "本机代理端口",
+        )
+    except (TypeError, ValueError):
+        return ""
+    if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
+        return ""
+    if not _state_owns_local_proxy_settings(state, mixed_port):
+        return "本机代理正在运行，但环境变量所有权记录不完整，未自动修复"
+
+    expected = _local_proxy_env_values(mixed_port)
+    updates = {}
+    conflicts = []
+    try:
+        for key in remote_proxy.PROXY_ENV_KEYS:
+            current = persistent_env._local_user_env_value_strict(key)
+            if current is None or not str(current).strip():
+                updates[key] = expected[key]
+            elif current == expected[key]:
+                os.environ[key] = expected[key]
+            else:
+                conflicts.append(key)
+    except Exception as exc:
+        return f"Windows 用户环境变量核对失败，未自动修复: {type(exc).__name__}"
+    if updates:
+        persistent_env.set_local_user_env(updates)
+
+    pieces = []
+    if updates:
+        pieces.append("已补齐本工具缺失的 Windows 用户环境变量: " + "、".join(updates))
+    if conflicts:
+        pieces.append("检测到用户另行修改的代理变量，未覆盖: " + "、".join(conflicts))
+    return "；".join(pieces)
+
+
+def reconcile_local_ai_proxy_startup_settings() -> str:
+    """Repair a live proxy or restore settings left by a dead owned proxy."""
+
+    if os.name != "nt":
+        return ""
+    state = _load_state()
+    try:
+        mixed_port = remote_proxy._normalize_port(
+            state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+            "本机代理端口",
+        )
+    except (TypeError, ValueError):
+        return ""
+    managed_running = _managed_local_proxy_is_running(state)
+    port_listening = _is_port_listening(mixed_port)
+    if managed_running and port_listening:
+        return reconcile_running_local_ai_proxy_settings()
+    if not _state_owns_local_proxy_settings(state, mixed_port):
+        return ""
+    if state.get("installing") and _local_proxy_state_update_is_recent(state):
+        return "本机代理仍处于启动交易中，未自动改动代理设置"
+    if managed_running:
+        return "本机代理进程存在但端口暂未监听，未自动改动代理设置"
+    if port_listening:
+        return "本机代理端口由其他进程监听，未自动改动代理设置"
+
+    restore_errors = _restore_managed_settings(state, mixed_port)
+    try:
+        if restore_errors:
+            _save_restore_retry_state(state, mixed_port, restore_errors)
+        else:
+            LOCAL_PROXY_PID_PATH.unlink(missing_ok=True)
+            _save_state({})
+    except Exception as exc:
+        restore_errors.append(f"状态记录: {exc}")
+        try:
+            _save_restore_retry_state(state, mixed_port, restore_errors)
+        except Exception:
+            pass
+    if restore_errors:
+        return "检测到本工具上次代理已退出，自动恢复本机设置未完成: " + "；".join(
+            restore_errors
+        )
+    return (
+        "检测到本工具上次代理已退出，已自动恢复它写入的 Windows 环境变量、"
+        "VS Code 和系统代理设置；已打开的终端需重开"
+    )
+
+
+def _local_proxy_state_update_is_recent(state: dict) -> bool:
+    raw = str(state.get("updated_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return -5 <= age_seconds <= LOCAL_PROXY_INSTALL_TRANSACTION_GRACE_SECONDS
+
+
 def _capture_previous_env() -> dict:
     previous = {}
     for key in remote_proxy.PROXY_ENV_KEYS:
-        value = persistent_env._local_user_env_value(key)
+        value = persistent_env._local_user_env_value_strict(key)
         previous[key] = {"exists": value is not None, "value": value or ""}
     return previous
 
@@ -2528,7 +2944,7 @@ def _restore_local_env(state: dict, mixed_port: int) -> None:
     updates = {}
     deletes = []
     for key in remote_proxy.PROXY_ENV_KEYS:
-        current = persistent_env._local_user_env_value(key)
+        current = persistent_env._local_user_env_value_strict(key)
         if current != expected.get(key):
             continue
         item = previous.get(key)
@@ -2566,6 +2982,7 @@ def _save_restore_retry_state(state: dict, mixed_port: int, restore_errors: list
     retry_state = dict(state or {})
     retry_state.pop("pid", None)
     retry_state["mixed_port"] = mixed_port
+    retry_state["installing"] = False
     retry_state["last_restore_error"] = "; ".join(str(item) for item in restore_errors)
     retry_state["updated_at"] = remote_proxy._now_iso()
     _save_state(retry_state)

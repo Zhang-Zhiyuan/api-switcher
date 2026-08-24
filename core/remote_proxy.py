@@ -102,6 +102,13 @@ class _NoBypassProxyHandler(urlrequest.ProxyHandler):
 AI_PROXY_CONFIG_MARKER = "# Managed by API切换器 AI proxy"
 AI_PROXY_STRICT_PRIVACY_MARKER = "# API-Switcher-Strict-Privacy: application-layer"
 AI_PROXY_INTERNAL_NODE_NAME = "API-SWITCHER-NODE"
+AI_PROXY_FALLBACK_NODE_PREFIX = "API-SWITCHER-FALLBACK-"
+AI_PROXY_FALLBACK_MAX_NODES = 5
+AI_PROXY_HEALTH_CHECK_URL = "https://chatgpt.com/cdn-cgi/trace"
+AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS = 200
+AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 15
+AI_PROXY_HEALTH_CHECK_TIMEOUT_MS = 6000
+AI_PROXY_HEALTH_CHECK_MAX_FAILURES = 2
 AI_PROXY_DISPLAY_NAME_MARKER = "# API-Switcher-Node-Name-B64:"
 PRIVATE_DIRECT_IP_RULES = (
     "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
@@ -2726,17 +2733,21 @@ def build_mihomo_config(
     proxy_node: dict,
     mixed_port: int = 7890,
     *,
+    fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None = None,
+    health_checked_group: bool = False,
+    log_level: str = "warning",
     extra_proxy_domains: tuple[str, ...] | list[str] | None = None,
     extra_proxy_ip_cidrs: tuple[str, ...] | list[str] | None = None,
     proxy_non_cn: bool = False,
     strict_privacy: bool = False,
 ) -> str:
-    node = _normalize_proxy_node(proxy_node)
-    display_name = str(node.get("name") or "AI_PROXY").strip() or "AI_PROXY"
+    primary_node = _normalize_proxy_node(proxy_node)
+    display_name = str(primary_node.get("name") or "AI_PROXY").strip() or "AI_PROXY"
     # Subscription display names share mihomo's outbound namespace with
     # built-ins and proxy groups.  Never let names such as DIRECT/REJECT/PASS
     # or AI-PROXY become a routing target.
-    node["name"] = AI_PROXY_INTERNAL_NODE_NAME
+    nodes = _managed_mihomo_proxy_nodes(primary_node, fallback_proxy_nodes)
+    node_names = [str(node["name"]) for node in nodes]
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     rules = [
         *(f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains)),
@@ -2762,15 +2773,14 @@ def build_mihomo_config(
         "allow-lan": False,
         "bind-address": "127.0.0.1",
         "mode": "rule",
-        "log-level": "warning",
+        "log-level": _normalize_mihomo_log_level(log_level),
         "ipv6": not strict_privacy,
-        "proxies": [node],
+        "proxies": nodes,
         "proxy-groups": [
-            {
-                "name": "AI-PROXY",
-                "type": "select",
-                "proxies": [AI_PROXY_INTERNAL_NODE_NAME],
-            }
+            _managed_ai_proxy_group(
+                node_names,
+                health_checked=bool(health_checked_group or len(node_names) > 1),
+            )
         ],
         "rules": rules,
     }
@@ -2788,6 +2798,65 @@ def build_mihomo_config(
     if strict_privacy:
         markers.append(AI_PROXY_STRICT_PRIVACY_MARKER)
     return "\n".join(markers) + "\n" + _dump_yaml(config)
+
+
+def _normalize_mihomo_log_level(value: object) -> str:
+    level = str(value or "warning").strip().casefold()
+    return level if level in {"silent", "error", "warning", "info", "debug"} else "warning"
+
+
+def _proxy_node_connection_key(node: dict) -> str:
+    normalized = _normalize_proxy_node(node)
+    normalized["name"] = "API-SWITCHER-CONNECTION"
+    payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _managed_mihomo_proxy_nodes(
+    primary_node: dict,
+    fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None,
+) -> list[dict]:
+    primary = _normalize_proxy_node(primary_node)
+    primary["name"] = AI_PROXY_INTERNAL_NODE_NAME
+    nodes = [primary]
+    seen = {_proxy_node_connection_key(primary_node)}
+    for candidate in fallback_proxy_nodes or ():
+        if len(nodes) >= AI_PROXY_FALLBACK_MAX_NODES:
+            break
+        try:
+            normalized = _normalize_proxy_node(candidate)
+            connection_key = _proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        # A standalone managed pool cannot safely resolve a subscription node
+        # whose outbound depends on another, omitted subscription name.
+        if str(normalized.get("dialer-proxy") or "").strip():
+            continue
+        if connection_key in seen:
+            continue
+        normalized["name"] = f"{AI_PROXY_FALLBACK_NODE_PREFIX}{len(nodes)}"
+        nodes.append(normalized)
+        seen.add(connection_key)
+    return nodes
+
+
+def _managed_ai_proxy_group(node_names: list[str], *, health_checked: bool) -> dict:
+    names = [str(name or "").strip() for name in node_names if str(name or "").strip()]
+    if not names:
+        raise ValueError("mihomo 受管代理组至少需要一个节点")
+    if not health_checked:
+        return {"name": "AI-PROXY", "type": "select", "proxies": names}
+    return {
+        "name": "AI-PROXY",
+        "type": "fallback",
+        "proxies": names,
+        "url": AI_PROXY_HEALTH_CHECK_URL,
+        "interval": AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS,
+        "lazy": False,
+        "timeout": AI_PROXY_HEALTH_CHECK_TIMEOUT_MS,
+        "max-failed-times": AI_PROXY_HEALTH_CHECK_MAX_FAILURES,
+        "expected-status": AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS,
+    }
 
 
 def _managed_proxy_display_name_marker(display_name: str) -> str:
@@ -2830,14 +2899,28 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         for node in proxy_nodes or ()
         if isinstance(node, dict)
     ]
-    managed_node_valid = False
-    if isinstance(proxy_nodes, list) and len(proxy_nodes) == 1:
+    expected_node_names = [AI_PROXY_INTERNAL_NODE_NAME]
+    expected_node_names.extend(
+        f"{AI_PROXY_FALLBACK_NODE_PREFIX}{index}"
+        for index in range(1, len(node_names))
+    )
+    managed_nodes_valid = bool(
+        isinstance(proxy_nodes, list)
+        and 1 <= len(proxy_nodes) <= AI_PROXY_FALLBACK_MAX_NODES
+        and len(node_names) == len(proxy_nodes)
+        and node_names == expected_node_names
+    )
+    if managed_nodes_valid:
         try:
-            _normalize_proxy_node(proxy_nodes[0])
+            connection_keys = [_proxy_node_connection_key(node) for node in proxy_nodes]
         except (TypeError, ValueError):
-            pass
+            managed_nodes_valid = False
         else:
-            managed_node_valid = True
+            managed_nodes_valid = len(connection_keys) == len(set(connection_keys)) and all(
+                not str(node.get("dialer-proxy") or "").strip()
+                for node in proxy_nodes[1:]
+                if isinstance(node, dict)
+            )
     ai_proxy_groups = [
         group
         for group in proxy_groups or ()
@@ -2849,17 +2932,18 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         if isinstance(ai_proxy_group, dict)
         else None
     )
+    if not node_names:
+        return False
+    select_group = _managed_ai_proxy_group(node_names, health_checked=False)
+    fallback_group = _managed_ai_proxy_group(node_names, health_checked=True)
     proxy_group_contract_valid = bool(
-        isinstance(proxy_nodes, list)
-        and len(proxy_nodes) == 1
-        and managed_node_valid
-        and node_names == [AI_PROXY_INTERNAL_NODE_NAME]
+        managed_nodes_valid
         and isinstance(proxy_groups, list)
         and len(proxy_groups) == 1
         and isinstance(ai_proxy_group, dict)
-        and str(ai_proxy_group.get("type") or "").strip() == "select"
         and isinstance(group_proxy_names, list)
-        and group_proxy_names == [AI_PROXY_INTERNAL_NODE_NAME]
+        and group_proxy_names == node_names
+        and ai_proxy_group in (select_group, fallback_group)
     )
     def strict_rule_action(rule) -> str:
         text_rule = str(rule or "").strip()
@@ -2900,8 +2984,8 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         and parsed.get("ipv6") is False
         # This is an intentionally exact managed-config contract.  Besides
         # rejecting plaintext resolvers, equality rejects alternate URL
-        # authorities/userinfo/query/fragment and extra fallback/policy/listen
-        # fields that could create an unverified DNS path.
+        # authorities/userinfo/query/fragment and extra policy/listen fields
+        # that could create an unverified DNS path.
         and isinstance(dns, dict)
         and dns.get("enable") is True
         and dns.get("ipv6") is False
