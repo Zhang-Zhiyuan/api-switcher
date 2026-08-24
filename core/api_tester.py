@@ -573,7 +573,12 @@ class APITester:
         return normalized_host, port
 
     @classmethod
-    def _check_loopback_proxy(cls, proxy_url: object) -> tuple[tuple[str, int] | None, bool]:
+    def _check_loopback_proxy(
+        cls,
+        proxy_url: object,
+        *,
+        force: bool = False,
+    ) -> tuple[tuple[str, int] | None, bool]:
         """Return ``(endpoint, available)`` for a loopback proxy URL."""
         endpoint = cls._local_proxy_endpoint(proxy_url)
         if not endpoint:
@@ -583,7 +588,7 @@ class APITester:
         now = time.monotonic()
         with cls._proxy_check_lock:
             cached = cls._proxy_check_cache.get(cache_key)
-            if cached and now - cached[0] < cls.INVALID_LOCAL_PROXY_CACHE_TTL:
+            if not force and cached and now - cached[0] < cls.INVALID_LOCAL_PROXY_CACHE_TTL:
                 return endpoint, cached[1]
             host, port = endpoint
             try:
@@ -622,11 +627,11 @@ class APITester:
         return values
 
     @classmethod
-    def invalid_local_proxy_env_names(cls) -> tuple[str, ...]:
+    def invalid_local_proxy_env_names(cls, *, force: bool = False) -> tuple[str, ...]:
         """Return proxy variables pointing at refused loopback endpoints."""
         invalid: list[str] = []
         for name, value in cls._local_proxy_env_values().items():
-            endpoint, available = cls._check_loopback_proxy(value)
+            endpoint, available = cls._check_loopback_proxy(value, force=force)
             if endpoint and not available:
                 invalid.append(name)
         return tuple(invalid)
@@ -721,39 +726,136 @@ class APITester:
         loopback services, ``NO_PROXY``, system-wide settings, and unrelated
         environment variables are left untouched.
         """
-        invalid_names = cls.invalid_local_proxy_env_names()
-        if names is None:
-            names_to_clear = invalid_names
-        else:
-            invalid_by_fold = {name.casefold(): name for name in invalid_names}
-            names_to_clear = tuple(
-                dict.fromkeys(
-                    invalid_by_fold.get(str(name or "").strip().casefold())
-                    for name in names
-                    if invalid_by_fold.get(str(name or "").strip().casefold())
+        from core import local_proxy
+
+        # A stale warning/button must not delete an environment variable while
+        # this app is restarting or hot-updating its managed proxy. Revalidate
+        # after acquiring the same cross-process lifecycle lock used by those
+        # operations, bypassing the short availability cache.
+        with local_proxy._local_proxy_operation_lock("清理失效代理环境变量"):
+            invalid_names = cls.invalid_local_proxy_env_names(force=True)
+            if names is None:
+                names_to_clear = invalid_names
+            else:
+                invalid_by_fold = {name.casefold(): name for name in invalid_names}
+                names_to_clear = tuple(
+                    dict.fromkeys(
+                        invalid_by_fold.get(str(name or "").strip().casefold())
+                        for name in names
+                        if invalid_by_fold.get(str(name or "").strip().casefold())
+                    )
                 )
-            )
-        if not names_to_clear:
-            return ()
+            if not names_to_clear:
+                return ()
 
-        if os.name == "nt":
-            from core import persistent_env
+            if os.name == "nt":
+                from core import persistent_env
 
-            # Delete the persistent values first.  The helper also updates
-            # this process and broadcasts WM_SETTINGCHANGE for new terminals.
-            persistent_env.delete_local_user_env(names_to_clear)
-        # Keep the process view deterministic even when a platform adapter
-        # only implements the registry part of persistent deletion.
-        for name in names_to_clear:
-            os.environ.pop(name, None)
+                # The current process may still contain the app's old value
+                # after the user changed HKCU\Environment elsewhere. Delete a
+                # persistent value only when that registry value is itself a
+                # currently refused loopback proxy; never erase the newer user
+                # value merely because this process inherited an older one.
+                persistent_names = []
+                current_values = cls._local_proxy_env_values()
+                for name in names_to_clear:
+                    current_value = next(
+                        (
+                            value
+                            for current_name, value in current_values.items()
+                            if current_name.casefold() == name.casefold()
+                        ),
+                        "",
+                    )
+                    current_endpoint = cls._local_proxy_endpoint(current_value)
+                    persistent_value = persistent_env._local_user_env_value_strict(name)
+                    _persistent_endpoint, persistent_available = cls._check_loopback_proxy(
+                        persistent_value,
+                        force=True,
+                    )
+                    if (
+                        _persistent_endpoint
+                        and _persistent_endpoint == current_endpoint
+                        and not persistent_available
+                    ):
+                        persistent_names.append(name)
+                if persistent_names:
+                    persistent_env.delete_local_user_env(persistent_names)
+            # Keep the process view deterministic even when a platform adapter
+            # only implements the registry part of persistent deletion.
+            for name in names_to_clear:
+                os.environ.pop(name, None)
 
-        with cls._proxy_check_lock:
-            cls._proxy_check_cache.clear()
-        return names_to_clear
+            with cls._proxy_check_lock:
+                cls._proxy_check_cache.clear()
+            return names_to_clear
+
+    @classmethod
+    def _auto_clear_program_owned_invalid_proxy(
+        cls,
+        proxy_url: str,
+        endpoint: tuple[str, int],
+    ) -> tuple[tuple[str, ...], str]:
+        """Auto-clean only after excluding a live or transitioning managed proxy."""
+
+        from core import local_proxy
+
+        entered_lock = False
+        try:
+            with local_proxy._local_proxy_operation_lock(
+                "自动清理失效代理环境变量",
+                timeout=0.0,
+            ):
+                entered_lock = True
+                fresh_endpoint, fresh_available = cls._check_loopback_proxy(
+                    proxy_url,
+                    force=True,
+                )
+                if fresh_endpoint != endpoint:
+                    return (), "changed"
+                if fresh_available:
+                    return (), "recovered"
+
+                fresh_values = cls._local_proxy_env_values()
+                fresh_invalid_names = cls.invalid_local_proxy_env_names(force=True)
+                fresh_owned_names = cls._program_owned_invalid_local_proxy_env_names(
+                    fresh_invalid_names,
+                    fresh_values,
+                    endpoint,
+                )
+                if not fresh_owned_names:
+                    return (), "unowned"
+
+                state = local_proxy._load_state()
+                managed_running = local_proxy._managed_local_proxy_is_running(state)
+                try:
+                    state_pid = int(state.get("pid") or 0)
+                except (TypeError, ValueError):
+                    state_pid = 0
+                if state_pid and not managed_running:
+                    # The PID file itself may be momentarily unavailable or
+                    # damaged. A state PID is not enough authority to stop a
+                    # process, but a verified managed image is enough reason
+                    # to defer destructive environment cleanup.
+                    managed_running = bool(
+                        local_proxy._is_pid_running(state_pid)
+                        and local_proxy._is_managed_mihomo_pid(state_pid, state=state)
+                    )
+                recent_transition = bool(
+                    (state.get("installing") or state.get("pid"))
+                    and local_proxy._local_proxy_state_update_is_recent(state)
+                )
+                if managed_running or recent_transition:
+                    return (), "transitioning"
+                return cls.clear_invalid_local_proxy_env(fresh_owned_names), ""
+        except RuntimeError:
+            if not entered_lock:
+                return (), "busy"
+            raise
 
     @classmethod
     def _invalid_local_proxy_warning(cls, url: str) -> str:
-        """Detect a refused loopback proxy without changing persistent env vars."""
+        """Detect a refused loopback proxy and safely reconcile app-owned residue."""
 
         try:
             parsed_url = urllib.parse.urlsplit(str(url or ""))
@@ -793,12 +895,22 @@ class APITester:
         )
         if owned_names:
             try:
-                removed = cls.clear_invalid_local_proxy_env(owned_names)
+                removed, cleanup_state = cls._auto_clear_program_owned_invalid_proxy(
+                    proxy_url,
+                    endpoint,
+                )
             except Exception as error:
                 logger.warning("Failed to auto-clean managed invalid proxy variables: %s", error)
                 return (
                     f"检测到本程序配置的失效本机代理 {host}:{port}，本次请求已临时直连；"
                     f"自动清理失败，请手动清理变量（{ '、'.join(owned_names) }）"
+                )
+            if cleanup_state == "recovered":
+                return ""
+            if cleanup_state in {"busy", "transitioning"}:
+                return (
+                    f"检测到本程序的本机代理 {host}:{port} 暂时不可用，"
+                    "代理正在启动或切换保护期，未清理环境变量；本次请求已临时直连"
                 )
             if removed:
                 remaining = tuple(
@@ -812,10 +924,22 @@ class APITester:
         return f"检测到失效本机代理 {host}:{port}，本次请求已临时直连"
 
     @classmethod
-    def _urlopen(cls, request: urllib.request.Request, timeout: int):
+    def _urlopen(
+        cls,
+        request: urllib.request.Request,
+        timeout: int,
+        *,
+        known_proxy_warning: str = "",
+    ):
         """Open a request, bypassing only a refused loopback proxy."""
 
-        warning = cls._invalid_local_proxy_warning(request.full_url)
+        # High-level request helpers precompute this diagnostic so it survives
+        # even when the direct request itself raises. Preserve that decision:
+        # auto-cleaning the process env between two checks must not make this
+        # same request fall back to a still-stale WinINET proxy.
+        warning = str(known_proxy_warning or "") or cls._invalid_local_proxy_warning(
+            request.full_url
+        )
         if warning:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             return opener.open(request, timeout=timeout), warning
@@ -912,7 +1036,11 @@ class APITester:
         # direct retry itself fails (``opener.open`` raises before returning).
         proxy_warning = APITester._invalid_local_proxy_warning(url)
         try:
-            response, detected_proxy_warning = APITester._urlopen(req, timeout)
+            response, detected_proxy_warning = APITester._urlopen(
+                req,
+                timeout,
+                known_proxy_warning=proxy_warning,
+            )
             proxy_warning = detected_proxy_warning or proxy_warning
             with response:
                 response_time = (time.time() - start_time) * 1000
@@ -994,7 +1122,11 @@ class APITester:
 
         proxy_warning = APITester._invalid_local_proxy_warning(url)
         try:
-            response, detected_proxy_warning = APITester._urlopen(req, timeout)
+            response, detected_proxy_warning = APITester._urlopen(
+                req,
+                timeout,
+                known_proxy_warning=proxy_warning,
+            )
             proxy_warning = detected_proxy_warning or proxy_warning
             with response:
                 status_code = response.getcode()
@@ -1552,7 +1684,11 @@ class APITester:
         proxy_warning = APITester._invalid_local_proxy_warning(url)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": APITester.USER_AGENT}, method="HEAD")
-            response, detected_proxy_warning = APITester._urlopen(req, timeout)
+            response, detected_proxy_warning = APITester._urlopen(
+                req,
+                timeout,
+                known_proxy_warning=proxy_warning,
+            )
             proxy_warning = detected_proxy_warning or proxy_warning
             with response:
                 return TestResult(
