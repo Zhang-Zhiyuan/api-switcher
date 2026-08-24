@@ -113,7 +113,7 @@ class APITestResultDialog(ctk.CTkToplevel):
 
         proxy_warning = getattr(result, "proxy_warning", None)
         if proxy_warning:
-            self._add_detail_row(scroll_frame, "网络提示", proxy_warning, COLORS["warning"])
+            self._add_detail_row(scroll_frame, "代理处理", proxy_warning, COLORS["warning"])
             self._invalid_proxy_env_names = APITester.invalid_local_proxy_env_names()
 
         # Error details / benchmark details
@@ -178,7 +178,7 @@ class APITestResultDialog(ctk.CTkToplevel):
         if not names:
             self._invalid_proxy_env_names = ()
             if self._proxy_cleanup_button is not None:
-                self._proxy_cleanup_button.configure(state="disabled", text="代理已恢复")
+                self._proxy_cleanup_button.configure(state="disabled", text="无需清理")
             return
 
         from ui.dialogs.confirm_dialog import ConfirmDialog
@@ -191,7 +191,10 @@ class APITestResultDialog(ctk.CTkToplevel):
                 if not removed:
                     message = "未发现仍然失效的本机代理变量"
                 else:
-                    message = f"已清理失效代理变量: {'、'.join(removed)}；新开的终端会立即生效"
+                    message = (
+                        f"已清理失效代理变量: {'、'.join(removed)}；"
+                        "本软件后续请求立即生效，已打开的终端和 VS Code 窗口需重开"
+                    )
                 self._invalid_proxy_env_names = ()
                 if self._proxy_cleanup_button is not None:
                     self._proxy_cleanup_button.configure(state="disabled", text="已清理")
@@ -258,6 +261,15 @@ class APITestResultDialog(ctk.CTkToplevel):
     def _get_recommendations(self, result) -> list:
         """Get recommendations based on test result."""
         recommendations = []
+        proxy_warning = str(getattr(result, "proxy_warning", "") or "")
+
+        if proxy_warning:
+            if "已自动清理" in proxy_warning:
+                recommendations.append("旧代理已由本软件清理；请重开终端和 VS Code，避免已有进程继续继承旧值")
+            elif "启动或切换保护期" in proxy_warning:
+                recommendations.append("本机代理正在启动或切换，软件未清理变量；请等待操作完成后重试")
+            else:
+                recommendations.append("本次请求已绕过失效本机代理；确认不再使用后可点击“清理失效代理变量”")
 
         if "认证失败" in result.message or "API Key 无效" in result.message:
             recommendations.append("检查 API Key 是否正确")
@@ -272,7 +284,12 @@ class APITestResultDialog(ctk.CTkToplevel):
         elif "网络错误" in result.message:
             recommendations.append("检查网络连接")
             recommendations.append("确认防火墙未阻止连接")
-            recommendations.append("尝试使用代理或 VPN")
+            if "已自动清理" in proxy_warning:
+                recommendations.append("若仍需要本机代理，请在 Win11 代理页重新启动；否则重开终端后重试")
+            elif proxy_warning:
+                recommendations.append("检查本机代理服务是否应该启动，或清理已废弃的代理变量")
+            else:
+                recommendations.append("按实际网络环境检查代理或 VPN")
 
         elif "超时" in result.message:
             recommendations.append("检查网络速度")

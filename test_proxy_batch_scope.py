@@ -1783,6 +1783,47 @@ def test_local_task_thread_start_failure_restores_busy(monkeypatch):
     assert statuses[-1][1] == "error"
 
 
+def test_local_task_feedback_marks_skips_as_warning_and_keeps_failure_safety_hint(monkeypatch):
+    statuses = []
+    toasts = []
+    monkeypatch.setattr("ui.tabs.local_proxy_tab.threading.Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.show_toast",
+        lambda _top, message, **kwargs: toasts.append((message, kwargs)),
+    )
+
+    local = object.__new__(LocalProxyTab)
+    local._busy = False
+    local._set_busy = lambda value: setattr(local, "_busy", value)
+    local._set_status = lambda message, severity="info": statuses.append((message, severity))
+    local._run_on_ui_thread = lambda callback: callback()
+    local.winfo_exists = lambda: True
+    local.winfo_toplevel = lambda: object()
+
+    local._run_local_task(
+        "正在检查...",
+        lambda: "本机 AI 代理未运行，已跳过连通性探测",
+        "检查本机 AI 代理",
+    )
+
+    assert statuses[-1][1] == "warning"
+    assert toasts[-1][1]["is_error"] is True
+
+    def fail_read_only_check():
+        raise RuntimeError("controller unavailable")
+
+    local._run_local_task(
+        "正在检查...",
+        fail_read_only_check,
+        "检查本机 AI 代理",
+        failure_hint="本次仅执行状态检查，未修改本机代理设置",
+    )
+
+    assert statuses[-1][1] == "error"
+    assert "未修改本机代理设置" in statuses[-1][0]
+    assert "未修改本机代理设置" in toasts[-1][0]
+
+
 def test_current_node_thread_start_failure_releases_lock_and_restores_busy(monkeypatch):
     node = _node(1, "香港-1")
     local_profile_id = "profile-local-thread-failure"

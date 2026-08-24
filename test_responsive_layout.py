@@ -198,6 +198,9 @@ def test_status_bar_assigns_semantic_states():
     assert app_status_severity("代理质量检测设置已保存") == "success"
     assert app_status_severity("暂无已加载页面") == "warning"
     assert app_status_severity("配置加载失败") == "error"
+    assert app_status_severity("热更新失败，已保留原节点") == "warning"
+    assert app_status_severity("刷新失败，已使用内置模型列表") == "warning"
+    assert app_status_severity("热更新失败，恢复原节点失败") == "error"
     assert app_status_severity("等待操作") == "info"
 
 
