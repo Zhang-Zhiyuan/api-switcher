@@ -1146,9 +1146,33 @@ class App(ctk.CTk):
             try:
                 from core import local_proxy
 
-                if not local_proxy.local_proxy_start_on_login_enabled():
+                auto_start_enabled = local_proxy.local_proxy_start_on_login_enabled()
+                auto_start_message = ""
+                auto_start_error = None
+                if auto_start_enabled:
+                    try:
+                        auto_start_message = local_proxy.auto_start_local_ai_proxy_if_enabled()
+                    except Exception as exc:
+                        auto_start_error = exc
+                repair_message = local_proxy.reconcile_local_ai_proxy_startup_settings()
+                if repair_message:
+                    logger.info("Local proxy startup reconciliation: %s", repair_message)
+                if auto_start_error is not None:
+                    suffix = f"；{repair_message}" if repair_message else ""
+                    raise RuntimeError(f"{auto_start_error}{suffix}") from auto_start_error
+                if not auto_start_enabled:
+                    if repair_message:
+                        def update_repair_status():
+                            if self._exit_requested:
+                                return
+                            self._set_app_status(repair_message)
+                            self._refresh_loaded_tab("_local_proxy_tab")
+
+                        self._run_on_ui_thread(update_repair_status)
                     return
-                message = local_proxy.auto_start_local_ai_proxy_if_enabled()
+                message = "；".join(
+                    part for part in (auto_start_message, repair_message) if part
+                )
                 logger.info("Local proxy auto-start: %s", message)
 
                 def update_status():
