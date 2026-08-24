@@ -4321,8 +4321,13 @@ def test_remote_install_command_retries_mihomo_downloads_with_user_agent():
     assert "User-Agent" in command
     assert "API-Switcher/1.0" in command
     assert "for attempt in range(1, 4)" in command
-    assert "download failed after 3 attempts" in command
+    assert "failed after 3 attempts" in command
     assert "command -v clash-meta" in command
+    assert "ProxyHandler({})" in command
+    assert "release asset SHA-256 mismatch" in command
+    assert "hmac.compare_digest" in command
+    assert "os.replace(candidate_path, target)" in command
+    assert "kernel_version=" in command
 
 
 def test_remote_reload_command_calls_mihomo_controller():
@@ -7219,6 +7224,7 @@ def test_reload_local_ai_proxy_forces_old_config_after_ambiguous_controller_fail
         "_load_state",
         lambda: {"mixed_port": 17897, "config_path": str(config_path)},
     )
+    monkeypatch.setattr(local_proxy, "_save_state", lambda _state: None)
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args: True)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
     monkeypatch.setattr(

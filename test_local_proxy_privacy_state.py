@@ -39,6 +39,7 @@ def _patch_running_status(
     state: dict | None = None,
 ) -> dict:
     state = dict(state or _applied_state(config_path))
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", config_path.parent)
     monkeypatch.setattr(
         local_proxy,
         "_load_state",
@@ -94,6 +95,7 @@ def test_local_managed_node_restores_reserved_display_name_without_routing_to_it
         "_load_state",
         lambda: {"config_path": str(config_path)},
     )
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", config_path.parent)
 
     restored = local_proxy._read_local_managed_proxy_node()
     parsed = remote_proxy.yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -350,6 +352,7 @@ def test_install_records_fingerprint_for_successfully_started_process(
 def test_reload_success_records_new_applied_fingerprint(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, strict=False)
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", config_path.parent)
     state = _applied_state(config_path)
     saved_states = []
     monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
@@ -835,6 +838,7 @@ def test_strict_privacy_transaction_restores_preference_after_reload_failure(
     local_proxy.save_local_proxy_preferences(strict_privacy=False)
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, strict=False)
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", config_path.parent)
     state = _applied_state(config_path)
     monkeypatch.setattr(
         local_proxy,
@@ -874,6 +878,7 @@ def test_strict_privacy_transaction_fails_if_running_proxy_stops_after_apply(
 ):
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, strict=False)
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", config_path.parent)
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
     local_proxy.clear_local_proxy_preferences_cache()
     local_proxy.save_local_proxy_preferences(strict_privacy=False)
