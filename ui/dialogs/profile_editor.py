@@ -1,4 +1,5 @@
 import customtkinter as ctk
+from ui.feedback import safe_feedback_text
 from ui.widgets.masked_entry import MaskedEntry
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 from ui.ui_dispatch import run_on_ui_thread
@@ -79,8 +80,11 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             text="",
             text_color=COLORS["danger"],
             font=font(12),
+            anchor="w",
+            justify="left",
         )
         self._error_label.pack(fill="x", padx=18, pady=(0, 6))
+        bind_wraplength(self, self._error_label, padding=44, min_width=260, max_width=700)
 
         if profile_type == "claude":
             self._build_claude_fields(scroll)
@@ -128,12 +132,17 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         try:
             text = self.clipboard_get()
         except Exception as exc:
-            self._show_error(f"读取剪贴板失败: {exc}")
+            self._show_error(f"读取剪贴板失败: {exc}；当前表单未修改")
+            return
+        if not str(text or "").strip():
+            self._show_error("剪贴板为空，当前表单未修改")
             return
         try:
             parsed = parse_api_config_text(text, self._profile_type)
         except ValueError as exc:
-            self._show_error(str(exc))
+            self._show_error(
+                f"{exc}；当前表单未修改。支持 JSON、export、set/setx、PowerShell、命令行参数和裸 URL"
+            )
             return
         self._apply_parsed_api_config(parsed)
 
@@ -195,9 +204,21 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             )
             self._sync_codex_auth_fields(self._current_codex_provider())
 
-        source_note = "，URL 已从文本自动补全" if parsed.url_inferred else ""
+        profile_label = "Claude" if parsed.profile_type == "claude" else "Codex"
+        provider_label = parsed.provider_name or parsed.provider_id or "Custom"
+        auth_label = (
+            "Bearer Auth Token"
+            if parsed.profile_type == "claude" and parsed.auth_scheme == "auth_token"
+            else "x-api-key"
+            if parsed.profile_type == "claude"
+            else parsed.env_key or "API Key"
+        )
+        source_note = "URL 已自动嗅探并补全" if parsed.url_inferred else "URL 已识别并规范化"
+        model_note = f"；模型 {parsed.model}" if parsed.model else "；文本未含模型，保留当前推荐值"
         self._show_status(
-            f"已解析 {len(parsed.matched_keys)} 个关键配置{source_note}；密钥仅填入当前编辑器，保存后才会写入密钥库",
+            f"解析完成：{profile_label} / {provider_label} / {auth_label}；"
+            f"{source_note}为 {parsed.base_url}{model_note}；"
+            "密钥仅填入当前编辑器，点击保存后才写入密钥库",
             "success",
         )
 
@@ -560,10 +581,10 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             return widget.get()
 
     def _show_error(self, message: str) -> None:
-        self._error_label.configure(text=message, text_color=COLORS["danger"])
+        self._error_label.configure(text=safe_feedback_text(message), text_color=COLORS["danger"])
 
     def _show_status(self, message: str, color: str = "muted") -> None:
-        self._error_label.configure(text=message, text_color=COLORS[color])
+        self._error_label.configure(text=safe_feedback_text(message), text_color=COLORS[color])
 
     def _provider_note(self, provider, is_codex: bool) -> str:
         if provider is None:

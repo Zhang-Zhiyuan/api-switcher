@@ -6,6 +6,7 @@ import threading
 import time
 
 import customtkinter as ctk
+from ui.feedback import infer_feedback_severity, safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, combo_style, fit_window_to_screen, font, recent_user_scroll
 from ui.widgets.adaptive_tab_bar import AdaptiveTabBar
 
@@ -73,16 +74,7 @@ def global_action_columns(width: int) -> int:
 def app_status_severity(message: str) -> str:
     """Infer a concise visual state for status-bar messages."""
 
-    text = str(message or "")
-    if any(token in text for token in ("失败", "错误", "异常")):
-        return "error"
-    if any(token in text for token in ("取消", "暂无", "不能", "请勿", "不可")):
-        return "warning"
-    if any(token in text for token in ("正在", "加载中", "启动中", "读取中", "生成中")):
-        return "busy"
-    if "已" in text or any(token in text for token in ("完成", "就绪", "成功")):
-        return "success"
-    return "info"
+    return infer_feedback_severity(message)
 
 
 class _LazyTrayManager:
@@ -529,7 +521,8 @@ class App(ctk.CTk):
         if status is None:
             return
         try:
-            resolved = severity or app_status_severity(message)
+            safe_message = safe_feedback_text(message)
+            resolved = severity or app_status_severity(safe_message)
             color = {
                 "busy": COLORS["accent"],
                 "success": COLORS["success"],
@@ -537,7 +530,7 @@ class App(ctk.CTk):
                 "error": COLORS["danger"],
                 "info": COLORS["muted"],
             }.get(resolved, COLORS["muted"])
-            status.configure(text=message, text_color=color)
+            status.configure(text=safe_message, text_color=color)
         except Exception as exc:
             logger.debug("Failed to update status bar: %s", exc)
 
@@ -1166,6 +1159,12 @@ class App(ctk.CTk):
                             if self._exit_requested:
                                 return
                             self._set_app_status(repair_message)
+                            try:
+                                from ui.widgets.toast import show_toast
+
+                                show_toast(self, repair_message)
+                            except Exception as exc:
+                                logger.debug("Failed to show local-proxy repair toast: %s", exc)
                             self._refresh_loaded_tab("_local_proxy_tab")
 
                         self._run_on_ui_thread(update_repair_status)
@@ -1179,6 +1178,12 @@ class App(ctk.CTk):
                     if self._exit_requested:
                         return
                     self._set_app_status(message)
+                    try:
+                        from ui.widgets.toast import show_toast
+
+                        show_toast(self, message)
+                    except Exception as exc:
+                        logger.debug("Failed to show local-proxy startup toast: %s", exc)
                     self._refresh_loaded_tab("_local_proxy_tab")
 
                 self._run_on_ui_thread(update_status)
@@ -1188,7 +1193,14 @@ class App(ctk.CTk):
 
                 def update_error():
                     if not self._exit_requested:
-                        self._set_app_status(f"Win11 本机代理自启失败: {error_message}")
+                        message = f"Win11 本机代理自启失败: {error_message}；请打开 Win11 代理页检查状态"
+                        self._set_app_status(message)
+                        try:
+                            from ui.widgets.toast import show_toast
+
+                            show_toast(self, message, severity="error")
+                        except Exception as exc:
+                            logger.debug("Failed to show local-proxy startup error toast: %s", exc)
 
                 self._run_on_ui_thread(update_error)
 

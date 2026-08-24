@@ -7,6 +7,7 @@ import customtkinter as ctk
 from core.lazy_imports import LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITES
 from ui.dialogs.confirm_dialog import ConfirmDialog
+from ui.feedback import infer_feedback_severity, safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
@@ -1097,41 +1098,45 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not self._status_label:
             return
         color = {
+            "busy": COLORS["accent"],
             "success": COLORS["success"],
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._status_label.configure(text=message, text_color=color)
+        self._status_label.configure(text=safe_feedback_text(message), text_color=color)
 
     def _set_cache_status(self, message: str, severity: str = "info"):
         if not self._cache_label:
             return
         color = {
+            "busy": COLORS["accent"],
             "success": COLORS["success"],
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._cache_label.configure(text=message, text_color=color)
+        self._cache_label.configure(text=safe_feedback_text(message), text_color=color)
 
     def _set_selected_summary(self, message: str, severity: str = "info"):
         if not self._selected_label:
             return
         color = {
+            "busy": COLORS["accent"],
             "success": COLORS["success"],
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._selected_label.configure(text=message, text_color=color)
+        self._selected_label.configure(text=safe_feedback_text(message), text_color=color)
 
     def _set_routing_status(self, message: str, severity: str = "info"):
         if not self._routing_status_label:
             return
         color = {
+            "busy": COLORS["accent"],
             "success": COLORS["success"],
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._routing_status_label.configure(text=message, text_color=color)
+        self._routing_status_label.configure(text=safe_feedback_text(message), text_color=color)
 
     def _set_busy(self, busy: bool):
         self._busy = busy
@@ -2147,7 +2152,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                             severity = "warning"
                         self._set_status(message, severity)
                         if manual:
-                            show_toast(self.winfo_toplevel(), message, is_error=severity != "success")
+                            show_toast(
+                                self.winfo_toplevel(),
+                                message,
+                                is_error=severity in {"warning", "error"},
+                                severity=severity,
+                            )
                     except Exception as exc:
                         message = f"订阅已刷新，但界面同步失败: {exc}"
                         self._set_status(message, "warning")
@@ -2569,7 +2579,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     )
                     severity = "warning"
                 self._set_status(message, severity)
-                show_toast(self.winfo_toplevel(), message, is_error=severity == "warning")
+                show_toast(
+                    self.winfo_toplevel(),
+                    message,
+                    is_error=severity in {"warning", "error"},
+                    severity=severity,
+                )
 
             self._run_on_ui_thread(finish)
 
@@ -3301,7 +3316,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     message = str(payload["result"])
                     severity = self._hot_update_message_severity(message)
                     self._set_status(message, severity)
-                    show_toast(self.winfo_toplevel(), message, is_error=severity == "warning")
+                    show_toast(
+                        self.winfo_toplevel(),
+                        message,
+                        is_error=severity in {"warning", "error"},
+                        severity=severity,
+                    )
 
                 self._run_on_ui_thread(finish)
 
@@ -3377,12 +3397,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         on_success=None,
         severity_from_result=None,
         on_error=None,
+        failure_hint: str = "",
     ):
         if self._busy:
             show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
             return
         self._set_busy(True)
-        self._set_status(busy_message)
+        self._set_status(busy_message, "busy")
 
         def run():
             try:
@@ -3401,6 +3422,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         except Exception:
                             pass
                     message = f"{success_prefix}失败: {payload['error']}"
+                    if failure_hint:
+                        message = f"{message}；{failure_hint}"
                     self._set_status(message, "error")
                     show_toast(self.winfo_toplevel(), message, is_error=True)
                     return
@@ -3410,9 +3433,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     except Exception:
                         pass
                 message = str(payload["result"])
-                severity = severity_from_result(message) if severity_from_result else "success"
+                severity = (
+                    severity_from_result(message)
+                    if severity_from_result
+                    else infer_feedback_severity(message)
+                )
                 self._set_status(message, severity)
-                show_toast(self.winfo_toplevel(), message, is_error=severity == "warning")
+                show_toast(
+                    self.winfo_toplevel(),
+                    message,
+                    is_error=severity in {"warning", "error"},
+                    severity=severity,
+                )
 
             self._run_on_ui_thread(finish)
 
@@ -3421,6 +3453,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         except Exception as exc:
             self._set_busy(False)
             message = f"{success_prefix}启动失败: {exc}"
+            if failure_hint:
+                message = f"{message}；{failure_hint}"
             self._set_status(message, "error")
             show_toast(self.winfo_toplevel(), message, is_error=True)
 
@@ -3452,9 +3486,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 ),
                 "启动本机 AI 代理",
                 on_success=sync_started_node,
-                severity_from_result=lambda message: "warning"
-                if "验证未完全通过" in message or "自动尝试" in message
-                else "success",
+                severity_from_result=lambda message: "error"
+                if "恢复原节点失败" in message
+                else "warning"
+                if any(
+                    marker in message
+                    for marker in ("验证未完全通过", "自动尝试", "已恢复原节点", "已跳过")
+                )
+                else infer_feedback_severity(message),
+                failure_hint="启动未完成；程序已执行事务回滚保护，请点“检查状态”确认当前代理",
             )
 
         ConfirmDialog(
@@ -3489,6 +3529,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             "正在检查 Windows 本机 AI 代理状态...",
             inspect,
             "检查本机 AI 代理",
+            severity_from_result=lambda message: "warning"
+            if any(marker in message for marker in ("未运行", "未指向", "健康检查失败", "漂移", "未确认"))
+            else "success",
+            failure_hint="本次仅执行状态检查，未修改本机代理设置",
         )
 
     def _probe_local_proxy(self):
@@ -3500,6 +3544,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             "正在通过本机 AI 代理测试 OpenAI/Claude/Gemini 连通性...",
             probe,
             "测试本机 AI 代理",
+            severity_from_result=lambda message: "success"
+            if "AI 连通性 3/3 可达" in message
+            else "warning",
+            failure_hint="本次仅执行连通性测试，未修改本机代理设置",
         )
 
     def _stop_local_proxy(self):
@@ -3508,6 +3556,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 "正在停止 Windows 本机 AI 代理并恢复本工具写入的代理环境...",
                 local_proxy.stop_local_ai_proxy,
                 "停止本机 AI 代理",
+                severity_from_result=lambda message: "error"
+                if "恢复设置失败" in message
+                else "warning"
+                if "未停止" in message
+                else "success",
+                failure_hint="停止或恢复未完成，请点“检查状态”核对环境变量、系统代理和进程",
             )
 
         ConfirmDialog(
