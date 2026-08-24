@@ -4,6 +4,7 @@ import base64
 import importlib
 import logging
 import hashlib
+import os
 import re
 import threading
 from pathlib import Path
@@ -18,6 +19,13 @@ _SECRET_OPERATION_LOCK = threading.RLock()
 MAX_SECRET_JSON_BYTES = 16 * 1024 * 1024
 MAX_SECRET_JSON_COMPRESSED_BYTES = 8 * 1024 * 1024
 MAX_DPAPI_SECRET_BYTES = 32 * 1024 * 1024
+# Windows generic credentials have a small CredentialBlob limit.  The Windows
+# keyring backend hands ``str`` values to CredWrite as UTF-16, so large
+# compressed account snapshots can exceed the limit even though ordinary API
+# keys do not.  Leave a little room for backend-specific termination/alignment
+# and go straight to the existing per-user DPAPI fallback instead of producing
+# a predictable CredWrite 1783 warning on every save.
+WINDOWS_KEYRING_SAFE_UTF16_BYTES = 2500
 
 
 class SecretReadError(RuntimeError):
@@ -43,6 +51,18 @@ def _get_backend_type() -> str:
         return "unknown"
 
 
+def _requires_windows_dpapi_fallback(value: str) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        return len(str(value).encode("utf-16-le")) > WINDOWS_KEYRING_SAFE_UTF16_BYTES
+    except UnicodeEncodeError:
+        # An unpaired surrogate is not safe to hand to the Windows credential
+        # backend.  DPAPI stores the UTF-8 representation and will report a
+        # useful error if the value itself is malformed.
+        return True
+
+
 def set_secret(key: str | None, value: str | None) -> None:
     """Store a secret string. Tries keyring first, falls back to DPAPI file."""
     if not key:
@@ -50,6 +70,13 @@ def set_secret(key: str | None, value: str | None) -> None:
     if value is None:
         value = ""
     with _SECRET_OPERATION_LOCK:
+        if _requires_windows_dpapi_fallback(value):
+            try:
+                _dpapi_set(key, value)
+            except Exception as fallback_error:
+                raise RuntimeError("无法保存密钥：内容超过 Windows 密钥环容量且 DPAPI 不可用") from fallback_error
+            logger.debug("Stored oversized secret via DPAPI instead of Windows keyring: %s", key)
+            return
         try:
             _keyring().set_password(KEYRING_SERVICE, key, value)
         except Exception as e:

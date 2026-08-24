@@ -1,6 +1,7 @@
 import logging
 import errno
 import posixpath
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -25,6 +26,18 @@ class SSHManager:
     def __init__(self):
         self._clients: dict[str, paramiko.SSHClient] = {}
         self._client_signatures: dict[str, tuple] = {}
+        self._cache_lock = threading.RLock()
+        self._profile_connection_locks: dict[str, threading.RLock] = {}
+
+    def _profile_connection_lock(self, name: str) -> threading.RLock:
+        """Serialize cache lifecycle work for one profile, not all servers."""
+
+        normalized_name = str(name or "").strip() or "<unnamed>"
+        with self._cache_lock:
+            return self._profile_connection_locks.setdefault(
+                normalized_name,
+                threading.RLock(),
+            )
 
     @staticmethod
     def _connection_signature(profile: SSHProfile) -> tuple:
@@ -48,6 +61,27 @@ class SSHManager:
         secret_overrides: Mapping[str, str] | None = None,
     ) -> paramiko.SSHClient:
         """Establish SSH connection with optional non-persistent credentials."""
+        # Refreshes, tests, and batch actions can reach the same profile from
+        # separate UI workers. Without a per-profile lock both workers may
+        # create clients, overwrite the cache, and later close the client the
+        # other worker is using. Different servers remain fully parallel.
+        with self._profile_connection_lock(profile.name):
+            return self._connect_serialized(
+                profile,
+                timeout=timeout,
+                max_retries=max_retries,
+                secret_overrides=secret_overrides,
+            )
+
+    def _connect_serialized(
+        self,
+        profile: SSHProfile,
+        timeout: int = 10,
+        max_retries: int = 3,
+        *,
+        secret_overrides: Mapping[str, str] | None = None,
+    ) -> paramiko.SSHClient:
+        """Connect while the caller owns this profile's lifecycle lock."""
         signature = self._connection_signature(profile)
         ephemeral_auth = secret_overrides is not None
         overrides = dict(secret_overrides or {})
@@ -55,14 +89,17 @@ class SSHManager:
             raise ValueError("SSH 临时密钥格式无效")
 
         # Check if already connected
-        if not ephemeral_auth and profile.name in self._clients:
-            client = self._clients[profile.name]
+        with self._cache_lock:
+            cached_client = self._clients.get(profile.name)
+            cached_signature = self._client_signatures.get(profile.name)
+        if not ephemeral_auth and cached_client is not None:
+            client = cached_client
             try:
                 transport = client.get_transport()
                 if (
                     transport
                     and transport.is_active()
-                    and self._client_signatures.get(profile.name) == signature
+                    and cached_signature == signature
                 ):
                     logger.debug(f"Reusing existing connection to {profile.host}")
                     return client
@@ -74,8 +111,10 @@ class SSHManager:
                 client.close()
             except Exception:
                 pass
-            del self._clients[profile.name]
-            self._client_signatures.pop(profile.name, None)
+            with self._cache_lock:
+                if self._clients.get(profile.name) is client:
+                    self._clients.pop(profile.name, None)
+                    self._client_signatures.pop(profile.name, None)
 
         # Validate profile
         if not profile.host or not profile.host.strip():
@@ -155,35 +194,49 @@ class SSHManager:
                     raise RuntimeError("连接建立后立即失效")
 
                 if not ephemeral_auth:
-                    self._clients[profile.name] = client
-                    self._client_signatures[profile.name] = signature
+                    with self._cache_lock:
+                        self._clients[profile.name] = client
+                        self._client_signatures[profile.name] = signature
                 keep_client = True
                 logger.info(f"Successfully connected to {profile.host} as {profile.username}")
                 return client
 
             except paramiko.AuthenticationException as e:
                 # Don't retry authentication failures
-                logger.error(f"Authentication failed: {e}")
-                raise RuntimeError(f"认证失败: {e}") from e
+                detail = _ssh_exception_detail(e)
+                logger.warning("SSH authentication failed: %s", detail)
+                raise RuntimeError(f"认证失败: {detail}") from e
 
             except paramiko.SSHException as e:
                 last_error = e
-                logger.warning(f"SSH error on attempt {attempt + 1}: {e}")
+                logger.warning(
+                    "SSH error on attempt %s/%s: %s",
+                    attempt + 1,
+                    max_retries,
+                    _ssh_exception_detail(e),
+                )
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
                     logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    raise RuntimeError(f"SSH 连接失败 (已重试 {max_retries} 次): {e}") from e
+                    raise RuntimeError(
+                        f"SSH 连接失败 (已重试 {max_retries} 次): {_ssh_exception_detail(e)}"
+                    ) from e
 
             except Exception as e:
                 last_error = e
-                logger.error(f"Connection error on attempt {attempt + 1}: {e}")
+                logger.warning(
+                    "SSH connection error on attempt %s/%s: %s",
+                    attempt + 1,
+                    max_retries,
+                    _ssh_exception_detail(e),
+                )
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
                     time.sleep(wait_time)
                 else:
-                    raise RuntimeError(f"连接失败: {e}") from e
+                    raise RuntimeError(f"连接失败: {_ssh_exception_detail(e)}") from e
 
             finally:
                 if client is not None and not keep_client:
@@ -197,27 +250,33 @@ class SSHManager:
 
     def disconnect(self, name: str):
         """Disconnect from a server with error handling."""
-        if name in self._clients:
+        with self._profile_connection_lock(name):
+            with self._cache_lock:
+                client = self._clients.pop(name, None)
+                self._client_signatures.pop(name, None)
+            if client is None:
+                return
             try:
-                self._clients[name].close()
+                client.close()
                 logger.info(f"Disconnected from {name}")
             except Exception as e:
                 logger.warning(f"Error closing connection to {name}: {e}")
-            finally:
-                del self._clients[name]
-                self._client_signatures.pop(name, None)
 
     def disconnect_all(self):
         """Disconnect all clients."""
-        for name in list(self._clients.keys()):
+        with self._cache_lock:
+            names = list(self._clients)
+        for name in names:
             self.disconnect(name)
 
     def is_connected(self, name: str) -> bool:
         """Check if connected to a server."""
-        if name not in self._clients:
+        with self._cache_lock:
+            client = self._clients.get(name)
+        if client is None:
             return False
         try:
-            transport = self._clients[name].get_transport()
+            transport = client.get_transport()
             return transport is not None and transport.is_active()
         except Exception:
             return False
@@ -471,8 +530,11 @@ class SSHManager:
                 return False, f"连接测试失败: {stderr or '未知错误'}"
 
         except Exception as e:
-            logger.error(f"Connection test failed: {e}")
-            return False, f"连接失败: {e}"
+            detail = _ssh_exception_detail(e)
+            logger.warning("SSH connection test failed: %s", detail)
+            if detail.startswith(("连接失败", "SSH 连接失败", "认证失败")):
+                return False, detail
+            return False, f"连接失败: {detail}"
         finally:
             if secret_overrides is not None and client is not None:
                 try:

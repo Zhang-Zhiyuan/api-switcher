@@ -59,6 +59,43 @@ def _proxy_flags(command):
     ]
 
 
+def test_custom_target_url_requires_a_valid_http_host():
+    launcher = BrowserLauncher()
+
+    for value in (
+        "https://",
+        "https://example.com:99999/path",
+        "https://user:password@example.com/path",
+        "https://example.com/path\n--disable-web-security",
+        "file:///C:/Windows/System32",
+    ):
+        profile = BrowserProfile(
+            name="custom",
+            browser_type="chrome",
+            profile_mode="managed",
+            user_data_dir="unused",
+            start_target="custom",
+            custom_url=value,
+        )
+        with pytest.raises(ValueError):
+            launcher.resolve_target_url(profile)
+
+
+def test_custom_target_url_keeps_valid_path_and_query_unchanged():
+    launcher = BrowserLauncher()
+    url = "https://Example.com/path?target=a%20b"
+    profile = BrowserProfile(
+        name="custom",
+        browser_type="chrome",
+        profile_mode="managed",
+        user_data_dir="unused",
+        start_target="custom",
+        custom_url=url,
+    )
+
+    assert launcher.resolve_target_url(profile) == url
+
+
 def test_managed_browser_uses_running_strict_local_proxy(launch_browser, monkeypatch):
     from core import local_proxy
     from core.browser_data_manager import browser_data_manager

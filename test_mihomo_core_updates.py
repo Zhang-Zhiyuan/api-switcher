@@ -190,13 +190,16 @@ def test_managed_local_config_path_ignores_state_path_outside_owned_directory(
 
 def test_local_mihomo_log_rotation_keeps_one_previous_log(monkeypatch, tmp_path):
     log_path = tmp_path / "mihomo.log"
-    log_path.write_bytes(b"x" * 1025)
+    payload = b"old" + (b"x" * 1021) + b"newest"
+    log_path.write_bytes(payload)
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_LOG_PATH", log_path)
 
     local_proxy._rotate_local_mihomo_log(max_bytes=1024)
 
     assert not log_path.exists()
-    assert log_path.with_suffix(".log.1").stat().st_size == 1025
+    rotated = log_path.with_suffix(".log.1").read_bytes()
+    assert len(rotated) == 1024
+    assert rotated == payload[-1024:]
 
 
 def test_remote_core_updater_embedded_python_is_syntactically_valid_and_hardened():

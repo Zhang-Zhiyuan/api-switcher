@@ -185,6 +185,34 @@ def test_successful_keyring_write_cleans_stale_dpapi_fallback(monkeypatch):
     assert cleaned == ["test:ref"]
 
 
+def test_oversized_windows_secret_skips_known_failing_keyring_backend(monkeypatch):
+    class UnexpectedKeyring:
+        @staticmethod
+        def set_password(*_args):
+            raise AssertionError("oversized Windows secret must bypass CredWrite")
+
+    stored = []
+    monkeypatch.setattr(security, "_requires_windows_dpapi_fallback", lambda _value: True)
+    monkeypatch.setattr(security, "_keyring", lambda: UnexpectedKeyring())
+    monkeypatch.setattr(security, "_dpapi_set", lambda key, value: stored.append((key, value)))
+
+    security.set_secret("codex-account:test:auth_json", "x" * 5000)
+
+    assert stored == [("codex-account:test:auth_json", "x" * 5000)]
+
+
+def test_oversized_windows_secret_reports_dpapi_failure_without_keyring_retry(monkeypatch):
+    monkeypatch.setattr(security, "_requires_windows_dpapi_fallback", lambda _value: True)
+    monkeypatch.setattr(
+        security,
+        "_dpapi_set",
+        lambda *_args: (_ for _ in ()).throw(OSError("dpapi unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="超过 Windows 密钥环容量"):
+        security.set_secret("test:large", "x" * 5000)
+
+
 def test_successful_keyring_write_reports_stale_fallback_cleanup_failure(monkeypatch):
     class WorkingKeyring:
         @staticmethod

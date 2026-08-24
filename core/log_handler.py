@@ -8,6 +8,24 @@ from queue import Empty, Full, Queue
 from typing import Optional
 
 
+class ExpectedLibraryNoiseFilter(logging.Filter):
+    """Keep routine library disconnects from looking like application bugs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == "paramiko.transport"
+            and record.levelno == logging.ERROR
+            and record.getMessage().startswith("Socket exception:")
+        ):
+            # Paramiko reports ordinary remote socket closure as ERROR even
+            # though SSHManager already retries/surfaces the operation result.
+            # Preserve the diagnostic as WARNING without inflating the UI's
+            # application-error counter or hiding the event completely.
+            record.levelno = logging.WARNING
+            record.levelname = logging.getLevelName(logging.WARNING)
+        return True
+
+
 class GUILogHandler(logging.Handler):
     """将日志消息发送到队列，供 GUI 线程消费"""
 
@@ -61,6 +79,7 @@ class LogManager:
             # prevents concurrent app-start paths from installing duplicates.
             handler = GUILogHandler(self)
             handler.setLevel(logging.DEBUG)
+            handler.addFilter(ExpectedLibraryNoiseFilter())
             root_logger = logging.getLogger()
             root_logger.addHandler(handler)
             self.gui_handler = handler

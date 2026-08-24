@@ -135,6 +135,38 @@ class APITester:
         return headers
 
     @staticmethod
+    def _request_header_error(headers: dict[str, str]) -> TestResult | None:
+        """Reject malformed header values before ``http.client`` encodes them.
+
+        API keys copied with Chinese instructions, smart punctuation, or a
+        trailing newline otherwise surface as a cryptic latin-1 error after the
+        network operation starts.  Header control characters are rejected here
+        as well so pasted multi-line text cannot become header injection.
+        """
+
+        for raw_name, raw_value in dict(headers or {}).items():
+            name = str(raw_name)
+            value = str(raw_value)
+            sensitive = name.casefold() in APITester._SENSITIVE_HEADER_NAMES
+            field_label = "API Key/Auth Token" if sensitive else f"请求头 {name}"
+            if any(ord(char) < 32 and char != "\t" for char in value) or ord("\x7f") in map(ord, value):
+                return TestResult(
+                    success=False,
+                    message=f"{field_label}格式无效",
+                    error_details="检测到换行或控制字符；请只粘贴密钥本身，不要包含 export/set 命令或说明文字。",
+                )
+            try:
+                name.encode("ascii")
+                value.encode("latin-1")
+            except UnicodeEncodeError:
+                return TestResult(
+                    success=False,
+                    message=f"{field_label}格式无效",
+                    error_details="检测到 HTTP 请求头不支持的字符；请去掉中文说明、全角引号或其他非密钥内容。",
+                )
+        return None
+
+    @staticmethod
     def _normalize_base_url(base_url: str, default: str) -> str:
         return validate_api_base_url(base_url, default=default)
 
@@ -1029,6 +1061,9 @@ class APITester:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", APITester.USER_AGENT)
+        header_error = APITester._request_header_error(request_headers)
+        if header_error is not None:
+            return False, None, header_error
         req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
         request_secrets = APITester._sensitive_header_values(request_headers)
 
@@ -1117,6 +1152,9 @@ class APITester:
         data = json.dumps(payload).encode("utf-8")
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", APITester.USER_AGENT)
+        header_error = APITester._request_header_error(request_headers)
+        if header_error is not None:
+            return header_error
         req = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
         request_secrets = APITester._sensitive_header_values(request_headers)
 

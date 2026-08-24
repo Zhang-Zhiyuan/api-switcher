@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -95,9 +96,25 @@ class BrowserLauncher:
             custom_url = (profile.custom_url or "").strip()
             if not custom_url:
                 raise ValueError("自定义目标 URL 为空")
-            # Basic URL validation
-            if not (custom_url.startswith("http://") or custom_url.startswith("https://")):
-                raise ValueError(f"无效的 URL 格式: {custom_url}")
+            if any(unicodedata.category(char) == "Cc" for char in custom_url):
+                raise ValueError("自定义目标 URL 不能包含换行或控制字符")
+            if any(char.isspace() for char in custom_url):
+                raise ValueError("自定义目标 URL 不能包含空白字符，请先进行 URL 编码")
+            try:
+                parsed = urlsplit(custom_url)
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("自定义目标 URL 的主机或端口无效") from exc
+            if parsed.scheme.casefold() not in {"http", "https"}:
+                raise ValueError("自定义目标 URL 只支持 http:// 或 https://")
+            if not parsed.hostname:
+                raise ValueError("自定义目标 URL 缺少主机名")
+            if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+                raise ValueError("自定义目标 URL 不能包含用户名或密码")
+            # Accessing ``port`` above validates malformed/out-of-range ports;
+            # keep the original URL so path/query escaping and user casing are
+            # left to Chromium instead of being rewritten by the launcher.
+            _ = port
             return custom_url
         raise ValueError(f"未知目标站点: {use_target}")
 

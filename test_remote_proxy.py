@@ -6773,7 +6773,11 @@ def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
     starts = []
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
-    monkeypatch.setattr(local_proxy, "install_local_ai_proxy", lambda text: starts.append(text) or "started")
+    monkeypatch.setattr(
+        local_proxy,
+        "install_local_ai_proxy",
+        lambda text, **_kwargs: starts.append(text) or "started",
+    )
 
     assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
     assert "saved.example.com" in starts[0]
@@ -6794,7 +6798,11 @@ def test_local_proxy_startup_node_can_be_saved_from_current_node(monkeypatch, tm
     starts = []
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: False)
-    monkeypatch.setattr(local_proxy, "install_local_ai_proxy", lambda text: starts.append(text) or "started")
+    monkeypatch.setattr(
+        local_proxy,
+        "install_local_ai_proxy",
+        lambda text, **_kwargs: starts.append(text) or "started",
+    )
 
     assert "boot.example.com" in summary
     assert "boot.example.com" in local_proxy.local_proxy_startup_node_summary()
@@ -6838,6 +6846,94 @@ def test_local_proxy_auto_start_skips_when_managed_proxy_is_alive(monkeypatch, t
 
     assert "已在运行" in message
     assert "17898" in message
+
+
+def test_local_proxy_auto_start_preserves_existing_verified_fallback_pool(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+    local_proxy.set_local_proxy_start_on_login(True)
+    primary = {"name": "primary", "type": "vless", "server": "primary.example.com", "port": 443}
+    fallback = {"name": "backup", "type": "vless", "server": "backup.example.com", "port": 443}
+    local_proxy.save_local_proxy_preferences(last_node=primary)
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: False)
+    monkeypatch.setattr(local_proxy, "_existing_local_proxy_fallback_nodes", lambda _node: (fallback,))
+    starts = []
+
+    def capture_start(text, **kwargs):
+        starts.append((text, kwargs))
+        return "started"
+
+    monkeypatch.setattr(local_proxy, "install_local_ai_proxy", capture_start)
+
+    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert starts[0][1]["fallback_nodes"] == (fallback,)
+
+
+def test_local_proxy_auto_start_recovers_collapsed_pool_from_linked_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+    local_proxy.set_local_proxy_start_on_login(True)
+    primary = {"name": "primary", "type": "vless", "server": "primary.example.com", "port": 443}
+    fallback = {"name": "backup", "type": "vless", "server": "backup.example.com", "port": 443}
+    local_proxy.save_local_proxy_preferences(last_node=primary)
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: False)
+    monkeypatch.setattr(local_proxy, "_existing_local_proxy_fallback_nodes", lambda _node: ())
+    monkeypatch.setattr(local_proxy, "_cached_subscription_fallback_nodes", lambda _node: (fallback,))
+    starts = []
+    monkeypatch.setattr(
+        local_proxy,
+        "install_local_ai_proxy",
+        lambda text, **kwargs: starts.append((text, kwargs)) or "started",
+    )
+
+    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert starts[0][1]["fallback_nodes"] == (fallback,)
+
+
+def test_cached_subscription_pool_requires_exact_selected_node_link(monkeypatch):
+    primary = {"name": "manual", "type": "vless", "server": "manual.example.com", "port": 443}
+    cache_loads = []
+    monkeypatch.setattr(
+        remote_proxy,
+        "load_proxy_subscription_state",
+        lambda: {"selected_node_key": "0" * 64},
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "load_cached_proxy_subscription",
+        lambda _state: cache_loads.append(True),
+    )
+
+    assert local_proxy._cached_subscription_fallback_nodes(primary) == ()
+    assert cache_loads == []
+
+
+def test_cached_subscription_pool_uses_linked_managed_nodes(monkeypatch):
+    primary = {"name": "primary", "type": "vless", "server": "primary.example.com", "port": 443}
+    fallback = {"name": "backup", "type": "vless", "server": "backup.example.com", "port": 443}
+    item = remote_proxy.ProxySubscriptionNode(index=1, node=fallback)
+    state = {"selected_node_key": remote_proxy.proxy_node_key(primary)}
+    qualities = {"quality": {"ok": True}}
+    captured = []
+    monkeypatch.setattr(remote_proxy, "load_proxy_subscription_state", lambda: state)
+    monkeypatch.setattr(
+        remote_proxy,
+        "load_cached_proxy_subscription",
+        lambda _state: remote_proxy.ProxySubscriptionResult(nodes=(item,), saved_path="managed.yaml"),
+    )
+    monkeypatch.setattr(remote_proxy, "load_proxy_subscription_qualities", lambda _state: qualities)
+    monkeypatch.setattr(
+        local_proxy,
+        "_local_proxy_fallback_nodes",
+        lambda selected, nodes, evidence: captured.append((selected, nodes, evidence)) or (fallback,),
+    )
+
+    assert local_proxy._cached_subscription_fallback_nodes(primary) == (fallback,)
+    assert captured == [(primary, (item,), qualities)]
 
 
 def test_apply_local_proxy_routing_skips_unmanaged_listener(monkeypatch, tmp_path):

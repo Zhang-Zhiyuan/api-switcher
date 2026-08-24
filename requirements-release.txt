@@ -1,4 +1,4 @@
-# Audited Windows x64 release environment for API切换器 v2.4.0.
+# Audited Windows x64 release environment for API切换器 v2.4.4.
 # Generated from the validated CPython 3.12.10 build environment. Keep direct
 # and transitive dependencies exact so a clean release machine cannot silently
 # absorb a future incompatible package version.

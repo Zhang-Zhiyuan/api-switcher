@@ -16,6 +16,13 @@ PORTABLE_MARKER_FILE = "portable.flag"
 PORTABLE_DATA_DIR_NAME = "data"
 _STORAGE_DIR_SOURCE = "default"
 _STORAGE_DIR_WARNINGS: list[str] = []
+_EXPLICIT_STORAGE_SOURCES = {
+    ENV_DATA_DIR,
+    DATA_DIR_POINTER_FILE,
+    "portable",
+    "temp-fallback",
+    "cwd-fallback",
+}
 
 
 def _get_app_dir() -> Path:
@@ -235,9 +242,25 @@ def migrate_legacy_storage() -> list[str]:
     return copied
 
 
+def _legacy_storage_migration_enabled() -> bool:
+    """Migrate only when the app selected its normal platform data home.
+
+    An explicit environment override, pointer, or portable directory is an
+    authoritative destination. Silently seeding it from an unrelated legacy
+    project ``storage`` directory breaks clean-room runs and also defeats the
+    user's ``copy_current=False`` choice when switching data locations.
+    """
+
+    return STORAGE_DIR_SOURCE not in _EXPLICIT_STORAGE_SOURCES
+
+
 def ensure_storage_dirs(migrate_legacy: bool = True) -> list[str]:
     """Create all app-owned data directories and optionally migrate old data."""
-    migrated = migrate_legacy_storage() if migrate_legacy else []
+    migrated = (
+        migrate_legacy_storage()
+        if migrate_legacy and _legacy_storage_migration_enabled()
+        else []
+    )
     for directory in [
         STORAGE_DIR,
         BACKUPS_DIR,

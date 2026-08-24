@@ -2,7 +2,7 @@ import logging
 import threading
 
 from ui.tabs.log_viewer_tab import LOG_LEVELS, LogViewerTab, _prepare_log_entries
-from core.log_handler import LogManager
+from core.log_handler import ExpectedLibraryNoiseFilter, LogManager
 
 
 def test_prepare_log_entries_filters_and_counts_by_level():
@@ -54,6 +54,38 @@ def test_log_manager_bounds_history_and_queue():
 
     assert manager.get_recent_entries() == []
     assert manager.get_log_queue().qsize() == 0
+
+
+def test_expected_paramiko_socket_close_is_preserved_as_warning():
+    record = logging.LogRecord(
+        name="paramiko.transport",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="Socket exception: connection reset by peer",
+        args=(),
+        exc_info=None,
+    )
+
+    assert ExpectedLibraryNoiseFilter().filter(record) is True
+    assert record.levelno == logging.WARNING
+    assert record.levelname == "WARNING"
+
+
+def test_expected_library_filter_keeps_unrelated_errors_unchanged():
+    record = logging.LogRecord(
+        name="paramiko.transport",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="Unexpected protocol failure",
+        args=(),
+        exc_info=None,
+    )
+
+    ExpectedLibraryNoiseFilter().filter(record)
+
+    assert record.levelno == logging.ERROR
 
 
 def test_log_manager_initial_snapshot_consumes_duplicate_queue_backlog():
