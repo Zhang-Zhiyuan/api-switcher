@@ -304,6 +304,10 @@ class RemoteAIProxyStatus:
         return f"AI 代理{installed}，{state}: {self.proxy_url}{detail}"
 
 
+class RemoteMihomoCoreMissingError(RuntimeError):
+    """The remote candidate probe cannot start because no compatible core exists."""
+
+
 @dataclass(frozen=True)
 class RemoteAIProxyProbeResult:
     label: str
@@ -3228,6 +3232,8 @@ def _probe_ai_proxy_candidate_isolated(
     if status != 0:
         detail = (stderr or stdout or "").strip().splitlines()
         clean_detail = detail[-1][:240] if detail else str(status)
+        if status == 12:
+            raise RemoteMihomoCoreMissingError(f"隔离候选验证失败: {clean_detail}")
         raise RuntimeError(f"隔离候选验证失败: {clean_detail}")
     results = _parse_remote_probe_output(stdout)
     expected = REMOTE_AI_STABILITY_EXPECTED_PROBES
@@ -3320,6 +3326,50 @@ def _reconcile_dead_ai_proxy_runtime(client, home: str, mixed_port: int) -> dict
             "为避免误杀，已停止部署"
         )
     return values
+
+
+def _ensure_remote_mihomo_core_on_client(
+    client,
+    home: str,
+    *,
+    force_check: bool = False,
+) -> str:
+    command = _build_ensure_mihomo_command(home, force_check=force_check)
+    status, stdout, stderr = ssh_manager.execute_command_with_status(
+        client,
+        command,
+        timeout=300,
+        log_command=False,
+    )
+    if status != 0:
+        detail = (stderr or stdout or str(status)).strip().splitlines()
+        raise RuntimeError(f"远端 mihomo 内核准备失败: {(detail[-1] if detail else status)[:300]}")
+    values = _parse_key_values(stdout)
+    return values.get("kernel_version") or "mihomo 内核已准备"
+
+
+def ensure_remote_mihomo_core(ssh_name: str, *, force_check: bool = False) -> str:
+    """Install or safely update only the tool-managed remote mihomo binary."""
+
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    detail = _ensure_remote_mihomo_core_on_client(client, home, force_check=force_check)
+    return f"{ssh_name}: {detail}"
+
+
+def _probe_ai_proxy_candidate_with_core_bootstrap(
+    ssh_name: str,
+    proxy_text: str,
+    timeout: int = 8,
+) -> str:
+    try:
+        return probe_ai_proxy_candidate_isolated(ssh_name, proxy_text, timeout=timeout)
+    except RemoteMihomoCoreMissingError:
+        # A clean server cannot run an isolated candidate before the promised
+        # automatic core installation.  Install only the managed binary, then
+        # retry without touching proxy config, environment, or login state.
+        ensure_remote_mihomo_core(ssh_name)
+        return probe_ai_proxy_candidate_isolated(ssh_name, proxy_text, timeout=timeout)
 
 
 def install_ai_proxy(
@@ -3428,7 +3478,7 @@ def install_ai_proxy_verified(
     requested_key = proxy_node_key(requested_node)
     tried = []
     try:
-        requested_probe = probe_ai_proxy_candidate_isolated(ssh_name, proxy_text)
+        requested_probe = _probe_ai_proxy_candidate_with_core_bootstrap(ssh_name, proxy_text)
     except Exception as exc:
         requested_probe = ""
         tried.append(f"{describe_proxy_node(requested_node)}: {exc}")
@@ -3472,7 +3522,7 @@ def install_ai_proxy_verified(
         node_summary = describe_proxy_node(item.node)
         latency_label = proxy_node_latency_label(result)
         try:
-            candidate_probe = probe_ai_proxy_candidate_isolated(
+            candidate_probe = _probe_ai_proxy_candidate_with_core_bootstrap(
                 ssh_name,
                 format_proxy_node(item.node),
             )
@@ -3958,6 +4008,7 @@ def inspect_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> RemoteAIProxyStat
     env_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.env")
     start_path = posixpath.join(home, ".config", "api-switcher", "start-ai-proxy.sh")
     pid_path = posixpath.join(home, ".config", "api-switcher", "ai-proxy.pid")
+    core_path = posixpath.join(home, ".local", "bin", "mihomo")
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     shell_paths = " ".join(shlex.quote(path) for path in _shell_proxy_profile_paths(home))
     vscode_paths = " ".join(
@@ -3970,6 +4021,7 @@ CONFIG_DIR={shlex.quote(posixpath.dirname(config_path))}
 ENV_FILE={shlex.quote(env_path)}
 START_SCRIPT={shlex.quote(start_path)}
 PID_FILE={shlex.quote(pid_path)}
+CORE_BIN={shlex.quote(core_path)}
 PORT={mixed_port}
 installed=no
 running=no
@@ -4017,6 +4069,8 @@ env_file=no
 start_script=no
 shell_entrypoints=0
 vscode_entrypoints=0
+kernel_version=""
+kernel_source=""
 [ -s "$ENV_FILE" ] && grep -q "HTTP_PROXY=http://127.0.0.1:$PORT" "$ENV_FILE" 2>/dev/null && env_file=yes
 [ -x "$START_SCRIPT" ] && start_script=yes
 for file in {shell_paths}; do
@@ -4025,10 +4079,20 @@ done
 for file in {vscode_paths}; do
   [ -f "$file" ] && grep -q "{VSCODE_ENV_BLOCK_START}" "$file" 2>/dev/null && vscode_entrypoints=$((vscode_entrypoints + 1))
 done
+if [ -x "$CORE_BIN" ]; then
+  kernel_source=managed
+  kernel_version="$("$CORE_BIN" -v 2>&1 | head -n 1 | tr '\n\r' '  ' || true)"
+else
+  detected_core="$(command -v mihomo 2>/dev/null || command -v clash-meta 2>/dev/null || command -v clash 2>/dev/null || true)"
+  if [ -n "$detected_core" ] && [ -x "$detected_core" ]; then
+    kernel_source=system
+    kernel_version="$("$detected_core" -v 2>&1 | head -n 1 | tr '\n\r' '  ' || true)"
+  fi
+fi
 if [ "$config_owned" = "yes" ] && [ "$pid_running" = "yes" ] && [ "$pid_managed" = "yes" ] && [ "$port_listening" = "yes" ]; then
   running=yes
 fi
-printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig_present=%s\\nconfig_owned=%s\\nconfig_legacy=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$config_present" "$config_owned" "$config_legacy" "$CONFIG"
+printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig_present=%s\\nconfig_owned=%s\\nconfig_legacy=%s\\nkernel_source=%s\\nkernel_version=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$config_present" "$config_owned" "$config_legacy" "$kernel_source" "$kernel_version" "$CONFIG"
 """
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=20)
     if status != 0:
@@ -4051,6 +4115,12 @@ printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_liste
         )
     )
     detail_parts = []
+    kernel_version = str(values.get("kernel_version") or "").strip()[:300]
+    if kernel_version:
+        source_label = "受管" if values.get("kernel_source") == "managed" else "系统"
+        detail_parts.append(f"{source_label}代理内核: {kernel_version}")
+    else:
+        detail_parts.append("未检测到可自检版本的 mihomo/clash 内核")
     if values.get("pid_running") == "yes" and values.get("pid_managed") == "no":
         detail_parts.append("pid 文件指向非本工具受管的 mihomo/clash 进程")
     elif values.get("pid_running") == "yes" and values.get("pid_managed") != "yes":
@@ -6202,6 +6272,14 @@ if port_listening; then
   exit 6
 fi
 mkdir -p "$APP_DIR"
+if [ -f "$LOG_FILE" ]; then
+  log_size="$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)"
+  case "$log_size" in ''|*[!0-9]*) log_size=0 ;; esac
+  if [ "$log_size" -gt 8388608 ]; then
+    rm -f "$LOG_FILE.1"
+    mv "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+  fi
+fi
 printf '\\n--- API-Switcher AI proxy start %s ---\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date 2>/dev/null || true)" >>"$LOG_FILE"
 {proxy_unset}
 nohup "$BIN" -d "$CONFIG_DIR" >>"$LOG_FILE" 2>&1 &
@@ -7131,6 +7209,354 @@ def _remote_latency_command_timeout(node_count: int, timeout: float, attempts: i
     return max(45, min(300, int(batches * max(1, attempts) * _normalize_timeout(timeout, 3.0) + 30)))
 
 
+def _build_ensure_mihomo_command(
+    home: str,
+    *,
+    app_dir: str | None = None,
+    local_bin_dir: str | None = None,
+    force_check: bool = False,
+) -> str:
+    """Build an atomic, digest-checked managed mihomo installer/updater."""
+
+    app_dir = app_dir or posixpath.join(home, ".config", "api-switcher")
+    local_bin_dir = local_bin_dir or posixpath.join(home, ".local", "bin")
+    template = r"""set -eu
+HOME_DIR=__HOME_DIR__
+APP_DIR=__APP_DIR__
+LOCAL_BIN_DIR=__LOCAL_BIN_DIR__
+FORCE_CHECK=__FORCE_CHECK__
+BIN="$LOCAL_BIN_DIR/mihomo"
+RELEASE_STATE="$APP_DIR/mihomo-release.json"
+mkdir -p "$APP_DIR" "$LOCAL_BIN_DIR"
+chmod 700 "$APP_DIR" 2>/dev/null || true
+arch="$(uname -m 2>/dev/null || echo unknown)"
+case "$arch" in
+  x86_64|amd64) pattern="linux-amd64" ;;
+  aarch64|arm64) pattern="linux-arm64" ;;
+  armv7l|armv7*) pattern="linux-armv7" ;;
+  *) echo "不支持的远端架构: $arch" >&2; exit 3 ;;
+esac
+
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 - "$pattern" "$BIN" "$RELEASE_STATE" "$FORCE_CHECK" <<'PY'
+import gzip
+import hashlib
+import hmac
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+pattern, target, state_path, force_value = sys.argv[1:]
+force_check = force_value == "1"
+release_url = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+metadata_limit = 4 * 1024 * 1024
+asset_limit = 256 * 1024 * 1024
+binary_limit = 256 * 1024 * 1024
+
+
+def safe_error(error):
+    text = str(error or "unknown error").strip() or "unknown error"
+    text = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1***@", text)
+    text = re.sub(r"(?i)([?&](?:token|sig|signature|key|auth)=)[^&\s]+", r"\1***", text)
+    return text[:600]
+
+
+def read_state():
+    try:
+        if os.path.getsize(state_path) > 1024 * 1024:
+            return {}
+        with open(state_path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_state(value):
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".mihomo-release-", dir=os.path.dirname(state_path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, state_path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def version_from(value):
+    match = re.search(r"(?<!\d)v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)", str(value or ""))
+    return match.group(1) if match else ""
+
+
+def version_key(value):
+    version = version_from(value)
+    if not version:
+        return (-1, -1, -1)
+    return tuple(int(part) for part in version.split("-", 1)[0].split(".")[:3])
+
+
+def probe_binary(path):
+    try:
+        completed = subprocess.run(
+            [path, "-v"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return None
+    detail = next((line.strip() for line in completed.stdout.splitlines() if line.strip()), "")
+    version = version_from(detail)
+    if completed.returncode != 0 or not version or "mihomo" not in detail.casefold():
+        return None
+    return version, detail[:300]
+
+
+def read_response(response, limit, label):
+    content_length = response.headers.get("Content-Length")
+    try:
+        declared = int(content_length) if content_length else 0
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > limit:
+        raise RuntimeError(f"{label} response too large: {declared}")
+    payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise RuntimeError(f"{label} response exceeds {limit} bytes")
+    return payload
+
+
+def read_url(url, timeout, limit, label):
+    last_error = None
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for attempt in range(1, 4):
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json, application/octet-stream, */*",
+                "User-Agent": "API-Switcher/1.0",
+            },
+        )
+        openers = [urllib.request.urlopen]
+        if any(urllib.request.getproxies().get(key) for key in ("http", "https", "all")):
+            openers.append(direct.open)
+        errors = []
+        for opener in openers:
+            try:
+                with opener(request, timeout=timeout) as response:
+                    return read_response(response, limit, label)
+            except Exception as exc:
+                last_error = exc
+                errors.append(safe_error(exc))
+        if attempt < 3:
+            time.sleep(attempt)
+    detail = "; ".join(dict.fromkeys(errors)) if errors else safe_error(last_error)
+    raise RuntimeError(f"{label} failed after 3 attempts: {detail}") from last_error
+
+
+state = read_state()
+current = probe_binary(target) if os.path.isfile(target) and os.access(target, os.X_OK) else None
+now = time.time()
+try:
+    checked_at = float(state.get("checked_at_epoch") or 0)
+except (TypeError, ValueError):
+    checked_at = 0
+ttl = 6 * 60 * 60 if state.get("last_check_success") is True else 15 * 60
+cached_latest = version_from(state.get("latest_version"))
+cache_current = current and (
+    state.get("last_check_success") is not True
+    or not cached_latest
+    or version_key(current[0]) >= version_key(cached_latest)
+)
+if current and not force_check and checked_at > 0 and 0 <= now - checked_at < ttl and cache_current:
+    print("kernel_cached=" + current[1])
+    raise SystemExit(0)
+
+try:
+    data = json.loads(read_url(release_url, 45, metadata_limit, "release metadata").decode("utf-8"))
+    tag = str(data.get("tag_name") or "").strip()
+    latest_version = version_from(tag)
+    assets = data.get("assets") or []
+    if not latest_version or not isinstance(assets, list):
+        raise RuntimeError("release metadata is incomplete")
+
+    if current and version_key(current[0]) >= version_key(latest_version):
+        state.update({
+            "schema": 1,
+            "checked_at_epoch": now,
+            "last_check_success": True,
+            "latest_tag": tag,
+            "latest_version": latest_version,
+            "installed_version": current[0],
+            "installed_detail": current[1],
+            "last_error": "",
+        })
+        write_state(state)
+        print("kernel_current=" + current[1])
+        raise SystemExit(0)
+
+    def usable(asset):
+        name = str(asset.get("name") or "").lower()
+        return (
+            pattern in name
+            and name.endswith(".gz")
+            and not any(token in name for token in ("deb", "rpm", "sha256", "checksums"))
+        )
+
+    candidates = [asset for asset in assets if isinstance(asset, dict) and usable(asset)]
+    if not candidates:
+        raise RuntimeError(f"no mihomo asset matched {pattern}")
+    exact_name = f"mihomo-{pattern}-{tag}".lower() + ".gz"
+
+    def asset_rank(asset):
+        name = str(asset.get("name") or "").lower()
+        if name == exact_name:
+            return (0, name)
+        if "compatible" in name:
+            return (30, name)
+        if re.search(r"-(?:go\d+|v[1-3])(?:-|\.)", name):
+            return (20, name)
+        return (10, name)
+
+    asset = min(candidates, key=asset_rank)
+    url = str(asset.get("browser_download_url") or "")
+    if not url:
+        raise RuntimeError("mihomo release asset has no download URL")
+    compressed = read_url(url, 180, asset_limit, "release asset")
+    try:
+        expected_size = int(asset.get("size") or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    if expected_size and len(compressed) != expected_size:
+        raise RuntimeError(f"release asset size mismatch: expected {expected_size}, got {len(compressed)}")
+    digest = str(asset.get("digest") or "").strip().lower()
+    if digest:
+        algorithm, separator, expected_digest = digest.partition(":")
+        if separator != ":" or algorithm != "sha256" or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+            raise RuntimeError("release asset digest is unsupported")
+        actual_digest = hashlib.sha256(compressed).hexdigest()
+        if not hmac.compare_digest(actual_digest, expected_digest):
+            raise RuntimeError("release asset SHA-256 mismatch")
+
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as handle:
+        binary = handle.read(binary_limit + 1)
+    if not binary or len(binary) > binary_limit or not binary.startswith(b"\x7fELF"):
+        raise RuntimeError("downloaded mihomo binary is empty, oversized, or not ELF")
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    fd, candidate_path = tempfile.mkstemp(prefix=".mihomo-core-", dir=os.path.dirname(target))
+    candidate = None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(binary)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(candidate_path, 0o755)
+        candidate = probe_binary(candidate_path)
+        if not candidate or version_key(candidate[0]) != version_key(latest_version):
+            raise RuntimeError("downloaded mihomo binary version self-check failed")
+        detail_lower = candidate[1].casefold()
+        expected_arch = "armv7" if pattern.endswith("armv7") else pattern.rsplit("-", 1)[-1]
+        if "linux" not in detail_lower or expected_arch not in detail_lower:
+            raise RuntimeError("downloaded mihomo binary platform self-check failed")
+        os.replace(candidate_path, target)
+    finally:
+        try:
+            os.unlink(candidate_path)
+        except FileNotFoundError:
+            pass
+
+    state.update({
+        "schema": 1,
+        "checked_at_epoch": now,
+        "last_check_success": True,
+        "latest_tag": tag,
+        "latest_version": latest_version,
+        "installed_version": candidate[0],
+        "installed_detail": candidate[1],
+        "installed_asset": str(asset.get("name") or ""),
+        "installed_at_epoch": now,
+        "last_error": "",
+    })
+    write_state(state)
+    print("kernel_updated=" + candidate[1])
+except SystemExit:
+    raise
+except Exception as exc:
+    state.update({
+        "schema": 1,
+        "checked_at_epoch": time.time(),
+        "last_check_success": False,
+        "last_error": safe_error(exc),
+    })
+    if current:
+        state["installed_version"] = current[0]
+        state["installed_detail"] = current[1]
+    try:
+        write_state(state)
+    except Exception:
+        pass
+    if current:
+        print("mihomo update check failed; keeping current core: " + safe_error(exc), file=sys.stderr)
+        raise SystemExit(0)
+    raise
+PY
+  then
+    if command -v mihomo >/dev/null 2>&1 || command -v clash-meta >/dev/null 2>&1 || command -v clash >/dev/null 2>&1; then
+      echo "mihomo 下载/校验失败，回退使用远端已有兼容内核" >&2
+    else
+      exit 4
+    fi
+  fi
+elif [ -x "$BIN" ]; then
+  echo "远端未安装 python3，已复用受管 mihomo，但无法自动检查更新" >&2
+elif command -v mihomo >/dev/null 2>&1 || command -v clash-meta >/dev/null 2>&1 || command -v clash >/dev/null 2>&1; then
+  echo "远端未安装 python3，回退使用已有兼容内核" >&2
+else
+  echo "远端未安装 python3，且未找到 mihomo/clash-meta/clash，无法自动下载 mihomo" >&2
+  exit 2
+fi
+
+ACTIVE_BIN="$BIN"
+if [ ! -x "$ACTIVE_BIN" ]; then
+  ACTIVE_BIN="$(command -v mihomo 2>/dev/null || command -v clash-meta 2>/dev/null || command -v clash 2>/dev/null || true)"
+fi
+if [ -z "$ACTIVE_BIN" ] || [ ! -x "$ACTIVE_BIN" ]; then
+  echo "远端没有可执行的 mihomo/clash 兼容内核" >&2
+  exit 2
+fi
+KERNEL_LINE="$("$ACTIVE_BIN" -v 2>&1 | head -n 1 | tr '\n\r' '  ' || true)"
+if [ -z "$KERNEL_LINE" ]; then
+  echo "远端代理内核版本自检失败" >&2
+  exit 5
+fi
+printf 'kernel_path=%s\nkernel_version=%s\n' "$ACTIVE_BIN" "$KERNEL_LINE"
+"""
+    return (
+        template.replace("__HOME_DIR__", shlex.quote(home))
+        .replace("__APP_DIR__", shlex.quote(app_dir))
+        .replace("__LOCAL_BIN_DIR__", shlex.quote(local_bin_dir))
+        .replace("__FORCE_CHECK__", "1" if force_check else "0")
+    )
+
+
 def _build_install_command(
     home: str,
     config_dir: str,
@@ -7140,93 +7566,25 @@ def _build_install_command(
     mixed_port: int,
 ) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
-    return f"""set -eu
-HOME_DIR={shlex.quote(home)}
+    ensure_command = _build_ensure_mihomo_command(
+        home,
+        app_dir=app_dir,
+        local_bin_dir=local_bin_dir,
+    )
+    start_command = f"""
 CONFIG_DIR={shlex.quote(config_dir)}
-APP_DIR={shlex.quote(app_dir)}
-LOCAL_BIN_DIR={shlex.quote(local_bin_dir)}
 START_SCRIPT={shlex.quote(start_path)}
 PORT={mixed_port}
-BIN="$LOCAL_BIN_DIR/mihomo"
-mkdir -p "$CONFIG_DIR" "$APP_DIR" "$LOCAL_BIN_DIR"
-if [ ! -x "$BIN" ] && ! command -v mihomo >/dev/null 2>&1 && ! command -v clash-meta >/dev/null 2>&1 && ! command -v clash >/dev/null 2>&1; then
-  arch="$(uname -m 2>/dev/null || echo unknown)"
-  case "$arch" in
-    x86_64|amd64) pattern="linux-amd64" ;;
-    aarch64|arm64) pattern="linux-arm64" ;;
-    armv7l|armv7*) pattern="linux-armv7" ;;
-    *) echo "不支持的远端架构: $arch" >&2; exit 3 ;;
-  esac
-  if command -v python3 >/dev/null 2>&1; then
-    if ! python3 - "$pattern" "$BIN" <<'PY'
-import gzip
-import json
-import os
-import sys
-import time
-import urllib.request
-
-pattern, target = sys.argv[1], sys.argv[2]
-
-def read_url(url, timeout):
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            request = urllib.request.Request(
-                url,
-                headers={{
-                    "Accept": "application/vnd.github+json, application/octet-stream, */*",
-                    "User-Agent": "API-Switcher/1.0",
-                }},
-            )
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read()
-        except Exception as exc:
-            last_error = exc
-            if attempt < 3:
-                time.sleep(attempt)
-    raise RuntimeError(f"download failed after 3 attempts: {{last_error}}") from last_error
-
-data = json.loads(read_url("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest", 45).decode("utf-8"))
-assets = data.get("assets") or []
-
-def usable(asset):
-    name = str(asset.get("name") or "").lower()
-    if pattern not in name or not name.endswith(".gz"):
-        return False
-    return not any(token in name for token in ("deb", "rpm", "sha256", "checksums"))
-
-candidates = [asset for asset in assets if usable(asset) and "compatible" not in str(asset.get("name", "")).lower()]
-if not candidates:
-    candidates = [asset for asset in assets if usable(asset)]
-if not candidates:
-    raise SystemExit(f"no mihomo asset matched {{pattern}}")
-url = candidates[0]["browser_download_url"]
-payload = read_url(url, 180)
-if url.lower().endswith(".gz"):
-    payload = gzip.decompress(payload)
-with open(target, "wb") as handle:
-    handle.write(payload)
-os.chmod(target, 0o755)
-print("downloaded=" + url)
-PY
-    then
-      if command -v clash-meta >/dev/null 2>&1 || command -v clash >/dev/null 2>&1; then
-        echo "mihomo 下载失败，回退使用远端已有 clash 兼容二进制" >&2
-      else
-        exit 4
-      fi
-    fi
-  elif command -v clash-meta >/dev/null 2>&1 || command -v clash >/dev/null 2>&1; then
-    echo "远端未安装 python3，回退使用已有 clash 兼容二进制" >&2
-  else
-    echo "远端未安装 python3，且未找到 mihomo/clash-meta/clash，无法自动下载 mihomo" >&2
-    exit 2
-  fi
-fi
+mkdir -p "$CONFIG_DIR"
 "$START_SCRIPT" restart
-printf 'config=%s\\nproxy=http://127.0.0.1:%s\\n' "$CONFIG_DIR/config.yaml" "$PORT"
+ACTIVE_BIN="$LOCAL_BIN_DIR/mihomo"
+if [ ! -x "$ACTIVE_BIN" ]; then
+  ACTIVE_BIN="$(command -v mihomo 2>/dev/null || command -v clash-meta 2>/dev/null || command -v clash 2>/dev/null || true)"
+fi
+KERNEL_LINE="$("$ACTIVE_BIN" -v 2>&1 | head -n 1 | tr '\n\r' '  ' || true)"
+printf 'config=%s proxy=http://127.0.0.1:%s kernel=%s\n' "$CONFIG_DIR/config.yaml" "$PORT" "$KERNEL_LINE"
 """
+    return ensure_command.rstrip() + "\n" + start_command.lstrip()
 
 
 def _build_shell_profile_block(env_path: str, start_path: str) -> str:

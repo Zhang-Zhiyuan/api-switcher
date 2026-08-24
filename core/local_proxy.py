@@ -4,6 +4,7 @@ import atexit
 import copy
 import gzip
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import io
@@ -31,7 +32,7 @@ from urllib.parse import urlparse
 
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser
-from core.atomic_io import atomic_write_bytes, atomic_write_text
+from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_text, replace_with_retry
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITE_IDS, LOCAL_PROXY_BUILTIN_SITES
 
 
@@ -51,6 +52,14 @@ LOCAL_PROXY_APPLIED_CONFIG_STATE_KEYS = (
     "applied_config_at",
 )
 MIHOMO_DOWNLOAD_RETRIES = 3
+MIHOMO_RELEASE_API_URL = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+MIHOMO_RELEASE_STATE_PATH = LOCAL_PROXY_BIN_DIR / "mihomo-release.json"
+MIHOMO_PENDING_BINARY_PATH = LOCAL_PROXY_BIN_DIR / "mihomo.pending.exe"
+MIHOMO_RELEASE_CHECK_TTL_SECONDS = 6 * 60 * 60
+MIHOMO_RELEASE_FAILURE_RETRY_SECONDS = 15 * 60
+MIHOMO_RELEASE_METADATA_MAX_BYTES = 4 * 1024 * 1024
+MIHOMO_RELEASE_ASSET_MAX_BYTES = 256 * 1024 * 1024
+MIHOMO_BINARY_MAX_BYTES = 256 * 1024 * 1024
 WINDOWS_SYSTEM_PROXY_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 WINDOWS_SYSTEM_PROXY_KEYS = ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL", "AutoDetect")
 WINDOWS_SYSTEM_PROXY_OVERRIDE = "<local>;127.0.0.1;localhost;::1"
@@ -96,6 +105,7 @@ _ISOLATED_MIHOMO_LOCK = threading.RLock()
 _ISOLATED_MIHOMO_PROCESSES: set[object] = set()
 _ISOLATED_MIHOMO_DIRECTORIES: set[Path] = set()
 _ISOLATED_MIHOMO_SHUTTING_DOWN = threading.Event()
+_MIHOMO_BINARY_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -443,7 +453,7 @@ def set_local_proxy_strict_privacy_and_apply(enabled: bool) -> str:
         "本机代理端口",
     )
     was_running = _managed_local_proxy_is_running(state) and _is_port_listening(mixed_port)
-    config_path = Path(state.get("config_path") or (LOCAL_PROXY_CONFIG_DIR / "config.yaml"))
+    config_path = _managed_local_config_path(state)
     previous_config = ""
     if was_running:
         try:
@@ -679,6 +689,119 @@ def auto_start_local_ai_proxy_if_enabled() -> str:
     return install_local_ai_proxy(remote_proxy.format_proxy_node(node))
 
 
+def update_local_mihomo_core(*, restart_running: bool = False) -> str:
+    """Check the managed core and optionally restart only to apply a staged update.
+
+    This deliberately does not rewrite proxy environment, Windows system proxy,
+    VS Code settings, node selection, or login credentials.
+    """
+
+    if os.name != "nt":
+        raise RuntimeError("本机 mihomo 内核更新目前只支持 Windows")
+    binary_path = _ensure_mihomo_binary()
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+        "本机代理端口",
+    )
+    running = _managed_local_proxy_is_running(state) and _is_port_listening(mixed_port)
+    pending = MIHOMO_PENDING_BINARY_PATH.exists()
+    if pending and running and not restart_running:
+        return _local_mihomo_core_status_detail()
+
+    if pending and running:
+        config_path = _managed_local_config_path(state)
+        try:
+            config_text = config_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise RuntimeError(f"无法读取当前受管配置，未重启代理: {exc}") from exc
+        if remote_proxy.AI_PROXY_CONFIG_MARKER not in config_text:
+            raise RuntimeError("当前配置缺少本工具标记，未为内核更新重启代理")
+        _backup_local_proxy_state_before_core_update()
+        _repair_local_runtime_state_for_core_restart(
+            state,
+            config_path=config_path,
+            binary_path=binary_path,
+            mixed_port=mixed_port,
+        )
+        _save_state(state)
+        _start_local_mihomo(binary_path, mixed_port)
+        applied_pid = _read_pid()
+        _repair_local_runtime_state_for_core_restart(
+            state,
+            config_path=config_path,
+            binary_path=binary_path,
+            mixed_port=mixed_port,
+        )
+        state["pid"] = applied_pid
+        _stamp_applied_local_config(state, config_path, mixed_port, pid=applied_pid)
+        _save_state(state)
+        return f"{_local_mihomo_core_status_detail()}；运行中的本机代理已安全重启，其他代理设置未改动"
+
+    return _local_mihomo_core_status_detail() or f"mihomo 内核可用: {binary_path}"
+
+
+def _backup_local_proxy_state_before_core_update() -> None:
+    try:
+        if LOCAL_PROXY_STATE_PATH.is_file():
+            atomic_copy_file(
+                LOCAL_PROXY_STATE_PATH,
+                LOCAL_PROXY_STATE_PATH.with_name("state.pre-core-update.backup.json"),
+            )
+    except OSError:
+        return
+
+
+def _repair_local_runtime_state_for_core_restart(
+    state: dict,
+    *,
+    config_path: Path,
+    binary_path: Path,
+    mixed_port: int,
+) -> None:
+    proxy_url = _proxy_url(mixed_port)
+    state.update(
+        {
+            "mixed_port": mixed_port,
+            "proxy_url": proxy_url,
+            "managed_proxy_env": {
+                "owner": "api-switcher",
+                "proxy_url": proxy_url,
+                "variables": list(remote_proxy.PROXY_ENV_KEYS),
+            },
+            "config_path": str(config_path),
+            "binary_path": str(binary_path),
+            "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
+            "installing": False,
+            "updated_at": remote_proxy._now_iso(),
+        }
+    )
+    node = _read_local_proxy_node_from_config(config_path)
+    if node:
+        state["node_display"] = remote_proxy.describe_proxy_node(node)
+        state["node_key"] = remote_proxy.proxy_node_key(node)
+        state["node_name"] = str(node.get("name") or "")
+    if not isinstance(state.get("previous_env"), dict):
+        state["previous_env"] = {
+            key: {"exists": False, "value": ""}
+            for key in remote_proxy.PROXY_ENV_KEYS
+        }
+    if not isinstance(state.get("previous_vscode"), dict):
+        state["previous_vscode"] = {
+            "http.proxy": {"exists": False, "value": None},
+            "http.proxySupport": {"exists": False, "value": None},
+            "terminal.integrated.env.windows": {
+                key: {"exists": False, "value": None}
+                for key in remote_proxy.PROXY_ENV_KEYS
+            },
+        }
+    if not isinstance(state.get("previous_system_proxy"), dict):
+        state["previous_system_proxy"] = {
+            key: {"exists": False, "value": "", "type": None}
+            for key in WINDOWS_SYSTEM_PROXY_KEYS
+        }
+
+
 def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
@@ -772,8 +895,11 @@ def install_local_ai_proxy(proxy_text: str, mixed_port: int = DEFAULT_LOCAL_MIXE
     )
     _save_state(state)
     _save_last_proxy_node(proxy_node)
+    core_detail = _local_mihomo_core_status_detail()
     return (
         f"本机 AI 代理已启动: {proxy_url}；"
+        + (f"{core_detail}；" if core_detail else "")
+        +
         "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
         "并临时关闭系统 PAC/自动检测代理；新终端或重开的 VS Code 窗口生效"
     )
@@ -1272,7 +1398,7 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         state.get("mixed_port") or mixed_port,
         "本机代理端口",
     )
-    config_path = Path(state.get("config_path") or (LOCAL_PROXY_CONFIG_DIR / "config.yaml"))
+    config_path = _managed_local_config_path(state)
     pid = _read_pid()
     pid_running = _is_pid_running(pid) if pid else False
     managed_pid_running = bool(pid and pid_running and _is_managed_mihomo_pid(pid, state=state))
@@ -1297,6 +1423,12 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
             strict_config_unverified=bool(strict_config_contract and not applied_config_matches),
         )
     ]
+    core_detail = _local_mihomo_core_status_detail()
+    if core_detail:
+        details.append(core_detail)
+    stored_config_path = str(state.get("config_path") or "").strip()
+    if stored_config_path and _normalize_existing_path(stored_config_path) != _normalize_existing_path(config_path):
+        details.append("状态文件中的非受管配置路径已忽略")
     if pid_running and not managed_pid_running:
         details.append("pid 文件指向非本工具代理进程")
     if managed_pid_running and not port_listening:
@@ -2331,6 +2463,21 @@ def _proxy_url(mixed_port: int) -> str:
     return f"http://127.0.0.1:{mixed_port}"
 
 
+def _managed_local_config_path(state: dict | None = None) -> Path:
+    """Return the only config path that a locally managed process may own.
+
+    The path in state is diagnostic data, not filesystem authority.  Ignoring
+    a stale or tampered path prevents reload/rollback operations from reading
+    or overwriting an unrelated YAML file.
+    """
+
+    expected = LOCAL_PROXY_CONFIG_DIR / "config.yaml"
+    stored = (state or {}).get("config_path") if isinstance(state, dict) else None
+    if stored and _normalize_existing_path(stored) == _normalize_existing_path(expected):
+        return Path(stored)
+    return expected
+
+
 def _select_local_mixed_port(preferred_port: int = DEFAULT_LOCAL_MIXED_PORT) -> int:
     state = _load_state()
     pid = _read_pid()
@@ -2613,7 +2760,11 @@ def _restore_local_proxy_node_after_failed_update(
 
 def _read_local_managed_proxy_node() -> dict | None:
     state = _load_state()
-    config_path = Path(state.get("config_path") or (LOCAL_PROXY_CONFIG_DIR / "config.yaml"))
+    config_path = _managed_local_config_path(state)
+    return _read_local_proxy_node_from_config(config_path)
+
+
+def _read_local_proxy_node_from_config(config_path: Path) -> dict | None:
     try:
         content = config_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -2761,16 +2912,278 @@ def _local_vscode_proxy_match_detail(mixed_port: int) -> str:
 
 
 def _ensure_mihomo_binary() -> Path:
+    """Return a usable mihomo binary and refresh the managed copy when safe.
+
+    A previously downloaded binary used to be trusted forever.  Keep release
+    checks bounded by a cache, retain a working binary when GitHub is
+    temporarily unavailable, and stage updates while Windows still has the
+    executable open.
+    """
+
+    with _MIHOMO_BINARY_LOCK:
+        return _ensure_mihomo_binary_locked()
+
+
+def _ensure_mihomo_binary_locked() -> Path:
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
-    if binary_path.exists():
+    metadata = _load_mihomo_release_state()
+    _apply_pending_mihomo_update(binary_path, metadata=metadata)
+    metadata = _load_mihomo_release_state()
+
+    current_info = _try_mihomo_binary_info(binary_path) if binary_path.exists() else None
+    if current_info and not _mihomo_release_check_due(metadata):
+        cached_latest = _mihomo_version_from_text(metadata.get("latest_version"))
+        cached_update_missing = (
+            metadata.get("last_check_success") is True
+            and cached_latest
+            and _mihomo_version_key(current_info[0]) < _mihomo_version_key(cached_latest)
+            and not MIHOMO_PENDING_BINARY_PATH.exists()
+        )
+        if not cached_update_missing:
+            return binary_path
+
+    try:
+        release = _fetch_mihomo_release()
+    except Exception as exc:
+        _record_mihomo_release_failure(metadata, exc, current_info=current_info)
+        if current_info:
+            return binary_path
+        existing = _find_existing_mihomo_binary()
+        if existing:
+            return existing
+        raise RuntimeError(f"无法取得可用的 mihomo 内核: {_network_error_summary(exc)}") from exc
+
+    latest_tag = str(release.get("tag_name") or "").strip()
+    latest_version = _mihomo_version_from_text(latest_tag)
+    if not latest_version:
+        error = RuntimeError("mihomo 最新发行版标签无效")
+        _record_mihomo_release_failure(metadata, error, current_info=current_info)
+        if current_info:
+            return binary_path
+        raise error
+
+    if current_info and _mihomo_version_key(current_info[0]) >= _mihomo_version_key(latest_version):
+        _save_mihomo_release_state(
+            {
+                **metadata,
+                "checked_at_epoch": time.time(),
+                "last_check_success": True,
+                "latest_tag": latest_tag,
+                "latest_version": latest_version,
+                "installed_version": current_info[0],
+                "installed_detail": current_info[1],
+                "last_error": "",
+            }
+        )
         return binary_path
 
-    existing = shutil.which("mihomo") or shutil.which("mihomo.exe") or shutil.which("clash") or shutil.which("clash.exe")
-    if existing:
-        return Path(existing)
+    try:
+        download_info = _download_mihomo_binary(MIHOMO_PENDING_BINARY_PATH, release=release)
+        pending_state = {
+            **metadata,
+            "checked_at_epoch": time.time(),
+            "last_check_success": True,
+            "latest_tag": latest_tag,
+            "latest_version": latest_version,
+            "pending_tag": latest_tag,
+            "pending_version": download_info[0],
+            "pending_detail": download_info[1],
+            "pending_asset": download_info[2],
+            "last_error": "",
+        }
+        if current_info:
+            pending_state["installed_version"] = current_info[0]
+            pending_state["installed_detail"] = current_info[1]
+        _save_mihomo_release_state(pending_state)
+        if _apply_pending_mihomo_update(binary_path, metadata=pending_state):
+            return binary_path
+        if current_info:
+            # The managed process still owns mihomo.exe.  The pending file is
+            # applied immediately after that process is stopped for restart.
+            return binary_path
+        raise RuntimeError("mihomo 新内核已下载，但 Windows 暂时无法替换旧文件")
+    except Exception as exc:
+        metadata = _load_mihomo_release_state()
+        _record_mihomo_release_failure(metadata, exc, current_info=current_info)
+        if current_info:
+            return binary_path
+        existing = _find_existing_mihomo_binary()
+        if existing:
+            return existing
+        raise RuntimeError(f"mihomo 内核下载或校验失败: {_network_error_summary(exc)}") from exc
 
-    _download_mihomo_binary(binary_path)
-    return binary_path
+
+def _find_existing_mihomo_binary() -> Path | None:
+    existing = (
+        shutil.which("mihomo")
+        or shutil.which("mihomo.exe")
+        or shutil.which("clash-meta")
+        or shutil.which("clash-meta.exe")
+        or shutil.which("clash")
+        or shutil.which("clash.exe")
+    )
+    return Path(existing) if existing else None
+
+
+def _load_mihomo_release_state() -> dict:
+    try:
+        if MIHOMO_RELEASE_STATE_PATH.stat().st_size > 1024 * 1024:
+            return {}
+        data = json.loads(MIHOMO_RELEASE_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_mihomo_release_state(state: dict) -> None:
+    payload = dict(state) if isinstance(state, dict) else {}
+    payload["schema"] = 1
+    payload["updated_at"] = remote_proxy._now_iso()
+    atomic_write_text(
+        MIHOMO_RELEASE_STATE_PATH,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
+
+
+def _local_mihomo_core_status_detail() -> str:
+    binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
+    metadata = _load_mihomo_release_state()
+    installed_version = _mihomo_version_from_text(metadata.get("installed_version"))
+    if not installed_version and binary_path.exists():
+        current_info = _try_mihomo_binary_info(binary_path)
+        installed_version = current_info[0] if current_info else ""
+    pending_version = _mihomo_version_from_text(metadata.get("pending_version"))
+    latest_version = _mihomo_version_from_text(metadata.get("latest_version"))
+
+    if pending_version:
+        current = f"v{installed_version}" if installed_version else "当前版本"
+        return f"mihomo 内核 {current}（v{pending_version} 已校验，待代理重启时应用）"
+    if installed_version and latest_version and metadata.get("last_check_success") is True:
+        if _mihomo_version_key(installed_version) >= _mihomo_version_key(latest_version):
+            return f"mihomo 内核 v{installed_version}（最近检查为最新）"
+        return f"mihomo 内核 v{installed_version}（最新 v{latest_version}，待下次更新检查）"
+    if installed_version and metadata.get("last_check_success") is False:
+        return f"mihomo 内核 v{installed_version}（更新检查失败，已安全保留现有内核）"
+    if installed_version:
+        return f"mihomo 内核 v{installed_version}（尚未检查更新）"
+    if binary_path.exists():
+        return "mihomo 内核文件存在，但版本自检未通过"
+    return ""
+
+
+def _mihomo_release_check_due(metadata: dict, *, now: float | None = None) -> bool:
+    try:
+        checked_at = float(metadata.get("checked_at_epoch") or 0)
+    except (TypeError, ValueError):
+        checked_at = 0
+    if checked_at <= 0:
+        return True
+    ttl = (
+        MIHOMO_RELEASE_CHECK_TTL_SECONDS
+        if metadata.get("last_check_success") is True
+        else MIHOMO_RELEASE_FAILURE_RETRY_SECONDS
+    )
+    age = (time.time() if now is None else float(now)) - checked_at
+    return age < 0 or age >= ttl
+
+
+def _record_mihomo_release_failure(
+    metadata: dict,
+    error: Exception,
+    *,
+    current_info: tuple[str, str] | None,
+) -> None:
+    updated = {
+        **(metadata if isinstance(metadata, dict) else {}),
+        "checked_at_epoch": time.time(),
+        "last_check_success": False,
+        "last_error": _network_error_summary(error),
+    }
+    if current_info:
+        updated["installed_version"] = current_info[0]
+        updated["installed_detail"] = current_info[1]
+    try:
+        _save_mihomo_release_state(updated)
+    except OSError:
+        return
+
+
+def _mihomo_version_from_text(value: object) -> str:
+    match = re.search(r"(?<!\d)v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)", str(value or ""))
+    return match.group(1) if match else ""
+
+
+def _mihomo_version_key(value: object) -> tuple[int, int, int]:
+    version = _mihomo_version_from_text(value)
+    if not version:
+        return (-1, -1, -1)
+    return tuple(int(part) for part in version.split("-", 1)[0].split(".")[:3])
+
+
+def _mihomo_binary_info(binary_path: Path) -> tuple[str, str]:
+    completed = subprocess.run(
+        [str(binary_path), "-v"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        timeout=10,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    detail = next((line.strip() for line in completed.stdout.splitlines() if line.strip()), "")
+    version = _mihomo_version_from_text(detail)
+    if completed.returncode != 0 or not version or "mihomo" not in detail.casefold():
+        raise RuntimeError(f"mihomo 内核自检失败: {detail or completed.returncode}")
+    return version, detail[:300]
+
+
+def _try_mihomo_binary_info(binary_path: Path) -> tuple[str, str] | None:
+    try:
+        return _mihomo_binary_info(binary_path)
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return None
+
+
+def _apply_pending_mihomo_update(binary_path: Path, *, metadata: dict | None = None) -> bool:
+    if binary_path != LOCAL_PROXY_BIN_DIR / "mihomo.exe" or not MIHOMO_PENDING_BINARY_PATH.exists():
+        return False
+    if _managed_local_proxy_is_running():
+        return False
+    pending_info = _try_mihomo_binary_info(MIHOMO_PENDING_BINARY_PATH)
+    if not pending_info:
+        MIHOMO_PENDING_BINARY_PATH.unlink(missing_ok=True)
+        return False
+    current_info = _try_mihomo_binary_info(binary_path) if binary_path.exists() else None
+    if current_info and _mihomo_version_key(pending_info[0]) <= _mihomo_version_key(current_info[0]):
+        MIHOMO_PENDING_BINARY_PATH.unlink(missing_ok=True)
+        state = dict(metadata or _load_mihomo_release_state())
+        state.pop("pending_tag", None)
+        state.pop("pending_version", None)
+        state.pop("pending_detail", None)
+        state.pop("pending_asset", None)
+        state["installed_version"] = current_info[0]
+        state["installed_detail"] = current_info[1]
+        _save_mihomo_release_state(state)
+        return False
+    try:
+        binary_path.parent.mkdir(parents=True, exist_ok=True)
+        replace_with_retry(MIHOMO_PENDING_BINARY_PATH, binary_path)
+    except OSError:
+        return False
+    state = dict(metadata or _load_mihomo_release_state())
+    state.pop("pending_tag", None)
+    state.pop("pending_version", None)
+    state.pop("pending_detail", None)
+    state.pop("pending_asset", None)
+    state["installed_version"] = pending_info[0]
+    state["installed_detail"] = pending_info[1]
+    state["installed_tag"] = state.get("latest_tag") or f"v{pending_info[0]}"
+    state["installed_at"] = remote_proxy._now_iso()
+    _save_mihomo_release_state(state)
+    return True
 
 
 def _windows_asset_pattern() -> str:
@@ -2782,7 +3195,7 @@ def _windows_asset_pattern() -> str:
     raise RuntimeError(f"不支持的 Windows 架构: {platform.machine()}")
 
 
-def _pick_mihomo_asset(assets: list[dict], pattern: str) -> dict:
+def _pick_mihomo_asset(assets: list[dict], pattern: str, tag_name: str = "") -> dict:
     def usable(asset: dict) -> bool:
         name = str(asset.get("name") or "").lower()
         if pattern not in name:
@@ -2791,31 +3204,108 @@ def _pick_mihomo_asset(assets: list[dict], pattern: str) -> dict:
             return False
         return not any(token in name for token in ("sha256", "checksums"))
 
-    candidates = [asset for asset in assets if usable(asset) and "compatible" not in str(asset.get("name", "")).lower()]
-    if not candidates:
-        candidates = [asset for asset in assets if usable(asset)]
+    candidates = [asset for asset in assets if usable(asset)]
     if not candidates:
         raise RuntimeError(f"没有找到匹配 {pattern} 的 mihomo Windows 发行包")
-    return candidates[0]
+
+    normalized_tag = str(tag_name or "").strip().lower()
+    canonical_names = {
+        f"mihomo-{pattern}-{normalized_tag}{extension}"
+        for extension in (".zip", ".gz", ".exe")
+        if normalized_tag
+    }
+    canonical_names.update(f"mihomo-{pattern}{extension}" for extension in (".zip", ".gz", ".exe"))
+
+    def rank(asset: dict) -> tuple[int, int, str]:
+        name = str(asset.get("name") or "").lower()
+        if name in canonical_names:
+            variant_rank = 0
+        elif "compatible" in name:
+            variant_rank = 30
+        elif re.search(r"-(?:go\d+|v[1-3])(?:-|\.)", name):
+            variant_rank = 20
+        else:
+            variant_rank = 10
+        extension_rank = 0 if name.endswith(".zip") else 1 if name.endswith(".gz") else 2
+        return variant_rank, extension_rank, name
+
+    return min(candidates, key=rank)
 
 
-def _download_mihomo_binary(target: Path) -> None:
-    pattern = _windows_asset_pattern()
+def _fetch_mihomo_release() -> dict:
     release_request = urllib.request.Request(
-        "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest",
+        MIHOMO_RELEASE_API_URL,
         headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": "API-Switcher/1.0",
         },
     )
-    data = json.loads(_read_url_with_retries(release_request, timeout=45, label="读取 mihomo 最新版本").decode("utf-8"))
-    asset = _pick_mihomo_asset(data.get("assets") or [], pattern)
+    payload = _read_url_with_retries(
+        release_request,
+        timeout=45,
+        label="读取 mihomo 最新版本",
+        max_bytes=MIHOMO_RELEASE_METADATA_MAX_BYTES,
+    )
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("mihomo 最新发行版响应不是有效 JSON") from exc
+    if not isinstance(data, dict) or not _mihomo_version_from_text(data.get("tag_name")):
+        raise RuntimeError("mihomo 最新发行版响应缺少有效版本")
+    if not isinstance(data.get("assets"), list):
+        raise RuntimeError("mihomo 最新发行版响应缺少资源列表")
+    return data
+
+
+def _download_mihomo_binary(target: Path, *, release: dict | None = None) -> tuple[str, str, str]:
+    pattern = _windows_asset_pattern()
+    data = release or _fetch_mihomo_release()
+    tag_name = str(data.get("tag_name") or "").strip()
+    expected_version = _mihomo_version_from_text(tag_name)
+    asset = _pick_mihomo_asset(data.get("assets") or [], pattern, tag_name)
     url = str(asset.get("browser_download_url") or "")
     if not url:
         raise RuntimeError("mihomo 发行包缺少下载地址")
     asset_request = urllib.request.Request(url, headers={"User-Agent": "API-Switcher/1.0"})
-    payload = _read_url_with_retries(asset_request, timeout=180, label="下载 mihomo Windows 发行包")
-    _write_mihomo_payload(target, url, payload)
+    payload = _read_url_with_retries(
+        asset_request,
+        timeout=180,
+        label="下载 mihomo Windows 发行包",
+        max_bytes=MIHOMO_RELEASE_ASSET_MAX_BYTES,
+    )
+    _verify_mihomo_release_asset(asset, payload)
+    candidate = target.with_name(f"{target.stem}.{uuid.uuid4().hex}.candidate{target.suffix or '.exe'}")
+    try:
+        _write_mihomo_payload(candidate, url, payload)
+        version, detail = _mihomo_binary_info(candidate)
+        if expected_version and _mihomo_version_key(version) != _mihomo_version_key(expected_version):
+            raise RuntimeError(f"mihomo 内核版本校验失败: 期望 {expected_version}，实际 {version}")
+        lowered = detail.casefold()
+        expected_arch = "arm64" if pattern.endswith("arm64") else "amd64"
+        if "windows" not in lowered or expected_arch not in lowered:
+            raise RuntimeError(f"mihomo 内核平台校验失败: {detail}")
+        replace_with_retry(candidate, target)
+        return version, detail, str(asset.get("name") or "")
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def _verify_mihomo_release_asset(asset: dict, payload: bytes) -> None:
+    try:
+        expected_size = int(asset.get("size") or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    if expected_size > 0 and len(payload) != expected_size:
+        raise RuntimeError(f"mihomo 发行包大小校验失败: 期望 {expected_size}，实际 {len(payload)}")
+    digest = str(asset.get("digest") or "").strip().lower()
+    if not digest:
+        return
+    algorithm, separator, expected = digest.partition(":")
+    if separator != ":" or algorithm != "sha256" or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("mihomo 发行包提供了无法识别的摘要")
+    actual = hashlib.sha256(payload).hexdigest()
+    if not hmac.compare_digest(actual, expected):
+        raise RuntimeError("mihomo 发行包 SHA-256 校验失败")
 
 
 def _read_url_with_retries(
@@ -2824,6 +3314,7 @@ def _read_url_with_retries(
     timeout: int,
     label: str,
     retries: int = MIHOMO_DOWNLOAD_RETRIES,
+    max_bytes: int | None = None,
 ) -> bytes:
     try:
         attempts = max(1, int(retries))
@@ -2831,17 +3322,61 @@ def _read_url_with_retries(
         attempts = MIHOMO_DOWNLOAD_RETRIES
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read()
-        except Exception as exc:
-            last_error = exc
+        openers = [("当前网络配置", None)]
+        if _environment_has_http_proxy():
+            openers.append(("直连回退", urllib.request.build_opener(urllib.request.ProxyHandler({}))))
+        errors = []
+        for _mode, opener in openers:
+            try:
+                response_context = (
+                    urllib.request.urlopen(request, timeout=timeout)
+                    if opener is None
+                    else opener.open(request, timeout=timeout)
+                )
+                with response_context as response:
+                    return _read_bounded_response(response, max_bytes=max_bytes, label=label)
+            except Exception as exc:
+                last_error = exc
+                errors.append(_network_error_summary(exc))
+        if errors:
+            last_error = RuntimeError("；".join(dict.fromkeys(errors)))
         if attempt < attempts:
             delay = remote_proxy._retry_delay_seconds(1.0, attempt)
             if delay > 0:
                 time.sleep(delay)
     suffix = f"（已重试 {attempts} 次）" if attempts > 1 else ""
-    raise RuntimeError(f"{label}失败{suffix}: {last_error}") from last_error
+    raise RuntimeError(f"{label}失败{suffix}: {_network_error_summary(last_error)}") from last_error
+
+
+def _environment_has_http_proxy() -> bool:
+    proxies = urllib.request.getproxies()
+    return any(str(proxies.get(key) or "").strip() for key in ("http", "https", "all"))
+
+
+def _read_bounded_response(response, *, max_bytes: int | None, label: str) -> bytes:
+    if max_bytes is None:
+        return response.read()
+    limit = max(1, int(max_bytes))
+    headers = getattr(response, "headers", None)
+    content_length = headers.get("Content-Length") if headers is not None else None
+    try:
+        declared = int(content_length) if content_length is not None else 0
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > limit:
+        raise RuntimeError(f"{label}响应过大: {declared} 字节")
+    payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise RuntimeError(f"{label}响应超过 {limit} 字节限制")
+    return payload
+
+
+def _network_error_summary(error: object) -> str:
+    text = str(error or "未知错误").strip() or "未知错误"
+    # Do not echo credentials embedded in a proxy URL or a signed download URL.
+    text = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1***@", text)
+    text = re.sub(r"(?i)([?&](?:token|sig|signature|key|auth)=)[^&\s]+", r"\1***", text)
+    return text[:600]
 
 
 def _probe_url_through_proxy(proxy_url: str, label: str, url: str, timeout: int = 8) -> LocalAIProxyProbeResult:
@@ -3376,18 +3911,36 @@ def _write_mihomo_payload(target: Path, url: str, payload: bytes) -> None:
     lower_url = url.lower()
     if lower_url.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            exe_names = [
-                name
-                for name in archive.namelist()
-                if name.lower().endswith(".exe") and ("mihomo" in name.lower() or "clash" in name.lower())
+            exe_entries = [
+                entry
+                for entry in archive.infolist()
+                if not entry.is_dir()
+                and entry.filename.lower().endswith(".exe")
+                and ("mihomo" in entry.filename.lower() or "clash" in entry.filename.lower())
             ]
-            if not exe_names:
+            if not exe_entries:
                 raise RuntimeError("mihomo zip 里没有找到可执行文件")
-            content = archive.read(exe_names[0])
+            exe_entries.sort(
+                key=lambda entry: (
+                    0 if Path(entry.filename).name.casefold() == "mihomo.exe" else 1,
+                    len(Path(entry.filename).parts),
+                    entry.filename.casefold(),
+                )
+            )
+            selected = exe_entries[0]
+            if selected.file_size > MIHOMO_BINARY_MAX_BYTES:
+                raise RuntimeError("mihomo zip 中的可执行文件过大")
+            with archive.open(selected) as handle:
+                content = handle.read(MIHOMO_BINARY_MAX_BYTES + 1)
     elif lower_url.endswith(".gz"):
-        content = gzip.decompress(payload)
+        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as handle:
+            content = handle.read(MIHOMO_BINARY_MAX_BYTES + 1)
     else:
         content = payload
+    if not content or len(content) > MIHOMO_BINARY_MAX_BYTES:
+        raise RuntimeError("mihomo 可执行文件为空或超过大小限制")
+    if target.suffix.casefold() == ".exe" and not content.startswith(b"MZ"):
+        raise RuntimeError("mihomo Windows 可执行文件头校验失败")
     atomic_write_bytes(target, content)
 
 
@@ -3558,7 +4111,12 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
     elif _is_port_listening(mixed_port):
         raise RuntimeError(f"本机端口 127.0.0.1:{mixed_port} 已被占用，请先关闭占用该端口的程序")
 
+    if binary_path == LOCAL_PROXY_BIN_DIR / "mihomo.exe":
+        with _MIHOMO_BINARY_LOCK:
+            _apply_pending_mihomo_update(binary_path)
+
     LOCAL_PROXY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_local_mihomo_log()
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     with LOCAL_PROXY_LOG_PATH.open("ab") as log_handle:
         log_handle.write(f"\n--- API切换器 start {remote_proxy._now_iso()} port={mixed_port} ---\n".encode("utf-8"))
@@ -3579,6 +4137,20 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
             return
         time.sleep(0.5)
     raise RuntimeError(_mihomo_failure_message(f"mihomo 已启动但端口 {mixed_port} 未监听"))
+
+
+def _rotate_local_mihomo_log(max_bytes: int = 8 * 1024 * 1024) -> None:
+    """Keep one bounded previous mihomo log instead of growing forever."""
+
+    try:
+        if LOCAL_PROXY_LOG_PATH.stat().st_size <= max(1024, int(max_bytes)):
+            return
+        rotated = LOCAL_PROXY_LOG_PATH.with_suffix(LOCAL_PROXY_LOG_PATH.suffix + ".1")
+        rotated.unlink(missing_ok=True)
+        replace_with_retry(LOCAL_PROXY_LOG_PATH, rotated)
+    except (OSError, TypeError, ValueError):
+        # Logging must never prevent the proxy from starting.
+        return
 
 
 def _mihomo_failure_message(prefix: str) -> str:
