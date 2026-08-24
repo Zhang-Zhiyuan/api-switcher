@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import copy
+import errno
 import gzip
 import hashlib
 import hmac
@@ -28,9 +29,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from urllib.parse import quote as url_quote
 from urllib.parse import urlparse
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    _msvcrt = None
 
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser
@@ -54,6 +66,7 @@ LOCAL_PROXY_APPLIED_CONFIG_STATE_KEYS = (
     "applied_config_at",
 )
 LOCAL_PROXY_INSTALL_TRANSACTION_GRACE_SECONDS = 60
+LOCAL_PROXY_OPERATION_LOCK_TIMEOUT_SECONDS = 5.0
 MIHOMO_DOWNLOAD_RETRIES = 3
 MIHOMO_RELEASE_API_URL = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 MIHOMO_RELEASE_STATE_PATH = LOCAL_PROXY_BIN_DIR / "mihomo-release.json"
@@ -109,6 +122,140 @@ _ISOLATED_MIHOMO_PROCESSES: set[object] = set()
 _ISOLATED_MIHOMO_DIRECTORIES: set[Path] = set()
 _ISOLATED_MIHOMO_SHUTTING_DOWN = threading.Event()
 _MIHOMO_BINARY_LOCK = threading.RLock()
+_LOCAL_PROXY_OPERATION_THREAD_LOCK = threading.RLock()
+_LOCAL_PROXY_OPERATION_CONTEXT = threading.local()
+
+
+def _local_proxy_operation_lock_path() -> Path:
+    """Return the persistent, app-owned lock used by every proxy mutator."""
+
+    return LOCAL_PROXY_DIR / "operation.lock"
+
+
+def _prepare_local_proxy_lock_file(handle) -> None:
+    if _msvcrt is None:
+        return
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() < 1:
+        handle.write(b"\0")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _acquire_local_proxy_file_lock(handle) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        return
+    if _msvcrt is not None:
+        handle.seek(0, os.SEEK_SET)
+        _msvcrt.locking(handle.fileno(), _msvcrt.LK_NBLCK, 1)
+        return
+    raise RuntimeError("当前系统不支持本机代理跨进程操作锁")
+
+
+def _release_local_proxy_file_lock(handle) -> None:
+    try:
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        elif _msvcrt is not None:
+            handle.seek(0, os.SEEK_SET)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+    except OSError:
+        # Closing the handle below is the final lock-release authority.
+        pass
+
+
+def _local_proxy_lock_is_busy(exc: OSError) -> bool:
+    return bool(
+        getattr(exc, "errno", None)
+        in {errno.EACCES, errno.EAGAIN, getattr(errno, "EWOULDBLOCK", errno.EAGAIN)}
+        or getattr(exc, "winerror", None) in {32, 33, 36, 158}
+    )
+
+
+@contextmanager
+def _local_proxy_operation_lock(
+    operation: str,
+    *,
+    timeout: float = LOCAL_PROXY_OPERATION_LOCK_TIMEOUT_SECONDS,
+):
+    """Serialize live proxy/settings mutations across threads and app instances.
+
+    The lock is re-entrant within one thread because verified start/reload
+    transactions deliberately call the lower-level mutation helpers. Other
+    threads or API切换器 instances get a bounded wait and then fail without
+    touching the currently working proxy.
+    """
+
+    label = str(operation or "操作").strip() or "操作"
+    try:
+        timeout_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError):
+        timeout_seconds = LOCAL_PROXY_OPERATION_LOCK_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
+    thread_acquired = _LOCAL_PROXY_OPERATION_THREAD_LOCK.acquire(timeout=timeout_seconds)
+    if not thread_acquired:
+        raise RuntimeError(
+            f"另一个本机代理任务正在进行，已取消{label}以避免中断当前连接，请稍后重试"
+        )
+
+    handle = None
+    depth = int(getattr(_LOCAL_PROXY_OPERATION_CONTEXT, "depth", 0) or 0)
+    if depth:
+        _LOCAL_PROXY_OPERATION_CONTEXT.depth = depth + 1
+        try:
+            yield
+        finally:
+            _LOCAL_PROXY_OPERATION_CONTEXT.depth = depth
+            _LOCAL_PROXY_OPERATION_THREAD_LOCK.release()
+        return
+
+    try:
+        lock_path = _local_proxy_operation_lock_path()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("a+b")
+            _prepare_local_proxy_lock_file(handle)
+        except OSError as exc:
+            raise RuntimeError(f"无法创建本机代理操作锁，已取消{label}: {exc}") from exc
+
+        while True:
+            try:
+                _acquire_local_proxy_file_lock(handle)
+                break
+            except OSError as exc:
+                if not _local_proxy_lock_is_busy(exc):
+                    raise RuntimeError(f"无法获取本机代理操作锁，已取消{label}: {exc}") from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"另一个 API切换器实例正在操作本机代理，"
+                        f"已取消{label}以避免中断当前连接，请稍后重试"
+                    ) from exc
+                time.sleep(min(0.1, remaining))
+
+        _LOCAL_PROXY_OPERATION_CONTEXT.depth = 1
+        try:
+            yield
+        finally:
+            _LOCAL_PROXY_OPERATION_CONTEXT.depth = 0
+            _release_local_proxy_file_lock(handle)
+    finally:
+        if handle is not None:
+            handle.close()
+        _LOCAL_PROXY_OPERATION_THREAD_LOCK.release()
+
+
+def _serialized_local_proxy_operation(operation: str):
+    def decorate(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            with _local_proxy_operation_lock(operation):
+                return func(*args, **kwargs)
+
+        return wrapped
+
+    return decorate
 
 
 @dataclass(frozen=True)
@@ -344,6 +491,7 @@ def local_proxy_strict_privacy_desired_authoritative() -> bool:
     return _coerce_bool(preferences.get("strict_privacy"))
 
 
+@_serialized_local_proxy_operation("保存代理偏好")
 def save_local_proxy_preferences(**updates) -> dict:
     with _LOCAL_PROXY_PREFS_LOCK:
         preferences = load_local_proxy_preferences()
@@ -451,6 +599,7 @@ def set_local_proxy_strict_privacy(enabled: bool) -> dict:
     return save_local_proxy_preferences(strict_privacy=_coerce_bool(enabled))
 
 
+@_serialized_local_proxy_operation("应用严格隐私设置")
 def set_local_proxy_strict_privacy_and_apply(enabled: bool) -> str:
     """Persist strict privacy and transactionally apply it when running.
 
@@ -571,6 +720,7 @@ def set_local_proxy_strict_privacy_and_apply(enabled: bool) -> str:
     return f"已{mode}严格隐私（应用层）；{apply_message}"
 
 
+@_serialized_local_proxy_operation("保存内置代理站点")
 def set_builtin_proxy_site_enabled(site_id: str, enabled: bool) -> dict:
     site_key = str(site_id or "").strip()
     if site_key not in LOCAL_PROXY_BUILTIN_SITE_IDS:
@@ -581,6 +731,7 @@ def set_builtin_proxy_site_enabled(site_id: str, enabled: bool) -> dict:
     return save_local_proxy_preferences(builtin_sites=builtin_sites)
 
 
+@_serialized_local_proxy_operation("添加自定义代理目标")
 def add_custom_proxy_target(target: str, enabled: bool = True) -> dict:
     normalized = normalize_proxy_target(target)
     preferences = load_local_proxy_preferences()
@@ -607,6 +758,7 @@ def add_custom_proxy_target(target: str, enabled: bool = True) -> dict:
     return entry
 
 
+@_serialized_local_proxy_operation("删除自定义代理目标")
 def remove_custom_proxy_target(target_id: str) -> bool:
     target_key = str(target_id or "").strip()
     if not target_key:
@@ -619,6 +771,7 @@ def remove_custom_proxy_target(target_id: str) -> bool:
     return removed
 
 
+@_serialized_local_proxy_operation("修改自定义代理目标")
 def set_custom_proxy_target_enabled(target_id: str, enabled: bool) -> dict:
     target_key = str(target_id or "").strip()
     preferences = load_local_proxy_preferences()
@@ -668,6 +821,7 @@ def normalize_proxy_target(target: str) -> dict:
     }
 
 
+@_serialized_local_proxy_operation("应用本机代理规则")
 def apply_local_proxy_routing_to_running() -> str:
     # Validate the persisted routing authority before entering the reload path.
     # ``reload_local_ai_proxy`` reads it again immediately before building the
@@ -687,6 +841,7 @@ def apply_local_proxy_routing_to_running() -> str:
     return reload_local_ai_proxy(remote_proxy.format_proxy_node(node))
 
 
+@_serialized_local_proxy_operation("自动启动本机代理")
 def auto_start_local_ai_proxy_if_enabled() -> str:
     preferences = _load_local_proxy_routing_preferences_strict()
     if not _coerce_bool(preferences.get("start_on_login")):
@@ -706,6 +861,7 @@ def auto_start_local_ai_proxy_if_enabled() -> str:
     return install_local_ai_proxy(remote_proxy.format_proxy_node(node))
 
 
+@_serialized_local_proxy_operation("更新 mihomo 内核")
 def update_local_mihomo_core(*, restart_running: bool = False) -> str:
     """Check the managed core and optionally restart only to apply a staged update.
 
@@ -819,6 +975,7 @@ def _repair_local_runtime_state_for_core_restart(
         }
 
 
+@_serialized_local_proxy_operation("启动本机代理")
 def install_local_ai_proxy(
     proxy_text: str,
     mixed_port: int = DEFAULT_LOCAL_MIXED_PORT,
@@ -871,7 +1028,7 @@ def install_local_ai_proxy(
     _save_state(state)
 
     try:
-        config_path.write_text(config_content, encoding="utf-8")
+        atomic_write_text(config_path, config_content)
         _start_local_mihomo(binary_path, mixed_port)
         applied_pid = _read_pid()
         applied_config_sha256 = _local_config_sha256(config_path)
@@ -997,6 +1154,7 @@ def _prevalidated_local_candidate_matches(
     )
 
 
+@_serialized_local_proxy_operation("验证并启动本机代理")
 def install_local_ai_proxy_verified(
     proxy_text: str,
     candidate_nodes=None,
@@ -1103,6 +1261,7 @@ def install_local_ai_proxy_verified(
     )
 
 
+@_serialized_local_proxy_operation("热更新本机代理")
 def reload_local_ai_proxy(
     proxy_text: str,
     mixed_port: int = DEFAULT_LOCAL_MIXED_PORT,
@@ -1212,6 +1371,7 @@ def reload_local_ai_proxy(
     )
 
 
+@_serialized_local_proxy_operation("验证并热更新本机代理")
 def reload_local_ai_proxy_verified(
     proxy_text: str,
     candidate_nodes=None,
@@ -1696,6 +1856,7 @@ def _local_proxy_privacy_posture_detail(
     return "隐私边界: 当前运行配置允许兼容分流/DIRECT；无法防止系统 DNS、WebRTC/UDP 或忽略代理的程序泄露"
 
 
+@_serialized_local_proxy_operation("停止本机代理")
 def stop_local_ai_proxy(restore_settings: bool = True) -> str:
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
@@ -2818,6 +2979,7 @@ def _state_owns_local_proxy_settings(state: dict, mixed_port: int) -> bool:
     )
 
 
+@_serialized_local_proxy_operation("修复运行中的本机代理设置")
 def reconcile_running_local_ai_proxy_settings() -> str:
     """Repair only missing environment values owned by a verified live proxy.
 
@@ -2865,6 +3027,7 @@ def reconcile_running_local_ai_proxy_settings() -> str:
     return "；".join(pieces)
 
 
+@_serialized_local_proxy_operation("核对本机代理启动设置")
 def reconcile_local_ai_proxy_startup_settings() -> str:
     """Repair a live proxy or restore settings left by a dead owned proxy."""
 
@@ -4512,7 +4675,52 @@ def _is_port_listening(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", int(port))) == 0
 
 
+def _next_local_mihomo_start_binary(binary_path: Path) -> Path:
+    """Return the binary that the next managed start will actually attempt."""
+
+    managed_binary = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
+    if binary_path != managed_binary or not MIHOMO_PENDING_BINARY_PATH.exists():
+        return binary_path
+    pending_info = _try_mihomo_binary_info(MIHOMO_PENDING_BINARY_PATH)
+    if not pending_info:
+        return binary_path
+    current_info = _try_mihomo_binary_info(binary_path) if binary_path.exists() else None
+    if current_info and _mihomo_version_key(pending_info[0]) <= _mihomo_version_key(
+        current_info[0]
+    ):
+        return binary_path
+    return MIHOMO_PENDING_BINARY_PATH
+
+
+def _validate_local_mihomo_config(binary_path: Path, config_dir: Path) -> None:
+    """Validate the exact binary/config pair before touching a live process."""
+
+    try:
+        completed = subprocess.run(
+            [str(binary_path), "-t", "-d", str(config_dir)],
+            cwd=str(LOCAL_PROXY_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"mihomo 启动前配置预检无法完成，未改动当前进程: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"mihomo 启动前配置预检失败（退出码 {completed.returncode}），"
+            "未启动或停止任何 mihomo 进程"
+        )
+
+
 def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
+    start_binary = _next_local_mihomo_start_binary(binary_path)
+    _validate_local_mihomo_config(start_binary, LOCAL_PROXY_CONFIG_DIR)
+
     pid = _read_pid()
     if pid and _is_pid_running(pid):
         state = _load_state()
@@ -4545,15 +4753,33 @@ def _start_local_mihomo(binary_path: Path, mixed_port: int) -> None:
             stderr=subprocess.STDOUT,
             creationflags=creationflags,
         )
-    LOCAL_PROXY_PID_PATH.write_text(str(process.pid), encoding="utf-8")
-    time.sleep(1.5)
-    if process.poll() is not None:
-        raise RuntimeError(_mihomo_failure_message("mihomo 启动失败"))
-    for _ in range(10):
-        if _is_port_listening(mixed_port):
-            return
-        time.sleep(0.5)
-    raise RuntimeError(_mihomo_failure_message(f"mihomo 已启动但端口 {mixed_port} 未监听"))
+    try:
+        atomic_write_text(LOCAL_PROXY_PID_PATH, str(process.pid))
+        time.sleep(1.5)
+        if process.poll() is not None:
+            raise RuntimeError(_mihomo_failure_message("mihomo 启动失败"))
+        for _ in range(10):
+            if _is_port_listening(mixed_port):
+                return
+            time.sleep(0.5)
+        raise RuntimeError(
+            _mihomo_failure_message(f"mihomo 已启动但端口 {mixed_port} 未监听")
+        )
+    except Exception as exc:
+        stopped = True
+        try:
+            if process.poll() is None:
+                stopped = _terminate_pid(process.pid)
+        except Exception:
+            stopped = False
+        try:
+            if _read_pid() == process.pid:
+                LOCAL_PROXY_PID_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if not stopped:
+            raise RuntimeError(f"{exc}；新启动的 mihomo 进程也未能安全停止") from exc
+        raise
 
 
 def _rotate_local_mihomo_log(max_bytes: int = 8 * 1024 * 1024) -> None:
