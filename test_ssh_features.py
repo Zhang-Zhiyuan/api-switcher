@@ -853,7 +853,7 @@ def test_remote_wire_benchmark_ignores_no_proxy_and_uses_managed_loopback(
         def __exit__(self, *_args):
             return False
 
-        def readline(self):
+        def readline(self, _size=-1):
             if observations and observations[-1].get("read"):
                 return b""
             observations[-1]["read"] = True
@@ -1008,7 +1008,7 @@ def test_remote_wire_benchmark_without_strict_config_preserves_direct_compatibil
         def __exit__(self, *_args):
             return False
 
-        def readline(self):
+        def readline(self, _size=-1):
             if opened[-1].get("read"):
                 return b""
             opened[-1]["read"] = True
@@ -2543,6 +2543,104 @@ def test_ssh_remote_file_io_uses_binary_sftp_modes():
     assert sftp.posix_rename_calls
     assert not sftp.rename_calls
     assert all("\\" not in path for path in sftp.mkdir_calls)
+
+
+def test_ssh_remote_file_read_rejects_oversized_content():
+    manager = SSHManager()
+    sftp = _FakeSFTP()
+    sftp.files["/large.txt"] = b"x" * 33
+    client = _FakeClient(sftp)
+
+    with pytest.raises(RuntimeError, match="远程文件超过 32 字节上限"):
+        manager.read_remote_file(client, "/large.txt", max_bytes=32)
+
+
+def test_ssh_command_output_drains_stdout_and_stderr_with_one_total_limit():
+    class Channel:
+        def __init__(self):
+            self.stdout = bytearray(b"out")
+            self.stderr = bytearray(b"warn")
+
+        def recv_ready(self):
+            return bool(self.stdout)
+
+        def recv(self, size):
+            chunk = bytes(self.stdout[:size])
+            del self.stdout[:size]
+            return chunk
+
+        def recv_stderr_ready(self):
+            return bool(self.stderr)
+
+        def recv_stderr(self, size):
+            chunk = bytes(self.stderr[:size])
+            del self.stderr[:size]
+            return chunk
+
+        def exit_status_ready(self):
+            return not self.stdout and not self.stderr
+
+        @staticmethod
+        def recv_exit_status():
+            return 7
+
+    channel = Channel()
+    stream = type("Stream", (), {"channel": channel})()
+
+    status, stdout, stderr = SSHManager._collect_command_output(
+        stream,
+        stream,
+        timeout=1,
+        max_output_bytes=7,
+    )
+
+    assert (status, stdout, stderr) == (7, "out", "warn")
+
+
+def test_ssh_command_output_limit_closes_remote_channel():
+    class Channel:
+        def __init__(self):
+            self.payload = bytearray(b"x" * 33)
+            self.closed = False
+
+        def recv_ready(self):
+            return bool(self.payload)
+
+        def recv(self, size):
+            chunk = bytes(self.payload[:size])
+            del self.payload[:size]
+            return chunk
+
+        @staticmethod
+        def recv_stderr_ready():
+            return False
+
+        @staticmethod
+        def recv_stderr(_size):
+            return b""
+
+        def exit_status_ready(self):
+            return not self.payload
+
+        @staticmethod
+        def recv_exit_status():
+            return 0
+
+        def close(self):
+            self.closed = True
+
+    channel = Channel()
+    stream = type("Stream", (), {"channel": channel})()
+
+    with pytest.raises(ValueError, match="远程命令输出超过 32 字节上限"):
+        SSHManager._collect_command_output(
+            stream,
+            stream,
+            timeout=1,
+            max_output_bytes=32,
+        )
+
+    assert channel.closed is True
 
 
 def test_ssh_remote_file_explicit_mode_fails_closed_when_chmod_fails():

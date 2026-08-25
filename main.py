@@ -39,14 +39,18 @@ def parse_args(argv: list[str] | None = None) -> Namespace:
 
 def configure_logging():
     from config.paths import STORAGE_DIR, STORAGE_DIR_SOURCE, STORAGE_DIR_WARNINGS, ensure_storage_dirs
-    from core.log_handler import ExpectedLibraryNoiseFilter, log_manager
+    from core.log_handler import (
+        ExpectedLibraryNoiseFilter,
+        create_bounded_file_handler,
+        log_manager,
+    )
 
     migrated_storage_items = ensure_storage_dirs()
     logs_dir = STORAGE_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_file = logs_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = create_bounded_file_handler(log_file)
     stream_handler = logging.StreamHandler()
     # Attach the normalizer to both outputs. The first handler to receive a
     # Paramiko socket-close record downgrades it in-place, so every later

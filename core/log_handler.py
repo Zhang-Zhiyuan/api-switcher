@@ -4,8 +4,35 @@
 import logging
 import threading
 from collections import deque
+from logging.handlers import RotatingFileHandler
 from queue import Empty, Full, Queue
 from typing import Optional
+
+
+APP_LOG_MAX_BYTES = 8 * 1024 * 1024
+APP_LOG_BACKUP_COUNT = 2
+
+
+def create_bounded_file_handler(
+    path,
+    *,
+    max_bytes: int = APP_LOG_MAX_BYTES,
+    backup_count: int = APP_LOG_BACKUP_COUNT,
+) -> RotatingFileHandler:
+    """Create a UTF-8 file handler whose disk usage remains bounded.
+
+    The base filename is already split by day. Size-based rollover additionally
+    protects a single noisy day from producing an arbitrarily large file that
+    slows startup diagnostics and fills the user's profile directory.
+    """
+
+    return RotatingFileHandler(
+        path,
+        maxBytes=max(1024, int(max_bytes)),
+        backupCount=max(1, int(backup_count)),
+        encoding="utf-8",
+        delay=True,
+    )
 
 
 class ExpectedLibraryNoiseFilter(logging.Filter):

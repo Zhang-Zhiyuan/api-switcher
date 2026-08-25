@@ -114,6 +114,11 @@ import urllib.parse
 import urllib.request
 
 
+MAX_RESPONSE_BYTES = 64 * 1024
+MAX_STREAM_LINE_BYTES = 256 * 1024
+MAX_STREAM_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
 def classify_transport_error(error, streaming=False):
     text = (type(error).__name__ + ": " + str(error))[:180]
     lowered = text.lower()
@@ -280,12 +285,28 @@ def call(opener, api_key, base_url, model, wire_api, timeout):
                 snippet_len = 0
                 rolling_text = ""
                 event_count = 0
+                stream_bytes = 0
                 max_events = 1200
                 while True:
-                    raw_line = response.readline()
+                    raw_line = response.readline(MAX_STREAM_LINE_BYTES + 1)
                     if not raw_line:
                         break
                     event_count += 1
+                    stream_bytes += len(raw_line)
+                    if len(raw_line) > MAX_STREAM_LINE_BYTES:
+                        return {
+                            "ok": False,
+                            "status": response.status,
+                            "ms": round((time.time() - start) * 1000),
+                            "error": "stream line exceeded size limit",
+                        }
+                    if stream_bytes > MAX_STREAM_RESPONSE_BYTES:
+                        return {
+                            "ok": False,
+                            "status": response.status,
+                            "ms": round((time.time() - start) * 1000),
+                            "error": "stream exceeded response size limit",
+                        }
                     line = raw_line.decode("utf-8", errors="replace")
                     if snippet_len < 160:
                         snippet_parts.append(line)
@@ -332,7 +353,15 @@ def call(opener, api_key, base_url, model, wire_api, timeout):
                     "ms": round((time.time() - start) * 1000),
                     "error": "stream did not complete: " + body[:160],
                 }
-            body = response.read().decode("utf-8", errors="replace")
+            raw_body = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw_body) > MAX_RESPONSE_BYTES:
+                return {
+                    "ok": False,
+                    "status": response.status,
+                    "ms": round((time.time() - start) * 1000),
+                    "error": "response exceeded size limit",
+                }
+            body = raw_body.decode("utf-8", errors="replace")
             body = body[:300]
             return {
                 "ok": 200 <= response.status < 300 and body.lstrip().startswith(("{", "[")),

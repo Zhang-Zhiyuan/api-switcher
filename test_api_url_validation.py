@@ -23,8 +23,9 @@ class _JSONResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return json.dumps({"data": [{"id": "test-model"}]}).encode("utf-8")
+    def read(self, size=-1):
+        payload = json.dumps({"data": [{"id": "test-model"}]}).encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
     def getcode(self):
         return 200

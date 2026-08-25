@@ -24,6 +24,10 @@ from core.url_validation import validate_api_base_url
 logger = logging.getLogger(__name__)
 
 
+class _ResponseTooLargeError(ValueError):
+    """Raised when a remote endpoint exceeds a bounded diagnostic response."""
+
+
 @dataclass
 class TestResult:
     """Result of an API connection test."""
@@ -66,12 +70,17 @@ class APITester:
     MAX_REQUEST_TIMEOUT = 30
     MAX_BENCHMARK_REPEAT = 5
     MAX_STREAM_EVENTS = 1200
+    MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+    MAX_ERROR_RESPONSE_BYTES = 256 * 1024
+    MAX_STREAM_LINE_BYTES = 256 * 1024
+    MAX_STREAM_RESPONSE_BYTES = 8 * 1024 * 1024
     # Model-list and message/response probes can both incur gateway queueing;
     # keep the high-level UI test from reporting a healthy but slow relay as a
     # false timeout.  Low-level request helpers retain their shorter default.
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
-    USER_AGENT = "API-Switcher/2.4"
+    MAX_PROXY_CHECK_CACHE_ENTRIES = 64
+    USER_AGENT = "API-Switcher/2.4.5"
     # Keep both common casings: Windows environment names are case-insensitive,
     # while copied shell variables on Unix often use lowercase names.
     LOCAL_PROXY_ENV_NAMES = (
@@ -165,6 +174,31 @@ class APITester:
                     error_details="检测到 HTTP 请求头不支持的字符；请去掉中文说明、全角引号或其他非密钥内容。",
                 )
         return None
+
+    @staticmethod
+    def _read_response_bytes(response, max_bytes: int, label: str) -> bytes:
+        """Read an HTTP response with declared-size and actual-size checks."""
+
+        limit = max(1, int(max_bytes))
+        headers = getattr(response, "headers", None)
+        content_length = None
+        if headers is not None:
+            content_length = headers.get("Content-Length")
+            if content_length is None:
+                content_length = headers.get("content-length")
+        try:
+            declared = int(content_length or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > limit:
+            raise _ResponseTooLargeError(f"{label}声明长度 {declared} 字节，超过 {limit} 字节上限")
+
+        payload = response.read(limit + 1)
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", errors="replace")
+        if len(payload) > limit:
+            raise _ResponseTooLargeError(f"{label}超过 {limit} 字节上限")
+        return bytes(payload)
 
     @staticmethod
     def _normalize_base_url(base_url: str, default: str) -> str:
@@ -629,6 +663,22 @@ class APITester:
             except OSError:
                 available = False
             cls._proxy_check_cache[cache_key] = (now, available)
+            stale_before = now - cls.INVALID_LOCAL_PROXY_CACHE_TTL
+            stale_keys = [
+                key
+                for key, (checked_at, _result) in cls._proxy_check_cache.items()
+                if checked_at < stale_before
+            ]
+            for key in stale_keys:
+                cls._proxy_check_cache.pop(key, None)
+            overflow = len(cls._proxy_check_cache) - cls.MAX_PROXY_CHECK_CACHE_ENTRIES
+            if overflow > 0:
+                oldest = sorted(
+                    cls._proxy_check_cache,
+                    key=lambda key: cls._proxy_check_cache[key][0],
+                )[:overflow]
+                for key in oldest:
+                    cls._proxy_check_cache.pop(key, None)
             return endpoint, available
 
     @classmethod
@@ -1079,7 +1129,11 @@ class APITester:
             proxy_warning = detected_proxy_warning or proxy_warning
             with response:
                 response_time = (time.time() - start_time) * 1000
-                body = response.read().decode("utf-8", errors="replace")
+                body = APITester._read_response_bytes(
+                    response,
+                    APITester.MAX_JSON_RESPONSE_BYTES,
+                    "API 响应",
+                ).decode("utf-8", errors="replace")
                 try:
                     parsed = json.loads(body) if body else {}
                 except json.JSONDecodeError:
@@ -1104,13 +1158,27 @@ class APITester:
                 )
         except urllib.error.HTTPError as e:
             response_time = (time.time() - start_time) * 1000
-            error_body = e.read().decode("utf-8", errors="replace")
+            try:
+                error_body = APITester._read_response_bytes(
+                    e,
+                    APITester.MAX_ERROR_RESPONSE_BYTES,
+                    "API 错误响应",
+                ).decode("utf-8", errors="replace")
+                error_details = APITester._parse_error_body(error_body, request_secrets)
+            except _ResponseTooLargeError as body_error:
+                error_details = str(body_error)
             return False, None, APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=APITester._http_error_message(e.code, model_hint=True),
                 response_time=response_time,
                 status_code=e.code,
-                error_details=APITester._parse_error_body(error_body, request_secrets),
+                error_details=error_details,
+            ), proxy_warning)
+        except _ResponseTooLargeError as e:
+            return False, None, APITester._attach_proxy_warning(TestResult(
+                success=False,
+                message="API 响应过大，已停止读取",
+                error_details=str(e),
             ), proxy_warning)
         except (TimeoutError, socket.timeout):
             return False, None, APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
@@ -1173,12 +1241,32 @@ class APITester:
                 snippet_len = 0
                 rolling_text = ""
                 event_count = 0
+                stream_bytes = 0
 
                 while True:
-                    raw_line = response.readline()
+                    raw_line = response.readline(APITester.MAX_STREAM_LINE_BYTES + 1)
                     if not raw_line:
                         break
                     event_count += 1
+                    stream_bytes += len(raw_line)
+                    if len(raw_line) > APITester.MAX_STREAM_LINE_BYTES:
+                        return APITester._attach_proxy_warning(TestResult(
+                            success=False,
+                            message="流式响应单行过大，已停止读取",
+                            status_code=status_code,
+                            error_details=(
+                                f"单行超过 {APITester.MAX_STREAM_LINE_BYTES} 字节上限"
+                            ),
+                        ), proxy_warning)
+                    if stream_bytes > APITester.MAX_STREAM_RESPONSE_BYTES:
+                        return APITester._attach_proxy_warning(TestResult(
+                            success=False,
+                            message="流式响应过大，已停止读取",
+                            status_code=status_code,
+                            error_details=(
+                                f"累计超过 {APITester.MAX_STREAM_RESPONSE_BYTES} 字节上限"
+                            ),
+                        ), proxy_warning)
                     line = raw_line.decode("utf-8", errors="replace")
                     if snippet_len < 400:
                         snippet_parts.append(line)
@@ -1253,13 +1341,21 @@ class APITester:
                 ), proxy_warning)
         except urllib.error.HTTPError as e:
             response_time = (time.time() - start_time) * 1000
-            error_body = e.read().decode("utf-8", errors="replace")
+            try:
+                error_body = APITester._read_response_bytes(
+                    e,
+                    APITester.MAX_ERROR_RESPONSE_BYTES,
+                    "API 错误响应",
+                ).decode("utf-8", errors="replace")
+                error_details = APITester._parse_error_body(error_body, request_secrets)
+            except _ResponseTooLargeError as body_error:
+                error_details = str(body_error)
             return APITester._attach_proxy_warning(TestResult(
                 success=False,
                 message=APITester._http_error_message(e.code, model_hint=True),
                 response_time=response_time,
                 status_code=e.code,
-                error_details=APITester._parse_error_body(error_body, request_secrets),
+                error_details=error_details,
             ), proxy_warning)
         except (TimeoutError, socket.timeout):
             return APITester._attach_proxy_warning(APITester._timeout_result(timeout), proxy_warning)
