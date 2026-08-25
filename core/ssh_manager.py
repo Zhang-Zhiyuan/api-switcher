@@ -11,6 +11,9 @@ from core import security
 from models.profile import SSHProfile
 
 logger = logging.getLogger(__name__)
+MAX_REMOTE_FILE_BYTES = 8 * 1024 * 1024
+MAX_REMOTE_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+REMOTE_COMMAND_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _ssh_exception_detail(exc: BaseException) -> str:
@@ -350,7 +353,127 @@ class SSHManager:
                 except Exception:
                     pass
 
-    def read_remote_file(self, client: paramiko.SSHClient, path: str, timeout: int = 30) -> str | None:
+    @staticmethod
+    def _read_stream_bounded(stream, max_bytes: int, label: str) -> bytes:
+        """Read a file-like SSH stream with a strict in-memory limit."""
+
+        limit = max(1, int(max_bytes))
+        try:
+            raw = stream.read(limit + 1)
+        except TypeError:
+            # Small test/server adapters may expose only ``read()``. Paramiko's
+            # real SFTP and channel files support a size argument.
+            raw = stream.read()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8", errors="replace")
+        if len(raw) > limit:
+            raise ValueError(f"{label}超过 {limit} 字节上限")
+        return bytes(raw)
+
+    @classmethod
+    def _collect_command_output(
+        cls,
+        stdout,
+        stderr,
+        *,
+        timeout: int,
+        max_output_bytes: int,
+    ) -> tuple[int, str, str]:
+        """Drain stdout/stderr together so either stream cannot deadlock SSH."""
+
+        limit = max(1, int(max_output_bytes))
+        channel = getattr(stdout, "channel", None)
+        channel_methods = (
+            "recv_ready",
+            "recv",
+            "recv_stderr_ready",
+            "recv_stderr",
+            "exit_status_ready",
+            "recv_exit_status",
+        )
+        use_channel = channel is not None and all(
+            callable(getattr(channel, name, None)) for name in channel_methods
+        )
+
+        if not use_channel:
+            stdout_raw = cls._read_stream_bounded(stdout, limit, "远程命令输出")
+            remaining = max(0, limit - len(stdout_raw))
+            stderr_raw = cls._read_stream_bounded(
+                stderr,
+                remaining or 1,
+                "远程命令输出",
+            )
+            if len(stdout_raw) + len(stderr_raw) > limit:
+                raise ValueError(f"远程命令输出超过 {limit} 字节上限")
+            exit_status = stdout.channel.recv_exit_status()
+            return (
+                exit_status,
+                stdout_raw.decode("utf-8", errors="replace"),
+                stderr_raw.decode("utf-8", errors="replace"),
+            )
+
+        try:
+            deadline = time.monotonic() + max(0.1, float(timeout))
+        except (TypeError, ValueError):
+            deadline = time.monotonic() + 30.0
+        stdout_payload = bytearray()
+        stderr_payload = bytearray()
+
+        try:
+            while True:
+                progressed = False
+                for ready_name, recv_name, target in (
+                    ("recv_ready", "recv", stdout_payload),
+                    ("recv_stderr_ready", "recv_stderr", stderr_payload),
+                ):
+                    ready = getattr(channel, ready_name)
+                    receive = getattr(channel, recv_name)
+                    while ready():
+                        remaining = limit - len(stdout_payload) - len(stderr_payload)
+                        chunk = receive(min(REMOTE_COMMAND_READ_CHUNK_BYTES, remaining + 1))
+                        if isinstance(chunk, str):
+                            chunk = chunk.encode("utf-8", errors="replace")
+                        if not chunk:
+                            break
+                        target.extend(chunk)
+                        progressed = True
+                        if len(stdout_payload) + len(stderr_payload) > limit:
+                            raise ValueError(
+                                f"远程命令输出超过 {limit} 字节上限"
+                            )
+
+                if (
+                    channel.exit_status_ready()
+                    and not channel.recv_ready()
+                    and not channel.recv_stderr_ready()
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"远程命令输出读取超过 {timeout} 秒")
+                if not progressed:
+                    time.sleep(0.01)
+        except Exception:
+            close = getattr(channel, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            raise
+
+        return (
+            channel.recv_exit_status(),
+            bytes(stdout_payload).decode("utf-8", errors="replace"),
+            bytes(stderr_payload).decode("utf-8", errors="replace"),
+        )
+
+    def read_remote_file(
+        self,
+        client: paramiko.SSHClient,
+        path: str,
+        timeout: int = 30,
+        max_bytes: int = MAX_REMOTE_FILE_BYTES,
+    ) -> str | None:
         """Read a file from the remote server with timeout."""
         path = self._normalize_remote_path(path)
 
@@ -360,7 +483,7 @@ class SSHManager:
             sftp.get_channel().settimeout(timeout)
 
             with sftp.open(path, "rb") as f:
-                raw = f.read()
+                raw = self._read_stream_bounded(f, max_bytes, "远程文件")
                 content = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else str(raw)
                 logger.debug(f"Read {len(content)} bytes from {path}")
                 return content
@@ -447,7 +570,13 @@ class SSHManager:
                 except Exception:
                     pass
 
-    def execute_command(self, client: paramiko.SSHClient, cmd: str, timeout: int = 30) -> tuple[str, str]:
+    def execute_command(
+        self,
+        client: paramiko.SSHClient,
+        cmd: str,
+        timeout: int = 30,
+        max_output_bytes: int = MAX_REMOTE_COMMAND_OUTPUT_BYTES,
+    ) -> tuple[str, str]:
         """Execute a command on the remote server with timeout."""
         if not cmd or not cmd.strip():
             raise ValueError("命令不能为空")
@@ -455,11 +584,12 @@ class SSHManager:
         try:
             logger.debug(f"Executing command: {cmd}")
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-
-            stdout_data = stdout.read().decode("utf-8", errors="replace")
-            stderr_data = stderr.read().decode("utf-8", errors="replace")
-
-            exit_status = stdout.channel.recv_exit_status()
+            exit_status, stdout_data, stderr_data = self._collect_command_output(
+                stdout,
+                stderr,
+                timeout=timeout,
+                max_output_bytes=max_output_bytes,
+            )
             logger.debug(f"Command exit status: {exit_status}")
 
             return stdout_data, stderr_data
@@ -476,6 +606,7 @@ class SSHManager:
         input_data: str | None = None,
         log_command: bool = True,
         get_pty: bool = False,
+        max_output_bytes: int = MAX_REMOTE_COMMAND_OUTPUT_BYTES,
     ) -> tuple[int, str, str]:
         """Execute a command and return (exit_status, stdout, stderr)."""
         if not cmd or not cmd.strip():
@@ -492,10 +623,12 @@ class SSHManager:
             except Exception:
                 pass
 
-            stdout_data = stdout.read().decode("utf-8", errors="replace")
-            stderr_data = stderr.read().decode("utf-8", errors="replace")
-
-            exit_status = stdout.channel.recv_exit_status()
+            exit_status, stdout_data, stderr_data = self._collect_command_output(
+                stdout,
+                stderr,
+                timeout=timeout,
+                max_output_bytes=max_output_bytes,
+            )
             logger.debug(f"Command exit status: {exit_status}")
 
             return exit_status, stdout_data, stderr_data

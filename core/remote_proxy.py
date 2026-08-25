@@ -589,19 +589,11 @@ def fetch_proxy_subscription(
     )
 
 
-def import_proxy_subscription_file(
+def _read_local_proxy_file_payload(
     path: str | Path,
-    *,
-    max_bytes: int = PROXY_SUBSCRIPTION_MAX_BYTES,
-    persist: bool = True,
-    profile_id: str = "",
-    activate: bool = True,
-) -> ProxySubscriptionResult:
-    """Import all nodes from a local Clash/mihomo YAML file.
-
-    The source is copied into the managed cache so the imported nodes remain
-    available if the original file is later moved or removed.
-    """
+    max_bytes: int,
+) -> tuple[Path, bytes]:
+    """Resolve and read a local proxy document with a strict byte limit."""
 
     source_path = Path(path).expanduser()
     try:
@@ -619,6 +611,35 @@ def import_proxy_subscription_file(
         raise ValueError(f"读取本地 Clash 配置失败: {exc}") from exc
     if len(payload) > limit:
         raise ValueError(f"本地 Clash 配置超过 {_subscription_size_limit_label(limit)}，已停止读取")
+    return source_path, payload
+
+
+def read_proxy_node_text_file(
+    path: str | Path,
+    *,
+    max_bytes: int = PROXY_SUBSCRIPTION_MAX_BYTES,
+) -> str:
+    """Read a manually selected proxy node/config file without unbounded I/O."""
+
+    _source_path, payload = _read_local_proxy_file_payload(path, max_bytes)
+    return _decode_subscription_bytes(payload, "")
+
+
+def import_proxy_subscription_file(
+    path: str | Path,
+    *,
+    max_bytes: int = PROXY_SUBSCRIPTION_MAX_BYTES,
+    persist: bool = True,
+    profile_id: str = "",
+    activate: bool = True,
+) -> ProxySubscriptionResult:
+    """Import all nodes from a local Clash/mihomo YAML file.
+
+    The source is copied into the managed cache so the imported nodes remain
+    available if the original file is later moved or removed.
+    """
+
+    source_path, payload = _read_local_proxy_file_payload(path, max_bytes)
 
     text = _decode_subscription_bytes(payload, "")
     nodes = parse_proxy_subscription_content(text)
@@ -1118,7 +1139,23 @@ def _load_cached_proxy_subscription_nodes(
             and _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE == signature
         ):
             return _PROXY_SUBSCRIPTION_NODES_CACHE
-    text = _decode_subscription_bytes(path.read_bytes(), charset)
+    # State files are user-editable and may point outside the managed cache.
+    # Reject ordinary oversized files before reading, then verify again to
+    # cover a file that grew between stat and read. Keep raw OSError semantics
+    # here: callers intentionally distinguish a missing cache from permission
+    # or sharing failures instead of silently treating every I/O error as an
+    # invalid subscription.
+    limit = _normalize_subscription_max_bytes(PROXY_SUBSCRIPTION_MAX_BYTES)
+    if path.stat().st_size > limit:
+        raise ValueError(
+            f"缓存 Clash 配置超过 {_subscription_size_limit_label(limit)}，已停止读取"
+        )
+    payload = path.read_bytes()
+    if len(payload) > limit:
+        raise ValueError(
+            f"缓存 Clash 配置超过 {_subscription_size_limit_label(limit)}，已停止读取"
+        )
+    text = _decode_subscription_bytes(payload, charset)
     nodes = parse_proxy_subscription_content(text)
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
         _PROXY_SUBSCRIPTION_NODES_CACHE = nodes

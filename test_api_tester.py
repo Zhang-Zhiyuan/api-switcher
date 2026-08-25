@@ -22,8 +22,9 @@ class _FakeHTMLResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return b"<!doctype html><html><body>not an api</body></html>"
+    def read(self, size=-1):
+        payload = b"<!doctype html><html><body>not an api</body></html>"
+        return payload if size < 0 else payload[:size]
 
     def getcode(self):
         return 200
@@ -42,8 +43,9 @@ class _FakeJSONResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size=-1):
+        payload = json.dumps(self.payload).encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
     def getcode(self):
         return self.status
@@ -63,10 +65,11 @@ class _FakeStreamResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
-        return self.body.encode("utf-8")
+    def read(self, size=-1):
+        payload = self.body.encode("utf-8")
+        return payload if size < 0 else payload[:size]
 
-    def readline(self):
+    def readline(self, _size=-1):
         return next(self._lines, b"")
 
     def getcode(self):
@@ -78,7 +81,7 @@ class _CompletionThenBlockingStream(_FakeStreamResponse):
         super().__init__("event: response.completed\n")
         self._read_count = 0
 
-    def readline(self):
+    def readline(self, _size=-1):
         self._read_count += 1
         if self._read_count > 1:
             raise AssertionError("stream reader should return as soon as completion is seen")
@@ -89,7 +92,7 @@ class _EndlessDeltaStream(_FakeStreamResponse):
     def __init__(self):
         super().__init__("")
 
-    def readline(self):
+    def readline(self, _size=-1):
         return b"event: response.output_text.delta\ndata: {\"delta\":\"x\"}\n\n"
 
 
@@ -97,7 +100,7 @@ class _ReadTimeoutStream(_FakeStreamResponse):
     def __init__(self):
         super().__init__("")
 
-    def readline(self):
+    def readline(self, _size=-1):
         raise OSError("The read operation timed out")
 
 
@@ -105,7 +108,7 @@ class _DisconnectingStream(_FakeStreamResponse):
     def __init__(self):
         super().__init__("")
 
-    def readline(self):
+    def readline(self, _size=-1):
         raise http.client.IncompleteRead(b"event: response.output_text.delta\n")
 
 
@@ -125,6 +128,69 @@ def test_request_json_rejects_html_success_response(monkeypatch):
     assert result.status_code == 200
     assert "JSON" in result.message
     assert "text/html" in result.error_details
+
+
+def test_request_json_rejects_declared_oversized_response_without_reading(monkeypatch):
+    class OversizedResponse(_FakeJSONResponse):
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(APITester.MAX_JSON_RESPONSE_BYTES + 1),
+        }
+
+        def read(self, _size=-1):
+            raise AssertionError("declared oversized response must not be read")
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: OversizedResponse({}),
+    )
+
+    ok, data, result = APITester._request_json(
+        "https://relay.example.com/v1/models",
+        headers={"Accept": "application/json"},
+    )
+
+    assert ok is False
+    assert data is None
+    assert "响应过大" in result.message
+    assert "上限" in result.error_details
+
+
+def test_response_size_check_accepts_lowercase_content_length_header():
+    class LowercaseHeaderResponse(_FakeJSONResponse):
+        headers = {"content-length": "2"}
+
+    assert APITester._read_response_bytes(
+        LowercaseHeaderResponse({}),
+        APITester.MAX_JSON_RESPONSE_BYTES,
+        "API 响应",
+    ) == b"{}"
+
+
+def test_event_stream_rejects_oversized_single_line(monkeypatch):
+    class OversizedStream(_FakeStreamResponse):
+        def __init__(self):
+            super().__init__("")
+
+        def readline(self, size=-1):
+            assert size == APITester.MAX_STREAM_LINE_BYTES + 1
+            return b"x" * size
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: OversizedStream(),
+    )
+
+    result = APITester._request_event_stream(
+        "https://relay.example.com/v1/responses",
+        headers={"Authorization": "Bearer test-token"},
+        payload={"model": "test"},
+    )
+
+    assert result.success is False
+    assert "单行过大" in result.message
 
 
 def test_request_json_reports_wrapped_timeout_as_timeout(monkeypatch):

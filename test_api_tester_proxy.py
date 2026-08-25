@@ -96,7 +96,7 @@ def test_request_keeps_direct_bypass_after_precheck_auto_cleanup(monkeypatch):
             return False
 
         @staticmethod
-        def read():
+        def read(_size=-1):
             return b"{}"
 
         @staticmethod
@@ -129,6 +129,34 @@ def test_request_keeps_direct_bypass_after_precheck_auto_cleanup(monkeypatch):
     assert result.proxy_warning
     assert len(checks) == 1
     assert direct_calls == [("https://gateway.example/v1/models", 3)]
+
+
+def test_loopback_proxy_probe_cache_is_capacity_bounded(monkeypatch):
+    class ConnectedSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    APITester._proxy_check_cache.clear()
+    monkeypatch.setattr(api_tester.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        api_tester.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: ConnectedSocket(),
+    )
+
+    for port in range(20000, 20000 + APITester.MAX_PROXY_CHECK_CACHE_ENTRIES + 20):
+        endpoint, available = APITester._check_loopback_proxy(
+            f"http://127.0.0.1:{port}",
+            force=True,
+        )
+        assert endpoint == ("127.0.0.1", port)
+        assert available is True
+
+    assert len(APITester._proxy_check_cache) == APITester.MAX_PROXY_CHECK_CACHE_ENTRIES
+    APITester._proxy_check_cache.clear()
 
 
 def test_invalid_local_proxy_env_names_only_returns_refused_loopback_values(monkeypatch):

@@ -2,7 +2,11 @@ import logging
 import threading
 
 from ui.tabs.log_viewer_tab import LOG_LEVELS, LogViewerTab, _prepare_log_entries
-from core.log_handler import ExpectedLibraryNoiseFilter, LogManager
+from core.log_handler import (
+    ExpectedLibraryNoiseFilter,
+    LogManager,
+    create_bounded_file_handler,
+)
 
 
 def test_prepare_log_entries_filters_and_counts_by_level():
@@ -86,6 +90,25 @@ def test_expected_library_filter_keeps_unrelated_errors_unchanged():
     ExpectedLibraryNoiseFilter().filter(record)
 
     assert record.levelno == logging.ERROR
+
+
+def test_bounded_file_handler_rotates_noisy_app_log(tmp_path):
+    log_path = tmp_path / "app.log"
+    handler = create_bounded_file_handler(log_path, max_bytes=1024, backup_count=1)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger = logging.Logger("bounded-app-log")
+    logger.addHandler(handler)
+    try:
+        for index in range(30):
+            logger.info("%02d %s", index, "x" * 72)
+    finally:
+        handler.close()
+
+    rotated = log_path.with_suffix(".log.1")
+    assert log_path.is_file()
+    assert rotated.is_file()
+    assert log_path.stat().st_size <= 1024
+    assert rotated.stat().st_size <= 1024
 
 
 def test_log_manager_initial_snapshot_consumes_duplicate_queue_backlog():

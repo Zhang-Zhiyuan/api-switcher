@@ -29,6 +29,7 @@ from core.network_diagnostic_settings import (
 
 USER_AGENT = "API-Switcher-Network-Diagnostics/1.0"
 DEFAULT_TIMEOUT = 8.0
+HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
 
 PUBLIC_IP_ENDPOINTS = (
     ("IPv4", "https://api.ipify.org?format=json"),
@@ -2328,13 +2329,46 @@ def summarize_report(report: NetworkDiagnosticReport) -> str:
     )
 
 
+def _read_bounded_http_body(response, max_bytes: int = HTTP_RESPONSE_MAX_BYTES) -> bytes:
+    """Read a public diagnostic response without trusting the remote size."""
+
+    limit = max(1, int(max_bytes))
+    headers = getattr(response, "headers", None)
+    content_length = None
+    if headers is not None:
+        content_length = headers.get("Content-Length")
+        if content_length is None:
+            content_length = headers.get("content-length")
+    try:
+        declared = int(content_length or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > limit:
+        raise ValueError(f"响应声明长度 {declared} 字节，超过 {limit} 字节上限")
+    raw = response.read(limit + 1)
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", errors="replace")
+    if len(raw) > limit:
+        raise ValueError(f"响应超过 {limit} 字节上限")
+    return bytes(raw)
+
+
 def _http_get(url: str, timeout: float) -> HttpResult:
     start = time.perf_counter()
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,text/plain"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
             status_code = response.getcode()
+            try:
+                raw = _read_bounded_http_body(response)
+            except ValueError as body_error:
+                return HttpResult(
+                    url=url,
+                    ok=False,
+                    status_code=status_code,
+                    response_time=time.perf_counter() - start,
+                    error=str(body_error),
+                )
             text = raw.decode("utf-8", errors="replace")
             return HttpResult(
                 url=url,
@@ -2345,9 +2379,13 @@ def _http_get(url: str, timeout: float) -> HttpResult:
                 error="" if 200 <= int(status_code or 0) < 300 else f"HTTP {status_code}",
             )
     except urllib.error.HTTPError as exc:
+        error = f"HTTP {exc.code}"
         try:
-            raw = exc.read()
+            raw = _read_bounded_http_body(exc)
             text = raw.decode("utf-8", errors="replace")
+        except ValueError as body_error:
+            text = ""
+            error = f"HTTP {exc.code}；{body_error}"
         except Exception:
             text = ""
         return HttpResult(
@@ -2356,7 +2394,7 @@ def _http_get(url: str, timeout: float) -> HttpResult:
             text=text,
             status_code=exc.code,
             response_time=time.perf_counter() - start,
-            error=f"HTTP {exc.code}",
+            error=error,
         )
     except Exception as exc:
         return HttpResult(

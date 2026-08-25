@@ -3985,9 +3985,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not path:
             return
         try:
-            content = Path(path).read_text(encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            content = Path(path).read_text(encoding="utf-8", errors="replace")
+            content = remote_proxy.read_proxy_node_text_file(path)
         except Exception as e:
             show_toast(self.winfo_toplevel(), f"读取代理文件失败: {e}", is_error=True)
             return

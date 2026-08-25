@@ -1,8 +1,10 @@
 """
 Git版本管理模块 - 自动为项目创建git快照
 """
-import subprocess
 import logging
+import os
+import re
+import subprocess
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -17,6 +19,8 @@ logger = logging.getLogger(__name__)
 class GitManager:
     """Git版本管理器"""
 
+    CHANGED_FILE_COUNT_CACHE_MAX = 2048
+
     def __init__(self, project_path: Optional[Path] = None):
         """
         初始化Git管理器
@@ -27,6 +31,8 @@ class GitManager:
         self.project_path = project_path or Path.cwd()
         self._repo_root_cache: Path | None = None
         self._repo_root_lock = threading.RLock()
+        self._changed_file_count_cache: OrderedDict[str, int] = OrderedDict()
+        self._changed_file_count_cache_lock = threading.RLock()
 
     def _repo_root(self) -> Path | None:
         """返回当前目录所在的 Git 仓库根目录；不存在仓库时返回 None。"""
@@ -347,20 +353,88 @@ class GitManager:
             logger.error(f"创建快照失败: {e}")
             return False, f"创建快照失败: {str(e)}"
 
-    def _changed_file_count(self, commit_hash: str) -> int:
-        """Return number of files changed by a commit."""
+    def _changed_file_counts(self, commit_hashes: list[str]) -> dict[str, int]:
+        """Return changed-file counts for many commits using one Git process."""
+
+        hashes = [str(commit_hash or "").strip() for commit_hash in commit_hashes]
+        hashes = list(dict.fromkeys(commit_hash for commit_hash in hashes if commit_hash))
+        if not hashes:
+            return {}
+
+        counts: dict[str, int] = {}
+        missing: list[str] = []
+        with self._changed_file_count_cache_lock:
+            for commit_hash in hashes:
+                cached = self._changed_file_count_cache.pop(commit_hash, None)
+                if cached is None:
+                    missing.append(commit_hash)
+                    continue
+                self._changed_file_count_cache[commit_hash] = cached
+                counts[commit_hash] = cached
+        if not missing:
+            return counts
+
+        env = os.environ.copy()
+        # ``--shortstat`` is intentionally compact; force its stable English
+        # grammar so parsing does not depend on the user's Git locale.
+        env["LC_ALL"] = "C"
+        env["LANG"] = "C"
         result = subprocess.run(
-            ["git", "show", "--name-only", "--pretty=format:", "--no-renames", commit_hash],
+            [
+                "git",
+                "show",
+                "--format=%x1e%H",
+                "--shortstat",
+                "--no-renames",
+                "--no-ext-diff",
+                *missing,
+            ],
             cwd=self._git_cwd(),
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=5,
+            timeout=min(30, 5 + len(missing) // 20),
+            env=env,
         )
         if result.returncode != 0:
-            return 0
-        return len([line for line in result.stdout.splitlines() if line.strip()])
+            return counts
+
+        parsed_counts: dict[str, int] = {}
+        for record in result.stdout.split("\x1e"):
+            lines = [line.strip() for line in record.splitlines() if line.strip()]
+            if not lines:
+                continue
+            full_hash = lines[0]
+            match = re.search(r"\b(\d+) files? changed\b", "\n".join(lines[1:]))
+            parsed_counts[full_hash] = int(match.group(1)) if match else 0
+
+        with self._changed_file_count_cache_lock:
+            for commit_hash in missing:
+                count = parsed_counts.get(commit_hash)
+                if count is None:
+                    # ``git show`` always emits the canonical full object ID,
+                    # while callers may legitimately pass an abbreviated hash.
+                    # Accept only an unambiguous prefix match so a short hash
+                    # cannot silently report zero changed files.
+                    prefix_matches = [
+                        parsed_count
+                        for full_hash, parsed_count in parsed_counts.items()
+                        if full_hash.startswith(commit_hash)
+                    ]
+                    count = prefix_matches[0] if len(prefix_matches) == 1 else 0
+                self._changed_file_count_cache.pop(commit_hash, None)
+                self._changed_file_count_cache[commit_hash] = count
+                counts[commit_hash] = count
+            while len(self._changed_file_count_cache) > self.CHANGED_FILE_COUNT_CACHE_MAX:
+                self._changed_file_count_cache.popitem(last=False)
+        return counts
+
+    def _changed_file_count(self, commit_hash: str) -> int:
+        """Return number of files changed by one commit."""
+
+        counts = self._changed_file_counts([commit_hash])
+        return next(iter(counts.values()), 0)
 
     def get_commit_diff(self, commit_hash: str, stat_only: bool = False) -> Tuple[bool, str]:
         """Return a commit diff or diffstat for display/copying."""
@@ -458,12 +532,17 @@ class GitManager:
                         "message": message,
                         "author": author,
                         "date": date,
-                        "changed_files": self._changed_file_count(full_hash),
+                        "changed_files": 0,
                         "auto_snapshot": self.is_auto_snapshot_message(message),
                     })
                 if len(commits) >= count:
                     break
 
+            changed_counts = self._changed_file_counts(
+                [commit["full_hash"] for commit in commits]
+            )
+            for commit in commits:
+                commit["changed_files"] = changed_counts.get(commit["full_hash"], 0)
             return commits
 
         except Exception as e:

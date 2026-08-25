@@ -1,8 +1,42 @@
 import json
+import urllib.request
 
 import pytest
 
 from core import network_diagnostics
+
+
+def test_http_get_rejects_declared_oversized_response_before_read(monkeypatch):
+    class OversizedResponse:
+        headers = {
+            "Content-Length": str(network_diagnostics.HTTP_RESPONSE_MAX_BYTES + 1),
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read(_size=-1):
+            raise AssertionError("declared oversized response must not be read")
+
+        @staticmethod
+        def getcode():
+            return 200
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: OversizedResponse(),
+    )
+
+    result = network_diagnostics._http_get("https://diagnostic.example.test", 1.0)
+
+    assert result.ok is False
+    assert result.status_code == 200
+    assert "超过" in result.error
 
 
 def _fake_http_get(mapping):

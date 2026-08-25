@@ -186,6 +186,56 @@ def test_git_manager_snapshot_flow(tmp_path):
     assert no_change_result == "没有需要提交的更改"
 
 
+def test_recent_commit_file_counts_use_one_bulk_git_process(tmp_path, monkeypatch):
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    git_mgr = GitManager(project_dir)
+    assert git_mgr.init_repo()[0]
+
+    tracked = project_dir / "tracked.txt"
+    for index in range(3):
+        tracked.write_text(str(index), encoding="utf-8")
+        assert git_mgr.create_snapshot(message=f"snapshot {index}")[0]
+
+    # Warm the repository-root cache so this assertion measures only history
+    # retrieval, not the unrelated rev-parse discovery call.
+    assert git_mgr._repo_root() == project_dir.resolve()
+    real_run = subprocess.run
+    bulk_stat_calls = []
+
+    def counting_run(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", [])
+        if command[:3] == ["git", "show", "--format=%x1e%H"]:
+            bulk_stat_calls.append(command)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(git_manager_module.subprocess, "run", counting_run)
+
+    commits = git_mgr.get_recent_commits(count=3)
+    cached_commits = git_mgr.get_recent_commits(count=3)
+
+    assert len(commits) == 3
+    # The root snapshot also contains the automatically created .gitignore.
+    assert sorted(commit["changed_files"] for commit in commits) == [1, 1, 2]
+    assert cached_commits == commits
+    assert len(bulk_stat_calls) == 1
+
+
+def test_changed_file_count_accepts_abbreviated_commit_hash(tmp_path):
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    git_mgr = GitManager(project_dir)
+    assert git_mgr.init_repo()[0]
+
+    tracked = project_dir / "tracked.txt"
+    tracked.write_text("content", encoding="utf-8")
+    success, full_hash = git_mgr.create_snapshot(message="short hash snapshot")
+    assert success, full_hash
+
+    # The root snapshot includes the managed .gitignore and the test file.
+    assert git_mgr._changed_file_count(full_hash[:12]) == 2
+
+
 def test_git_manager_auto_snapshot_history_and_diff(tmp_path):
     project_dir = tmp_path / "repo"
     project_dir.mkdir()

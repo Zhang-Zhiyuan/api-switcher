@@ -3700,6 +3700,18 @@ def test_import_proxy_subscription_file_rejects_oversized_input(monkeypatch, tmp
         remote_proxy.import_proxy_subscription_file(source, max_bytes=32)
 
 
+def test_read_proxy_node_text_file_is_bounded_and_decodes_utf8_bom(tmp_path):
+    source = tmp_path / "node.yaml"
+    payload = b"\xef\xbb\xbf{name: test, type: vless, server: example.com, port: 443}"
+    source.write_bytes(payload)
+
+    text = remote_proxy.read_proxy_node_text_file(source, max_bytes=len(payload))
+
+    assert text.startswith("{name: test")
+    with pytest.raises(ValueError, match="超过"):
+        remote_proxy.read_proxy_node_text_file(source, max_bytes=len(payload) - 1)
+
+
 def test_local_file_profile_can_be_renamed_switched_and_keeps_empty_url(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path / "storage")
     source = tmp_path / "offline.yaml"
@@ -3812,6 +3824,21 @@ def test_load_cached_proxy_subscription_reads_saved_content(monkeypatch, tmp_pat
     assert cached is not None
     assert cached.url == "https://example.com/sub"
     assert cached.nodes[0].node["name"] == "cached"
+
+
+def test_load_cached_proxy_subscription_rejects_oversized_tampered_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy, "PROXY_SUBSCRIPTION_MAX_BYTES", 64)
+    remote_proxy.clear_proxy_subscription_state_cache()
+    content_path = tmp_path / "oversized-subscription.yaml"
+    content_path.write_bytes(b"proxies:\n" + b"x" * 128)
+    state = {
+        "url": "https://example.com/sub",
+        "saved_path": str(content_path),
+        "last_fetched_at": "2026-05-26T00:00:00+00:00",
+    }
+
+    assert remote_proxy.load_cached_proxy_subscription(state) is None
 
 
 def test_load_cached_proxy_subscription_respects_saved_charset(monkeypatch, tmp_path):
