@@ -2,6 +2,7 @@ import ast
 import hashlib
 import io
 import json
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -109,12 +110,51 @@ def test_local_core_update_failure_keeps_usable_existing_binary(monkeypatch, tmp
         lambda: (_ for _ in ()).throw(OSError("offline")),
     )
 
-    result = local_proxy._ensure_mihomo_binary()
+    result = local_proxy._ensure_latest_mihomo_binary()
 
     assert result == binary
     state = json.loads(local_proxy.MIHOMO_RELEASE_STATE_PATH.read_text(encoding="utf-8"))
     assert state["last_check_success"] is False
     assert state["installed_version"] == "1.19.25"
+
+
+def test_local_core_startup_never_waits_for_release_when_core_is_usable(
+    monkeypatch, tmp_path
+):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    monkeypatch.setattr(
+        local_proxy,
+        "_try_mihomo_binary_info",
+        lambda path: ("1.19.25", "Mihomo Meta v1.19.25 windows amd64")
+        if Path(path) == binary
+        else None,
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_fetch_mihomo_release",
+        lambda: (_ for _ in ()).throw(AssertionError("startup must not query GitHub")),
+    )
+
+    assert local_proxy._ensure_mihomo_binary() == binary
+
+
+def test_core_update_check_is_scheduled_in_background(monkeypatch, tmp_path):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"core")
+    completed = threading.Event()
+    monkeypatch.setattr(local_proxy, "_MIHOMO_UPDATE_THREAD", None)
+    monkeypatch.setattr(local_proxy, "_load_mihomo_release_state", lambda: {})
+    monkeypatch.setattr(
+        local_proxy,
+        "_ensure_latest_mihomo_binary",
+        lambda: completed.set() or binary,
+    )
+
+    assert local_proxy._schedule_mihomo_update_check() is True
+    assert completed.wait(1.0) is True
 
 
 def test_local_core_update_is_staged_while_running_then_applied(monkeypatch, tmp_path):
@@ -144,7 +184,7 @@ def test_local_core_update_is_staged_while_running_then_applied(monkeypatch, tmp
 
     monkeypatch.setattr(local_proxy, "_download_mihomo_binary", download)
 
-    assert local_proxy._ensure_mihomo_binary() == binary
+    assert local_proxy._ensure_latest_mihomo_binary() == binary
     assert binary.read_bytes() == b"old"
     assert local_proxy.MIHOMO_PENDING_BINARY_PATH.read_bytes() == b"new"
     assert "待代理重启时应用" in local_proxy._local_mihomo_core_status_detail()
@@ -161,7 +201,7 @@ def test_local_core_update_does_not_restart_running_proxy_by_default(monkeypatch
     binary.write_bytes(b"old")
     local_proxy.MIHOMO_PENDING_BINARY_PATH.write_bytes(b"new")
     monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
-    monkeypatch.setattr(local_proxy, "_ensure_mihomo_binary", lambda: binary)
+    monkeypatch.setattr(local_proxy, "_ensure_latest_mihomo_binary", lambda: binary)
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897})
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_a, **_k: True)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)

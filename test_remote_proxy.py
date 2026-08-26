@@ -178,14 +178,14 @@ def test_build_mihomo_config_strict_privacy_is_fail_closed_and_uses_encrypted_dn
         "use-hosts": True,
         "use-system-hosts": False,
         "respect-rules": True,
-        "default-nameserver": ["1.1.1.1", "8.8.8.8"],
+        "default-nameserver": ["223.5.5.5", "119.29.29.29"],
         "proxy-server-nameserver": [
-            "https://1.1.1.1/dns-query",
-            "https://8.8.8.8/dns-query",
+            "https://doh.pub/dns-query#DIRECT",
+            "https://dns.alidns.com/dns-query#DIRECT",
         ],
         "nameserver": [
-            "https://1.1.1.1/dns-query",
-            "https://8.8.8.8/dns-query",
+            "https://1.1.1.1/dns-query#AI-PROXY",
+            "https://8.8.8.8/dns-query#AI-PROXY",
         ],
     }
 
@@ -5651,7 +5651,7 @@ def test_reload_local_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
         ),
     )
     reloads = []
-    measured = []
+    fallback_servers = []
     probes = iter(
         [
             "本机 AI 连通性 0/3 可达",
@@ -5662,21 +5662,21 @@ def test_reload_local_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
     def fake_reload(text, **_kwargs):
         name = remote_proxy.parse_proxy_node(text)["name"]
         reloads.append(name)
+        fallback_servers.append(
+            [node["server"] for node in _kwargs.get("fallback_nodes") or ()]
+        )
         return f"reloaded {name}"
-
-    safe_latency = remote_proxy.ProxyNodeLatencyResult(
-        remote_proxy.proxy_node_key(safe.node), True, latency_ms=45
-    )
-
-    def fake_select(nodes, *_args, **_kwargs):
-        measured.extend(item.node["name"] for item in nodes)
-        result = _stable_local_prevalidation(safe)
-        return safe, result, {result.node_key: result}, {result.node_key: safe_latency}
 
     monkeypatch.setattr(local_proxy, "_read_local_managed_proxy_node", lambda: original)
     monkeypatch.setattr(local_proxy, "reload_local_ai_proxy", fake_reload)
     monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda *_a, **_k: next(probes))
-    monkeypatch.setattr(local_proxy, "_select_stable_automatic_local_candidate", fake_select)
+    monkeypatch.setattr(
+        local_proxy,
+        "_select_stable_automatic_local_candidate",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("startup verification must not run blocking deep probes")
+        ),
+    )
     monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
 
     message = local_proxy.reload_local_ai_proxy_verified(
@@ -5684,9 +5684,11 @@ def test_reload_local_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
         [requested, hong_kong, safe],
     )
 
-    assert measured == ["日本备用"]
-    assert reloads == ["failed", "日本备用"]
-    assert "验证通过" in message
+    assert reloads == ["failed", "old"]
+    assert fallback_servers[0] == ["jp.example.com"]
+    assert "hk.example.com" not in fallback_servers[0]
+    assert "已跳过阻塞式逐节点深测" in message
+    assert "已恢复更新前节点 old" in message
 
 
 def test_reload_remote_proxy_does_not_use_hong_kong_when_no_other_fallback(monkeypatch):
@@ -6662,7 +6664,7 @@ def test_install_local_proxy_verified_skips_hong_kong_fallback(monkeypatch):
         ),
     )
     installs = []
-    measured = []
+    fallback_servers = []
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda _state: False)
     probes = iter(
@@ -6671,23 +6673,22 @@ def test_install_local_proxy_verified_skips_hong_kong_fallback(monkeypatch):
             "本机 AI 连通性 3/3 可达",
         ]
     )
-    safe_key = remote_proxy.proxy_subscription_node_key(safe)
-    latencies = {
-        safe_key: remote_proxy.ProxyNodeLatencyResult(safe_key, True, latency_ms=50),
-    }
-
-    def fake_install(text, *_args, **_kwargs):
+    def fake_install(text, *_args, **kwargs):
         installs.append(remote_proxy.parse_proxy_node(text)["name"])
+        fallback_servers.append(
+            [node["server"] for node in kwargs.get("fallback_nodes") or ()]
+        )
         return "installed"
-
-    def fake_select(nodes, *_args, **_kwargs):
-        measured.extend(item.node["name"] for item in nodes)
-        result = _stable_local_prevalidation(safe)
-        return safe, result, {result.node_key: result}, latencies
 
     monkeypatch.setattr(local_proxy, "install_local_ai_proxy", fake_install)
     monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda *_a, **_k: next(probes))
-    monkeypatch.setattr(local_proxy, "_select_stable_automatic_local_candidate", fake_select)
+    monkeypatch.setattr(
+        local_proxy,
+        "_select_stable_automatic_local_candidate",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("startup verification must not run blocking deep probes")
+        ),
+    )
     monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda _node: {})
 
     message = local_proxy.install_local_ai_proxy_verified(
@@ -6695,9 +6696,11 @@ def test_install_local_proxy_verified_skips_hong_kong_fallback(monkeypatch):
         [requested, hong_kong, safe],
     )
 
-    assert measured == ["Japan safe"]
-    assert installs == ["bad", "Japan safe"]
-    assert "自动切换到 Japan safe" in message
+    assert installs == ["bad"]
+    assert fallback_servers == [["jp.example.com"]]
+    assert "hk.example.com" not in fallback_servers[0]
+    assert "已保留 2 节点内核故障切换池" in message
+    assert "已跳过耗时的逐节点长会话深测" in message
 
 
 def test_install_local_proxy_verified_uses_hot_reload_when_managed_proxy_is_running(
@@ -6825,7 +6828,7 @@ def test_install_remote_proxy_verified_failed_candidates_never_touch_formal_prox
     assert "未修改正式代理" in message
 
 
-def test_install_local_proxy_verified_reports_failed_original_restore(monkeypatch):
+def test_install_local_proxy_failed_validation_never_reinstalls_nodes(monkeypatch):
     requested = remote_proxy.ProxySubscriptionNode(
         1,
         remote_proxy.parse_proxy_node("{ name: requested, type: vless, server: bad.example.com, port: 443 }"),
@@ -6841,30 +6844,18 @@ def test_install_local_proxy_verified_reports_failed_original_restore(monkeypatc
     def fake_install(text, _port=17897, **_kwargs):
         name = remote_proxy.parse_proxy_node(text)["name"]
         calls.append(name)
-        if name == "requested" and calls.count("requested") > 1:
-            raise RuntimeError("restore boom")
         return f"installed {name}"
-
-    latency = remote_proxy.ProxyNodeLatencyResult(
-        remote_proxy.proxy_node_key(candidate.node),
-        True,
-        latency_ms=20,
-    )
     monkeypatch.setattr(local_proxy, "install_local_ai_proxy", fake_install)
     monkeypatch.setattr(
         local_proxy,
         "probe_local_ai_proxy",
         lambda *_args, **_kwargs: "本机 AI 连通性 0/3 可达",
     )
-    stable = _stable_local_prevalidation(candidate)
     monkeypatch.setattr(
         local_proxy,
         "_select_stable_automatic_local_candidate",
-        lambda *_args, **_kwargs: (
-            candidate,
-            stable,
-            {stable.node_key: stable},
-            {stable.node_key: latency},
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("startup verification must not run blocking deep probes")
         ),
     )
 
@@ -6873,9 +6864,9 @@ def test_install_local_proxy_verified_reports_failed_original_restore(monkeypatc
         [requested, candidate],
     )
 
-    assert calls == ["requested", "candidate", "requested"]
-    assert "恢复原节点失败: restore boom" in message
-    assert "已恢复原节点" not in message
+    assert calls == ["requested"]
+    assert "验证未完全通过" in message
+    assert "已跳过耗时的逐节点长会话深测" in message
 
 
 def test_install_ai_proxy_verified_prefers_quality_ranked_candidate(monkeypatch):
@@ -7874,11 +7865,20 @@ def test_restore_local_proxy_node_does_not_report_skipped_reload_as_success(monk
 def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("mixed-port: 17897", encoding="utf-8")
-    probes = [
-        local_proxy.LocalAIProxyProbeResult("OpenAI/ChatGPT", True, status=403, elapsed_ms=11),
-        local_proxy.LocalAIProxyProbeResult("Claude/Anthropic", True, status=405, elapsed_ms=12),
-        local_proxy.LocalAIProxyProbeResult("Gemini/Google AI", False, detail="timeout", elapsed_ms=13),
-    ]
+    probes = {
+        "OpenAI API": local_proxy.LocalAIProxyProbeResult(
+            "OpenAI API", True, status=401, elapsed_ms=10
+        ),
+        "OpenAI/ChatGPT": local_proxy.LocalAIProxyProbeResult(
+            "OpenAI/ChatGPT", True, status=403, elapsed_ms=11
+        ),
+        "Claude/Anthropic": local_proxy.LocalAIProxyProbeResult(
+            "Claude/Anthropic", True, status=405, elapsed_ms=12
+        ),
+        "Gemini/Google AI": local_proxy.LocalAIProxyProbeResult(
+            "Gemini/Google AI", False, detail="timeout", elapsed_ms=13
+        ),
+    }
 
     monkeypatch.setattr(
         local_proxy,
@@ -7890,13 +7890,44 @@ def test_probe_local_ai_proxy_reports_each_target(monkeypatch, tmp_path):
             proxy_url="http://127.0.0.1:17897",
         ),
     )
-    monkeypatch.setattr(local_proxy, "_probe_url_through_proxy", lambda *_args, **_kwargs: probes.pop(0))
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_url_through_proxy",
+        lambda _proxy, label, _url, **_kwargs: probes[label],
+    )
 
     summary = local_proxy.probe_local_ai_proxy()
 
-    assert "AI 连通性 2/3 可达" in summary
+    assert "AI 连通性 3/4 可达" in summary
+    assert "OpenAI API: 可达 / HTTP 401 / 10ms" in summary
     assert "OpenAI/ChatGPT: 可达 / HTTP 403 / 11ms" in summary
     assert "Gemini/Google AI: 失败 / timeout / 13ms" in summary
+
+
+def test_probe_local_ai_proxy_runs_all_targets_in_parallel(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("mixed-port: 17897", encoding="utf-8")
+    barrier = threading.Barrier(len(local_proxy.LOCAL_AI_PROBE_TARGETS), timeout=1.0)
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path=str(config_path),
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+
+    def probe(_proxy, label, _url, **_kwargs):
+        barrier.wait()
+        return local_proxy.LocalAIProxyProbeResult(label, True, status=200)
+
+    monkeypatch.setattr(local_proxy, "_probe_url_through_proxy", probe)
+
+    summary = local_proxy.probe_local_ai_proxy()
+
+    assert "AI 连通性 4/4 可达" in summary
 
 
 def test_reload_local_ai_proxy_uses_controller_and_updates_state(monkeypatch, tmp_path):

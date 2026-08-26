@@ -3482,7 +3482,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._use_selected_subscription_node(show_message=False)
 
             self._run_local_task(
-                "正在启动 Windows 本机 AI 代理，并验证 OpenAI/Claude/Gemini 连通性...",
+                "正在启动 Windows 本机 AI 代理，优先验证 Codex/OpenAI 并等待内核故障切换...",
                 lambda: local_proxy.install_local_ai_proxy_verified(
                     proxy_text,
                     tuple(self._subscription_nodes),
@@ -3495,7 +3495,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 else "warning"
                 if any(
                     marker in message
-                    for marker in ("验证未完全通过", "自动尝试", "已恢复原节点", "已跳过")
+                    for marker in (
+                        "验证未完全通过",
+                        "其他 AI 服务未完全可达",
+                        "自动尝试",
+                        "已恢复原节点",
+                        "已跳过",
+                    )
                 )
                 else infer_feedback_severity(message),
                 failure_hint="启动未完成；程序已执行事务回滚保护，请点“检查状态”确认当前代理",
@@ -3514,8 +3520,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     else "严格隐私未开启：未命中代理规则的流量可能 DIRECT。\n"
                 )
                 + "如果当前订阅有合格候选，会一并装载最多 4 个备用节点，主节点失效后由 mihomo 为新连接自动切换。\n"
+                + "启动只执行有上限的快速验证；耗时的逐节点长会话深测请在节点页手动执行。\n"
                 + "这不是 VPN/TUN，无法阻止忽略代理的程序、WebRTC/UDP 或系统 DNS/IPv6 绕过。"
-                "启动后请重启 Codex、Claude Code、VS Code 并打开新终端。"
+                "启动后已打开的 Codex/Claude Code 不会自动继承新环境，"
+                "请完全退出后重开 Codex、Claude Code、VS Code 和终端。"
             ),
             on_confirm=do_start,
         )
@@ -3545,12 +3553,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return f"{result}\n此检测只证明明确经过 mihomo 的请求可用，不是 DNS/真实 IP 泄露证明。"
 
         self._run_local_task(
-            "正在通过本机 AI 代理测试 OpenAI/Claude/Gemini 连通性...",
+            "正在并行测试 OpenAI API、ChatGPT、Claude 和 Gemini 连通性...",
             probe,
             "测试本机 AI 代理",
-            severity_from_result=lambda message: "success"
-            if "AI 连通性 3/3 可达" in message
-            else "warning",
+            severity_from_result=lambda message: (
+                "success" if remote_proxy._probe_summary_all_ok(message) else "warning"
+            ),
             failure_hint="本次仅执行连通性测试，未修改本机代理设置",
         )
 

@@ -117,9 +117,93 @@ def test_local_config_uses_silent_log_and_health_check_even_with_one_node():
     parsed = remote_proxy.yaml.safe_load(config)
 
     assert parsed["log-level"] == "silent"
+    assert parsed["tcp-concurrent"] is True
+    assert parsed["keep-alive-interval"] == 15
+    assert parsed["keep-alive-idle"] == 15
+    assert parsed["disable-keep-alive"] is False
+    assert parsed["dns"]["proxy-server-nameserver"] == [
+        "https://doh.pub/dns-query#DIRECT",
+        "https://dns.alidns.com/dns-query#DIRECT",
+    ]
+    assert parsed["dns"]["nameserver-policy"]["+.openai.com"] == [
+        "https://1.1.1.1/dns-query#AI-PROXY",
+        "https://8.8.8.8/dns-query#AI-PROXY",
+    ]
     assert len(parsed["proxies"]) == 1
     assert parsed["proxy-groups"][0]["type"] == "fallback"
     assert parsed["proxy-groups"][0]["url"] == remote_proxy.AI_PROXY_HEALTH_CHECK_URL
+
+
+def test_local_mainland_dns_routes_custom_proxy_domains_through_ai_proxy():
+    config = local_proxy._build_local_mihomo_config(
+        _node("primary", "primary.example.com"),
+        17897,
+        preferences={
+            "custom_targets": [
+                {"kind": "domain", "value": "example.org", "enabled": True}
+            ]
+        },
+    )
+    parsed = remote_proxy.yaml.safe_load(config)
+
+    assert parsed["dns"]["nameserver-policy"]["+.example.org"] == [
+        "https://1.1.1.1/dns-query#AI-PROXY",
+        "https://8.8.8.8/dns-query#AI-PROXY",
+    ]
+
+
+def test_startup_probe_retries_once_after_fallback_health_initializes(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("proxy-groups: []", encoding="utf-8")
+    probes = iter(["AI 连通性 0/4 可达", "AI 连通性 4/4 可达"])
+    monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda **_kwargs: next(probes))
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path=str(config_path),
+            proxy_url="http://127.0.0.1:17897",
+            fallback_candidates=2,
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_local_mihomo_failover_status",
+        lambda *_args: local_proxy._LocalMihomoFailoverStatus(
+            healthy=True,
+            candidates=2,
+        ),
+    )
+
+    summary, retried = local_proxy._probe_local_ai_proxy_after_failover_warmup()
+
+    assert retried is True
+    assert "4/4 可达" in summary
+
+
+def test_startup_probe_does_not_wait_when_codex_paths_are_ready(monkeypatch):
+    summary = (
+        "AI 连通性 2/4 可达；"
+        "OpenAI API: 可达 / HTTP 401；"
+        "OpenAI/ChatGPT: 可达 / HTTP 200；"
+        "Claude/Anthropic: 失败 / timeout；"
+        "Gemini/Google AI: 失败 / timeout"
+    )
+    monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda **_kwargs: summary)
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: (_ for _ in ()).throw(AssertionError("must not wait for optional services")),
+    )
+
+    result, retried = local_proxy._probe_local_ai_proxy_after_failover_warmup()
+
+    assert result == summary
+    assert retried is False
 
 
 def test_local_fallback_candidates_exclude_unsafe_and_cap_pool():
