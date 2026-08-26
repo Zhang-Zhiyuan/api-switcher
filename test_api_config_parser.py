@@ -22,6 +22,28 @@ def test_parse_claude_export_block_and_ignore_unrelated_flags():
     assert parsed.url_inferred is False
 
 
+def test_parse_quoted_shell_values_preserves_ampersands():
+    parsed = parse_api_config_text(
+        'export OPENAI_BASE_URL="https://relay.example.test/v1?region=cn&mode=fast"\n'
+        'export OPENAI_API_KEY="sk-example-with&ampersand"',
+        "codex",
+    )
+
+    assert parsed.base_url == "https://relay.example.test/v1?region=cn&mode=fast"
+    assert parsed.token == "sk-example-with&ampersand"
+
+
+def test_sniffed_codex_bare_url_preserves_query_when_adding_v1():
+    parsed = parse_api_config_text(
+        "Codex endpoint: https://relay.example.test?region=cn&path=/\n"
+        "API key: sk-example-query-preserved",
+        "codex",
+    )
+
+    assert parsed.base_url == "https://relay.example.test/v1?region=cn&path=/"
+    assert parsed.url_inferred is True
+
+
 def test_parse_powershell_and_codex_aliases():
     parsed = parse_api_config_text(
         '$env:OPENAI_BASE_URL = "gateway.example.com/v1"; '

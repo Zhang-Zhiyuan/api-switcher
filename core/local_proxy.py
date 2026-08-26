@@ -1039,9 +1039,14 @@ def auto_start_local_ai_proxy_if_enabled() -> str:
         # linkage prevents a manually entered node from being mixed with an
         # unrelated active subscription and requires no startup network call.
         fallback_nodes = _cached_subscription_fallback_nodes(node)
-    return install_local_ai_proxy(
+    install_message = install_local_ai_proxy(
         remote_proxy.format_proxy_node(node),
         fallback_nodes=fallback_nodes,
+    )
+    return _verify_new_local_proxy_start(
+        install_message,
+        fallback_nodes=fallback_nodes,
+        action_label="Win11 本机代理自启",
     )
 
 
@@ -1055,7 +1060,7 @@ def update_local_mihomo_core(*, restart_running: bool = False) -> str:
 
     if os.name != "nt":
         raise RuntimeError("本机 mihomo 内核更新目前只支持 Windows")
-    binary_path = _ensure_latest_mihomo_binary()
+    binary_path = _ensure_latest_mihomo_binary(force_check=True)
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
         state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
@@ -1340,6 +1345,66 @@ def _prevalidated_local_candidate_matches(
     )
 
 
+def _rollback_new_local_proxy_start() -> str:
+    """Stop a newly deployed but unusable proxy and restore its checkpoint."""
+
+    try:
+        rollback = stop_local_ai_proxy(restore_settings=True)
+    except Exception as exc:
+        return (
+            "；自动回滚执行失败，可能仍有本机代理设置残留: "
+            f"{type(exc).__name__}: {exc}；请点“停止并恢复设置”"
+        )
+    if "恢复设置失败" in rollback or "未停止" in rollback:
+        return f"；自动回滚未完全完成: {rollback}；请点“检查状态”"
+    return f"；{rollback}，已恢复启动前设置，未保留不可用代理"
+
+
+def _verify_new_local_proxy_start(
+    install_message: str,
+    *,
+    fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
+    action_label: str = "启动",
+) -> str:
+    """Bounded verification shared by manual and login-time fresh starts."""
+
+    try:
+        probe_message, failover_retried = _probe_local_ai_proxy_after_failover_warmup()
+    except Exception as exc:
+        return (
+            f"{install_message}；{action_label}验证执行失败: {type(exc).__name__}: {exc}"
+            f"{_rollback_new_local_proxy_start()}"
+        )
+    retry_detail = "；已等待内核故障切换初始化并复检" if failover_retried else ""
+    if remote_proxy._probe_summary_all_ok(probe_message):
+        return (
+            f"{install_message}{retry_detail}；验证通过: "
+            f"{remote_proxy._compact_probe_summary(probe_message)}"
+        )
+    if _local_probe_summary_codex_ready(probe_message):
+        return (
+            f"{install_message}{retry_detail}；Codex 核心链路已通过；"
+            f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}"
+        )
+
+    reachable_codex_routes = _local_probe_summary_reachable_codex_routes(probe_message)
+    if reachable_codex_routes:
+        route_detail = "、".join(reachable_codex_routes)
+        return (
+            f"{install_message}{retry_detail}；Codex 至少一个入口已通过"
+            f"（{route_detail}）；另一个入口或其他 AI 服务未完全可达: "
+            f"{remote_proxy._compact_probe_summary(probe_message)}"
+        )
+
+    pool_size = 1 + len(fallback_nodes or ())
+    pool_detail = f"（已快速复检 {pool_size} 节点故障切换池）" if pool_size > 1 else ""
+    return (
+        f"{install_message}{retry_detail}；{action_label}验证失败{pool_detail}: "
+        f"{remote_proxy._compact_probe_summary(probe_message)}"
+        f"{_rollback_new_local_proxy_start()}"
+    )
+
+
 @_serialized_local_proxy_operation("验证并启动本机代理")
 def install_local_ai_proxy_verified(
     proxy_text: str,
@@ -1370,28 +1435,10 @@ def install_local_ai_proxy_verified(
         quality_results,
     )
     install_message = install_local_ai_proxy(proxy_text, fallback_nodes=fallback_nodes)
-    probe_message, failover_retried = _probe_local_ai_proxy_after_failover_warmup()
-    retry_detail = "；已等待内核故障切换初始化并复检" if failover_retried else ""
-    if remote_proxy._probe_summary_all_ok(probe_message):
-        return (
-            f"{install_message}{retry_detail}；验证通过: "
-            f"{remote_proxy._compact_probe_summary(probe_message)}"
-        )
-    if _local_probe_summary_codex_ready(probe_message):
-        return (
-            f"{install_message}{retry_detail}；Codex 核心链路已通过；"
-            f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}"
-        )
-    pool_size = 1 + len(fallback_nodes)
-    fallback_detail = (
-        f"；已保留 {pool_size} 节点内核故障切换池，内核将继续定期复检"
-        if pool_size > 1
-        else ""
-    )
-    return (
-        f"{install_message}{retry_detail}；验证未完全通过: "
-        f"{remote_proxy._compact_probe_summary(probe_message)}{fallback_detail}；"
-        "启动阶段已跳过耗时的逐节点长会话深测，可在节点页手动执行深度检测"
+    return _verify_new_local_proxy_start(
+        install_message,
+        fallback_nodes=fallback_nodes,
+        action_label="启动",
     )
 
 
@@ -1896,6 +1943,14 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         details.append(core_detail)
     if failover_status.detail:
         details.append(failover_status.detail)
+    system_proxy_endpoint = _windows_enabled_simple_loopback_proxy_endpoint()
+    if system_proxy_endpoint is not None and system_proxy_endpoint[1] != mixed_port:
+        external_host, external_port = system_proxy_endpoint
+        availability = "端口正在监听" if _is_port_listening(external_port) else "端口连接被拒绝"
+        details.append(
+            f"Windows 当前用户系统代理另指向 {external_host}:{external_port}"
+            f"（{availability}）；该设置不属于当前受管端口，本工具未自动修改"
+        )
     stored_config_path = str(state.get("config_path") or "").strip()
     if stored_config_path and _normalize_existing_path(stored_config_path) != _normalize_existing_path(config_path):
         details.append("状态文件中的非受管配置路径已忽略")
@@ -2058,10 +2113,17 @@ def probe_local_ai_proxy(timeout: int = 8) -> str:
 def _local_probe_summary_codex_ready(summary: str) -> bool:
     """Return whether both official Codex network entry paths are reachable."""
 
+    return len(_local_probe_summary_reachable_codex_routes(summary)) == 2
+
+
+def _local_probe_summary_reachable_codex_routes(summary: str) -> tuple[str, ...]:
+    """Return the reachable API-key and ChatGPT Codex entry labels."""
+
     text = str(summary or "")
-    return all(
-        re.search(rf"(?:^|；){re.escape(label)}:\s*可达(?:\s*/|；|$)", text)
+    return tuple(
+        label
         for label in ("OpenAI API", "OpenAI/ChatGPT")
+        if re.search(rf"(?:^|；){re.escape(label)}:\s*可达(?:\s*/|；|$)", text)
     )
 
 
@@ -2742,7 +2804,7 @@ def _build_isolated_mihomo_probe_config(
         # node. A deterministic select group lets the caller try every bounded
         # existing route instead of trusting an unrelated health-check URL to
         # predict access to this particular subscription provider.
-        config["dns"] = remote_proxy._strict_privacy_dns_config()
+        config["dns"] = remote_proxy._strict_privacy_dns_config(group_name)
     return remote_proxy.AI_PROXY_CONFIG_MARKER + " isolated\n" + remote_proxy._dump_yaml(config)
 
 
@@ -3454,9 +3516,21 @@ def _restore_local_env(state: dict, mixed_port: int) -> None:
     expected = _local_proxy_env_values(mixed_port)
     updates = {}
     deletes = []
+    process_updates = {}
+    process_deletes = []
     for key in remote_proxy.PROXY_ENV_KEYS:
         current = persistent_env._local_user_env_value_strict(key)
-        if current != expected.get(key):
+        expected_value = expected.get(key)
+        process_current = os.environ.get(key)
+        if current != expected_value:
+            # The persistent value was changed or removed after this app
+            # started. Preserve that newer user choice, but do not leave this
+            # already-running process holding the app's refused old endpoint.
+            if process_current == expected_value:
+                if current is None:
+                    process_deletes.append(key)
+                else:
+                    process_updates[key] = current
             continue
         item = previous.get(key)
         if isinstance(item, dict) and item.get("exists") and item.get("value"):
@@ -3467,6 +3541,10 @@ def _restore_local_env(state: dict, mixed_port: int) -> None:
         persistent_env.set_local_user_env(updates)
     if deletes:
         persistent_env.delete_local_user_env(deletes)
+    for key, value in process_updates.items():
+        os.environ[key] = value
+    for key in process_deletes:
+        os.environ.pop(key, None)
 
 
 def _restore_managed_settings(state: dict, mixed_port: int) -> list[str]:
@@ -3522,13 +3600,42 @@ def _windows_system_proxy_expected_values(mixed_port: int) -> dict[str, object]:
 
 def _windows_system_proxy_matches_values(values: dict, mixed_port: int) -> bool:
     expected = _windows_system_proxy_expected_values(mixed_port)
-    return (
-        int(values.get("ProxyEnable") or 0) == expected["ProxyEnable"]
+    try:
+        proxy_enabled = int(values.get("ProxyEnable") or 0)
+        auto_detect = int(values.get("AutoDetect") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        proxy_enabled == expected["ProxyEnable"]
         and str(values.get("ProxyServer") or "") == expected["ProxyServer"]
         and str(values.get("ProxyOverride") or "") == expected["ProxyOverride"]
         and str(values.get("AutoConfigURL") or "") == expected["AutoConfigURL"]
-        and int(values.get("AutoDetect") or 0) == expected["AutoDetect"]
+        and auto_detect == expected["AutoDetect"]
     )
+
+
+def _windows_enabled_simple_loopback_proxy_endpoint() -> tuple[str, int] | None:
+    """Return a credential-free enabled WinINET endpoint for status feedback."""
+
+    if os.name != "nt":
+        return None
+    try:
+        values = _read_windows_system_proxy_values()
+        if int(values.get("ProxyEnable") or 0) != 1:
+            return None
+        raw = str(values.get("ProxyServer") or "").strip()
+        # Per-protocol shapes may contain several unrelated endpoints; do not
+        # guess which one Windows will select in this read-only status helper.
+        if not raw or ";" in raw or "=" in raw:
+            return None
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        host = str(parsed.hostname or "").strip().casefold()
+        port = parsed.port
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
+    if host not in {"127.0.0.1", "localhost", "::1"} or port is None:
+        return None
+    return host, int(port)
 
 
 def _windows_system_proxy_matches(mixed_port: int) -> bool:
@@ -3591,13 +3698,41 @@ def _restore_windows_system_proxy(state: dict, mixed_port: int) -> None:
     previous = state.get("previous_system_proxy")
     if not isinstance(previous, dict):
         return
-    if not _windows_system_proxy_matches(mixed_port):
+
+    expected = _windows_system_proxy_expected_values(mixed_port)
+    current = {
+        name: _read_windows_system_proxy_value(name)
+        for name in WINDOWS_SYSTEM_PROXY_KEYS
+    }
+    # ProxyEnable and the remaining WinINET fields are coupled.  The exact
+    # app endpoint is the ownership anchor; if another program changed
+    # ProxyServer, do not disable or rewrite its new proxy.  When the endpoint
+    # is still ours, restore each remaining field only while it retains the
+    # value written by this application.  This tolerates harmless drift in one
+    # field without abandoning the refused ProxyServer and discarding the
+    # restore checkpoint as if everything had succeeded.
+    proxy_server = current.get("ProxyServer", (False, "", None))
+    if not proxy_server[0] or str(proxy_server[1] or "") != str(expected["ProxyServer"]):
         return
 
     import winreg
 
+    changed = False
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WINDOWS_SYSTEM_PROXY_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
         for name in WINDOWS_SYSTEM_PROXY_KEYS:
+            exists, current_value, _current_type = current.get(name, (False, "", None))
+            expected_value = expected[name]
+            if name in {"ProxyEnable", "AutoDetect"}:
+                try:
+                    current_matches = int(current_value or 0) == int(expected_value)
+                except (TypeError, ValueError, OverflowError):
+                    current_matches = False
+            elif name == "AutoConfigURL":
+                current_matches = not exists or str(current_value or "") == ""
+            else:
+                current_matches = exists and str(current_value or "") == str(expected_value)
+            if not current_matches:
+                continue
             item = previous.get(name)
             if isinstance(item, dict) and item.get("exists"):
                 value = item.get("value")
@@ -3607,12 +3742,15 @@ def _restore_windows_system_proxy(state: dict, mixed_port: int) -> None:
                 else:
                     value = str(value or "")
                 winreg.SetValueEx(key, name, 0, value_type, value)
+                changed = True
             else:
                 try:
                     winreg.DeleteValue(key, name)
+                    changed = True
                 except FileNotFoundError:
                     pass
-    _notify_windows_proxy_change()
+    if changed:
+        _notify_windows_proxy_change()
 
 
 def _notify_windows_proxy_change() -> None:
@@ -3845,13 +3983,14 @@ def _ensure_mihomo_binary() -> Path:
     Startup is the wrong place for a release-network dependency: on mainland
     Windows a valid installed core used to wait through every GitHub timeout
     before the proxy that could reach GitHub was even available.  Explicit and
-    background update checks use ``_ensure_latest_mihomo_binary`` instead.
+    manual downloads use ``_ensure_latest_mihomo_binary``; background work
+    refreshes metadata only.
     """
 
-    # A background update owns this lock while it fetches and validates the
-    # candidate.  Starting/reloading the already usable core must not queue
-    # behind that network operation.  If no usable fallback exists we still
-    # wait for the owner, because it may be producing the first core binary.
+    # An explicit update owns this lock while it fetches and validates the
+    # candidate. Starting/reloading the already usable core must not queue
+    # behind that operation. If no usable fallback exists we still wait for
+    # the owner, because it may be producing the first core binary.
     if _MIHOMO_BINARY_LOCK.acquire(blocking=False):
         try:
             return _ensure_mihomo_binary_locked(check_updates=False)
@@ -3868,15 +4007,100 @@ def _ensure_mihomo_binary() -> Path:
         return _ensure_mihomo_binary_locked(check_updates=False)
 
 
-def _ensure_latest_mihomo_binary() -> Path:
+def _ensure_latest_mihomo_binary(*, force_check: bool = False) -> Path:
     """Return a usable core after one bounded official release check."""
 
     with _MIHOMO_BINARY_LOCK:
-        return _ensure_mihomo_binary_locked(check_updates=True)
+        return _ensure_mihomo_binary_locked(
+            check_updates=True,
+            force_update_check=bool(force_check),
+        )
+
+
+def _check_mihomo_update_availability() -> Path:
+    """Refresh official version metadata without downloading a release asset."""
+
+    binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
+    current_info = _try_mihomo_binary_info(binary_path) if binary_path.is_file() else None
+    if not current_info:
+        raise RuntimeError("现有 mihomo 内核不可用，已跳过后台版本检查")
+    metadata = _load_mihomo_release_state()
+    if not _mihomo_release_check_due(metadata):
+        return binary_path
+
+    check_started_at = time.time()
+    try:
+        release = _fetch_mihomo_release()
+        latest_tag = str(release.get("tag_name") or "").strip()
+        latest_version = _mihomo_version_from_text(latest_tag)
+        if not latest_version:
+            raise RuntimeError("mihomo 最新发行版标签无效")
+    except Exception as exc:
+        with _MIHOMO_BINARY_LOCK:
+            latest_state = _load_mihomo_release_state()
+            try:
+                newer_check_finished = (
+                    float(latest_state.get("checked_at_epoch") or 0) > check_started_at
+                )
+            except (TypeError, ValueError):
+                newer_check_finished = False
+            current_info = (
+                _try_mihomo_binary_info(binary_path)
+                if binary_path.is_file()
+                else None
+            )
+            if not newer_check_finished:
+                _record_mihomo_release_failure(
+                    latest_state,
+                    exc,
+                    current_info=current_info,
+                )
+        if current_info:
+            return binary_path
+        raise RuntimeError(
+            f"mihomo 后台版本检查失败: {_network_error_summary(exc)}"
+        ) from exc
+
+    # The metadata request deliberately runs without the binary lock.  This
+    # lets an immediate subscription-recovery session use the installed core
+    # instead of spending its entire deadline behind a slow GitHub request.
+    with _MIHOMO_BINARY_LOCK:
+        current_info = (
+            _try_mihomo_binary_info(binary_path)
+            if binary_path.is_file()
+            else None
+        )
+        if not current_info:
+            raise RuntimeError("mihomo 内核在版本检查期间变为不可用")
+        metadata = _load_mihomo_release_state()
+        try:
+            newer_check_finished = (
+                float(metadata.get("checked_at_epoch") or 0) > check_started_at
+            )
+        except (TypeError, ValueError):
+            newer_check_finished = False
+        if newer_check_finished:
+            # A foreground update completed while the metadata request was in
+            # flight. Keep its newer release/pending state instead of letting
+            # this older background response overwrite it.
+            return binary_path
+        _save_mihomo_release_state(
+            {
+                **metadata,
+                "checked_at_epoch": time.time(),
+                "last_check_success": True,
+                "latest_tag": latest_tag,
+                "latest_version": latest_version,
+                "installed_version": current_info[0],
+                "installed_detail": current_info[1],
+                "last_error": "",
+            }
+        )
+    return binary_path
 
 
 def _schedule_mihomo_update_check() -> bool:
-    """Check the official release in the background after the proxy is live."""
+    """Check official metadata in the background after the proxy is live."""
 
     global _MIHOMO_UPDATE_THREAD
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
@@ -3891,7 +4115,11 @@ def _schedule_mihomo_update_check() -> bool:
         def run() -> None:
             global _MIHOMO_UPDATE_THREAD
             try:
-                _ensure_latest_mihomo_binary()
+                # Do not download a 15-25 MB release package on the same route
+                # while Codex and the startup probes are establishing their
+                # first connections.  The explicit UI action performs the
+                # verified/staged download without restarting a live proxy.
+                _check_mihomo_update_availability()
             except Exception as exc:
                 # A release check must never degrade the already-live proxy.
                 logger.warning("Background mihomo update check failed: %s", _network_error_summary(exc))
@@ -3909,7 +4137,11 @@ def _schedule_mihomo_update_check() -> bool:
         return True
 
 
-def _ensure_mihomo_binary_locked(*, check_updates: bool) -> Path:
+def _ensure_mihomo_binary_locked(
+    *,
+    check_updates: bool,
+    force_update_check: bool = False,
+) -> Path:
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
     metadata = _load_mihomo_release_state()
     _apply_pending_mihomo_update(binary_path, metadata=metadata)
@@ -3922,7 +4154,11 @@ def _ensure_mihomo_binary_locked(*, check_updates: bool) -> Path:
         existing = _find_existing_mihomo_binary()
         if existing and _try_mihomo_binary_info(existing):
             return existing
-    if current_info and not _mihomo_release_check_due(metadata):
+    if (
+        current_info
+        and not force_update_check
+        and not _mihomo_release_check_due(metadata)
+    ):
         cached_latest = _mihomo_version_from_text(metadata.get("latest_version"))
         cached_update_missing = (
             metadata.get("last_check_success") is True
@@ -3952,6 +4188,38 @@ def _ensure_mihomo_binary_locked(*, check_updates: bool) -> Path:
         if current_info:
             return binary_path
         raise error
+
+    pending_info = (
+        _try_mihomo_binary_info(MIHOMO_PENDING_BINARY_PATH)
+        if MIHOMO_PENDING_BINARY_PATH.is_file()
+        else None
+    )
+    if MIHOMO_PENDING_BINARY_PATH.exists() and not pending_info:
+        MIHOMO_PENDING_BINARY_PATH.unlink(missing_ok=True)
+        metadata = _without_mihomo_pending_metadata(metadata)
+    if (
+        current_info
+        and pending_info
+        and _mihomo_version_key(pending_info[0]) >= _mihomo_version_key(latest_version)
+    ):
+        # Repeated clicks while the proxy is running must not download the
+        # same 15-25 MB asset again. Preserve the already verified staged core.
+        _save_mihomo_release_state(
+            {
+                **metadata,
+                "checked_at_epoch": time.time(),
+                "last_check_success": True,
+                "latest_tag": latest_tag,
+                "latest_version": latest_version,
+                "installed_version": current_info[0],
+                "installed_detail": current_info[1],
+                "pending_tag": latest_tag,
+                "pending_version": pending_info[0],
+                "pending_detail": pending_info[1],
+                "last_error": "",
+            }
+        )
+        return binary_path
 
     if current_info and _mihomo_version_key(current_info[0]) >= _mihomo_version_key(latest_version):
         _save_mihomo_release_state(
@@ -4043,7 +4311,11 @@ def _local_mihomo_core_status_detail() -> str:
     if not installed_version and binary_path.exists():
         current_info = _try_mihomo_binary_info(binary_path)
         installed_version = current_info[0] if current_info else ""
-    pending_version = _mihomo_version_from_text(metadata.get("pending_version"))
+    pending_version = (
+        _mihomo_version_from_text(metadata.get("pending_version"))
+        if MIHOMO_PENDING_BINARY_PATH.is_file()
+        else ""
+    )
     latest_version = _mihomo_version_from_text(metadata.get("latest_version"))
 
     if pending_version:
@@ -4052,7 +4324,10 @@ def _local_mihomo_core_status_detail() -> str:
     if installed_version and latest_version and metadata.get("last_check_success") is True:
         if _mihomo_version_key(installed_version) >= _mihomo_version_key(latest_version):
             return f"mihomo 内核 v{installed_version}（最近检查为最新）"
-        return f"mihomo 内核 v{installed_version}（最新 v{latest_version}，待下次更新检查）"
+        return (
+            f"mihomo 内核 v{installed_version}（发现最新 v{latest_version}，"
+            "可在 Win11 代理页手动下载，不影响当前连接）"
+        )
     if installed_version and metadata.get("last_check_success") is False:
         return f"mihomo 内核 v{installed_version}（更新检查失败，已安全保留现有内核）"
     if installed_version:
@@ -4139,22 +4414,23 @@ def _try_mihomo_binary_info(binary_path: Path) -> tuple[str, str] | None:
 
 
 def _apply_pending_mihomo_update(binary_path: Path, *, metadata: dict | None = None) -> bool:
-    if binary_path != LOCAL_PROXY_BIN_DIR / "mihomo.exe" or not MIHOMO_PENDING_BINARY_PATH.exists():
+    if binary_path != LOCAL_PROXY_BIN_DIR / "mihomo.exe":
+        return False
+    state = dict(metadata or _load_mihomo_release_state())
+    if not MIHOMO_PENDING_BINARY_PATH.exists():
+        _clear_mihomo_pending_metadata(state)
         return False
     if _managed_local_proxy_is_running():
         return False
     pending_info = _try_mihomo_binary_info(MIHOMO_PENDING_BINARY_PATH)
     if not pending_info:
         MIHOMO_PENDING_BINARY_PATH.unlink(missing_ok=True)
+        _clear_mihomo_pending_metadata(state)
         return False
     current_info = _try_mihomo_binary_info(binary_path) if binary_path.exists() else None
     if current_info and _mihomo_version_key(pending_info[0]) <= _mihomo_version_key(current_info[0]):
         MIHOMO_PENDING_BINARY_PATH.unlink(missing_ok=True)
-        state = dict(metadata or _load_mihomo_release_state())
-        state.pop("pending_tag", None)
-        state.pop("pending_version", None)
-        state.pop("pending_detail", None)
-        state.pop("pending_asset", None)
+        state = _without_mihomo_pending_metadata(state)
         state["installed_version"] = current_info[0]
         state["installed_detail"] = current_info[1]
         _save_mihomo_release_state(state)
@@ -4175,6 +4451,25 @@ def _apply_pending_mihomo_update(binary_path: Path, *, metadata: dict | None = N
     state["installed_at"] = remote_proxy._now_iso()
     _save_mihomo_release_state(state)
     return True
+
+
+def _without_mihomo_pending_metadata(metadata: dict) -> dict:
+    state = dict(metadata or {})
+    for key in ("pending_tag", "pending_version", "pending_detail", "pending_asset"):
+        state.pop(key, None)
+    return state
+
+
+def _clear_mihomo_pending_metadata(metadata: dict) -> None:
+    state = dict(metadata or {})
+    cleaned = _without_mihomo_pending_metadata(state)
+    if cleaned == state:
+        return
+    try:
+        _save_mihomo_release_state(cleaned)
+    except OSError:
+        # Stale status metadata must never prevent use of the working core.
+        return
 
 
 def _windows_asset_pattern() -> str:
@@ -4314,9 +4609,23 @@ def _read_url_with_retries(
     total_timeout = max(1.0, float(timeout or 1))
     deadline = time.monotonic() + total_timeout
     last_error: Exception | None = None
+    proxy_diagnostic = remote_proxy._subscription_proxy_environment_diagnostic(
+        request.full_url
+    )
     for attempt in range(1, attempts + 1):
-        openers = [("当前网络配置", None)]
-        if _environment_has_http_proxy():
+        if proxy_diagnostic.has_invalid_proxy:
+            # Core metadata/assets are public downloads. A refused loopback
+            # proxy cannot help, so skip it immediately instead of spending a
+            # large first-attempt slice before reaching the safe direct route.
+            openers = [
+                (
+                    "失效本机代理直连回退",
+                    urllib.request.build_opener(urllib.request.ProxyHandler({})),
+                )
+            ]
+        else:
+            openers = [("当前网络配置", None)]
+        if not proxy_diagnostic.has_invalid_proxy and _environment_has_http_proxy():
             openers.append(("直连回退", urllib.request.build_opener(urllib.request.ProxyHandler({}))))
         errors = []
         for mode_index, (_mode, opener) in enumerate(openers):

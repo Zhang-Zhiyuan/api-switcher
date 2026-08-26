@@ -679,6 +679,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._inspect_button.pack(anchor="e", pady=(0, 6))
+        self._core_update_button = ctk.CTkButton(
+            actions,
+            text="更新内核",
+            width=104,
+            command=self._update_local_proxy_core,
+            **button_style("secondary", compact=True),
+        )
+        self._core_update_button.pack(anchor="e", pady=(0, 6))
         self._test_button = ctk.CTkButton(
             actions,
             text="测试连通",
@@ -1154,6 +1162,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._load_file_button,
             self._start_button,
             self._inspect_button,
+            getattr(self, "_core_update_button", None),
             self._test_button,
             self._stop_button,
             self._apply_routing_button,
@@ -3496,6 +3505,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if any(
                     marker in message
                     for marker in (
+                        "启动验证失败",
+                        "验证执行失败",
+                        "自动回滚未完全完成",
                         "验证未完全通过",
                         "其他 AI 服务未完全可达",
                         "自动尝试",
@@ -3545,6 +3557,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if any(marker in message for marker in ("未运行", "未指向", "健康检查失败", "漂移", "未确认"))
             else "success",
             failure_hint="本次仅执行状态检查，未修改本机代理设置",
+        )
+
+    def _update_local_proxy_core(self):
+        self._run_local_task(
+            "正在检查、下载并校验 mihomo 官方稳定版；当前代理不会自动重启...",
+            local_proxy.update_local_mihomo_core,
+            "更新 mihomo 内核",
+            severity_from_result=lambda message: (
+                "warning" if any(marker in message for marker in ("失败", "待代理重启")) else "success"
+            ),
+            failure_hint="内核更新失败不会替换现有可用版本，也不会修改代理环境或当前节点",
         )
 
     def _probe_local_proxy(self):

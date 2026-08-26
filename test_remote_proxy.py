@@ -14,6 +14,11 @@ import pytest
 from core import local_proxy, network_diagnostic_settings, network_diagnostics, remote_proxy
 
 
+class _ConnectedProbeSocket:
+    def close(self):
+        return None
+
+
 def _stable_local_prevalidation(node) -> local_proxy.LocalProxyNodeStabilityResult:
     node_dict = node.node if isinstance(node, remote_proxy.ProxySubscriptionNode) else node
     return local_proxy.LocalProxyNodeStabilityResult(
@@ -3164,6 +3169,11 @@ def test_fetch_proxy_subscription_bypasses_failed_configured_proxy_without_chang
         lambda: {"https": "http://127.0.0.1:7890"},
     )
     monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: _ConnectedProbeSocket(),
+    )
+    monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
         lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
@@ -3245,6 +3255,77 @@ def test_fetch_proxy_subscription_detects_stale_loopback_environment_proxy(
     assert "临时绕过" in result.proxy_warning
     assert calls == ["ProxyHandler", "direct"]
     assert os.environ.get("HTTPS_PROXY") == "http://127.0.0.1:17897"
+
+
+def test_fetch_proxy_subscription_immediately_bypasses_stale_wininet_proxy(
+    monkeypatch,
+    tmp_path,
+):
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
+
+    calls = []
+
+    class DirectOpener:
+        def open(self, _request, **_kwargs):
+            calls.append("direct")
+            return Response()
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:7897"},
+    )
+    monkeypatch.setattr(
+        "core.persistent_env._local_user_env_value_strict",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionRefusedError()),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale WinINET proxy must be bypassed before urlopen")
+        ),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+    )
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retry_base_delay=0,
+    )
+
+    assert result.nodes[0].node["name"] == "direct"
+    assert "Windows 系统代理" in result.proxy_warning
+    assert "临时绕过" in result.proxy_warning
+    assert calls == ["ProxyHandler", "direct"]
 
 
 def test_fetch_proxy_subscription_auto_cleans_program_owned_stale_proxy_before_download(
@@ -3466,6 +3547,11 @@ def test_fetch_proxy_subscription_bypasses_configured_proxy_gateway_errors(
         remote_proxy.urlrequest,
         "getproxies",
         lambda: {"https": "http://127.0.0.1:7890"},
+    )
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: _ConnectedProbeSocket(),
     )
     monkeypatch.setattr(
         remote_proxy.urlrequest,
@@ -4141,6 +4227,11 @@ def test_gateway_error_direct_recovery_stays_inside_total_deadline(
         lambda: {"https": "http://127.0.0.1:7890"},
     )
     monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: _ConnectedProbeSocket(),
+    )
+    monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
         lambda _handler: DirectOpener(),
@@ -4202,6 +4293,11 @@ def test_fetch_proxy_subscription_reserves_deadline_for_direct_timeout_recovery(
         remote_proxy.urlrequest,
         "getproxies",
         lambda: {"https": "http://127.0.0.1:7890"},
+    )
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: _ConnectedProbeSocket(),
     )
     monkeypatch.setattr(
         remote_proxy.urlrequest,
@@ -6682,6 +6778,12 @@ def test_install_local_proxy_verified_skips_hong_kong_fallback(monkeypatch):
 
     monkeypatch.setattr(local_proxy, "install_local_ai_proxy", fake_install)
     monkeypatch.setattr(local_proxy, "probe_local_ai_proxy", lambda *_a, **_k: next(probes))
+    rollbacks = []
+    monkeypatch.setattr(
+        local_proxy,
+        "stop_local_ai_proxy",
+        lambda **_kwargs: rollbacks.append(True) or "本机 AI 代理已停止",
+    )
     monkeypatch.setattr(
         local_proxy,
         "_select_stable_automatic_local_candidate",
@@ -6699,8 +6801,10 @@ def test_install_local_proxy_verified_skips_hong_kong_fallback(monkeypatch):
     assert installs == ["bad"]
     assert fallback_servers == [["jp.example.com"]]
     assert "hk.example.com" not in fallback_servers[0]
-    assert "已保留 2 节点内核故障切换池" in message
-    assert "已跳过耗时的逐节点长会话深测" in message
+    assert "启动验证失败" in message
+    assert "已快速复检 2 节点故障切换池" in message
+    assert "已恢复启动前设置" in message
+    assert rollbacks == [True]
 
 
 def test_install_local_proxy_verified_uses_hot_reload_when_managed_proxy_is_running(
@@ -6858,6 +6962,12 @@ def test_install_local_proxy_failed_validation_never_reinstalls_nodes(monkeypatc
             AssertionError("startup verification must not run blocking deep probes")
         ),
     )
+    rollbacks = []
+    monkeypatch.setattr(
+        local_proxy,
+        "stop_local_ai_proxy",
+        lambda **_kwargs: rollbacks.append(True) or "本机 AI 代理已停止",
+    )
 
     message = local_proxy.install_local_ai_proxy_verified(
         remote_proxy.format_proxy_node(requested.node),
@@ -6865,8 +6975,37 @@ def test_install_local_proxy_failed_validation_never_reinstalls_nodes(monkeypatc
     )
 
     assert calls == ["requested"]
-    assert "验证未完全通过" in message
-    assert "已跳过耗时的逐节点长会话深测" in message
+    assert "启动验证失败" in message
+    assert "已恢复启动前设置" in message
+    assert rollbacks == [True]
+
+
+def test_new_local_proxy_start_keeps_single_reachable_codex_entry(monkeypatch):
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_ai_proxy_after_failover_warmup",
+        lambda: (
+            "本机 AI 连通性 1/4 可达；"
+            "OpenAI API: 可达 / HTTP 401 / 20ms；"
+            "OpenAI/ChatGPT: 失败 / timeout；"
+            "Claude/Anthropic: 失败 / timeout；"
+            "Gemini/Google AI: 失败 / timeout",
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "stop_local_ai_proxy",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("one reachable Codex entry must not be rolled back")
+        ),
+    )
+
+    message = local_proxy._verify_new_local_proxy_start("started")
+
+    assert "Codex 至少一个入口已通过（OpenAI API）" in message
+    assert "启动验证失败" not in message
+    assert "已等待内核故障切换初始化并复检" in message
 
 
 def test_install_ai_proxy_verified_prefers_quality_ranked_candidate(monkeypatch):
@@ -7213,6 +7352,101 @@ def test_windows_system_proxy_expected_values_match_managed_proxy():
     assert local_proxy._windows_system_proxy_matches_values(values, 17897) is True
     assert local_proxy._windows_system_proxy_matches_values({**values, "ProxyServer": "127.0.0.1:18000"}, 17897) is False
     assert local_proxy._windows_system_proxy_matches_values({**values, "AutoDetect": 1}, 17897) is False
+    assert local_proxy._windows_system_proxy_matches_values({**values, "ProxyEnable": "broken"}, 17897) is False
+
+
+def test_windows_simple_loopback_proxy_status_is_narrow(monkeypatch):
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        local_proxy,
+        "_read_windows_system_proxy_values",
+        lambda: {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:7897"},
+    )
+    assert local_proxy._windows_enabled_simple_loopback_proxy_endpoint() == (
+        "127.0.0.1",
+        7897,
+    )
+
+    monkeypatch.setattr(
+        local_proxy,
+        "_read_windows_system_proxy_values",
+        lambda: {
+            "ProxyEnable": 1,
+            "ProxyServer": "http=127.0.0.1:7897;https=127.0.0.1:7898",
+        },
+    )
+    assert local_proxy._windows_enabled_simple_loopback_proxy_endpoint() is None
+
+
+def test_windows_system_proxy_restore_tolerates_unrelated_field_drift(monkeypatch):
+    import winreg
+
+    current = {
+        "ProxyEnable": (True, 1, winreg.REG_DWORD),
+        "ProxyServer": (True, "127.0.0.1:17897", winreg.REG_SZ),
+        "ProxyOverride": (True, "user-changed", winreg.REG_SZ),
+        "AutoConfigURL": (False, "", None),
+        "AutoDetect": (True, 0, winreg.REG_DWORD),
+    }
+    previous = {
+        "ProxyEnable": {"exists": True, "value": 0, "type": winreg.REG_DWORD},
+        "ProxyServer": {"exists": False, "value": "", "type": None},
+        "ProxyOverride": {"exists": True, "value": "old", "type": winreg.REG_SZ},
+        "AutoConfigURL": {
+            "exists": True,
+            "value": "https://pac.example/proxy.pac",
+            "type": winreg.REG_SZ,
+        },
+        "AutoDetect": {"exists": True, "value": 1, "type": winreg.REG_DWORD},
+    }
+    writes = []
+    deletes = []
+    notifications = []
+
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        local_proxy,
+        "_read_windows_system_proxy_value",
+        lambda name: current[name],
+    )
+    monkeypatch.setattr(winreg, "CreateKeyEx", lambda *_args, **_kwargs: Key())
+    monkeypatch.setattr(
+        winreg,
+        "SetValueEx",
+        lambda _key, name, _reserved, value_type, value: writes.append(
+            (name, value_type, value)
+        ),
+    )
+    monkeypatch.setattr(
+        winreg,
+        "DeleteValue",
+        lambda _key, name: deletes.append(name),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_notify_windows_proxy_change",
+        lambda: notifications.append(True),
+    )
+
+    local_proxy._restore_windows_system_proxy(
+        {"previous_system_proxy": previous},
+        17897,
+    )
+
+    assert ("ProxyEnable", winreg.REG_DWORD, 0) in writes
+    assert ("AutoConfigURL", winreg.REG_SZ, "https://pac.example/proxy.pac") in writes
+    assert ("AutoDetect", winreg.REG_DWORD, 1) in writes
+    assert "ProxyServer" in deletes
+    assert not any(name == "ProxyOverride" for name, _type, _value in writes)
+    assert "ProxyOverride" not in deletes
+    assert notifications == [True]
 
 
 def test_local_proxy_preferences_build_custom_routing_rules(monkeypatch, tmp_path):
@@ -7395,8 +7629,13 @@ def test_local_proxy_auto_start_uses_last_saved_node(monkeypatch, tmp_path):
         "install_local_ai_proxy",
         lambda text, **_kwargs: starts.append(text) or "started",
     )
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_ai_proxy_after_failover_warmup",
+        lambda: ("本机 AI 连通性 4/4 可达", False),
+    )
 
-    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert "验证通过" in local_proxy.auto_start_local_ai_proxy_if_enabled()
     assert "saved.example.com" in starts[0]
 
 
@@ -7420,10 +7659,15 @@ def test_local_proxy_startup_node_can_be_saved_from_current_node(monkeypatch, tm
         "install_local_ai_proxy",
         lambda text, **_kwargs: starts.append(text) or "started",
     )
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_ai_proxy_after_failover_warmup",
+        lambda: ("本机 AI 连通性 4/4 可达", False),
+    )
 
     assert "boot.example.com" in summary
     assert "boot.example.com" in local_proxy.local_proxy_startup_node_summary()
-    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert "验证通过" in local_proxy.auto_start_local_ai_proxy_if_enabled()
     assert "boot.example.com" in starts[0]
 
 
@@ -7483,8 +7727,13 @@ def test_local_proxy_auto_start_preserves_existing_verified_fallback_pool(monkey
         return "started"
 
     monkeypatch.setattr(local_proxy, "install_local_ai_proxy", capture_start)
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_ai_proxy_after_failover_warmup",
+        lambda: ("本机 AI 连通性 4/4 可达", False),
+    )
 
-    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert "验证通过" in local_proxy.auto_start_local_ai_proxy_if_enabled()
     assert starts[0][1]["fallback_nodes"] == (fallback,)
 
 
@@ -7506,8 +7755,13 @@ def test_local_proxy_auto_start_recovers_collapsed_pool_from_linked_cache(monkey
         "install_local_ai_proxy",
         lambda text, **kwargs: starts.append((text, kwargs)) or "started",
     )
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_ai_proxy_after_failover_warmup",
+        lambda: ("本机 AI 连通性 4/4 可达", False),
+    )
 
-    assert local_proxy.auto_start_local_ai_proxy_if_enabled() == "started"
+    assert "验证通过" in local_proxy.auto_start_local_ai_proxy_if_enabled()
     assert starts[0][1]["fallback_nodes"] == (fallback,)
 
 
@@ -8052,6 +8306,11 @@ def test_read_url_with_retries_retries_transient_failure(monkeypatch):
         return Response()
 
     monkeypatch.setattr(local_proxy.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        remote_proxy,
+        "_subscription_proxy_environment_diagnostic",
+        lambda _url: remote_proxy.ProxyEnvironmentDiagnostic(),
+    )
     monkeypatch.setattr(local_proxy.time, "sleep", lambda _seconds: None)
 
     payload = local_proxy._read_url_with_retries(
@@ -8063,6 +8322,56 @@ def test_read_url_with_retries_retries_transient_failure(monkeypatch):
 
     assert payload == b"ok"
     assert len(calls) == 2
+
+
+def test_read_url_with_retries_skips_refused_loopback_proxy(monkeypatch):
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"ok"
+
+    class DirectOpener:
+        def open(self, _request, **_kwargs):
+            calls.append("direct")
+            return Response()
+
+    monkeypatch.setattr(
+        remote_proxy,
+        "_subscription_proxy_environment_diagnostic",
+        lambda _url: remote_proxy.ProxyEnvironmentDiagnostic(
+            invalid_proxy_urls=("http://127.0.0.1:7897",),
+            invalid_windows_proxy=True,
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("refused loopback proxy must be skipped")
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy.urllib.request,
+        "build_opener",
+        lambda _handler: DirectOpener(),
+    )
+
+    payload = local_proxy._read_url_with_retries(
+        local_proxy.urllib.request.Request("https://example.com/file"),
+        timeout=1,
+        label="下载测试",
+        retries=2,
+    )
+
+    assert payload == b"ok"
+    assert calls == ["direct"]
 
 
 def test_install_local_proxy_failure_reports_restore_errors(monkeypatch, tmp_path):

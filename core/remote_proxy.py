@@ -200,8 +200,12 @@ PROXY_NODE_FORBIDDEN_OUTBOUND_TYPES = frozenset(
 )
 
 
-def _strict_privacy_dns_config() -> dict:
-    """Return the one DNS shape emitted and trusted for managed strict mode."""
+def _strict_privacy_dns_config(proxy_route: str = "AI-PROXY") -> dict:
+    """Return strict DNS bound to the exact managed/isolated proxy route."""
+
+    route = str(proxy_route or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", route):
+        raise ValueError("严格 DNS 代理路由名称无效")
 
     return {
         "enable": True,
@@ -222,8 +226,8 @@ def _strict_privacy_dns_config() -> dict:
             "https://dns.alidns.com/dns-query#DIRECT",
         ],
         "nameserver": [
-            "https://1.1.1.1/dns-query#AI-PROXY",
-            "https://8.8.8.8/dns-query#AI-PROXY",
+            f"https://1.1.1.1/dns-query#{route}",
+            f"https://8.8.8.8/dns-query#{route}",
         ],
     }
 
@@ -471,27 +475,36 @@ class ProxyEnvironmentDiagnostic:
 
     invalid_variables: tuple[str, ...] = ()
     invalid_proxy_urls: tuple[str, ...] = ()
+    invalid_windows_proxy: bool = False
     reconciled_warning: str = ""
 
     @property
     def has_invalid_proxy(self) -> bool:
-        return bool(self.invalid_variables)
+        return bool(self.invalid_variables or self.invalid_windows_proxy)
 
     def warning(self, *, bypassed: bool = True) -> str:
         if self.reconciled_warning:
             return self.reconciled_warning
         if not self.has_invalid_proxy:
             return ""
-        variables = ", ".join(self.invalid_variables)
         proxies = ", ".join(self.invalid_proxy_urls)
+        if self.invalid_variables:
+            source = f"环境变量 {', '.join(self.invalid_variables)}"
+        else:
+            source = "Windows 当前用户系统代理"
         action = (
             "本次订阅请求已临时绕过该代理"
             if bypassed
             else "当前严格隐私模式未绕过该代理"
         )
+        untouched = (
+            "未修改系统环境变量"
+            if self.invalid_variables
+            else "未修改 Windows 系统代理设置"
+        )
         return (
-            f"检测到无效本机代理配置（{variables}={proxies}，回环端口无法连接）；"
-            f"{action}，未修改系统环境变量"
+            f"检测到无效本机代理配置（{source}={proxies}，回环端口无法连接）；"
+            f"{action}，{untouched}"
         )
 
 
@@ -6189,13 +6202,13 @@ def _subscription_recovery_proxy_context(
 
 
 def _subscription_proxy_environment_diagnostic(url: str) -> ProxyEnvironmentDiagnostic:
-    """Detect an unreachable loopback proxy without touching process settings.
+    """Detect an unreachable selected loopback proxy without changing settings.
 
-    Only values that are both selected by ``urllib`` and still present in the
-    corresponding environment variable are considered. This avoids treating
-    an explicitly supplied/managed opener as a stale Windows environment
-    variable and keeps the check limited to the local endpoints known to cause
-    WinError 10061.
+    ``urllib.getproxies`` may select either an environment value or WinINET.
+    Both can cause WinError 10061, so both must trigger an immediate bounded
+    direct recovery.  Only matching environment names are eligible for the
+    separately ownership-checked cleanup path; an unrelated WinINET proxy is
+    reported and bypassed for this download but never changed automatically.
     """
 
     try:
@@ -6226,9 +6239,6 @@ def _subscription_proxy_environment_diagnostic(url: str) -> ProxyEnvironmentDiag
             continue
         if _subscription_proxy_url_signature(value) == signature:
             matching_names.append(key)
-    if not matching_names:
-        return ProxyEnvironmentDiagnostic()
-
     try:
         connection = socket.create_connection((host, port), timeout=0.25)
         try:
@@ -6243,6 +6253,7 @@ def _subscription_proxy_environment_diagnostic(url: str) -> ProxyEnvironmentDiag
         return ProxyEnvironmentDiagnostic(
             invalid_variables=tuple(sorted(set(matching_names))),
             invalid_proxy_urls=(_subscription_proxy_display_url(candidate),),
+            invalid_windows_proxy=not matching_names,
         )
 
 
@@ -6284,6 +6295,7 @@ def _reconcile_subscription_proxy_environment(
     return ProxyEnvironmentDiagnostic(
         invalid_variables=diagnostic.invalid_variables,
         invalid_proxy_urls=diagnostic.invalid_proxy_urls,
+        invalid_windows_proxy=diagnostic.invalid_windows_proxy,
         reconciled_warning=warning,
     )
 

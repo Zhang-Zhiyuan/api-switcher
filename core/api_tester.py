@@ -80,7 +80,7 @@ class APITester:
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
     MAX_PROXY_CHECK_CACHE_ENTRIES = 64
-    USER_AGENT = "API-Switcher/2.4.9"
+    USER_AGENT = "API-Switcher/2.4.10"
     # Keep both common casings: Windows environment names are case-insensitive,
     # while copied shell variables on Unix often use lowercase names.
     LOCAL_PROXY_ENV_NAMES = (
@@ -719,6 +719,88 @@ class APITester:
         return tuple(invalid)
 
     @classmethod
+    def invalid_windows_system_proxy_endpoint(
+        cls,
+        *,
+        force: bool = False,
+    ) -> tuple[str, int] | None:
+        """Return an unowned refused WinINET loopback endpoint, if selected."""
+
+        if os.name != "nt":
+            return None
+        try:
+            proxies = urllib.request.getproxies()
+        except (OSError, ValueError):
+            return None
+        proxy_url = str(
+            proxies.get("https")
+            or proxies.get("http")
+            or proxies.get("all")
+            or ""
+        ).strip()
+        endpoint, available = cls._check_loopback_proxy(proxy_url, force=force)
+        if not endpoint or available:
+            return None
+        # Environment proxies have a separate cleanup path which can restore
+        # the application's full checkpoint. This method is only for a
+        # WinINET-selected endpoint with no matching environment value.
+        if any(
+            cls._local_proxy_endpoint(value) == endpoint
+            for value in cls._local_proxy_env_values().values()
+        ):
+            return None
+        return endpoint
+
+    @classmethod
+    def disable_invalid_windows_system_proxy(cls) -> tuple[str, int] | None:
+        """Disable only a user-confirmed, refused, simple WinINET loopback proxy.
+
+        ``ProxyServer`` is preserved so another proxy application can re-enable
+        it later. PAC, auto-detect and non-loopback/per-protocol proxy shapes
+        are outside this narrow repair and are never changed here.
+        """
+
+        if os.name != "nt":
+            return None
+        from core import local_proxy
+
+        with local_proxy._local_proxy_operation_lock("关闭失效 Windows 系统代理"):
+            endpoint = cls.invalid_windows_system_proxy_endpoint(force=True)
+            if endpoint is None:
+                return None
+            enabled_exists, enabled_value, _enabled_type = (
+                local_proxy._read_windows_system_proxy_value("ProxyEnable")
+            )
+            server_exists, server_value, _server_type = (
+                local_proxy._read_windows_system_proxy_value("ProxyServer")
+            )
+            try:
+                enabled = int(enabled_value or 0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                not enabled_exists
+                or enabled != 1
+                or not server_exists
+                or cls._local_proxy_endpoint(server_value) != endpoint
+            ):
+                return None
+
+            import winreg
+
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                local_proxy.WINDOWS_SYSTEM_PROXY_REG_PATH,
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            local_proxy._notify_windows_proxy_change()
+            with cls._proxy_check_lock:
+                cls._proxy_check_cache.clear()
+            return endpoint
+
+    @classmethod
     def _program_owned_invalid_local_proxy_env_names(
         cls,
         invalid_names: Iterable[str],
@@ -799,6 +881,32 @@ class APITester:
                 continue
             owned.append(normalized_name)
         return tuple(dict.fromkeys(owned))
+
+    @classmethod
+    def _program_owns_local_proxy_endpoint(
+        cls,
+        endpoint: tuple[str, int],
+        *,
+        state: dict | None = None,
+    ) -> bool:
+        """Return whether the full current endpoint checkpoint is app-owned."""
+
+        if os.name != "nt":
+            return False
+        try:
+            from core import local_proxy
+
+            current_state = local_proxy._load_state() if state is None else state
+            if not isinstance(current_state, dict):
+                return False
+            port = int(current_state.get("mixed_port") or 0)
+            return bool(
+                port > 0
+                and cls._local_proxy_endpoint(current_state.get("proxy_url")) == endpoint
+                and local_proxy._state_owns_local_proxy_settings(current_state, port)
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, OverflowError):
+            return False
 
     @classmethod
     def clear_invalid_local_proxy_env(cls, names: Iterable[str] | None = None) -> tuple[str, ...]:
@@ -905,10 +1013,13 @@ class APITester:
                     fresh_values,
                     endpoint,
                 )
-                if not fresh_owned_names:
-                    return (), "unowned"
-
                 state = local_proxy._load_state()
+                owns_endpoint = cls._program_owns_local_proxy_endpoint(
+                    endpoint,
+                    state=state,
+                )
+                if not fresh_owned_names and not owns_endpoint:
+                    return (), "unowned"
                 managed_running = local_proxy._managed_local_proxy_is_running(state)
                 try:
                     state_pid = int(state.get("pid") or 0)
@@ -929,7 +1040,25 @@ class APITester:
                 )
                 if managed_running or recent_transition:
                     return (), "transitioning"
-                return cls.clear_invalid_local_proxy_env(fresh_owned_names), ""
+
+                # A dead proxy written by this application owns more than the
+                # environment variables: it also changed VS Code and WinINET.
+                # Restore the complete checkpoint while the lifecycle lock is
+                # still held.  This prevents a half-cleaned state where the
+                # current request succeeds directly but the next Windows app
+                # is sent back to the same refused system proxy.
+                restore_message = local_proxy.reconcile_local_ai_proxy_startup_settings()
+                if "已自动恢复" in restore_message:
+                    return fresh_owned_names, "restored"
+                if "自动恢复本机设置未完成" in restore_message:
+                    return (), "restore_failed"
+                if fresh_owned_names:
+                    return cls.clear_invalid_local_proxy_env(fresh_owned_names), ""
+                # Ownership was proven from the full checkpoint, so an empty
+                # reconciliation result means the state changed underneath us
+                # or could not be safely restored. Never downgrade that to an
+                # unowned automatic system-proxy mutation.
+                return (), "restore_failed"
         except RuntimeError:
             if not entered_lock:
                 return (), "busy"
@@ -962,19 +1091,10 @@ class APITester:
             return ""
 
         values = cls._local_proxy_env_values()
-        # ``urllib.getproxies()`` also consults Windows WinINET settings.
-        # This feature is scoped to process environment variables; persistent
-        # user values are inspected for the explicit cleanup action below,
-        # while an unrelated system proxy must not change request behavior.
-        proxy_env_names = {item.casefold() for item in cls.LOCAL_PROXY_ENV_NAMES}
-        process_proxy_values = [
-            str(value).strip()
-            for name, value in os.environ.items()
-            if name.casefold() in proxy_env_names
-            and str(value or "").strip()
-        ]
-        if not any(cls._local_proxy_endpoint(value) == endpoint for value in process_proxy_values):
-            return ""
+        selected_from_environment = any(
+            cls._local_proxy_endpoint(value) == endpoint
+            for value in values.values()
+        )
 
         invalid_names = cls.invalid_local_proxy_env_names()
         owned_names = cls._program_owned_invalid_local_proxy_env_names(
@@ -982,7 +1102,8 @@ class APITester:
             values,
             endpoint,
         )
-        if owned_names:
+        owns_endpoint = cls._program_owns_local_proxy_endpoint(endpoint)
+        if owned_names or owns_endpoint:
             try:
                 removed, cleanup_state = cls._auto_clear_program_owned_invalid_proxy(
                     proxy_url,
@@ -990,9 +1111,14 @@ class APITester:
                 )
             except Exception as error:
                 logger.warning("Failed to auto-clean managed invalid proxy variables: %s", error)
+                managed_detail = (
+                    f"变量（{ '、'.join(owned_names) }）"
+                    if owned_names
+                    else "Windows 系统代理设置"
+                )
                 return (
                     f"检测到本程序配置的失效本机代理 {host}:{port}，{action}；"
-                    f"自动清理失败，请手动清理变量（{ '、'.join(owned_names) }）"
+                    f"自动清理失败，请手动检查{managed_detail}"
                 )
             if cleanup_state == "recovered":
                 return ""
@@ -1000,6 +1126,18 @@ class APITester:
                 return (
                     f"检测到本程序的本机代理 {host}:{port} 暂时不可用，"
                     f"代理正在启动或切换保护期，未清理环境变量；{action}"
+                )
+            if cleanup_state == "restore_failed":
+                return (
+                    f"检测到本程序配置的失效本机代理 {host}:{port}，{action}；"
+                    "自动恢复 Windows 环境变量、VS Code 或系统代理未完成，"
+                    "已保留恢复记录供下次启动重试"
+                )
+            if cleanup_state == "restored":
+                return (
+                    f"检测到本程序配置的失效本机代理 {host}:{port}，"
+                    "已自动恢复本程序启动前保存的 Windows 环境变量、"
+                    f"VS Code 和系统代理设置；{action}"
                 )
             if removed:
                 remaining = tuple(
@@ -1011,9 +1149,11 @@ class APITester:
                     f"（{ '、'.join(removed) }）；{action}{suffix}"
                 )
         variable_detail = f"（{'、'.join(invalid_names)}）" if invalid_names else ""
+        source = "本机代理" if selected_from_environment else "Windows 系统代理"
+        untouched = "未修改环境变量" if selected_from_environment else "未修改该系统代理设置"
         return (
-            f"检测到来源无法确认的失效本机代理 {host}:{port}{variable_detail}，"
-            f"未修改环境变量；{action}"
+            f"检测到来源无法确认且失效的 {source} {host}:{port}{variable_detail}，"
+            f"{untouched}；{action}"
         )
 
     @classmethod
