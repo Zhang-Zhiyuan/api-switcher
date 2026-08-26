@@ -398,12 +398,15 @@ class ProxyEnvironmentDiagnostic:
 
     invalid_variables: tuple[str, ...] = ()
     invalid_proxy_urls: tuple[str, ...] = ()
+    reconciled_warning: str = ""
 
     @property
     def has_invalid_proxy(self) -> bool:
         return bool(self.invalid_variables)
 
     def warning(self, *, bypassed: bool = True) -> str:
+        if self.reconciled_warning:
+            return self.reconciled_warning
         if not self.has_invalid_proxy:
             return ""
         variables = ", ".join(self.invalid_variables)
@@ -512,6 +515,11 @@ def fetch_proxy_subscription(
         raise ValueError("订阅链接必须是 http 或 https 地址")
     normalized_url = urlparse.urlunparse(parsed_url)
     proxy_diagnostic = _subscription_proxy_environment_diagnostic(normalized_url)
+    proxy_diagnostic = _reconcile_subscription_proxy_environment(
+        normalized_url,
+        proxy_diagnostic,
+        allow_direct_fallback=allow_direct_fallback,
+    )
 
     request = urlrequest.Request(
         normalized_url,
@@ -5717,6 +5725,48 @@ def _subscription_proxy_environment_diagnostic(url: str) -> ProxyEnvironmentDiag
             invalid_variables=tuple(sorted(set(matching_names))),
             invalid_proxy_urls=(_subscription_proxy_display_url(candidate),),
         )
+
+
+def _reconcile_subscription_proxy_environment(
+    url: str,
+    diagnostic: ProxyEnvironmentDiagnostic,
+    *,
+    allow_direct_fallback: bool,
+) -> ProxyEnvironmentDiagnostic:
+    """Auto-clean only app-owned stale proxy residue before a link refresh."""
+
+    if not diagnostic.has_invalid_proxy:
+        return diagnostic
+
+    request_action = (
+        "本次订阅请求已临时绕过该代理并直连"
+        if allow_direct_fallback
+        else "严格隐私模式仍禁止直连"
+    )
+    try:
+        # Import lazily: APITester itself imports local proxy helpers only when
+        # ownership must be verified, avoiding a module-import cycle here.
+        from core.api_tester import APITester
+
+        warning = APITester.reconcile_invalid_local_proxy_for_request(
+            url,
+            request_action=request_action,
+        )
+    except Exception:
+        # Cleanup diagnostics must never make a recoverable subscription fetch
+        # fail. The original detector still forces a bounded direct recovery
+        # (when allowed) and reports that no environment value was changed.
+        return diagnostic
+
+    if not warning:
+        # The endpoint may have recovered during the lock-protected forced
+        # recheck. Recompute so a healthy proxy is not bypassed unnecessarily.
+        return _subscription_proxy_environment_diagnostic(url)
+    return ProxyEnvironmentDiagnostic(
+        invalid_variables=diagnostic.invalid_variables,
+        invalid_proxy_urls=diagnostic.invalid_proxy_urls,
+        reconciled_warning=warning,
+    )
 
 
 def _strict_subscription_proxy_map(request: urlrequest.Request) -> dict[str, str]:

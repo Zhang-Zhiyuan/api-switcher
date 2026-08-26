@@ -3247,6 +3247,183 @@ def test_fetch_proxy_subscription_detects_stale_loopback_environment_proxy(
     assert os.environ.get("HTTPS_PROXY") == "http://127.0.0.1:17897"
 
 
+def test_fetch_proxy_subscription_auto_cleans_program_owned_stale_proxy_before_download(
+    monkeypatch,
+    tmp_path,
+):
+    from core.api_tester import APITester
+
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: recovered, type: vless, server: example.com, port: 443 }\n"
+
+    calls = []
+    reconciliation = {}
+
+    class DirectOpener:
+        def open(self, _request, **_kwargs):
+            calls.append("direct")
+            return Response()
+
+    def reconcile(_cls, url, *, request_action):
+        reconciliation["url"] = url
+        reconciliation["action"] = request_action
+        os.environ.pop("HTTPS_PROXY", None)
+        return f"已自动清理变量（HTTPS_PROXY）；{request_action}"
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:17897")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:17897"},
+    )
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionRefusedError(10061, "refused")),
+    )
+    monkeypatch.setattr(
+        APITester,
+        "reconcile_invalid_local_proxy_for_request",
+        classmethod(reconcile),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cleaned stale proxy must remain bypassed for this request")
+        ),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+    )
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retry_base_delay=0,
+    )
+
+    assert result.nodes[0].node["name"] == "recovered"
+    assert "已自动清理变量" in result.proxy_warning
+    assert "临时绕过" in result.proxy_warning
+    assert reconciliation == {
+        "url": "https://example.com/sub",
+        "action": "本次订阅请求已临时绕过该代理并直连",
+    }
+    assert "HTTPS_PROXY" not in os.environ
+    assert calls == ["ProxyHandler", "direct"]
+
+
+def test_fetch_proxy_subscription_uses_real_owned_proxy_cleanup_contract(
+    monkeypatch,
+    tmp_path,
+):
+    from contextlib import nullcontext
+
+    from core import api_tester
+    from core.api_tester import APITester
+
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: cleaned, type: vless, server: example.com, port: 443 }\n"
+
+    class DirectOpener:
+        def open(self, _request, **_kwargs):
+            return Response()
+
+    APITester._proxy_check_cache.clear()
+    for name in APITester.LOCAL_PROXY_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:17897")
+    monkeypatch.setattr(api_tester.os, "name", "nt")
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:17897"},
+    )
+    monkeypatch.setattr(
+        remote_proxy.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionRefusedError(10061, "refused")),
+    )
+    monkeypatch.setattr(
+        "core.local_proxy._load_state",
+        lambda: {
+            "proxy_url": "http://127.0.0.1:17897",
+            "managed_proxy_env": {
+                "owner": "api-switcher",
+                "proxy_url": "http://127.0.0.1:17897",
+                "variables": ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "core.local_proxy._local_proxy_operation_lock",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "core.persistent_env._local_user_env_value_strict",
+        lambda _name: None,
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("owned stale proxy must be cleaned and bypassed")
+        ),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda _handler: DirectOpener(),
+    )
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retry_base_delay=0,
+    )
+
+    assert result.nodes[0].node["name"] == "cleaned"
+    assert "已自动清理变量" in result.proxy_warning
+    assert "HTTPS_PROXY" not in os.environ
+
+
 @pytest.mark.parametrize("status", [502, 503, 504])
 def test_fetch_proxy_subscription_bypasses_configured_proxy_gateway_errors(
     monkeypatch,
