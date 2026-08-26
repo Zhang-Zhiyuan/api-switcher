@@ -140,6 +140,41 @@ def test_local_core_startup_never_waits_for_release_when_core_is_usable(
     assert local_proxy._ensure_mihomo_binary() == binary
 
 
+def test_local_core_startup_does_not_wait_behind_background_update(
+    monkeypatch, tmp_path
+):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    update_lock = threading.RLock()
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+    monkeypatch.setattr(local_proxy, "_MIHOMO_BINARY_LOCK", update_lock)
+    monkeypatch.setattr(
+        local_proxy,
+        "_try_mihomo_binary_info",
+        lambda path: ("1.19.25", "Mihomo Meta v1.19.25 windows amd64")
+        if Path(path) == binary
+        else None,
+    )
+
+    def hold_update_lock():
+        with update_lock:
+            lock_acquired.set()
+            release_lock.wait(2.0)
+
+    worker = threading.Thread(target=hold_update_lock, daemon=True)
+    worker.start()
+    assert lock_acquired.wait(1.0) is True
+    started = time.monotonic()
+    try:
+        assert local_proxy._ensure_mihomo_binary() == binary
+        assert time.monotonic() - started < 0.5
+    finally:
+        release_lock.set()
+        worker.join(timeout=1.0)
+
+
 def test_core_update_check_is_scheduled_in_background(monkeypatch, tmp_path):
     binary = _patch_local_core_paths(monkeypatch, tmp_path)
     binary.parent.mkdir(parents=True)
