@@ -20,7 +20,8 @@ _MAX_CONFIG_TEXT_CHARS = 2_000_000
 _ASSIGNMENT_RE = re.compile(
     r"(?:^|[\r\n;&])\s*(?:(?:export|set|env)\s+)?"
     r"(?:\$env:)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
-    r"([^\r\n;&]*?)(?=\s*(?:[;&]|$))",
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`|[^\r\n;&]*?)"
+    r"(?=\s*(?:[;&]|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 _SETX_RE = re.compile(
@@ -45,7 +46,8 @@ _POWERSHELL_SET_RE = re.compile(
 )
 _POWER_SHELL_RE = re.compile(
     r"(?:^|[\r\n;&])\s*\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
-    r"([^\r\n;&]*?)(?=\s*(?:[;&]|$))",
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`|[^\r\n;&]*?)"
+    r"(?=\s*(?:[;&]|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 _URL_RE = re.compile(
@@ -617,7 +619,9 @@ def _normalize_url(value: str, *, profile_type: str, inferred: bool) -> str:
             if lowered.endswith(suffix):
                 path = path[: -len(suffix)] + replacement
                 break
-        normalized = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+        normalized = urlunsplit(
+            (parsed.scheme, parsed.netloc, path, parsed.query, "")
+        )
         if profile_type == "claude":
             normalized = normalize_claude_base_url(normalized)
         else:
@@ -631,8 +635,13 @@ def _normalize_url(value: str, *, profile_type: str, inferred: bool) -> str:
     if profile_type == "codex" and inferred:
         parsed = urlsplit(normalized)
         if not parsed.path or parsed.path == "/":
-            normalized = urlunsplit((parsed.scheme, parsed.netloc, "/v1", "", ""))
-    return normalized.rstrip("/")
+            normalized = urlunsplit(
+                (parsed.scheme, parsed.netloc, "/v1", parsed.query, "")
+            )
+    # The shared URL validator already removes a trailing slash from the path.
+    # Calling ``rstrip('/')`` on the whole URL would corrupt a legitimate query
+    # value that happens to end in a slash.
+    return normalized
 
 
 def _provider_for_url(url: str) -> str:

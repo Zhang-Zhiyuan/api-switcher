@@ -184,12 +184,171 @@ def test_core_update_check_is_scheduled_in_background(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "_load_mihomo_release_state", lambda: {})
     monkeypatch.setattr(
         local_proxy,
-        "_ensure_latest_mihomo_binary",
+        "_check_mihomo_update_availability",
         lambda: completed.set() or binary,
     )
 
     assert local_proxy._schedule_mihomo_update_check() is True
     assert completed.wait(1.0) is True
+
+
+def test_background_core_check_records_update_without_downloading(monkeypatch, tmp_path):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    monkeypatch.setattr(
+        local_proxy,
+        "_try_mihomo_binary_info",
+        lambda path: ("1.19.25", "Mihomo Meta v1.19.25 windows amd64")
+        if Path(path) == binary
+        else None,
+    )
+    monkeypatch.setattr(local_proxy, "_fetch_mihomo_release", lambda: _release())
+    monkeypatch.setattr(
+        local_proxy,
+        "_download_mihomo_binary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("background metadata check must not download")
+        ),
+    )
+
+    assert local_proxy._check_mihomo_update_availability() == binary
+    state = json.loads(local_proxy.MIHOMO_RELEASE_STATE_PATH.read_text(encoding="utf-8"))
+    assert state["installed_version"] == "1.19.25"
+    assert state["latest_version"] == "1.19.30"
+    assert not local_proxy.MIHOMO_PENDING_BINARY_PATH.exists()
+    assert "手动下载" in local_proxy._local_mihomo_core_status_detail()
+
+
+def test_background_core_metadata_fetch_does_not_hold_binary_lock(monkeypatch, tmp_path):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    update_lock = threading.RLock()
+    fetch_started = threading.Event()
+    finish_fetch = threading.Event()
+    outcome = []
+    monkeypatch.setattr(local_proxy, "_MIHOMO_BINARY_LOCK", update_lock)
+    monkeypatch.setattr(
+        local_proxy,
+        "_try_mihomo_binary_info",
+        lambda path: ("1.19.25", "Mihomo Meta v1.19.25 windows amd64")
+        if Path(path) == binary
+        else None,
+    )
+
+    def fetch_release():
+        fetch_started.set()
+        finish_fetch.wait(2.0)
+        return _release()
+
+    monkeypatch.setattr(local_proxy, "_fetch_mihomo_release", fetch_release)
+
+    def check():
+        try:
+            outcome.append(local_proxy._check_mihomo_update_availability())
+        except Exception as exc:  # pragma: no cover - asserted below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=check, daemon=True)
+    worker.start()
+    assert fetch_started.wait(1.0) is True
+    acquired = update_lock.acquire(blocking=False)
+    try:
+        assert acquired is True
+    finally:
+        if acquired:
+            update_lock.release()
+        finish_fetch.set()
+        worker.join(timeout=2.0)
+    assert outcome == [binary]
+
+
+def test_older_background_core_response_does_not_overwrite_foreground_state(
+    monkeypatch,
+    tmp_path,
+):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    monkeypatch.setattr(
+        local_proxy,
+        "_try_mihomo_binary_info",
+        lambda path: ("1.19.25", "Mihomo Meta v1.19.25 windows amd64")
+        if Path(path) == binary
+        else None,
+    )
+
+    def fetch_release():
+        local_proxy._save_mihomo_release_state(
+            {
+                "checked_at_epoch": time.time() + 10,
+                "last_check_success": True,
+                "latest_tag": "v1.19.31",
+                "latest_version": "1.19.31",
+                "installed_version": "1.19.25",
+            }
+        )
+        return _release()
+
+    monkeypatch.setattr(local_proxy, "_fetch_mihomo_release", fetch_release)
+
+    assert local_proxy._check_mihomo_update_availability() == binary
+    state = json.loads(local_proxy.MIHOMO_RELEASE_STATE_PATH.read_text(encoding="utf-8"))
+    assert state["latest_version"] == "1.19.31"
+
+
+def test_manual_core_update_reuses_verified_staged_release(monkeypatch, tmp_path):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    local_proxy.MIHOMO_PENDING_BINARY_PATH.write_bytes(b"new")
+    monkeypatch.setattr(
+        local_proxy,
+        "_try_mihomo_binary_info",
+        lambda path: {
+            binary: ("1.19.25", "Mihomo Meta v1.19.25 windows amd64"),
+            local_proxy.MIHOMO_PENDING_BINARY_PATH: (
+                "1.19.30",
+                "Mihomo Meta v1.19.30 windows amd64",
+            ),
+        }.get(Path(path)),
+    )
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_a, **_k: True)
+    monkeypatch.setattr(local_proxy, "_fetch_mihomo_release", lambda: _release())
+    monkeypatch.setattr(
+        local_proxy,
+        "_download_mihomo_binary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("verified staged release must be reused")
+        ),
+    )
+
+    assert local_proxy._ensure_latest_mihomo_binary(force_check=True) == binary
+    state = json.loads(local_proxy.MIHOMO_RELEASE_STATE_PATH.read_text(encoding="utf-8"))
+    assert state["pending_version"] == "1.19.30"
+    assert state["latest_version"] == "1.19.30"
+
+
+def test_missing_staged_core_does_not_report_false_pending_update(monkeypatch, tmp_path):
+    binary = _patch_local_core_paths(monkeypatch, tmp_path)
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"old")
+    local_proxy._save_mihomo_release_state(
+        {
+            "installed_version": "1.19.25",
+            "latest_version": "1.19.30",
+            "pending_version": "1.19.30",
+            "pending_asset": "missing.zip",
+            "last_check_success": True,
+        }
+    )
+
+    assert "待代理重启" not in local_proxy._local_mihomo_core_status_detail()
+    assert local_proxy._apply_pending_mihomo_update(binary) is False
+    state = json.loads(local_proxy.MIHOMO_RELEASE_STATE_PATH.read_text(encoding="utf-8"))
+    assert "pending_version" not in state
+    assert "pending_asset" not in state
 
 
 def test_local_core_update_is_staged_while_running_then_applied(monkeypatch, tmp_path):
@@ -236,7 +395,11 @@ def test_local_core_update_does_not_restart_running_proxy_by_default(monkeypatch
     binary.write_bytes(b"old")
     local_proxy.MIHOMO_PENDING_BINARY_PATH.write_bytes(b"new")
     monkeypatch.setattr(local_proxy.os, "name", "nt", raising=False)
-    monkeypatch.setattr(local_proxy, "_ensure_latest_mihomo_binary", lambda: binary)
+    monkeypatch.setattr(
+        local_proxy,
+        "_ensure_latest_mihomo_binary",
+        lambda **_kwargs: binary,
+    )
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897})
     monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_a, **_k: True)
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)

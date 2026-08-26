@@ -1083,6 +1083,11 @@ def test_isolated_subscription_recovery_pool_forces_every_domain_through_select_
     assert parsed["ipv6"] is False
     assert parsed["dns"]["respect-rules"] is True
     assert parsed["dns"]["use-system-hosts"] is False
+    assert parsed["dns"]["nameserver"] == [
+        "https://1.1.1.1/dns-query#API-SWITCHER-PROBE-GROUP",
+        "https://8.8.8.8/dns-query#API-SWITCHER-PROBE-GROUP",
+    ]
+    assert "#AI-PROXY" not in config
 
 
 def test_isolated_subscription_session_selects_and_verifies_requested_route(monkeypatch, tmp_path):

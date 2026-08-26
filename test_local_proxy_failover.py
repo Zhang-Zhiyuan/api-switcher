@@ -479,6 +479,49 @@ def test_startup_reconcile_restores_settings_owned_by_dead_proxy(monkeypatch, tm
     assert "已打开的终端需重开" in message
 
 
+def test_restore_env_drops_stale_process_value_after_persistent_value_changed(
+    monkeypatch,
+):
+    expected = local_proxy._local_proxy_env_values(17897)
+    process_env = dict(expected)
+    persistent = dict(expected)
+    persistent["HTTPS_PROXY"] = None
+    persistent["HTTP_PROXY"] = "http://127.0.0.1:19000"
+    writes = []
+    deletes = []
+    monkeypatch.setattr(local_proxy.os, "environ", process_env)
+    monkeypatch.setattr(
+        local_proxy.persistent_env,
+        "_local_user_env_value_strict",
+        lambda name: persistent[name],
+    )
+    monkeypatch.setattr(
+        local_proxy.persistent_env,
+        "set_local_user_env",
+        lambda updates: writes.append(dict(updates)),
+    )
+    monkeypatch.setattr(
+        local_proxy.persistent_env,
+        "delete_local_user_env",
+        lambda names: deletes.append(tuple(names)),
+    )
+
+    local_proxy._restore_local_env(
+        {
+            "previous_env": {
+                key: {"exists": False, "value": ""}
+                for key in remote_proxy.PROXY_ENV_KEYS
+            }
+        },
+        17897,
+    )
+
+    assert "HTTPS_PROXY" not in process_env
+    assert process_env["HTTP_PROXY"] == "http://127.0.0.1:19000"
+    assert "HTTPS_PROXY" not in {name for batch in deletes for name in batch}
+    assert not any("HTTP_PROXY" in update for update in writes)
+
+
 @pytest.mark.parametrize(("managed", "listening"), [(True, False), (False, True)])
 def test_startup_reconcile_preserves_settings_while_process_or_port_exists(
     monkeypatch,

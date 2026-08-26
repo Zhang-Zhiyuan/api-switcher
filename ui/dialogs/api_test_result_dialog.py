@@ -26,6 +26,7 @@ class APITestResultDialog(ctk.CTkToplevel):
     def _build_ui(self, result, profile_name: str):
         """Build the dialog UI."""
         self._invalid_proxy_env_names = ()
+        self._invalid_system_proxy_endpoint = None
         self._proxy_cleanup_button = None
 
         # Container
@@ -115,6 +116,9 @@ class APITestResultDialog(ctk.CTkToplevel):
         if proxy_warning:
             self._add_detail_row(scroll_frame, "代理处理", proxy_warning, COLORS["warning"])
             self._invalid_proxy_env_names = APITester.invalid_local_proxy_env_names()
+            self._invalid_system_proxy_endpoint = (
+                APITester.invalid_windows_system_proxy_endpoint()
+            )
 
         # Error details / benchmark details
         if result.error_details:
@@ -162,10 +166,10 @@ class APITestResultDialog(ctk.CTkToplevel):
         )
         close_btn.pack(side="right")
 
-        if self._invalid_proxy_env_names:
+        if self._invalid_proxy_env_names or self._invalid_system_proxy_endpoint:
             self._proxy_cleanup_button = ctk.CTkButton(
                 button_frame,
-                text="清理失效代理变量",
+                text="清理失效代理设置",
                 width=180,
                 command=self._confirm_proxy_cleanup,
                 **button_style("warning"),
@@ -173,29 +177,44 @@ class APITestResultDialog(ctk.CTkToplevel):
             self._proxy_cleanup_button.pack(side="left")
 
     def _confirm_proxy_cleanup(self) -> None:
-        """Ask before deleting invalid loopback proxy variables."""
+        """Ask before clearing unowned invalid loopback proxy settings."""
         names = APITester.invalid_local_proxy_env_names()
-        if not names:
+        system_endpoint = APITester.invalid_windows_system_proxy_endpoint()
+        if not names and system_endpoint is None:
             self._invalid_proxy_env_names = ()
+            self._invalid_system_proxy_endpoint = None
             if self._proxy_cleanup_button is not None:
                 self._proxy_cleanup_button.configure(state="disabled", text="无需清理")
             return
 
         from ui.dialogs.confirm_dialog import ConfirmDialog
 
-        listed = "、".join(names)
+        details = []
+        if names:
+            details.append("环境变量：" + "、".join(names))
+        if system_endpoint is not None:
+            details.append(
+                f"Windows 系统代理：{system_endpoint[0]}:{system_endpoint[1]}"
+            )
+        listed = "\n".join(details)
 
         def cleanup() -> None:
             try:
                 removed = APITester.clear_invalid_local_proxy_env()
-                if not removed:
-                    message = "未发现仍然失效的本机代理变量"
-                else:
-                    message = (
-                        f"已清理失效代理变量: {'、'.join(removed)}；"
-                        "本软件后续请求立即生效，已打开的终端和 VS Code 窗口需重开"
+                disabled_endpoint = APITester.disable_invalid_windows_system_proxy()
+                actions = []
+                if removed:
+                    actions.append(f"已清理代理变量: {'、'.join(removed)}")
+                if disabled_endpoint is not None:
+                    actions.append(
+                        "已关闭失效 Windows 系统代理启用开关: "
+                        f"{disabled_endpoint[0]}:{disabled_endpoint[1]}"
                     )
+                message = "；".join(actions) if actions else "未发现仍然失效的本机代理设置"
+                if actions:
+                    message += "；本软件后续请求立即生效，已打开的终端和 VS Code 窗口需重开"
                 self._invalid_proxy_env_names = ()
+                self._invalid_system_proxy_endpoint = None
                 if self._proxy_cleanup_button is not None:
                     self._proxy_cleanup_button.configure(state="disabled", text="已清理")
                 from ui.widgets.toast import show_toast
@@ -204,14 +223,15 @@ class APITestResultDialog(ctk.CTkToplevel):
             except Exception as error:
                 from ui.widgets.toast import show_toast
 
-                show_toast(self, f"清理失效代理变量失败: {error}", is_error=True)
+                show_toast(self, f"清理失效代理设置失败: {error}", is_error=True)
 
         ConfirmDialog(
             self,
-            title="清理失效代理环境变量",
+            title="清理失效代理设置",
             message=(
-                f"将删除当前检测到连接被拒绝的本机代理变量：\n{listed}\n\n"
-                "只会清理指向失效 127.0.0.1/localhost 端口的变量，不会修改正常代理、NO_PROXY 或系统级代理。"
+                f"将清理当前检测到连接被拒绝的本机代理设置：\n{listed}\n\n"
+                "环境变量只删除仍指向失效回环端口的值；Windows 系统代理只关闭启用开关，"
+                "并保留 ProxyServer/PAC 等原值，正常代理、NO_PROXY 和远程代理不会被修改。"
             ),
             on_confirm=cleanup,
         )
@@ -269,7 +289,9 @@ class APITestResultDialog(ctk.CTkToplevel):
             elif "启动或切换保护期" in proxy_warning:
                 recommendations.append("本机代理正在启动或切换，软件未清理变量；请等待操作完成后重试")
             else:
-                recommendations.append("本次请求已绕过失效本机代理；确认不再使用后可点击“清理失效代理变量”")
+                recommendations.append(
+                    "本次请求已绕过失效本机代理；确认不再使用后可点击“清理失效代理设置”"
+                )
 
         if "认证失败" in result.message or "API Key 无效" in result.message:
             recommendations.append("检查 API Key 是否正确")
