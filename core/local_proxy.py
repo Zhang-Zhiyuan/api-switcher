@@ -3848,6 +3848,22 @@ def _ensure_mihomo_binary() -> Path:
     background update checks use ``_ensure_latest_mihomo_binary`` instead.
     """
 
+    # A background update owns this lock while it fetches and validates the
+    # candidate.  Starting/reloading the already usable core must not queue
+    # behind that network operation.  If no usable fallback exists we still
+    # wait for the owner, because it may be producing the first core binary.
+    if _MIHOMO_BINARY_LOCK.acquire(blocking=False):
+        try:
+            return _ensure_mihomo_binary_locked(check_updates=False)
+        finally:
+            _MIHOMO_BINARY_LOCK.release()
+
+    binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
+    if binary_path.is_file() and _try_mihomo_binary_info(binary_path):
+        return binary_path
+    existing = _find_existing_mihomo_binary()
+    if existing and _try_mihomo_binary_info(existing):
+        return existing
     with _MIHOMO_BINARY_LOCK:
         return _ensure_mihomo_binary_locked(check_updates=False)
 
