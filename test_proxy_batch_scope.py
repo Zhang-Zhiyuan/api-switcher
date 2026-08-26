@@ -2027,6 +2027,47 @@ def test_current_node_hot_update_buttons_follow_busy_and_node_availability():
     assert ssh_button.values["state"] == "disabled"
 
 
+def test_explicit_stale_proxy_action_previews_before_cleanup(monkeypatch):
+    from core.api_tester import APITester, InvalidProxySettingsInspection
+    from ui.tabs import local_proxy_tab
+
+    inspection = InvalidProxySettingsInspection(
+        environment_names=("HTTPS_PROXY",),
+        environment_endpoints=(("HTTPS_PROXY", "127.0.0.1", 17897),),
+    )
+    assert 'text="清理脏代理"' in inspect.getsource(LocalProxyTab._build_ui)
+    monkeypatch.setattr(
+        APITester,
+        "inspect_invalid_proxy_settings_for_cleanup",
+        classmethod(lambda _cls: inspection),
+    )
+    dialogs = []
+
+    def fake_dialog(parent, **kwargs):
+        dialogs.append((parent, kwargs))
+
+    monkeypatch.setattr(local_proxy_tab, "ConfirmDialog", fake_dialog)
+    tab = object.__new__(LocalProxyTab)
+    tab.winfo_toplevel = lambda: "root"
+    cleanups = []
+    tab._perform_stale_proxy_cleanup = cleanups.append
+
+    def run_task(_busy, worker, _prefix, **kwargs):
+        result = worker()
+        kwargs["on_success"](result)
+
+    tab._run_local_task = run_task
+
+    tab._inspect_and_cleanup_stale_proxy()
+
+    assert len(dialogs) == 1
+    assert dialogs[0][0] == "root"
+    assert "HTTPS_PROXY (127.0.0.1:17897)" in dialogs[0][1]["message"]
+    assert cleanups == []
+    dialogs[0][1]["on_confirm"]()
+    assert cleanups == [inspection]
+
+
 def test_proxy_tabs_action_hint_lists_only_effective_quality_sources(monkeypatch):
     settings = network_diagnostic_settings.settings_from_values(
         {

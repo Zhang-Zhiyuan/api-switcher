@@ -203,6 +203,60 @@ def test_api_profile_test_thread_start_failure_rolls_back_state(
     assert toasts[-1][1]["is_error"] is True
 
 
+def test_api_result_cleanup_does_not_disable_unlisted_system_proxy(monkeypatch):
+    from ui.dialogs import confirm_dialog
+    from ui.widgets import toast
+
+    dialog = object.__new__(api_test_result_dialog.APITestResultDialog)
+    dialog._invalid_proxy_env_names = ("HTTPS_PROXY",)
+    dialog._invalid_system_proxy_endpoint = None
+    dialog._proxy_cleanup_button = _FakeButton()
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "invalid_local_proxy_env_names",
+        classmethod(lambda _cls, **_kwargs: ("HTTPS_PROXY",)),
+    )
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "invalid_windows_system_proxy_endpoint",
+        classmethod(lambda _cls, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "_local_proxy_env_values",
+        classmethod(
+            lambda _cls: {"HTTPS_PROXY": "http://127.0.0.1:17897"}
+        ),
+    )
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "clear_invalid_local_proxy_env",
+        classmethod(lambda _cls, *_args, **_kwargs: ("HTTPS_PROXY",)),
+    )
+    monkeypatch.setattr(
+        api_tester.APITester,
+        "disable_invalid_windows_system_proxy",
+        classmethod(
+            lambda _cls, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("an unlisted system proxy must not be changed")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        confirm_dialog,
+        "ConfirmDialog",
+        lambda _parent, **kwargs: kwargs["on_confirm"](),
+    )
+    messages = []
+    monkeypatch.setattr(toast, "show_toast", lambda _parent, message, **_kwargs: messages.append(message))
+
+    dialog._confirm_proxy_cleanup()
+
+    assert messages
+    assert "已清理代理变量" in messages[-1]
+    assert dialog._proxy_cleanup_button.text == "已清理"
+
+
 @pytest.mark.parametrize("module,tab_class,_list_method,_profile", _api_tab_cases())
 def test_api_tab_refresh_thread_start_failure_replaces_loading_state(
     monkeypatch,

@@ -103,6 +103,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._load_file_button = None
         self._start_button = None
         self._inspect_button = None
+        self._core_update_button = None
+        self._cleanup_proxy_button = None
         self._test_button = None
         self._stop_button = None
         self._status_label = None
@@ -679,6 +681,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._inspect_button.pack(anchor="e", pady=(0, 6))
+        self._cleanup_proxy_button = ctk.CTkButton(
+            actions,
+            text="清理脏代理",
+            width=104,
+            command=self._inspect_and_cleanup_stale_proxy,
+            **button_style("warning", compact=True),
+        )
+        self._cleanup_proxy_button.pack(anchor="e", pady=(0, 6))
         self._core_update_button = ctk.CTkButton(
             actions,
             text="更新内核",
@@ -1162,6 +1172,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._load_file_button,
             self._start_button,
             self._inspect_button,
+            getattr(self, "_cleanup_proxy_button", None),
             getattr(self, "_core_update_button", None),
             self._test_button,
             self._stop_button,
@@ -3557,6 +3568,72 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if any(marker in message for marker in ("未运行", "未指向", "健康检查失败", "漂移", "未确认"))
             else "success",
             failure_hint="本次仅执行状态检查，未修改本机代理设置",
+        )
+
+    def _inspect_and_cleanup_stale_proxy(self):
+        """Inspect stale loopback settings and request explicit cleanup."""
+
+        from core.api_tester import APITester
+
+        def confirm_cleanup(inspection):
+            if inspection.protected_message or not inspection.has_invalid_settings:
+                return
+            details = inspection.confirmation_details()
+            reconciliation = (
+                f"{inspection.reconciliation_message}\n\n"
+                if inspection.reconciliation_message
+                else ""
+            )
+            ConfirmDialog(
+                self.winfo_toplevel(),
+                title="清理脏代理设置",
+                message=(
+                    reconciliation
+                    + "检测到以下设置仍指向拒绝连接的本机回环端口：\n"
+                    + details
+                    + "\n\n确认后会再次检查端口和设置值，只清理仍与上述清单一致的项目。"
+                    "正在工作的本机代理、远程代理、NO_PROXY、PAC、自动检测和其他 VS Code 设置不会被修改。"
+                    "Windows 系统代理仅关闭 ProxyEnable，原 ProxyServer 保留，方便代理软件以后重新启用。"
+                ),
+                on_confirm=lambda: self._perform_stale_proxy_cleanup(inspection),
+            )
+
+        self._run_local_task(
+            "正在检查环境变量、Win11 系统代理和 VS Code 中的脏代理残留...",
+            APITester.inspect_invalid_proxy_settings_for_cleanup,
+            "检查脏代理设置",
+            on_success=confirm_cleanup,
+            severity_from_result=lambda message: "error"
+            if any(marker in message for marker in ("失败", "未完成"))
+            else "warning"
+            if any(
+                marker in message
+                for marker in (
+                    "检测到",
+                    "等待用户确认",
+                    "未自动改动",
+                    "保护期",
+                    "未清理",
+                    "仅支持 Windows",
+                )
+            )
+            else "success",
+            failure_hint="本次检查失败，未修改任何代理设置",
+        )
+
+    def _perform_stale_proxy_cleanup(self, inspection):
+        from core.api_tester import APITester
+
+        self._run_local_task(
+            "正在复核并清理确认过的失效回环代理设置...",
+            lambda: APITester.clear_invalid_proxy_settings(inspection),
+            "清理脏代理设置",
+            severity_from_result=lambda message: "error"
+            if "清理失败" in message
+            else "warning"
+            if "未清理任何项目" in message
+            else "success",
+            failure_hint="清理未完成；未通过二次校验的设置保持原样",
         )
 
     def _update_local_proxy_core(self):

@@ -64,6 +64,113 @@ class ModelListResult:
     proxy_warning: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class InvalidProxySettingsInspection:
+    """Credential-free snapshot shown before explicit stale-proxy cleanup."""
+
+    environment_names: tuple[str, ...] = ()
+    environment_endpoints: tuple[tuple[str, str, int], ...] = ()
+    windows_system_endpoint: tuple[str, int] | None = None
+    vscode_fields: tuple[str, ...] = ()
+    vscode_endpoints: tuple[tuple[str, str, int], ...] = ()
+    reconciliation_message: str = ""
+    protected_message: str = ""
+
+    @property
+    def has_invalid_settings(self) -> bool:
+        return bool(
+            self.environment_names
+            or self.windows_system_endpoint
+            or self.vscode_fields
+        )
+
+    def confirmation_details(self) -> str:
+        def endpoint_text(host: str, port: int) -> str:
+            return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+        details: list[str] = []
+        if self.environment_names:
+            endpoints = {
+                name.casefold(): endpoint_text(host, port)
+                for name, host, port in self.environment_endpoints
+            }
+            labels = [
+                f"{name} ({endpoints[name.casefold()]})"
+                if name.casefold() in endpoints
+                else name
+                for name in self.environment_names
+            ]
+            details.append("Windows/进程环境变量：" + "、".join(labels))
+        if self.windows_system_endpoint is not None:
+            host, port = self.windows_system_endpoint
+            details.append(
+                "Windows 当前用户系统代理：" + endpoint_text(host, port)
+            )
+        if self.vscode_fields:
+            endpoints = {
+                name: endpoint_text(host, port)
+                for name, host, port in self.vscode_endpoints
+            }
+            labels = [
+                f"{name} ({endpoints[name]})" if name in endpoints else name
+                for name in self.vscode_fields
+            ]
+            details.append("VS Code 设置：" + "、".join(labels))
+        return "\n".join(details)
+
+    def __str__(self) -> str:
+        if self.protected_message:
+            return self.protected_message
+        pieces = []
+        if self.reconciliation_message:
+            pieces.append(self.reconciliation_message)
+        if self.has_invalid_settings:
+            pieces.append(
+                "检测到来源无法确认的失效回环代理设置，等待用户确认："
+                + self.confirmation_details().replace("\n", "；")
+            )
+        elif not pieces:
+            pieces.append("未发现失效的回环代理环境变量、Windows 系统代理或 VS Code 残留")
+        return "；".join(pieces)
+
+
+@dataclass(frozen=True)
+class InvalidProxyCleanupResult:
+    """Non-secret summary of one revalidated explicit cleanup."""
+
+    removed_environment_names: tuple[str, ...] = ()
+    disabled_windows_endpoint: tuple[str, int] | None = None
+    removed_vscode_fields: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def changed(self) -> bool:
+        return bool(
+            self.removed_environment_names
+            or self.disabled_windows_endpoint
+            or self.removed_vscode_fields
+        )
+
+    def __str__(self) -> str:
+        actions: list[str] = []
+        if self.removed_environment_names:
+            actions.append(
+                "已清理代理环境变量：" + "、".join(self.removed_environment_names)
+            )
+        if self.disabled_windows_endpoint is not None:
+            host, port = self.disabled_windows_endpoint
+            actions.append(f"已关闭失效 Windows 系统代理启用开关：{host}:{port}")
+        if self.removed_vscode_fields:
+            actions.append("已清理 VS Code 代理残留：" + "、".join(self.removed_vscode_fields))
+        if not actions:
+            actions.append("代理设置已变化或恢复可用，本次未清理任何项目")
+        if self.errors:
+            actions.append("部分项目清理失败：" + "；".join(self.errors))
+        elif self.changed:
+            actions.append("新终端和重开的 VS Code 窗口将读取最新设置")
+        return "；".join(actions)
+
+
 class APITester:
     """Test API connections and refresh model lists."""
 
@@ -80,7 +187,7 @@ class APITester:
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
     MAX_PROXY_CHECK_CACHE_ENTRIES = 64
-    USER_AGENT = "API-Switcher/2.4.10"
+    USER_AGENT = "API-Switcher/2.4.11"
     # Keep both common casings: Windows environment names are case-insensitive,
     # while copied shell variables on Unix often use lowercase names.
     LOCAL_PROXY_ENV_NAMES = (
@@ -712,8 +819,12 @@ class APITester:
     def invalid_local_proxy_env_names(cls, *, force: bool = False) -> tuple[str, ...]:
         """Return proxy variables pointing at refused loopback endpoints."""
         invalid: list[str] = []
+        checks: dict[str, tuple[tuple[str, int] | None, bool]] = {}
         for name, value in cls._local_proxy_env_values().items():
-            endpoint, available = cls._check_loopback_proxy(value, force=force)
+            signature = value.casefold()
+            if signature not in checks:
+                checks[signature] = cls._check_loopback_proxy(value, force=force)
+            endpoint, available = checks[signature]
             if endpoint and not available:
                 invalid.append(name)
         return tuple(invalid)
@@ -723,28 +834,64 @@ class APITester:
         cls,
         *,
         force: bool = False,
+        include_environment_match: bool = False,
     ) -> tuple[str, int] | None:
-        """Return an unowned refused WinINET loopback endpoint, if selected."""
+        """Return a refused WinINET loopback endpoint, if selected.
+
+        Ordinary request diagnostics leave an endpoint that is also present in
+        proxy environment variables to the environment ownership path. An
+        explicit cleanup preview sets ``include_environment_match`` so the
+        confirmation list discloses every setting that may be changed.
+        """
 
         if os.name != "nt":
             return None
-        try:
-            proxies = urllib.request.getproxies()
-        except (OSError, ValueError):
-            return None
-        proxy_url = str(
-            proxies.get("https")
-            or proxies.get("http")
-            or proxies.get("all")
-            or ""
-        ).strip()
+        if include_environment_match:
+            # ``urllib.getproxies`` gives environment variables precedence on
+            # Windows, so it cannot accurately preview WinINET while a stale
+            # environment proxy also exists. Read the enabled, simple
+            # registry endpoint through the local-proxy registry helpers.
+            try:
+                from core import local_proxy
+
+                enabled_exists, enabled_value, _enabled_type = (
+                    local_proxy._read_windows_system_proxy_value("ProxyEnable")
+                )
+                server_exists, server_value, _server_type = (
+                    local_proxy._read_windows_system_proxy_value("ProxyServer")
+                )
+                enabled = int(enabled_value or 0)
+            except (OSError, TypeError, ValueError, OverflowError):
+                return None
+            raw_server = str(server_value or "").strip()
+            if (
+                not enabled_exists
+                or enabled != 1
+                or not server_exists
+                or not raw_server
+                or ";" in raw_server
+                or "=" in raw_server
+            ):
+                return None
+            proxy_url = raw_server
+        else:
+            try:
+                proxies = urllib.request.getproxies()
+            except (OSError, ValueError):
+                return None
+            proxy_url = str(
+                proxies.get("https")
+                or proxies.get("http")
+                or proxies.get("all")
+                or ""
+            ).strip()
         endpoint, available = cls._check_loopback_proxy(proxy_url, force=force)
         if not endpoint or available:
             return None
         # Environment proxies have a separate cleanup path which can restore
         # the application's full checkpoint. This method is only for a
         # WinINET-selected endpoint with no matching environment value.
-        if any(
+        if not include_environment_match and any(
             cls._local_proxy_endpoint(value) == endpoint
             for value in cls._local_proxy_env_values().values()
         ):
@@ -752,7 +899,11 @@ class APITester:
         return endpoint
 
     @classmethod
-    def disable_invalid_windows_system_proxy(cls) -> tuple[str, int] | None:
+    def disable_invalid_windows_system_proxy(
+        cls,
+        *,
+        expected_endpoint: tuple[str, int] | None = None,
+    ) -> tuple[str, int] | None:
         """Disable only a user-confirmed, refused, simple WinINET loopback proxy.
 
         ``ProxyServer`` is preserved so another proxy application can re-enable
@@ -765,8 +916,13 @@ class APITester:
         from core import local_proxy
 
         with local_proxy._local_proxy_operation_lock("关闭失效 Windows 系统代理"):
-            endpoint = cls.invalid_windows_system_proxy_endpoint(force=True)
+            endpoint = cls.invalid_windows_system_proxy_endpoint(
+                force=True,
+                include_environment_match=True,
+            )
             if endpoint is None:
+                return None
+            if expected_endpoint is not None and endpoint != expected_endpoint:
                 return None
             enabled_exists, enabled_value, _enabled_type = (
                 local_proxy._read_windows_system_proxy_value("ProxyEnable")
@@ -799,6 +955,331 @@ class APITester:
             with cls._proxy_check_lock:
                 cls._proxy_check_cache.clear()
             return endpoint
+
+    @classmethod
+    def _vscode_proxy_candidates(cls, settings: dict) -> dict[str, str]:
+        candidates: dict[str, str] = {}
+        proxy_url = str((settings or {}).get("http.proxy") or "").strip()
+        if proxy_url:
+            candidates["http.proxy"] = proxy_url
+
+        terminal_key = "terminal.integrated.env.windows"
+        terminal_env = (settings or {}).get(terminal_key)
+        if not isinstance(terminal_env, dict):
+            return candidates
+        accepted_names = {
+            *(name.casefold() for name in cls.LOCAL_PROXY_ENV_NAMES),
+            "api_switcher_ai_proxy_url",
+        }
+        for name, value in terminal_env.items():
+            clean_name = str(name or "").strip()
+            clean_value = str(value or "").strip()
+            if clean_name.casefold() in accepted_names and clean_value:
+                candidates[f"{terminal_key}.{clean_name}"] = clean_value
+        return candidates
+
+    @classmethod
+    def invalid_vscode_local_proxy_fields(
+        cls,
+        *,
+        force: bool = False,
+    ) -> tuple[str, ...]:
+        """Return VS Code fields that still point to refused loopback ports."""
+
+        if os.name != "nt":
+            return ()
+        try:
+            from core import vscode_parser
+
+            candidates = cls._vscode_proxy_candidates(
+                vscode_parser.read_vscode_settings()
+            )
+        except Exception as error:
+            logger.debug("Failed to inspect VS Code proxy settings: %s", error)
+            return ()
+
+        checks: dict[str, tuple[tuple[str, int] | None, bool]] = {}
+        invalid = []
+        for field_name, value in candidates.items():
+            signature = value.casefold()
+            if signature not in checks:
+                checks[signature] = cls._check_loopback_proxy(value, force=force)
+            endpoint, available = checks[signature]
+            if endpoint and not available:
+                invalid.append(field_name)
+        return tuple(invalid)
+
+    @classmethod
+    def clear_invalid_vscode_local_proxy_fields(
+        cls,
+        fields: Iterable[str] | None = None,
+        *,
+        expected_endpoints: Iterable[tuple[str, str, int]] | None = None,
+    ) -> tuple[str, ...]:
+        """Remove only revalidated refused loopback values from VS Code."""
+
+        if os.name != "nt":
+            return ()
+        from core import local_proxy, vscode_parser
+
+        with local_proxy._local_proxy_operation_lock("清理 VS Code 失效代理设置"):
+            settings = vscode_parser.read_vscode_settings()
+            candidates = cls._vscode_proxy_candidates(settings)
+            requested = set(candidates) if fields is None else {
+                str(field or "").strip() for field in fields if str(field or "").strip()
+            }
+            endpoint_expectations_provided = expected_endpoints is not None
+            expected_by_field = {
+                str(field or "").strip(): (str(host or "").strip().casefold(), int(port))
+                for field, host, port in (expected_endpoints or ())
+                if str(field or "").strip()
+            }
+            removable = []
+            checks: dict[str, tuple[tuple[str, int] | None, bool]] = {}
+            for field_name, value in candidates.items():
+                if field_name not in requested:
+                    continue
+                signature = value.casefold()
+                if signature not in checks:
+                    checks[signature] = cls._check_loopback_proxy(value, force=True)
+                endpoint, available = checks[signature]
+                expected_endpoint = expected_by_field.get(field_name)
+                if (
+                    endpoint
+                    and not available
+                    and (
+                        not endpoint_expectations_provided
+                        or endpoint == expected_endpoint
+                    )
+                ):
+                    removable.append(field_name)
+            if not removable:
+                return ()
+
+            updated = dict(settings or {})
+            terminal_key = "terminal.integrated.env.windows"
+            terminal_env = updated.get(terminal_key)
+            terminal_env = dict(terminal_env) if isinstance(terminal_env, dict) else {}
+            changed = False
+            for field_name in removable:
+                if field_name == "http.proxy":
+                    if "http.proxy" in updated:
+                        updated.pop("http.proxy", None)
+                        changed = True
+                    continue
+                prefix = terminal_key + "."
+                if field_name.startswith(prefix):
+                    env_name = field_name[len(prefix):]
+                    if env_name in terminal_env:
+                        terminal_env.pop(env_name, None)
+                        changed = True
+            if terminal_env:
+                updated[terminal_key] = terminal_env
+            else:
+                updated.pop(terminal_key, None)
+            if changed:
+                vscode_parser.write_vscode_settings(updated)
+            with cls._proxy_check_lock:
+                cls._proxy_check_cache.clear()
+            return tuple(removable) if changed else ()
+
+    @classmethod
+    def inspect_invalid_proxy_settings_for_cleanup(
+        cls,
+    ) -> InvalidProxySettingsInspection:
+        """Reconcile owned residue, then return explicit-cleanup candidates."""
+
+        if os.name != "nt":
+            return InvalidProxySettingsInspection(
+                protected_message="显式脏代理清理目前仅支持 Windows"
+            )
+        from core import local_proxy
+
+        reconciliation_messages: list[str] = []
+        state = local_proxy._load_state()
+        state_endpoint = cls._local_proxy_endpoint(state.get("proxy_url"))
+        if state_endpoint and cls._program_owns_local_proxy_endpoint(
+            state_endpoint,
+            state=state,
+        ):
+            _endpoint, available = cls._check_loopback_proxy(
+                state.get("proxy_url"),
+                force=True,
+            )
+            if not available:
+                reconciliation_message = (
+                    local_proxy.reconcile_local_ai_proxy_startup_settings()
+                )
+                if any(
+                    marker in reconciliation_message
+                    for marker in (
+                        "未自动改动",
+                        "自动恢复本机设置未完成",
+                    )
+                ):
+                    return InvalidProxySettingsInspection(
+                        reconciliation_message=reconciliation_message,
+                        protected_message=(
+                            reconciliation_message
+                            + "；为避免打断正在启动/切换的代理，本次未扫描或清理其他设置"
+                        ),
+                    )
+                if reconciliation_message:
+                    reconciliation_messages.append(reconciliation_message)
+
+        # A missing/damaged state file can still leave enough independent
+        # proof of ownership: the app-only environment marker plus the managed
+        # mihomo config marker. Reuse the request-time cleanup authority so
+        # these proven app residues do not require a confirmation dialog.
+        environment_values = cls._local_proxy_env_values()
+        initial_invalid_names = cls.invalid_local_proxy_env_names(force=True)
+        checked_endpoints: set[tuple[str, int]] = set()
+        values_by_name = {
+            name.casefold(): value for name, value in environment_values.items()
+        }
+        for name in initial_invalid_names:
+            proxy_url = values_by_name.get(name.casefold(), "")
+            endpoint = cls._local_proxy_endpoint(proxy_url)
+            if endpoint is None or endpoint in checked_endpoints:
+                continue
+            checked_endpoints.add(endpoint)
+            owned_names = cls._program_owned_invalid_local_proxy_env_names(
+                initial_invalid_names,
+                environment_values,
+                endpoint,
+            )
+            if not owned_names:
+                continue
+            try:
+                removed, cleanup_state = cls._auto_clear_program_owned_invalid_proxy(
+                    proxy_url,
+                    endpoint,
+                )
+            except Exception as error:
+                return InvalidProxySettingsInspection(
+                    protected_message=(
+                        "检测到本程序写入的失效代理，但自动清理失败："
+                        f"{error}；为避免部分清理，本次未继续处理其他设置"
+                    )
+                )
+            if cleanup_state in {"busy", "transitioning"}:
+                return InvalidProxySettingsInspection(
+                    protected_message=(
+                        "本机代理正在启动或切换保护期，未清理任何设置；请稍后重试"
+                    )
+                )
+            if cleanup_state == "restore_failed":
+                return InvalidProxySettingsInspection(
+                    protected_message=(
+                        "检测到本程序写入的失效代理，但自动恢复 Windows 环境变量、"
+                        "VS Code 或系统代理未完成；已保留恢复记录，请稍后重试"
+                    )
+                )
+            if cleanup_state == "restored":
+                reconciliation_messages.append(
+                    "已自动恢复本程序启动前保存的 Windows 环境变量、VS Code 和系统代理设置"
+                )
+            elif removed:
+                reconciliation_messages.append(
+                    "已自动清理本程序写入的失效代理变量：" + "、".join(removed)
+                )
+
+        environment_names = cls.invalid_local_proxy_env_names(force=True)
+        environment_values = cls._local_proxy_env_values()
+        environment_endpoints = tuple(
+            (name, endpoint[0], endpoint[1])
+            for name in environment_names
+            if (
+                endpoint := cls._local_proxy_endpoint(
+                    next(
+                        (
+                            value
+                            for current_name, value in environment_values.items()
+                            if current_name.casefold() == name.casefold()
+                        ),
+                        "",
+                    )
+                )
+            )
+        )
+        vscode_fields = cls.invalid_vscode_local_proxy_fields(force=True)
+        try:
+            from core import vscode_parser
+
+            vscode_values = cls._vscode_proxy_candidates(
+                vscode_parser.read_vscode_settings()
+            )
+        except Exception:
+            vscode_values = {}
+        vscode_endpoints = tuple(
+            (field, endpoint[0], endpoint[1])
+            for field in vscode_fields
+            if (endpoint := cls._local_proxy_endpoint(vscode_values.get(field)))
+        )
+
+        return InvalidProxySettingsInspection(
+            environment_names=environment_names,
+            environment_endpoints=environment_endpoints,
+            windows_system_endpoint=cls.invalid_windows_system_proxy_endpoint(
+                force=True,
+                include_environment_match=True,
+            ),
+            vscode_fields=vscode_fields,
+            vscode_endpoints=vscode_endpoints,
+            reconciliation_message="；".join(dict.fromkeys(reconciliation_messages)),
+        )
+
+    @classmethod
+    def clear_invalid_proxy_settings(
+        cls,
+        inspection: InvalidProxySettingsInspection,
+    ) -> InvalidProxyCleanupResult:
+        """Revalidate and clear exactly the user-confirmed stale settings."""
+
+        if not isinstance(inspection, InvalidProxySettingsInspection):
+            raise TypeError("失效代理清理清单无效")
+        if inspection.protected_message:
+            return InvalidProxyCleanupResult(errors=(inspection.protected_message,))
+        from core import local_proxy
+
+        removed_environment_names: tuple[str, ...] = ()
+        disabled_windows_endpoint: tuple[str, int] | None = None
+        removed_vscode_fields: tuple[str, ...] = ()
+        errors: list[str] = []
+        with local_proxy._local_proxy_operation_lock("显式清理失效代理设置"):
+            if inspection.environment_names:
+                try:
+                    removed_environment_names = cls.clear_invalid_local_proxy_env(
+                        inspection.environment_names,
+                        expected_endpoints=inspection.environment_endpoints,
+                    )
+                except Exception as error:
+                    errors.append(f"环境变量: {error}")
+            if inspection.windows_system_endpoint is not None:
+                try:
+                    disabled_windows_endpoint = (
+                        cls.disable_invalid_windows_system_proxy(
+                            expected_endpoint=inspection.windows_system_endpoint,
+                        )
+                    )
+                except Exception as error:
+                    errors.append(f"Windows 系统代理: {error}")
+            if inspection.vscode_fields:
+                try:
+                    removed_vscode_fields = (
+                        cls.clear_invalid_vscode_local_proxy_fields(
+                            inspection.vscode_fields,
+                            expected_endpoints=inspection.vscode_endpoints,
+                        )
+                    )
+                except Exception as error:
+                    errors.append(f"VS Code: {error}")
+        return InvalidProxyCleanupResult(
+            removed_environment_names=removed_environment_names,
+            disabled_windows_endpoint=disabled_windows_endpoint,
+            removed_vscode_fields=removed_vscode_fields,
+            errors=tuple(errors),
+        )
 
     @classmethod
     def _program_owned_invalid_local_proxy_env_names(
@@ -909,7 +1390,39 @@ class APITester:
             return False
 
     @classmethod
-    def clear_invalid_local_proxy_env(cls, names: Iterable[str] | None = None) -> tuple[str, ...]:
+    def _clear_program_owned_proxy_marker(
+        cls,
+        endpoint: tuple[str, int],
+    ) -> tuple[str, ...]:
+        """Clear the app-only endpoint marker after ownership is proven."""
+
+        marker_name = "API_SWITCHER_AI_PROXY_URL"
+        removed: list[str] = []
+        if cls._local_proxy_endpoint(os.environ.get(marker_name)) == endpoint:
+            os.environ.pop(marker_name, None)
+            removed.append(marker_name)
+        if os.name == "nt":
+            from core import persistent_env
+
+            try:
+                persistent_value = persistent_env._local_user_env_value_strict(
+                    marker_name
+                )
+                if cls._local_proxy_endpoint(persistent_value) == endpoint:
+                    persistent_env.delete_local_user_env((marker_name,))
+                    if marker_name not in removed:
+                        removed.append(marker_name)
+            except Exception as error:
+                logger.debug("Failed to clear the managed proxy marker: %s", error)
+        return tuple(removed)
+
+    @classmethod
+    def clear_invalid_local_proxy_env(
+        cls,
+        names: Iterable[str] | None = None,
+        *,
+        expected_endpoints: Iterable[tuple[str, str, int]] | None = None,
+    ) -> tuple[str, ...]:
         """Remove only currently invalid loopback proxy variables.
 
         The operation is intentionally narrow: non-loopback proxies, working
@@ -934,6 +1447,28 @@ class APITester:
                         for name in names
                         if invalid_by_fold.get(str(name or "").strip().casefold())
                     )
+                )
+            endpoint_expectations_provided = expected_endpoints is not None
+            expected_by_name = {
+                str(name or "").strip().casefold(): (
+                    str(host or "").strip().casefold(),
+                    int(port),
+                )
+                for name, host, port in (expected_endpoints or ())
+                if str(name or "").strip()
+            }
+            if endpoint_expectations_provided:
+                current_values = cls._local_proxy_env_values()
+                current_by_name = {
+                    name.casefold(): value for name, value in current_values.items()
+                }
+                names_to_clear = tuple(
+                    name
+                    for name in names_to_clear
+                    if cls._local_proxy_endpoint(
+                        current_by_name.get(name.casefold())
+                    )
+                    == expected_by_name.get(name.casefold())
                 )
             if not names_to_clear:
                 return ()
@@ -1053,7 +1588,9 @@ class APITester:
                 if "自动恢复本机设置未完成" in restore_message:
                     return (), "restore_failed"
                 if fresh_owned_names:
-                    return cls.clear_invalid_local_proxy_env(fresh_owned_names), ""
+                    removed = cls.clear_invalid_local_proxy_env(fresh_owned_names)
+                    marker_removed = cls._clear_program_owned_proxy_marker(endpoint)
+                    return tuple(dict.fromkeys((*removed, *marker_removed))), ""
                 # Ownership was proven from the full checkpoint, so an empty
                 # reconciliation result means the state changed underneath us
                 # or could not be safely restored. Never downgrade that to an
