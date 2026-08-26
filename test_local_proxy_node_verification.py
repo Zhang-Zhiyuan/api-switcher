@@ -977,6 +977,61 @@ def test_isolated_mihomo_always_stops_and_removes_secret_config(monkeypatch, tmp
     assert "top-secret-token" in created["config"]
 
 
+def test_isolated_mihomo_reports_and_tracks_secret_directory_cleanup_failure(
+    monkeypatch,
+    tmp_path,
+):
+    created = {}
+
+    class FakeProcess:
+        stopped = False
+
+        def __init__(self, _args, **kwargs):
+            created["directory"] = Path(kwargs["cwd"])
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+        def terminate(self):
+            self.stopped = True
+
+        def kill(self):
+            self.stopped = True
+
+        @staticmethod
+        def wait(timeout):
+            return 0
+
+    node = remote_proxy.parse_proxy_node(
+        "{ name: secret-node, type: vless, server: node.example.com, port: 443, uuid: cleanup-secret }"
+    )
+    monkeypatch.setattr(local_proxy.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(
+        local_proxy,
+        "_remove_isolated_mihomo_directory",
+        lambda _directory: False,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="凭据目录清理失败"):
+            with local_proxy._isolated_mihomo_session(
+                tmp_path / "mihomo.exe",
+                node,
+            ):
+                pass
+
+        directory = created["directory"]
+        assert directory.exists()
+        assert directory in local_proxy._ISOLATED_MIHOMO_DIRECTORIES
+    finally:
+        directory = created.get("directory")
+        if directory is not None:
+            local_proxy.shutil.rmtree(directory, ignore_errors=True)
+            with local_proxy._ISOLATED_MIHOMO_LOCK:
+                local_proxy._ISOLATED_MIHOMO_DIRECTORIES.discard(directory)
+
+
 @pytest.mark.parametrize("reserved_name", ["DIRECT", "REJECT", "PASS", "AI-PROXY"])
 def test_isolated_probe_config_never_routes_to_reserved_display_name(reserved_name):
     node = remote_proxy.parse_proxy_node(
@@ -995,6 +1050,37 @@ def test_isolated_probe_config_never_routes_to_reserved_display_name(reserved_na
         }
     ]
     assert parsed["rules"] == ["MATCH,API-SWITCHER-PROBE-GROUP"]
+
+
+def test_isolated_subscription_recovery_pool_forces_every_domain_through_fallback_group():
+    primary = remote_proxy.parse_proxy_node(
+        "{ name: primary, type: vless, server: one.example.com, port: 443 }"
+    )
+    fallback = remote_proxy.parse_proxy_node(
+        "{ name: fallback, type: vless, server: two.example.com, port: 443 }"
+    )
+
+    config = local_proxy._build_isolated_mihomo_probe_config(
+        primary,
+        18000,
+        fallback_proxy_nodes=(fallback,),
+    )
+    parsed = remote_proxy.yaml.safe_load(config)
+
+    assert [node["name"] for node in parsed["proxies"]] == [
+        "API-SWITCHER-PROBE-NODE",
+        "API-SWITCHER-PROBE-NODE-2",
+    ]
+    assert parsed["proxy-groups"][0]["type"] == "fallback"
+    assert parsed["proxy-groups"][0]["proxies"] == [
+        "API-SWITCHER-PROBE-NODE",
+        "API-SWITCHER-PROBE-NODE-2",
+    ]
+    assert parsed["rules"] == ["MATCH,API-SWITCHER-PROBE-GROUP"]
+    assert "DIRECT" not in parsed["rules"][0]
+    assert parsed["ipv6"] is False
+    assert parsed["dns"]["respect-rules"] is True
+    assert parsed["dns"]["use-system-hosts"] is False
 
 
 def test_exit_cleanup_stops_registered_process_and_removes_secret_directory(

@@ -1,4 +1,6 @@
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -536,6 +538,73 @@ def test_subscription_direct_fallback_uses_compatibility_default_without_prefere
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "missing.json")
 
     assert local_proxy.local_proxy_subscription_direct_fallback_allowed() is True
+
+
+def test_subscription_recovery_reads_only_bounded_managed_pool(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    first = _node()
+    second = {**_node(), "name": "fallback", "server": "fallback.example.com"}
+    content = remote_proxy.build_mihomo_config(
+        first,
+        17897,
+        fallback_proxy_nodes=(second,),
+        health_checked_group=True,
+    )
+    config_path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
+
+    nodes = local_proxy._managed_local_subscription_recovery_nodes()
+
+    assert [node["server"] for node in nodes] == [
+        "proxy.example.com",
+        "fallback.example.com",
+    ]
+    assert config_path.read_text(encoding="utf-8") == content
+
+    config_path.write_text("proxies: []\n", encoding="utf-8")
+    assert local_proxy._managed_local_subscription_recovery_nodes() == ()
+
+
+def test_subscription_recovery_uses_disposable_pool_without_touching_live_proxy(
+    monkeypatch,
+    tmp_path,
+):
+    nodes = (
+        _node(),
+        {**_node(), "name": "fallback", "server": "fallback.example.com"},
+    )
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    binary_path = binary_dir / "mihomo.exe"
+    binary_path.write_bytes(b"test")
+    calls = []
+
+    def isolated(binary, primary, *, fallback_proxy_nodes, startup_timeout_seconds):
+        calls.append(
+            (
+                binary,
+                primary,
+                tuple(fallback_proxy_nodes),
+                startup_timeout_seconds,
+            )
+        )
+        return nullcontext(SimpleNamespace(proxy_url="http://127.0.0.1:19001"))
+
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", binary_dir)
+    monkeypatch.setattr(
+        local_proxy,
+        "_managed_local_subscription_recovery_nodes",
+        lambda: nodes,
+    )
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_session", isolated)
+
+    with local_proxy.local_proxy_subscription_recovery_session(9.0) as proxy_url:
+        assert proxy_url == "http://127.0.0.1:19001"
+
+    assert len(calls) == 1
+    assert calls[0][:3] == (binary_path, nodes[0], (nodes[1],))
+    assert 0 < calls[0][3] <= 9.0
 
 
 def test_subscription_direct_fallback_stays_closed_after_ui_quarantines_corrupt_preferences(

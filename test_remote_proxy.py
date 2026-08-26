@@ -3514,6 +3514,208 @@ def test_fetch_proxy_subscription_does_not_bypass_origin_gateway_error_without_p
     assert calls == ["origin"]
 
 
+def test_fetch_proxy_subscription_uses_isolated_managed_pool_after_direct_failure(
+    monkeypatch,
+    tmp_path,
+):
+    class Headers:
+        def get_content_type(self):
+            return "application/yaml"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: recovered, type: vless, server: example.com, port: 443 }\n"
+
+    calls = []
+
+    class RecoveryOpener:
+        def open(self, _request, **_kwargs):
+            calls.append("managed-proxy")
+            return Response()
+
+    class RecoverySession:
+        def __enter__(self):
+            calls.append("start-isolated-session")
+            return "http://127.0.0.1:17897"
+
+        def __exit__(self, *_args):
+            calls.append("stop-isolated-session")
+            return False
+
+    def build_opener(handler):
+        assert isinstance(handler, remote_proxy._NoBypassProxyHandler)
+        calls.append(dict(handler.proxies))
+        return RecoveryOpener()
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: calls.append("direct")
+        or (_ for _ in ()).throw(TimeoutError("direct route timed out")),
+    )
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", build_opener)
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=1,
+        retry_base_delay=0,
+        recovery_proxy_provider=lambda _timeout: calls.append("create-isolated-session")
+        or RecoverySession(),
+    )
+
+    assert result.nodes[0].node["name"] == "recovered"
+    assert calls == [
+        "direct",
+        "create-isolated-session",
+        "start-isolated-session",
+        {"http": "http://127.0.0.1:17897", "https": "http://127.0.0.1:17897"},
+        "managed-proxy",
+        "stop-isolated-session",
+    ]
+    assert "现有受管节点的隔离代理" in result.proxy_warning
+    assert "一次性代理已退出" in result.proxy_warning
+
+
+def test_fetch_proxy_subscription_does_not_inspect_recovery_proxy_when_primary_succeeds(
+    monkeypatch,
+    tmp_path,
+):
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=1,
+        recovery_proxy_provider=lambda _timeout: (_ for _ in ()).throw(
+            AssertionError("successful primary route must stay lazy")
+        ),
+    )
+
+    assert result.nodes[0].node["name"] == "direct"
+    assert result.proxy_warning == ""
+
+
+def test_fetch_proxy_subscription_strict_can_use_verified_managed_recovery_proxy(
+    monkeypatch,
+    tmp_path,
+):
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: strict-recovery, type: vless, server: example.com, port: 443 }\n"
+
+    calls = []
+
+    class RecoveryOpener:
+        def open(self, _request, **_kwargs):
+            calls.append("managed-proxy")
+            return Response()
+
+    def build_opener(handler):
+        assert isinstance(handler, remote_proxy._NoBypassProxyHandler)
+        calls.append(dict(handler.proxies))
+        return RecoveryOpener()
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("strict mode must not connect directly")
+        ),
+    )
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", build_opener)
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=1,
+        allow_direct_fallback=False,
+        recovery_proxy_provider=lambda _timeout: "http://localhost:17897",
+    )
+
+    assert result.nodes[0].node["name"] == "strict-recovery"
+    assert calls == [
+        {"http": "http://localhost:17897", "https": "http://localhost:17897"},
+        "managed-proxy",
+    ]
+    assert "现有受管节点的隔离代理" in result.proxy_warning
+
+
+@pytest.mark.parametrize(
+    "recovery_url",
+    [
+        "https://127.0.0.1:17897",
+        "http://proxy.example.com:17897",
+        "http://user:secret@127.0.0.1:17897",
+        "http://127.0.0.1:17897/path",
+    ],
+)
+def test_fetch_proxy_subscription_rejects_untrusted_recovery_proxy_urls(
+    monkeypatch,
+    tmp_path,
+    recovery_url,
+):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("direct failed")),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("untrusted recovery URL must not be used")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="direct failed"):
+        remote_proxy.fetch_proxy_subscription(
+            "https://example.com/sub",
+            retries=1,
+            retry_base_delay=0,
+            recovery_proxy_provider=lambda _timeout: recovery_url,
+        )
+
+
 def test_fetch_proxy_subscription_can_forbid_direct_fallback(monkeypatch, tmp_path):
     calls = []
 
