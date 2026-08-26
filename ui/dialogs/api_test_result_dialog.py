@@ -117,7 +117,9 @@ class APITestResultDialog(ctk.CTkToplevel):
             self._add_detail_row(scroll_frame, "代理处理", proxy_warning, COLORS["warning"])
             self._invalid_proxy_env_names = APITester.invalid_local_proxy_env_names()
             self._invalid_system_proxy_endpoint = (
-                APITester.invalid_windows_system_proxy_endpoint()
+                APITester.invalid_windows_system_proxy_endpoint(
+                    include_environment_match=True
+                )
             )
 
         # Error details / benchmark details
@@ -179,7 +181,9 @@ class APITestResultDialog(ctk.CTkToplevel):
     def _confirm_proxy_cleanup(self) -> None:
         """Ask before clearing unowned invalid loopback proxy settings."""
         names = APITester.invalid_local_proxy_env_names()
-        system_endpoint = APITester.invalid_windows_system_proxy_endpoint()
+        system_endpoint = APITester.invalid_windows_system_proxy_endpoint(
+            include_environment_match=True
+        )
         if not names and system_endpoint is None:
             self._invalid_proxy_env_names = ()
             self._invalid_system_proxy_endpoint = None
@@ -190,8 +194,39 @@ class APITestResultDialog(ctk.CTkToplevel):
         from ui.dialogs.confirm_dialog import ConfirmDialog
 
         details = []
+        environment_values = APITester._local_proxy_env_values()
+        expected_environment_endpoints = tuple(
+            (name, endpoint[0], endpoint[1])
+            for name in names
+            if (
+                endpoint := APITester._local_proxy_endpoint(
+                    next(
+                        (
+                            value
+                            for current_name, value in environment_values.items()
+                            if current_name.casefold() == name.casefold()
+                        ),
+                        "",
+                    )
+                )
+            )
+        )
         if names:
-            details.append("环境变量：" + "、".join(names))
+            endpoint_by_name = {
+                name.casefold(): (
+                    f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+                )
+                for name, host, port in expected_environment_endpoints
+            }
+            details.append(
+                "环境变量："
+                + "、".join(
+                    f"{name} ({endpoint_by_name[name.casefold()]})"
+                    if name.casefold() in endpoint_by_name
+                    else name
+                    for name in names
+                )
+            )
         if system_endpoint is not None:
             details.append(
                 f"Windows 系统代理：{system_endpoint[0]}:{system_endpoint[1]}"
@@ -200,8 +235,17 @@ class APITestResultDialog(ctk.CTkToplevel):
 
         def cleanup() -> None:
             try:
-                removed = APITester.clear_invalid_local_proxy_env()
-                disabled_endpoint = APITester.disable_invalid_windows_system_proxy()
+                removed = APITester.clear_invalid_local_proxy_env(
+                    names,
+                    expected_endpoints=expected_environment_endpoints,
+                )
+                disabled_endpoint = None
+                if system_endpoint is not None:
+                    disabled_endpoint = (
+                        APITester.disable_invalid_windows_system_proxy(
+                            expected_endpoint=system_endpoint
+                        )
+                    )
                 actions = []
                 if removed:
                     actions.append(f"已清理代理变量: {'、'.join(removed)}")
