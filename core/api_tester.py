@@ -80,7 +80,7 @@ class APITester:
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
     MAX_PROXY_CHECK_CACHE_ENTRIES = 64
-    USER_AGENT = "API-Switcher/2.4.5"
+    USER_AGENT = "API-Switcher/2.4.6"
     # Keep both common casings: Windows environment names are case-insensitive,
     # while copied shell variables on Unix often use lowercase names.
     LOCAL_PROXY_ENV_NAMES = (
@@ -936,8 +936,15 @@ class APITester:
             raise
 
     @classmethod
-    def _invalid_local_proxy_warning(cls, url: str) -> str:
+    def _invalid_local_proxy_warning(
+        cls,
+        url: str,
+        *,
+        request_action: str = "本次请求已临时直连",
+    ) -> str:
         """Detect a refused loopback proxy and safely reconcile app-owned residue."""
+
+        action = str(request_action or "本次请求已临时直连").strip()
 
         try:
             parsed_url = urllib.parse.urlsplit(str(url or ""))
@@ -984,7 +991,7 @@ class APITester:
             except Exception as error:
                 logger.warning("Failed to auto-clean managed invalid proxy variables: %s", error)
                 return (
-                    f"检测到本程序配置的失效本机代理 {host}:{port}，本次请求已临时直连；"
+                    f"检测到本程序配置的失效本机代理 {host}:{port}，{action}；"
                     f"自动清理失败，请手动清理变量（{ '、'.join(owned_names) }）"
                 )
             if cleanup_state == "recovered":
@@ -992,7 +999,7 @@ class APITester:
             if cleanup_state in {"busy", "transitioning"}:
                 return (
                     f"检测到本程序的本机代理 {host}:{port} 暂时不可用，"
-                    "代理正在启动或切换保护期，未清理环境变量；本次请求已临时直连"
+                    f"代理正在启动或切换保护期，未清理环境变量；{action}"
                 )
             if removed:
                 remaining = tuple(
@@ -1001,9 +1008,34 @@ class APITester:
                 suffix = f"；另有来源不明变量待确认（{ '、'.join(remaining) }）" if remaining else ""
                 return (
                     f"检测到本程序配置的失效本机代理 {host}:{port}，已自动清理变量"
-                    f"（{ '、'.join(removed) }），本次请求已直连{suffix}"
+                    f"（{ '、'.join(removed) }）；{action}{suffix}"
                 )
-        return f"检测到失效本机代理 {host}:{port}，本次请求已临时直连"
+        variable_detail = f"（{'、'.join(invalid_names)}）" if invalid_names else ""
+        return (
+            f"检测到来源无法确认的失效本机代理 {host}:{port}{variable_detail}，"
+            f"未修改环境变量；{action}"
+        )
+
+    @classmethod
+    def reconcile_invalid_local_proxy_for_request(
+        cls,
+        url: str,
+        *,
+        request_action: str = "本次请求已临时直连",
+    ) -> str:
+        """Safely reconcile an invalid loopback proxy before a network request.
+
+        This public entry point is shared by API probes and subscription
+        downloads. Automatic deletion remains restricted to variables proven
+        to be owned by this application; unrelated proxies are only reported.
+        """
+
+        action = str(request_action or "本次请求已临时直连").strip()
+        if action == "本次请求已临时直连":
+            # Preserve the original two-argument monkeypatch/extension
+            # contract for ordinary API requests.
+            return cls._invalid_local_proxy_warning(url)
+        return cls._invalid_local_proxy_warning(url, request_action=action)
 
     @classmethod
     def _urlopen(
@@ -1019,9 +1051,9 @@ class APITester:
         # even when the direct request itself raises. Preserve that decision:
         # auto-cleaning the process env between two checks must not make this
         # same request fall back to a still-stale WinINET proxy.
-        warning = str(known_proxy_warning or "") or cls._invalid_local_proxy_warning(
-            request.full_url
-        )
+        warning = str(
+            known_proxy_warning or ""
+        ) or cls.reconcile_invalid_local_proxy_for_request(request.full_url)
         if warning:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             return opener.open(request, timeout=timeout), warning
@@ -1119,7 +1151,7 @@ class APITester:
 
         # Compute before opening so the diagnostic is retained even when the
         # direct retry itself fails (``opener.open`` raises before returning).
-        proxy_warning = APITester._invalid_local_proxy_warning(url)
+        proxy_warning = APITester.reconcile_invalid_local_proxy_for_request(url)
         try:
             response, detected_proxy_warning = APITester._urlopen(
                 req,
@@ -1226,7 +1258,7 @@ class APITester:
         req = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
         request_secrets = APITester._sensitive_header_values(request_headers)
 
-        proxy_warning = APITester._invalid_local_proxy_warning(url)
+        proxy_warning = APITester.reconcile_invalid_local_proxy_for_request(url)
         try:
             response, detected_proxy_warning = APITester._urlopen(
                 req,
@@ -1815,7 +1847,7 @@ class APITester:
         except ValueError as exc:
             return APITester._invalid_base_url_result(exc)
         start_time = time.time()
-        proxy_warning = APITester._invalid_local_proxy_warning(url)
+        proxy_warning = APITester.reconcile_invalid_local_proxy_for_request(url)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": APITester.USER_AGENT}, method="HEAD")
             response, detected_proxy_warning = APITester._urlopen(
