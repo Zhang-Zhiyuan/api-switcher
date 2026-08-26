@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 APP_NAME = "API切换器"
-APP_VERSION = "2.4.7"
+APP_VERSION = "2.4.8"
 SPEC_PATH = Path(f"{APP_NAME}.spec")
 VERSION_INFO_PATH = Path("version_info.txt")
 RELEASE_REQUIREMENTS_PATH = Path("requirements-release.txt")

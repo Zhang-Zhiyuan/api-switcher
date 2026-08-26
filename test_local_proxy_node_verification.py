@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1052,7 +1053,7 @@ def test_isolated_probe_config_never_routes_to_reserved_display_name(reserved_na
     assert parsed["rules"] == ["MATCH,API-SWITCHER-PROBE-GROUP"]
 
 
-def test_isolated_subscription_recovery_pool_forces_every_domain_through_fallback_group():
+def test_isolated_subscription_recovery_pool_forces_every_domain_through_select_group():
     primary = remote_proxy.parse_proxy_node(
         "{ name: primary, type: vless, server: one.example.com, port: 443 }"
     )
@@ -1071,16 +1072,91 @@ def test_isolated_subscription_recovery_pool_forces_every_domain_through_fallbac
         "API-SWITCHER-PROBE-NODE",
         "API-SWITCHER-PROBE-NODE-2",
     ]
-    assert parsed["proxy-groups"][0]["type"] == "fallback"
+    assert parsed["proxy-groups"][0]["type"] == "select"
     assert parsed["proxy-groups"][0]["proxies"] == [
         "API-SWITCHER-PROBE-NODE",
         "API-SWITCHER-PROBE-NODE-2",
     ]
     assert parsed["rules"] == ["MATCH,API-SWITCHER-PROBE-GROUP"]
     assert "DIRECT" not in parsed["rules"][0]
+    assert parsed["external-controller"] == "127.0.0.1:19000"
     assert parsed["ipv6"] is False
     assert parsed["dns"]["respect-rules"] is True
     assert parsed["dns"]["use-system-hosts"] is False
+
+
+def test_isolated_subscription_session_selects_and_verifies_requested_route(monkeypatch, tmp_path):
+    calls = []
+
+    def select(controller_port, route_name, *, timeout_seconds):
+        calls.append((controller_port, route_name, timeout_seconds))
+
+    monkeypatch.setattr(local_proxy, "_select_isolated_mihomo_route", select)
+    session = local_proxy._IsolatedMihomoSession(
+        proxy_url="http://127.0.0.1:19001",
+        config_path=tmp_path / "config.yaml",
+        mixed_port=19001,
+        process=object(),
+        controller_port=19002,
+        route_names=("API-SWITCHER-PROBE-NODE", "API-SWITCHER-PROBE-NODE-2"),
+    )
+
+    session.select_route(1, 0.8)
+
+    assert session.route_count == 2
+    assert calls == [(19002, "API-SWITCHER-PROBE-NODE-2", 0.8)]
+
+
+def test_isolated_route_controller_put_ignores_proxy_environment(monkeypatch):
+    requests = []
+
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        def open(self, request, *, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+    def build_opener(handler):
+        assert isinstance(handler, local_proxy.urllib.request.ProxyHandler)
+        assert handler.proxies == {}
+        return Opener()
+
+    controller_reads = []
+    monkeypatch.setattr(local_proxy.urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(
+        local_proxy,
+        "_read_local_mihomo_controller_json",
+        lambda port, path, *, timeout_seconds: controller_reads.append(
+            (port, path, timeout_seconds)
+        )
+        or {"now": "API-SWITCHER-PROBE-NODE-2"},
+    )
+
+    local_proxy._select_isolated_mihomo_route(
+        19002,
+        "API-SWITCHER-PROBE-NODE-2",
+        timeout_seconds=0.8,
+    )
+
+    request, timeout = requests[0]
+    assert request.get_method() == "PUT"
+    assert request.full_url.endswith("/proxies/API-SWITCHER-PROBE-GROUP")
+    assert json.loads(request.data.decode("utf-8")) == {
+        "name": "API-SWITCHER-PROBE-NODE-2"
+    }
+    assert 0 < timeout <= 0.8
+    assert controller_reads[0][0:2] == (
+        19002,
+        "/proxies/API-SWITCHER-PROBE-GROUP",
+    )
 
 
 def test_exit_cleanup_stops_registered_process_and_removes_secret_directory(

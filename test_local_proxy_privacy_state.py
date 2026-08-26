@@ -566,6 +566,41 @@ def test_subscription_recovery_reads_only_bounded_managed_pool(monkeypatch, tmp_
     assert local_proxy._managed_local_subscription_recovery_nodes() == ()
 
 
+def test_subscription_recovery_extends_deployed_pool_from_linked_offline_cache(monkeypatch):
+    primary = _node()
+    cached = {**_node(), "name": "cached", "server": "cached.example.com"}
+    duplicate = {**primary, "name": "same-connection"}
+
+    monkeypatch.setattr(
+        local_proxy,
+        "_managed_local_subscription_recovery_nodes",
+        lambda: (primary,),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_cached_subscription_fallback_nodes",
+        lambda node: (cached, duplicate) if node["server"] == primary["server"] else (),
+    )
+
+    nodes = local_proxy._available_local_subscription_recovery_nodes()
+
+    assert [node["server"] for node in nodes] == [
+        "proxy.example.com",
+        "cached.example.com",
+    ]
+
+
+def test_subscription_recovery_can_use_app_owned_last_node_without_deployed_config(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_managed_local_subscription_recovery_nodes", lambda: ())
+    monkeypatch.setattr(local_proxy, "_load_last_proxy_node", _node)
+    monkeypatch.setattr(local_proxy, "_cached_subscription_fallback_nodes", lambda _node: ())
+
+    nodes = local_proxy._available_local_subscription_recovery_nodes()
+
+    assert len(nodes) == 1
+    assert nodes[0]["server"] == "proxy.example.com"
+
+
 def test_subscription_recovery_uses_disposable_pool_without_touching_live_proxy(
     monkeypatch,
     tmp_path,
@@ -589,7 +624,12 @@ def test_subscription_recovery_uses_disposable_pool_without_touching_live_proxy(
                 startup_timeout_seconds,
             )
         )
-        return nullcontext(SimpleNamespace(proxy_url="http://127.0.0.1:19001"))
+        return nullcontext(
+            SimpleNamespace(
+                proxy_url="http://127.0.0.1:19001",
+                route_count=2,
+            )
+        )
 
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_BIN_DIR", binary_dir)
     monkeypatch.setattr(
@@ -597,10 +637,12 @@ def test_subscription_recovery_uses_disposable_pool_without_touching_live_proxy(
         "_managed_local_subscription_recovery_nodes",
         lambda: nodes,
     )
+    monkeypatch.setattr(local_proxy, "_cached_subscription_fallback_nodes", lambda _node: ())
     monkeypatch.setattr(local_proxy, "_isolated_mihomo_session", isolated)
 
-    with local_proxy.local_proxy_subscription_recovery_session(9.0) as proxy_url:
-        assert proxy_url == "http://127.0.0.1:19001"
+    with local_proxy.local_proxy_subscription_recovery_session(9.0) as session:
+        assert session.proxy_url == "http://127.0.0.1:19001"
+        assert session.route_count == 2
 
     assert len(calls) == 1
     assert calls[0][:3] == (binary_path, nodes[0], (nodes[1],))

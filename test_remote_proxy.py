@@ -3591,6 +3591,226 @@ def test_fetch_proxy_subscription_uses_isolated_managed_pool_after_direct_failur
     assert "一次性代理已退出" in result.proxy_warning
 
 
+def test_fetch_proxy_subscription_recovery_rotates_existing_nodes(monkeypatch, tmp_path):
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: route-2, type: vless, server: example.com, port: 443 }\n"
+
+    route = [0]
+    selections = []
+    requests = []
+
+    class RecoverySession:
+        proxy_url = "http://127.0.0.1:19001"
+        route_count = 3
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def select_route(self, index, timeout_seconds):
+            selections.append((index, timeout_seconds))
+            route[0] = index
+
+    class RecoveryOpener:
+        def open(self, request, **_kwargs):
+            requests.append((route[0], request.get_header("User-agent")))
+            if route[0] == 0:
+                raise remote_proxy.HTTPError(
+                    request.full_url,
+                    451,
+                    "Unavailable For Legal Reasons",
+                    {},
+                    None,
+                )
+            return Response()
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("direct timeout")),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda handler: RecoveryOpener()
+        if isinstance(handler, remote_proxy._NoBypassProxyHandler)
+        else (_ for _ in ()).throw(AssertionError("unexpected direct opener")),
+    )
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=1,
+        retry_base_delay=0,
+        recovery_proxy_provider=lambda _timeout: RecoverySession(),
+    )
+
+    assert result.nodes[0].node["name"] == "route-2"
+    assert [item[0] for item in requests] == [0, 1]
+    assert selections and selections[0][0] == 1
+    assert 0 < selections[0][1] <= 1.5
+    assert "尝试 2 个已有节点" in result.proxy_warning
+
+
+def test_fetch_proxy_subscription_recovery_rotates_client_signatures_after_403(
+    monkeypatch,
+    tmp_path,
+):
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: ua-compatible, type: vless, server: example.com, port: 443 }\n"
+
+    user_agents = []
+
+    class RecoveryOpener:
+        def open(self, request, **_kwargs):
+            user_agents.append(request.get_header("User-agent"))
+            if len(user_agents) < 3:
+                raise remote_proxy.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+            return Response()
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("direct timeout")),
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "build_opener",
+        lambda handler: RecoveryOpener()
+        if isinstance(handler, remote_proxy._NoBypassProxyHandler)
+        else (_ for _ in ()).throw(AssertionError("unexpected direct opener")),
+    )
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=1,
+        retry_base_delay=0,
+        recovery_proxy_provider=lambda _timeout: "http://127.0.0.1:19001",
+    )
+
+    assert result.nodes[0].node["name"] == "ua-compatible"
+    assert user_agents == list(remote_proxy.PROXY_SUBSCRIPTION_USER_AGENTS[:3])
+
+
+def test_fetch_proxy_subscription_retries_http_200_block_page_through_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    class Response:
+        def __init__(self, payload, content_type):
+            self.payload = payload
+            self.headers = {"Content-Type": content_type}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return self.payload
+
+    class RecoveryOpener:
+        def open(self, _request, **_kwargs):
+            return Response(
+                b"proxies:\n  - { name: recovered-html, type: vless, server: example.com, port: 443 }\n",
+                "application/yaml",
+            )
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: Response(
+            b"<!doctype html><html><title>Access denied</title></html>",
+            "text/html",
+        ),
+    )
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler: RecoveryOpener())
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=1,
+        retry_base_delay=0,
+        recovery_proxy_provider=lambda _timeout: "http://127.0.0.1:19001",
+    )
+
+    assert result.nodes[0].node["name"] == "recovered-html"
+    assert "隔离代理完成更新" in result.proxy_warning
+
+
+def test_fetch_proxy_subscription_retries_direct_recovery_with_next_signature(
+    monkeypatch,
+    tmp_path,
+):
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"proxies:\n  - { name: direct-ua-2, type: vless, server: example.com, port: 443 }\n"
+
+    direct_user_agents = []
+
+    class DirectOpener:
+        def open(self, request, **_kwargs):
+            direct_user_agents.append(request.get_header("User-agent"))
+            if len(direct_user_agents) == 1:
+                raise remote_proxy.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+            return Response()
+
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:7890"},
+    )
+    monkeypatch.setattr(
+        remote_proxy.urlrequest,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("proxy disconnected")),
+    )
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler: DirectOpener())
+
+    result = remote_proxy.fetch_proxy_subscription(
+        "https://example.com/sub",
+        retries=2,
+        retry_base_delay=0,
+    )
+
+    assert result.nodes[0].node["name"] == "direct-ua-2"
+    assert direct_user_agents == list(remote_proxy.PROXY_SUBSCRIPTION_USER_AGENTS[:2])
+
+
 def test_fetch_proxy_subscription_does_not_inspect_recovery_proxy_when_primary_succeeds(
     monkeypatch,
     tmp_path,
