@@ -387,6 +387,29 @@ class _IsolatedMihomoSession:
     config_path: Path
     mixed_port: int
     process: object = field(compare=False, repr=False)
+    controller_port: int | None = None
+    route_names: tuple[str, ...] = ()
+
+    @property
+    def route_count(self) -> int:
+        return max(1, len(self.route_names))
+
+    def select_route(self, index: int, timeout_seconds: float = 1.5) -> None:
+        route_index = int(index)
+        if route_index == 0 and self.controller_port is None:
+            return
+        if (
+            self.controller_port is None
+            or not self.route_names
+            or route_index < 0
+            or route_index >= len(self.route_names)
+        ):
+            raise RuntimeError("临时 mihomo 没有可切换的订阅兜底节点")
+        _select_isolated_mihomo_route(
+            self.controller_port,
+            self.route_names[route_index],
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def load_local_proxy_preferences() -> dict:
@@ -617,19 +640,59 @@ def _managed_local_subscription_recovery_nodes() -> tuple[dict, ...]:
     return tuple(selected)
 
 
+def _available_local_subscription_recovery_nodes() -> tuple[dict, ...]:
+    """Combine the deployed pool with its linked offline cache, without network I/O."""
+
+    selected = list(_managed_local_subscription_recovery_nodes())
+    if selected:
+        primary = selected[0]
+    else:
+        try:
+            primary = remote_proxy._normalize_proxy_node(_load_last_proxy_node())
+        except Exception:
+            primary = None
+        if isinstance(primary, dict) and not str(primary.get("dialer-proxy") or "").strip():
+            selected.append(primary)
+        else:
+            primary = None
+
+    if not isinstance(primary, dict):
+        return ()
+    try:
+        cached_fallbacks = _cached_subscription_fallback_nodes(primary)
+    except Exception:
+        cached_fallbacks = ()
+    seen = set()
+    normalized_nodes = []
+    for candidate in [*selected, *cached_fallbacks]:
+        if len(normalized_nodes) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES:
+            break
+        try:
+            normalized = remote_proxy._normalize_proxy_node(candidate)
+            connection_key = remote_proxy._proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
+            continue
+        normalized_nodes.append(normalized)
+        seen.add(connection_key)
+    return tuple(normalized_nodes)
+
+
 @contextmanager
 def local_proxy_subscription_recovery_session(timeout_seconds: float = 15.0):
     """Yield an isolated proxy pool for one failed subscription refresh.
 
     Reusing the live mixed port is insufficient in compatibility mode because
     an arbitrary subscription domain may match ``DIRECT``. This session copies
-    only the existing managed node pool into a disposable mihomo process whose
-    sole rule is to proxy all traffic. It never reloads the live process or
-    changes config, selected node, state, environment, VS Code, or WinINET.
+    the deployed app-owned pool plus its strongly linked offline cache into a
+    disposable mihomo process whose sole rule is to proxy all traffic. It never
+    reloads the live process or changes config, selected node, state,
+    environment, VS Code, or WinINET.
     """
 
     deadline = time.monotonic() + max(0.05, float(timeout_seconds or 0.0))
-    nodes = _managed_local_subscription_recovery_nodes()
+    nodes = _available_local_subscription_recovery_nodes()
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
     if not nodes:
         raise RuntimeError("没有可用于订阅兜底的受管节点池")
@@ -638,14 +701,25 @@ def local_proxy_subscription_recovery_session(timeout_seconds: float = 15.0):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("订阅兜底节点池检查超过剩余等待时间")
-    with _MIHOMO_BINARY_LOCK:
+    acquired = _MIHOMO_BINARY_LOCK.acquire(timeout=max(0.001, remaining))
+    if not acquired:
+        raise TimeoutError("等待 mihomo 内核完成其他操作时超过订阅兜底剩余时间")
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("订阅兜底节点池检查超过剩余等待时间")
         with _isolated_mihomo_session(
             binary_path,
             nodes[0],
             fallback_proxy_nodes=nodes[1:],
             startup_timeout_seconds=remaining,
         ) as session:
-            yield session.proxy_url
+            # Yield the scoped object rather than only its URL so the download
+            # layer can deterministically rotate existing nodes when one exit
+            # IP is blocked by the subscription provider.
+            yield session
+    finally:
+        _MIHOMO_BINARY_LOCK.release()
 
 
 def local_proxy_start_on_login_enabled() -> bool:
@@ -1824,13 +1898,21 @@ def _local_mihomo_failover_status(
     )
 
 
-def _read_local_mihomo_controller_json(controller_port: int, path: str) -> dict:
+def _read_local_mihomo_controller_json(
+    controller_port: int,
+    path: str,
+    *,
+    timeout_seconds: float = 1.5,
+) -> dict:
     request = urllib.request.Request(
         f"http://127.0.0.1:{int(controller_port)}{path}",
         headers={"Accept": "application/json"},
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=1.5) as response:
+    with opener.open(
+        request,
+        timeout=max(0.05, min(3.0, float(timeout_seconds or 0.0))),
+    ) as response:
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
         if status < 200 or status >= 300:
             raise RuntimeError(f"mihomo controller HTTP {status}")
@@ -1839,6 +1921,45 @@ def _read_local_mihomo_controller_json(controller_port: int, path: str) -> dict:
     if not isinstance(parsed, dict):
         raise RuntimeError("mihomo 控制器响应不是对象")
     return parsed
+
+
+def _select_isolated_mihomo_route(
+    controller_port: int,
+    route_name: str,
+    *,
+    timeout_seconds: float = 1.5,
+) -> None:
+    """Select and verify one internal route without inheriting any proxy env."""
+
+    timeout = max(0.1, min(3.0, float(timeout_seconds or 0.0)))
+    deadline = time.monotonic() + timeout
+    group_name = "API-SWITCHER-PROBE-GROUP"
+    clean_route = str(route_name or "").strip()
+    if not clean_route:
+        raise ValueError("临时 mihomo 订阅兜底节点名称为空")
+    payload = json.dumps({"name": clean_route}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        "http://127.0.0.1:"
+        f"{int(controller_port)}/proxies/{url_quote(group_name, safe='')}",
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="PUT",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        if status < 200 or status >= 300:
+            raise RuntimeError(f"mihomo controller route switch HTTP {status}")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("临时 mihomo 节点切换超过等待时间")
+    state = _read_local_mihomo_controller_json(
+        controller_port,
+        f"/proxies/{url_quote(group_name, safe='')}",
+        timeout_seconds=remaining,
+    )
+    if str(state.get("now") or "").strip() != clean_route:
+        raise RuntimeError("临时 mihomo 未确认切换到指定订阅兜底节点")
 
 
 def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalAIProxyStatus:
@@ -2489,24 +2610,47 @@ def _isolated_mihomo_session(
     """Run a bounded node pool in a disposable mihomo instance without managed state."""
 
     process = None
+    subscription_recovery = fallback_proxy_nodes is not None
     probe_dir = Path(tempfile.mkdtemp(prefix="api-switcher-node-probe-"))
     with _ISOLATED_MIHOMO_LOCK:
         _ISOLATED_MIHOMO_DIRECTORIES.add(probe_dir)
     try:
         if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set():
             raise RuntimeError("应用正在退出，已取消节点稳定验证")
-        mixed_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reserved_sockets = []
         try:
-            mixed_socket.bind(("127.0.0.1", 0))
-            mixed_port = int(mixed_socket.getsockname()[1])
+            port_count = 2 if subscription_recovery else 1
+            for _index in range(port_count):
+                reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                reserved.bind(("127.0.0.1", 0))
+                reserved_sockets.append(reserved)
+            mixed_port = int(reserved_sockets[0].getsockname()[1])
+            controller_port = (
+                int(reserved_sockets[1].getsockname()[1])
+                if subscription_recovery
+                else None
+            )
         finally:
-            mixed_socket.close()
+            for reserved in reserved_sockets:
+                reserved.close()
 
         config = _build_isolated_mihomo_probe_config(
             proxy_node,
             mixed_port,
             fallback_proxy_nodes=fallback_proxy_nodes,
+            controller_port=controller_port,
         )
+        parsed_config = remote_proxy.yaml.safe_load(config)
+        groups = parsed_config.get("proxy-groups") if isinstance(parsed_config, dict) else None
+        group = groups[0] if isinstance(groups, list) and groups else {}
+        raw_route_names = group.get("proxies") if isinstance(group, dict) else None
+        route_names = tuple(
+            str(name or "").strip()
+            for name in (raw_route_names if isinstance(raw_route_names, list) else ())
+            if str(name or "").strip()
+        )
+        if not route_names:
+            raise RuntimeError("临时 mihomo 配置没有可用节点")
         config_path = probe_dir / "config.yaml"
         atomic_write_text(config_path, config)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -2530,7 +2674,12 @@ def _isolated_mihomo_session(
             while time.monotonic() < startup_deadline:
                 if process.poll() is not None:
                     raise RuntimeError("临时 mihomo 启动失败")
-                if _is_port_listening(mixed_port):
+                listening_ports = (
+                    (mixed_port, controller_port)
+                    if controller_port is not None
+                    else (mixed_port,)
+                )
+                if all(_is_port_listening(port) for port in listening_ports):
                     break
                 time.sleep(min(0.1, max(0.001, startup_deadline - time.monotonic())))
             else:
@@ -2540,6 +2689,8 @@ def _isolated_mihomo_session(
                 config_path=config_path,
                 mixed_port=mixed_port,
                 process=process,
+                controller_port=controller_port,
+                route_names=route_names,
             )
         finally:
             if not _terminate_isolated_mihomo_process(process):
@@ -2564,6 +2715,7 @@ def _build_isolated_mihomo_probe_config(
     mixed_port: int,
     *,
     fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None = None,
+    controller_port: int | None = None,
 ) -> str:
     subscription_recovery = fallback_proxy_nodes is not None
     candidates = [proxy_node, *(fallback_proxy_nodes or ())]
@@ -2599,18 +2751,6 @@ def _build_isolated_mihomo_probe_config(
         "type": "select",
         "proxies": names,
     }
-    if len(names) > 1:
-        group.update(
-            {
-                "type": "fallback",
-                "url": remote_proxy.AI_PROXY_HEALTH_CHECK_URL,
-                "interval": remote_proxy.AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS,
-                "lazy": False,
-                "timeout": remote_proxy.AI_PROXY_HEALTH_CHECK_TIMEOUT_MS,
-                "max-failed-times": remote_proxy.AI_PROXY_HEALTH_CHECK_MAX_FAILURES,
-                "expected-status": remote_proxy.AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS,
-            }
-        )
     config = {
         "mixed-port": int(mixed_port),
         "allow-lan": False,
@@ -2623,9 +2763,18 @@ def _build_isolated_mihomo_probe_config(
         "rules": [f"MATCH,{group_name}"],
     }
     if subscription_recovery:
+        resolved_controller_port = (
+            int(controller_port)
+            if controller_port is not None
+            else remote_proxy.mihomo_controller_port(mixed_port)
+        )
+        config["external-controller"] = f"127.0.0.1:{resolved_controller_port}"
         # Subscription recovery must not fall back to plaintext/system DNS in
         # strict privacy mode. The encrypted resolver requests themselves are
-        # covered by the MATCH rule and therefore use the isolated node pool.
+        # covered by the MATCH rule and therefore use the selected isolated
+        # node. A deterministic select group lets the caller try every bounded
+        # existing route instead of trusting an unrelated health-check URL to
+        # predict access to this particular subscription provider.
         config["dns"] = remote_proxy._strict_privacy_dns_config()
     return remote_proxy.AI_PROXY_CONFIG_MARKER + " isolated\n" + remote_proxy._dump_yaml(config)
 

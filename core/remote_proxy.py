@@ -181,7 +181,9 @@ _PROXY_SUBSCRIPTION_PROFILE_FIELDS = {
 PROXY_SUBSCRIPTION_MAX_BYTES = 5 * 1024 * 1024
 PROXY_SUBSCRIPTION_USER_AGENTS = (
     "clash.meta",
+    "mihomo",
     "ClashforWindows/0.20.39",
+    "ClashVergeRev",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) API-Switcher/1.0",
 )
 
@@ -216,7 +218,29 @@ def _strict_privacy_dns_config() -> dict:
 
 
 PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS = frozenset({400, 401, 404, 405, 410, 414, 422})
-PROXY_SUBSCRIPTION_RETRYABLE_HTTP_ERRORS = frozenset({403, 406, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524})
+PROXY_SUBSCRIPTION_RETRYABLE_HTTP_ERRORS = frozenset(
+    {
+        403,
+        406,
+        408,
+        423,
+        425,
+        429,
+        451,
+        500,
+        502,
+        503,
+        504,
+        520,
+        521,
+        522,
+        523,
+        524,
+        525,
+        526,
+        530,
+    }
+)
 
 SUBSCRIPTION_METADATA_NODE_NAME_PATTERNS = (
     r"剩余流量",
@@ -440,14 +464,56 @@ class _ProxySubscriptionDownloadTrace:
     recovery_proxy_attempted: bool = False
     recovery_proxy_used: bool = False
     recovery_proxy_unavailable: bool = False
+    recovery_routes_attempted: int = 0
+    recovery_signatures_attempted: int = 0
 
     def warning(self) -> str:
         if not self.recovery_proxy_used:
             return ""
+        route_detail = (
+            f"（尝试 {self.recovery_routes_attempted} 个已有节点）"
+            if self.recovery_routes_attempted > 1
+            else ""
+        )
         return (
-            "常规下载不可用时，已通过现有受管节点的隔离代理完成更新；"
+            f"常规下载不可用时，已通过现有受管节点的隔离代理完成更新{route_detail}；"
             "一次性代理已退出，未改动当前节点或系统代理/环境变量"
         )
+
+    def failure_suffix(self) -> str:
+        if self.recovery_proxy_attempted:
+            detail = (
+                f"（尝试 {self.recovery_routes_attempted} 个节点、"
+                f"{self.recovery_signatures_attempted} 次兼容请求）"
+                if self.recovery_routes_attempted or self.recovery_signatures_attempted
+                else ""
+            )
+            return f"；已尝试现有受管节点的隔离代理兜底{detail}"
+        if self.recovery_proxy_unavailable:
+            return "；现有受管节点的隔离代理兜底不可用"
+        return ""
+
+
+class _ProxySubscriptionPayloadError(ValueError):
+    """A successful HTTP response that is not a usable subscription document."""
+
+
+@dataclass(frozen=True)
+class _ProxySubscriptionRecoverySession:
+    proxy_map: dict[str, str]
+    route_count: int = 1
+    route_selector: Callable[[int, float], object] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+
+    def select_route(self, index: int, timeout_seconds: float) -> None:
+        if index == 0 and self.route_selector is None:
+            return
+        if self.route_selector is None:
+            raise RuntimeError("订阅兜底代理不支持切换到下一个节点")
+        self.route_selector(int(index), max(0.001, float(timeout_seconds)))
 
 
 def parse_proxy_node(text: str) -> dict:
@@ -523,7 +589,7 @@ def fetch_proxy_subscription(
     timeout: int = 45,
     max_bytes: int = PROXY_SUBSCRIPTION_MAX_BYTES,
     persist: bool = True,
-    retries: int = 3,
+    retries: int = len(PROXY_SUBSCRIPTION_USER_AGENTS),
     retry_base_delay: float = 1.0,
     profile_id: str = "",
     activate: bool = True,
@@ -5347,7 +5413,7 @@ def _download_proxy_subscription(
     try:
         attempts = max(1, int(retries))
     except (TypeError, ValueError):
-        attempts = 3
+        attempts = len(PROXY_SUBSCRIPTION_USER_AGENTS)
     attempts = max(1, attempts)
     last_error: Exception | None = None
     proxy_diagnostic = proxy_diagnostic or _subscription_proxy_environment_diagnostic(
@@ -5358,7 +5424,7 @@ def _download_proxy_subscription(
     deadline = time.monotonic() + timeout_seconds
     proxy_configured = _subscription_proxy_is_configured() and not force_direct
     primary_is_direct = bool(force_direct or (allow_direct_fallback and not proxy_configured))
-    direct_recovery_attempted = bool(primary_is_direct)
+    direct_recovery_active = False
     trace = download_trace if download_trace is not None else _ProxySubscriptionDownloadTrace()
     recovery_discovery_attempted = False
     strict_proxy_map: dict[str, str] | None = None
@@ -5373,9 +5439,10 @@ def _download_proxy_subscription(
             strict_proxy_error = exc
     # A broken configured proxy is one of the main reasons subscription
     # refresh is needed.  Reserve part of the caller's total budget for the
-    # one-shot direct recovery instead of letting the first urlopen consume the
-    # entire deadline.  The direct request remains bounded by the same overall
-    # deadline and never changes system/application proxy settings.
+    # direct recovery instead of letting the first urlopen consume the entire
+    # deadline. Compatible signatures may reuse that download-only route, but
+    # every request remains bounded by the same overall deadline and never
+    # changes system/application proxy settings.
     direct_recovery_reserve = (
         min(15.0, max(0.25, timeout_seconds / 3.0))
         if allow_direct_fallback and proxy_configured and timeout_seconds >= 0.5
@@ -5399,7 +5466,7 @@ def _download_proxy_subscription(
         try:
             if strict_proxy_error is not None:
                 raise strict_proxy_error
-            result = _open_proxy_subscription_request(
+            result = _open_validated_proxy_subscription_request(
                 attempt_request,
                 timeout=_subscription_request_timeout(
                     deadline,
@@ -5415,6 +5482,8 @@ def _download_proxy_subscription(
             if exc.code in PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS:
                 raise ValueError(f"订阅链接返回 HTTP {exc.code}，请检查订阅地址是否有效") from exc
             last_error = exc
+        except _ProxySubscriptionPayloadError as exc:
+            last_error = exc
         except ValueError:
             raise
         except Exception as exc:
@@ -5425,12 +5494,15 @@ def _download_proxy_subscription(
         # never changes the user's proxy configuration or selected node.
         if (
             allow_direct_fallback
-            and not direct_recovery_attempted
-            and _should_try_direct_subscription_download(last_error)
+            and not primary_is_direct
+            and (
+                direct_recovery_active
+                or _should_try_direct_subscription_download(last_error)
+            )
         ):
-            direct_recovery_attempted = True
+            direct_recovery_active = True
             try:
-                return _open_proxy_subscription_request(
+                return _open_validated_proxy_subscription_request(
                     attempt_request,
                     timeout=_subscription_request_timeout(
                         deadline,
@@ -5445,6 +5517,8 @@ def _download_proxy_subscription(
                     raise ValueError(
                         f"订阅链接返回 HTTP {exc.code}，请检查订阅地址是否有效"
                     ) from exc
+                last_error = exc
+            except _ProxySubscriptionPayloadError as exc:
                 last_error = exc
             except ValueError:
                 raise
@@ -5461,30 +5535,38 @@ def _download_proxy_subscription(
         ):
             recovery_discovery_attempted = True
             original_error = last_error
-            candidate_proxy_map: dict[str, str] | None = None
             try:
                 with _subscription_recovery_proxy_context(
                     recovery_proxy_provider,
                     timeout_seconds=max(0.001, deadline - time.monotonic()),
-                ) as candidate_proxy_map:
-                    if candidate_proxy_map is None:
+                ) as recovery_session:
+                    if recovery_session is None:
                         trace.recovery_proxy_unavailable = True
                         continue
                     trace.recovery_proxy_attempted = True
-                    result = _open_proxy_subscription_request(
-                        attempt_request,
-                        timeout=_subscription_request_timeout(deadline),
+                    result, recovery_error = _download_proxy_subscription_via_recovery(
+                        request=attempt_request,
+                        session=recovery_session,
                         deadline=deadline,
                         max_bytes=max_bytes,
-                        proxy_map=candidate_proxy_map,
+                        trace=trace,
                     )
-                trace.recovery_proxy_used = True
-                return result
+                    if result is None:
+                        last_error = recovery_error or original_error
+                    else:
+                        # Do not report success until the disposable context
+                        # has also stopped and cleaned its credential directory.
+                        successful_result = result
+                if result is not None:
+                    trace.recovery_proxy_used = True
+                    return successful_result
             except HTTPError as exc:
                 if exc.code in PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS:
                     raise ValueError(
                         f"订阅链接返回 HTTP {exc.code}，请检查订阅地址是否有效"
                     ) from exc
+                last_error = exc
+            except _ProxySubscriptionPayloadError as exc:
                 last_error = exc
             except ValueError:
                 raise
@@ -5517,10 +5599,14 @@ def _download_proxy_subscription(
         if time.monotonic() >= deadline:
             break
 
+    recovery_suffix = trace.failure_suffix()
     if isinstance(last_error, HTTPError) and 400 <= last_error.code < 500:
         raise ValueError(
-            f"订阅链接返回 HTTP {last_error.code}，服务器可能拒绝了当前客户端或链接已失效"
+            f"订阅链接返回 HTTP {last_error.code}，"
+            f"服务器可能拒绝了当前客户端或链接已失效{recovery_suffix}"
         ) from last_error
+    if isinstance(last_error, _ProxySubscriptionPayloadError):
+        raise ValueError(f"{last_error}{recovery_suffix}") from last_error
     suffix = (
         f"（最长等待 {timeout_seconds:g} 秒，最多重试 {attempts} 次）"
         if attempts > 1
@@ -5532,12 +5618,6 @@ def _download_proxy_subscription(
         if proxy_diagnostic.has_invalid_proxy
         else ""
     )
-    if trace.recovery_proxy_attempted:
-        recovery_suffix = "；已尝试现有受管节点的隔离代理兜底"
-    elif trace.recovery_proxy_unavailable:
-        recovery_suffix = "；现有受管节点的隔离代理兜底不可用"
-    else:
-        recovery_suffix = ""
     raise RuntimeError(
         f"订阅下载失败{suffix}{privacy_suffix}{proxy_suffix}{recovery_suffix}: {last_error}"
     ) from last_error
@@ -5616,6 +5696,45 @@ def _open_proxy_subscription_request(
         return bytes(payload), _response_content_type(headers), _response_charset(headers) or "utf-8"
 
 
+def _open_validated_proxy_subscription_request(
+    request: urlrequest.Request,
+    *,
+    timeout: int | float,
+    deadline: float | None = None,
+    max_bytes: int,
+    direct: bool = False,
+    proxy_map: dict[str, str] | None = None,
+) -> tuple[bytes, str, str]:
+    """Download and reject HTTP-200 block/error pages before route fallback ends."""
+
+    result = _open_proxy_subscription_request(
+        request,
+        timeout=timeout,
+        deadline=deadline,
+        max_bytes=max_bytes,
+        direct=direct,
+        proxy_map=proxy_map,
+    )
+    payload, content_type, charset = result
+    text = _decode_subscription_bytes(payload, charset)
+    try:
+        parse_proxy_subscription_content(text)
+    except Exception as exc:
+        normalized_type = str(content_type or "").casefold()
+        prefix = text.lstrip()[:256].casefold()
+        if "html" in normalized_type or prefix.startswith(("<!doctype html", "<html")):
+            message = "订阅服务器返回了网页或拦截页，而不是节点配置"
+        elif (
+            "json" in normalized_type
+            and re.search(r'^[\[{].*"(?:error|message|detail|code)"\s*:', prefix, flags=re.S)
+        ):
+            message = "订阅服务器返回了错误信息，而不是节点配置"
+        else:
+            message = str(exc).strip() or "订阅内容无法识别"
+        raise _ProxySubscriptionPayloadError(message) from exc
+    return result
+
+
 def _tighten_subscription_response_timeout(response, remaining: float) -> None:
     """Best-effort socket timeout tightening; the monotonic checks stay authoritative."""
 
@@ -5642,14 +5761,136 @@ def _proxy_subscription_request_for_attempt(
     attempt: int,
 ) -> urlrequest.Request:
     index = (max(1, int(attempt)) - 1) % len(PROXY_SUBSCRIPTION_USER_AGENTS)
+    return _proxy_subscription_request_with_user_agent(
+        request,
+        PROXY_SUBSCRIPTION_USER_AGENTS[index],
+    )
+
+
+def _proxy_subscription_request_with_user_agent(
+    request: urlrequest.Request,
+    user_agent: str,
+) -> urlrequest.Request:
     headers = dict(request.header_items())
-    headers["User-Agent"] = PROXY_SUBSCRIPTION_USER_AGENTS[index]
+    headers["User-Agent"] = str(user_agent or PROXY_SUBSCRIPTION_USER_AGENTS[0])
     return urlrequest.Request(
         request.full_url,
         data=request.data,
         headers=headers,
         method=request.get_method(),
     )
+
+
+def _proxy_subscription_user_agents_for_request(
+    request: urlrequest.Request,
+) -> tuple[str, ...]:
+    current = str(request.get_header("User-agent") or "").strip()
+    ordered = [current, *PROXY_SUBSCRIPTION_USER_AGENTS]
+    seen = set()
+    result = []
+    for value in ordered:
+        clean = str(value or "").strip()
+        key = clean.casefold()
+        if not clean or key in seen:
+            continue
+        seen.add(key)
+        result.append(clean)
+    return tuple(result)
+
+
+def _subscription_recovery_attempt_deadline(
+    deadline: float,
+    *,
+    routes_after: int,
+) -> float:
+    """Reserve a useful slice for each later node in the disposable pool."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("订阅下载超过总等待时间")
+    later = max(0, int(routes_after))
+    if later <= 0:
+        return deadline
+    per_later_route = min(2.5, remaining / (later + 1))
+    reserve = min(max(0.0, remaining - 0.25), later * per_later_route)
+    return deadline - reserve
+
+
+def _download_proxy_subscription_via_recovery(
+    *,
+    request: urlrequest.Request,
+    session: _ProxySubscriptionRecoverySession,
+    deadline: float,
+    max_bytes: int,
+    trace: _ProxySubscriptionDownloadTrace,
+) -> tuple[tuple[bytes, str, str] | None, Exception | None]:
+    """Try client signatures and deterministic existing-node routes, bounded by deadline."""
+
+    last_error: Exception | None = None
+    user_agents = _proxy_subscription_user_agents_for_request(request)
+    route_count = max(1, min(AI_PROXY_FALLBACK_MAX_NODES, session.route_count))
+    for route_index in range(route_count):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = TimeoutError("订阅下载超过总等待时间")
+            break
+        if route_index > 0:
+            switch_timeout = min(
+                1.5,
+                max(0.05, remaining / (route_count - route_index + 1)),
+            )
+            try:
+                session.select_route(route_index, switch_timeout)
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        trace.recovery_routes_attempted += 1
+        for user_agent in user_agents:
+            if time.monotonic() >= deadline:
+                last_error = TimeoutError("订阅下载超过总等待时间")
+                break
+            attempt_deadline = _subscription_recovery_attempt_deadline(
+                deadline,
+                routes_after=route_count - route_index - 1,
+            )
+            attempt_request = _proxy_subscription_request_with_user_agent(
+                request,
+                user_agent,
+            )
+            trace.recovery_signatures_attempted += 1
+            try:
+                result = _open_validated_proxy_subscription_request(
+                    attempt_request,
+                    timeout=_subscription_request_timeout(attempt_deadline),
+                    deadline=attempt_deadline,
+                    max_bytes=max_bytes,
+                    proxy_map=session.proxy_map,
+                )
+                return result, None
+            except HTTPError as exc:
+                if exc.code in PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS:
+                    raise ValueError(
+                        f"订阅链接返回 HTTP {exc.code}，请检查订阅地址是否有效"
+                    ) from exc
+                last_error = exc
+                # 403/406 are commonly selected by User-Agent. Other route or
+                # origin failures are better served by changing the exit node.
+                if exc.code in {403, 406}:
+                    continue
+                break
+            except _ProxySubscriptionPayloadError as exc:
+                # A 200 anti-bot/error page can depend on both the client
+                # signature and exit IP, so exhaust signatures before routing
+                # the same secret URL through the next local-only node.
+                last_error = exc
+                continue
+            except ValueError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                break
+    return None, last_error
 
 
 def _should_try_direct_subscription_download(error: Exception | None) -> bool:
@@ -5684,21 +5925,10 @@ def _should_try_recovery_proxy_subscription_download(error: Exception | None) ->
 
     if error is None:
         return False
+    if isinstance(error, _ProxySubscriptionPayloadError):
+        return True
     if isinstance(error, HTTPError):
-        return error.code in {
-            408,
-            425,
-            429,
-            500,
-            502,
-            503,
-            504,
-            520,
-            521,
-            522,
-            523,
-            524,
-        }
+        return error.code == 407 or error.code in PROXY_SUBSCRIPTION_RETRYABLE_HTTP_ERRORS
     return isinstance(error, OSError) or _subscription_error_is_timeout(error)
 
 
@@ -5838,6 +6068,36 @@ def _subscription_recovery_proxy_map(value: str) -> dict[str, str] | None:
     return {"http": normalized, "https": normalized}
 
 
+def _normalize_subscription_recovery_session(
+    candidate: object,
+) -> _ProxySubscriptionRecoverySession | None:
+    """Validate the loopback endpoint and optional bounded route-switch API."""
+
+    if isinstance(candidate, str):
+        proxy_url = candidate
+    else:
+        proxy_url = str(getattr(candidate, "proxy_url", "") or "")
+    proxy_map = _subscription_recovery_proxy_map(proxy_url)
+    if proxy_map is None:
+        return None
+
+    route_selector = getattr(candidate, "select_route", None)
+    try:
+        route_count = int(getattr(candidate, "route_count", 1) or 1)
+    except (TypeError, ValueError, OverflowError):
+        route_count = 1
+    route_count = max(1, min(AI_PROXY_FALLBACK_MAX_NODES, route_count))
+    if route_count > 1 and not callable(route_selector):
+        # A plain URL is still a valid one-route recovery endpoint. Never
+        # assume that repeatedly using it selects a different upstream node.
+        route_count = 1
+    return _ProxySubscriptionRecoverySession(
+        proxy_map=proxy_map,
+        route_count=route_count,
+        route_selector=route_selector if callable(route_selector) else None,
+    )
+
+
 @contextmanager
 def _subscription_recovery_proxy_context(
     provider: Callable[[float], object] | None,
@@ -5853,12 +6113,12 @@ def _subscription_recovery_proxy_context(
     enter = getattr(candidate, "__enter__", None)
     exit_context = getattr(candidate, "__exit__", None)
     if callable(enter) and callable(exit_context):
-        with candidate as proxy_url:
-            yield _subscription_recovery_proxy_map(proxy_url)
+        with candidate as recovery_session:
+            yield _normalize_subscription_recovery_session(recovery_session)
         return
     if callable(enter) or callable(exit_context):
         raise TypeError("订阅兜底代理会话接口不完整")
-    yield _subscription_recovery_proxy_map(candidate)
+    yield _normalize_subscription_recovery_session(candidate)
 
 
 def _subscription_proxy_environment_diagnostic(url: str) -> ProxyEnvironmentDiagnostic:
