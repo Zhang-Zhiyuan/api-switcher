@@ -106,11 +106,16 @@ AI_PROXY_STRICT_PRIVACY_MARKER = "# API-Switcher-Strict-Privacy: application-lay
 AI_PROXY_INTERNAL_NODE_NAME = "API-SWITCHER-NODE"
 AI_PROXY_FALLBACK_NODE_PREFIX = "API-SWITCHER-FALLBACK-"
 AI_PROXY_FALLBACK_MAX_NODES = 5
-AI_PROXY_HEALTH_CHECK_URL = "https://chatgpt.com/cdn-cgi/trace"
-AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS = 200
-AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 15
-AI_PROXY_HEALTH_CHECK_TIMEOUT_MS = 6000
-AI_PROXY_HEALTH_CHECK_MAX_FAILURES = 2
+# Use the unauthenticated OpenAI API response as the live-route authority.  A
+# generic 200 page can stay reachable while the actual Codex/OpenAI path is
+# blocked.  Mihomo accepts multiple expected statuses separated by ``/``;
+# 401 is the normal response without a key, while 200 keeps compatibility with
+# gateways that expose a public model catalogue.
+AI_PROXY_HEALTH_CHECK_URL = "https://api.openai.com/v1/models"
+AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS = "200/401"
+AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 10
+AI_PROXY_HEALTH_CHECK_TIMEOUT_MS = 5000
+AI_PROXY_HEALTH_CHECK_MAX_FAILURES = 1
 AI_PROXY_DISPLAY_NAME_MARKER = "# API-Switcher-Node-Name-B64:"
 PRIVATE_DIRECT_IP_RULES = (
     "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
@@ -205,15 +210,57 @@ def _strict_privacy_dns_config() -> dict:
         "use-hosts": True,
         "use-system-hosts": False,
         "respect-rules": True,
-        "default-nameserver": ["1.1.1.1", "8.8.8.8"],
+        # These IP literals bootstrap only the resolver hostnames below.  The
+        # mainland-reachable pair avoids making first connection depend on a
+        # direct route to an overseas resolver.
+        "default-nameserver": ["223.5.5.5", "119.29.29.29"],
+        # Proxy-node hostnames must be resolved before the proxy exists.  Keep
+        # that narrowly scoped lookup encrypted but explicitly DIRECT to avoid
+        # a chicken-and-egg loop.  Destination DNS remains on AI-PROXY below.
         "proxy-server-nameserver": [
-            "https://1.1.1.1/dns-query",
-            "https://8.8.8.8/dns-query",
+            "https://doh.pub/dns-query#DIRECT",
+            "https://dns.alidns.com/dns-query#DIRECT",
         ],
         "nameserver": [
-            "https://1.1.1.1/dns-query",
-            "https://8.8.8.8/dns-query",
+            "https://1.1.1.1/dns-query#AI-PROXY",
+            "https://8.8.8.8/dns-query#AI-PROXY",
         ],
+    }
+
+
+def _mainland_compatible_dns_config(proxy_domains) -> dict:
+    """Resolve node hosts locally while sending selected AI DNS via the proxy."""
+
+    direct_doh = [
+        "https://doh.pub/dns-query#DIRECT",
+        "https://dns.alidns.com/dns-query#DIRECT",
+    ]
+    proxied_doh = [
+        "https://1.1.1.1/dns-query#AI-PROXY",
+        "https://8.8.8.8/dns-query#AI-PROXY",
+    ]
+    policy = {}
+    for value in proxy_domains or ():
+        domain = str(value or "").strip().strip(".").casefold()
+        if domain.startswith("*."):
+            domain = domain[2:]
+        if domain.startswith("+."):
+            domain = domain[2:]
+        if domain:
+            policy[f"+.{domain}"] = list(proxied_doh)
+    return {
+        "enable": True,
+        "ipv6": True,
+        "enhanced-mode": "redir-host",
+        "use-hosts": True,
+        "use-system-hosts": True,
+        "respect-rules": False,
+        "default-nameserver": ["223.5.5.5", "119.29.29.29"],
+        "proxy-server-nameserver": list(direct_doh),
+        "direct-nameserver": list(direct_doh),
+        "direct-nameserver-follow-policy": False,
+        "nameserver": list(direct_doh),
+        "nameserver-policy": policy,
     }
 
 
@@ -2881,6 +2928,8 @@ def build_mihomo_config(
     extra_proxy_ip_cidrs: tuple[str, ...] | list[str] | None = None,
     proxy_non_cn: bool = False,
     strict_privacy: bool = False,
+    resilient_transport: bool = False,
+    mainland_dns: bool = False,
 ) -> str:
     primary_node = _normalize_proxy_node(proxy_node)
     display_name = str(primary_node.get("name") or "AI_PROXY").strip() or "AI_PROXY"
@@ -2890,8 +2939,9 @@ def build_mihomo_config(
     nodes = _managed_mihomo_proxy_nodes(primary_node, fallback_proxy_nodes)
     node_names = [str(node["name"]) for node in nodes]
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    proxy_domains = _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains)
     rules = [
-        *(f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains)),
+        *(f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in proxy_domains),
         *(_ip_cidr_rule(cidr) for cidr in _unique_clean_values(extra_proxy_ip_cidrs)),
     ]
     if strict_privacy:
@@ -2925,13 +2975,30 @@ def build_mihomo_config(
         ],
         "rules": rules,
     }
+    if resilient_transport:
+        # Mainland routes commonly return several addresses with very uneven
+        # reachability. Race them and keep idle streaming sessions alive so a
+        # single slow/broken address or NAT timeout does not stall Codex.
+        config.update(
+            {
+                "tcp-concurrent": True,
+                "keep-alive-interval": 15,
+                "keep-alive-idle": 15,
+                "disable-keep-alive": False,
+            }
+        )
     if strict_privacy:
         # DoH requests follow the routing rules, so public DNS queries use the
         # selected proxy.  proxy-server-nameserver is intentionally encrypted
-        # but independent of those rules to resolve a hostname-based node
-        # without a bootstrap cycle.  IP-literal DoH endpoints avoid leaking a
-        # resolver hostname through the bootstrap nameserver.
+        # but independent of those rules to resolve a hostname-based node.
+        # Mainland-reachable bootstrap IPs resolve only those DoH hostnames;
+        # ordinary public destination DNS still follows AI-PROXY.
         config["dns"] = _strict_privacy_dns_config()
+    elif mainland_dns:
+        # Compatibility mode keeps normal/direct names on mainland-reachable
+        # encrypted resolvers, but selected AI names are resolved through the
+        # already bootstrapped AI-PROXY route to avoid poisoned system DNS.
+        config["dns"] = _mainland_compatible_dns_config(proxy_domains)
     markers = [
         AI_PROXY_CONFIG_MARKER,
         _managed_proxy_display_name_marker(display_name),

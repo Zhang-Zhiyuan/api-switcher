@@ -82,10 +82,12 @@ WINDOWS_SYSTEM_PROXY_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Inte
 WINDOWS_SYSTEM_PROXY_KEYS = ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL", "AutoDetect")
 WINDOWS_SYSTEM_PROXY_OVERRIDE = "<local>;127.0.0.1;localhost;::1"
 LOCAL_AI_PROBE_TARGETS = (
+    ("OpenAI API", "https://api.openai.com/v1/models"),
     ("OpenAI/ChatGPT", "https://chatgpt.com/cdn-cgi/trace"),
     ("Claude/Anthropic", "https://api.anthropic.com/"),
     ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
 )
+LOCAL_PROXY_FAILOVER_WARMUP_SECONDS = 6.5
 LOCAL_AI_STABILITY_TARGETS = (
     ("OpenAI API", "https://api.openai.com/v1/models"),
     ("ChatGPT 出口", "https://chatgpt.com/cdn-cgi/trace"),
@@ -124,6 +126,8 @@ _ISOLATED_MIHOMO_PROCESSES: set[object] = set()
 _ISOLATED_MIHOMO_DIRECTORIES: set[Path] = set()
 _ISOLATED_MIHOMO_SHUTTING_DOWN = threading.Event()
 _MIHOMO_BINARY_LOCK = threading.RLock()
+_MIHOMO_UPDATE_THREAD_LOCK = threading.Lock()
+_MIHOMO_UPDATE_THREAD: threading.Thread | None = None
 _LOCAL_PROXY_OPERATION_THREAD_LOCK = threading.RLock()
 _LOCAL_PROXY_OPERATION_CONTEXT = threading.local()
 
@@ -1051,7 +1055,7 @@ def update_local_mihomo_core(*, restart_running: bool = False) -> str:
 
     if os.name != "nt":
         raise RuntimeError("本机 mihomo 内核更新目前只支持 Windows")
-    binary_path = _ensure_mihomo_binary()
+    binary_path = _ensure_latest_mihomo_binary()
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
         state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
@@ -1257,9 +1261,11 @@ def install_local_ai_proxy(
     _save_state(state)
     _save_last_proxy_node(proxy_node)
     core_detail = _local_mihomo_core_status_detail()
+    update_scheduled = _schedule_mihomo_update_check()
     return (
         f"本机 AI 代理已启动: {proxy_url}；"
         + (f"{core_detail}；" if core_detail else "")
+        + ("内核更新检查已转入后台，不阻塞代理启动；" if update_scheduled else "")
         + f"内核故障切换池 {fallback_candidates} 个节点；"
         "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
         "并临时关闭系统 PAC/自动检测代理；新终端或重开的 VS Code 窗口生效"
@@ -1358,86 +1364,34 @@ def install_local_ai_proxy_verified(
             automatic_update=False,
         )
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
-    requested_key = remote_proxy.proxy_node_key(requested_node)
     fallback_nodes = _local_proxy_fallback_nodes(
         requested_node,
         candidate_nodes,
         quality_results,
     )
     install_message = install_local_ai_proxy(proxy_text, fallback_nodes=fallback_nodes)
-    probe_message = probe_local_ai_proxy()
+    probe_message, failover_retried = _probe_local_ai_proxy_after_failover_warmup()
+    retry_detail = "；已等待内核故障切换初始化并复检" if failover_retried else ""
     if remote_proxy._probe_summary_all_ok(probe_message):
-        return f"{install_message}；验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
-
-    candidates = tuple(
-        item
-        for item in remote_proxy.automatic_proxy_subscription_nodes(
-            candidate_nodes,
-            quality_results,
-        )
-        if remote_proxy.proxy_subscription_node_key(item) != requested_key
-    )
-    if not candidates:
-        return f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}"
-
-    try:
-        selected, selected_result, _results, latencies = _select_stable_automatic_local_candidate(
-            candidates,
-            quality_results,
-            max_candidates=max_candidates,
-        )
-    except Exception as exc:
         return (
-            f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
-            f"自动备用节点隔离深测失败，已保留当前启动节点: {exc}"
+            f"{install_message}{retry_detail}；验证通过: "
+            f"{remote_proxy._compact_probe_summary(probe_message)}"
         )
-    if selected is None or not _prevalidated_local_candidate_matches(
-        selected.node,
-        selected_result,
-    ):
+    if _local_probe_summary_codex_ready(probe_message):
         return (
-            f"{install_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
-            "自动备用节点均未通过 Codex 长会话网络深测，已保留当前启动节点"
+            f"{install_message}{retry_detail}；Codex 核心链路已通过；"
+            f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}"
         )
-
-    node_summary = remote_proxy.describe_proxy_node(selected.node)
-    latency_label = remote_proxy.proxy_node_latency_label(
-        latencies.get(remote_proxy.proxy_subscription_node_key(selected))
-    )
-    try:
-        selected_fallback_nodes = _local_proxy_fallback_nodes(
-            selected.node,
-            candidate_nodes,
-            quality_results,
-        )
-        install_local_ai_proxy(
-            remote_proxy.format_proxy_node(selected.node),
-            fallback_nodes=selected_fallback_nodes,
-        )
-        candidate_probe = probe_local_ai_proxy()
-    except Exception as exc:
-        candidate_probe = f"候选应用或验证执行失败: {exc}"
-    if remote_proxy._probe_summary_all_ok(candidate_probe):
-        _remember_selected_subscription_node(selected.node)
-        return (
-            f"本机 AI 代理原启动节点验证失败，已自动切换到 {node_summary}"
-            f"（本机 TCP {latency_label}）；隔离环境 Codex 长会话网络深测通过；"
-            f"应用后验证通过: {remote_proxy._compact_probe_summary(candidate_probe)}"
-        )
-
-    restore_error = ""
-    try:
-        install_local_ai_proxy(remote_proxy.format_proxy_node(requested_node))
-    except Exception as exc:
-        restore_error = str(exc).splitlines()[0][:240] or type(exc).__name__
-    restore_status = (
-        f"，但恢复原节点失败: {restore_error}；请重新检查代理状态"
-        if restore_error
-        else "，已恢复原节点"
+    pool_size = 1 + len(fallback_nodes)
+    fallback_detail = (
+        f"；已保留 {pool_size} 节点内核故障切换池，内核将继续定期复检"
+        if pool_size > 1
+        else ""
     )
     return (
-        f"{install_message}；自动备用节点虽通过隔离深测，但应用后验证未完全通过: "
-        f"{remote_proxy._compact_probe_summary(candidate_probe)}{restore_status}"
+        f"{install_message}{retry_detail}；验证未完全通过: "
+        f"{remote_proxy._compact_probe_summary(probe_message)}{fallback_detail}；"
+        "启动阶段已跳过耗时的逐节点长会话深测，可在节点页手动执行深度检测"
     )
 
 
@@ -1564,7 +1518,6 @@ def reload_local_ai_proxy_verified(
     _expected_original_node: dict | None = None,
 ) -> str:
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
-    requested_key = remote_proxy.proxy_node_key(requested_node)
     original_node = _read_local_managed_proxy_node()
     fallback_nodes = _local_proxy_fallback_nodes(
         requested_node,
@@ -1602,7 +1555,7 @@ def reload_local_ai_proxy_verified(
         return reload_message
 
     try:
-        probe_message = probe_local_ai_proxy()
+        probe_message, failover_retried = _probe_local_ai_proxy_after_failover_warmup()
     except Exception as exc:
         restore_suffix = _restore_local_proxy_node_after_failed_update(
             original_node,
@@ -1610,11 +1563,18 @@ def reload_local_ai_proxy_verified(
             profile_id=profile_id,
         )
         return f"{reload_message}；热更新后验证执行失败: {exc}{restore_suffix}"
+    retry_detail = "；已等待内核故障切换初始化并复检" if failover_retried else ""
     if remote_proxy._probe_summary_all_ok(probe_message):
         prevalidated = "；隔离环境 Codex 长会话网络深测通过" if automatic_update else ""
         return (
-            f"{reload_message}{prevalidated}；"
+            f"{reload_message}{prevalidated}{retry_detail}；"
             f"验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
+        )
+    if _local_probe_summary_codex_ready(probe_message):
+        prevalidated = "；隔离环境 Codex 长会话网络深测通过" if automatic_update else ""
+        return (
+            f"{reload_message}{prevalidated}{retry_detail}；Codex 核心链路已通过；"
+            f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}"
         )
 
     if automatic_update:
@@ -1624,77 +1584,9 @@ def reload_local_ai_proxy_verified(
             profile_id=profile_id,
         )
         return (
-            f"{reload_message}；隔离深测候选应用后验证未完全通过: "
+            f"{reload_message}{retry_detail}；隔离深测候选应用后验证未完全通过: "
             f"{remote_proxy._compact_probe_summary(probe_message)}{restore_suffix}"
         )
-
-    candidates = tuple(
-        item
-        for item in remote_proxy.automatic_proxy_subscription_nodes(
-            candidate_nodes,
-            quality_results,
-        )
-        if remote_proxy.proxy_subscription_node_key(item) != requested_key
-    )
-    if not candidates:
-        restore_suffix = _restore_local_proxy_node_after_failed_update(
-            original_node,
-            requested_node,
-            profile_id=profile_id,
-        )
-        return f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}{restore_suffix}"
-
-    try:
-        selected, selected_result, _results, latencies = _select_stable_automatic_local_candidate(
-            candidates,
-            quality_results,
-            max_candidates=max_candidates,
-        )
-    except Exception as exc:
-        restore_suffix = _restore_local_proxy_node_after_failed_update(
-            original_node,
-            requested_node,
-            profile_id=profile_id,
-        )
-        return (
-            f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
-            f"自动换节点测速失败: {exc}{restore_suffix}"
-        )
-
-    if selected is not None and _prevalidated_local_candidate_matches(
-        selected.node,
-        selected_result,
-    ):
-        try:
-            selected_fallback_nodes = _local_proxy_fallback_nodes(
-                selected.node,
-                candidate_nodes,
-                quality_results,
-            )
-            if profile_id:
-                reload_local_ai_proxy(
-                    remote_proxy.format_proxy_node(selected.node),
-                    profile_id=profile_id,
-                    fallback_nodes=selected_fallback_nodes,
-                )
-            else:
-                reload_local_ai_proxy(
-                    remote_proxy.format_proxy_node(selected.node),
-                    fallback_nodes=selected_fallback_nodes,
-                )
-            candidate_probe = probe_local_ai_proxy()
-        except Exception as exc:
-            candidate_probe = f"候选应用或验证执行失败: {exc}"
-        if remote_proxy._probe_summary_all_ok(candidate_probe):
-            _remember_selected_subscription_node(selected.node, profile_id=profile_id)
-            result = latencies.get(remote_proxy.proxy_subscription_node_key(selected))
-            return (
-                f"本机 AI 代理原热更新节点验证失败，已无重启切换到 "
-                f"{remote_proxy.describe_proxy_node(selected.node)}"
-                f"（本机 TCP {remote_proxy.proxy_node_latency_label(result)}）；"
-                "隔离环境 Codex 长会话网络深测通过；"
-                f"验证通过: {remote_proxy._compact_probe_summary(candidate_probe)}"
-            )
 
     restore_suffix = _restore_local_proxy_node_after_failed_update(
         original_node,
@@ -1702,8 +1594,9 @@ def reload_local_ai_proxy_verified(
         profile_id=profile_id,
     )
     return (
-        f"{reload_message}；验证未完全通过: {remote_proxy._compact_probe_summary(probe_message)}；"
-        f"自动备用节点均未通过 Codex 长会话网络深测或应用后验证{restore_suffix}"
+        f"{reload_message}{retry_detail}；验证未完全通过: "
+        f"{remote_proxy._compact_probe_summary(probe_message)}；"
+        f"为避免启动阶段长时间中断 Codex，已跳过阻塞式逐节点深测{restore_suffix}"
     )
 
 
@@ -2119,13 +2012,87 @@ def probe_local_ai_proxy(timeout: int = 8) -> str:
     if not status.running:
         return f"{status.summary()}；代理未运行，跳过 AI 连通性探测"
 
+    # The targets are independent.  Running them serially made one broken
+    # mainland route consume ``target_count * timeout`` before fallback even
+    # began.  Preserve deterministic display order while bounding the wall
+    # time to roughly one target timeout.
+    ordered_results: list[LocalAIProxyProbeResult | None] = [
+        None for _item in LOCAL_AI_PROBE_TARGETS
+    ]
+    with ThreadPoolExecutor(max_workers=len(LOCAL_AI_PROBE_TARGETS)) as executor:
+        futures = {
+            executor.submit(
+                _probe_url_through_proxy,
+                status.proxy_url,
+                label,
+                url,
+                timeout=timeout,
+            ): (index, label)
+            for index, (label, url) in enumerate(LOCAL_AI_PROBE_TARGETS)
+        }
+        for future in as_completed(futures):
+            index, label = futures[future]
+            try:
+                ordered_results[index] = future.result()
+            except Exception as exc:
+                ordered_results[index] = LocalAIProxyProbeResult(
+                    label=label,
+                    ok=False,
+                    detail=str(exc).splitlines()[0][:160] or type(exc).__name__,
+                )
     results = [
-        _probe_url_through_proxy(status.proxy_url, label, url, timeout=timeout)
-        for label, url in LOCAL_AI_PROBE_TARGETS
+        item
+        if isinstance(item, LocalAIProxyProbeResult)
+        else LocalAIProxyProbeResult(
+            label=LOCAL_AI_PROBE_TARGETS[index][0],
+            ok=False,
+            detail="探测结果缺失",
+        )
+        for index, item in enumerate(ordered_results)
     ]
     ok_count = sum(1 for item in results if item.ok)
     details = "；".join(item.summary() for item in results)
     return f"{status.summary()}；AI 连通性 {ok_count}/{len(results)} 可达；{details}"
+
+
+def _local_probe_summary_codex_ready(summary: str) -> bool:
+    """Return whether both official Codex network entry paths are reachable."""
+
+    text = str(summary or "")
+    return all(
+        re.search(rf"(?:^|；){re.escape(label)}:\s*可达(?:\s*/|；|$)", text)
+        for label in ("OpenAI API", "OpenAI/ChatGPT")
+    )
+
+
+def _probe_local_ai_proxy_after_failover_warmup(
+    *,
+    timeout: int = 6,
+    warmup_seconds: float = LOCAL_PROXY_FAILOVER_WARMUP_SECONDS,
+) -> tuple[str, bool]:
+    """Probe once, then give an initializing fallback pool one bounded retry."""
+
+    first = probe_local_ai_proxy(timeout=timeout)
+    if remote_proxy._probe_summary_all_ok(first) or _local_probe_summary_codex_ready(first):
+        return first, False
+
+    status = inspect_local_ai_proxy()
+    if not status.running or int(status.fallback_candidates or 0) <= 1:
+        return first, False
+    try:
+        parsed_proxy = urlparse(status.proxy_url)
+        mixed_port = int(parsed_proxy.port or DEFAULT_LOCAL_MIXED_PORT)
+        config_path = Path(status.config_path)
+    except (TypeError, ValueError):
+        return first, False
+
+    deadline = time.monotonic() + max(0.0, min(10.0, float(warmup_seconds or 0.0)))
+    while time.monotonic() < deadline:
+        health = _local_mihomo_failover_status(config_path, mixed_port)
+        if health.healthy is not None:
+            break
+        time.sleep(min(0.15, max(0.001, deadline - time.monotonic())))
+    return probe_local_ai_proxy(timeout=timeout), True
 
 
 def select_stable_local_proxy_node(
@@ -3020,6 +2987,8 @@ def _build_local_mihomo_config(
         mixed_port,
         fallback_proxy_nodes=fallback_nodes,
         health_checked_group=True,
+        resilient_transport=True,
+        mainland_dns=True,
         # A long-running detached process cannot safely rotate an inherited
         # Windows stdout handle while it is open.  Controller health state and
         # explicit probes provide bounded diagnostics without an unbounded log
@@ -3416,7 +3385,14 @@ def reconcile_local_ai_proxy_startup_settings() -> str:
     managed_running = _managed_local_proxy_is_running(state)
     port_listening = _is_port_listening(mixed_port)
     if managed_running and port_listening:
-        return reconcile_running_local_ai_proxy_settings()
+        repaired = reconcile_running_local_ai_proxy_settings()
+        update_scheduled = _schedule_mihomo_update_check()
+        update_detail = (
+            "mihomo 内核更新检查已通过当前可用代理转入后台"
+            if update_scheduled
+            else ""
+        )
+        return "；".join(item for item in (repaired, update_detail) if item)
     if not _state_owns_local_proxy_settings(state, mixed_port):
         return ""
     if state.get("installing") and _local_proxy_state_update_is_recent(state):
@@ -3864,25 +3840,72 @@ def _local_vscode_proxy_match_detail(mixed_port: int) -> str:
 
 
 def _ensure_mihomo_binary() -> Path:
-    """Return a usable mihomo binary and refresh the managed copy when safe.
+    """Return a usable mihomo binary without blocking startup on GitHub.
 
-    A previously downloaded binary used to be trusted forever.  Keep release
-    checks bounded by a cache, retain a working binary when GitHub is
-    temporarily unavailable, and stage updates while Windows still has the
-    executable open.
+    Startup is the wrong place for a release-network dependency: on mainland
+    Windows a valid installed core used to wait through every GitHub timeout
+    before the proxy that could reach GitHub was even available.  Explicit and
+    background update checks use ``_ensure_latest_mihomo_binary`` instead.
     """
 
     with _MIHOMO_BINARY_LOCK:
-        return _ensure_mihomo_binary_locked()
+        return _ensure_mihomo_binary_locked(check_updates=False)
 
 
-def _ensure_mihomo_binary_locked() -> Path:
+def _ensure_latest_mihomo_binary() -> Path:
+    """Return a usable core after one bounded official release check."""
+
+    with _MIHOMO_BINARY_LOCK:
+        return _ensure_mihomo_binary_locked(check_updates=True)
+
+
+def _schedule_mihomo_update_check() -> bool:
+    """Check the official release in the background after the proxy is live."""
+
+    global _MIHOMO_UPDATE_THREAD
+    binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
+    if not binary_path.is_file() or not _mihomo_release_check_due(
+        _load_mihomo_release_state()
+    ):
+        return False
+    with _MIHOMO_UPDATE_THREAD_LOCK:
+        if _MIHOMO_UPDATE_THREAD is not None and _MIHOMO_UPDATE_THREAD.is_alive():
+            return False
+
+        def run() -> None:
+            global _MIHOMO_UPDATE_THREAD
+            try:
+                _ensure_latest_mihomo_binary()
+            except Exception as exc:
+                # A release check must never degrade the already-live proxy.
+                logger.warning("Background mihomo update check failed: %s", _network_error_summary(exc))
+            finally:
+                with _MIHOMO_UPDATE_THREAD_LOCK:
+                    if _MIHOMO_UPDATE_THREAD is threading.current_thread():
+                        _MIHOMO_UPDATE_THREAD = None
+
+        _MIHOMO_UPDATE_THREAD = threading.Thread(
+            target=run,
+            name="api-switcher-mihomo-update",
+            daemon=True,
+        )
+        _MIHOMO_UPDATE_THREAD.start()
+        return True
+
+
+def _ensure_mihomo_binary_locked(*, check_updates: bool) -> Path:
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
     metadata = _load_mihomo_release_state()
     _apply_pending_mihomo_update(binary_path, metadata=metadata)
     metadata = _load_mihomo_release_state()
 
     current_info = _try_mihomo_binary_info(binary_path) if binary_path.exists() else None
+    if current_info and not check_updates:
+        return binary_path
+    if not current_info and not check_updates:
+        existing = _find_existing_mihomo_binary()
+        if existing and _try_mihomo_binary_info(existing):
+            return existing
     if current_info and not _mihomo_release_check_due(metadata):
         cached_latest = _mihomo_version_from_text(metadata.get("latest_version"))
         cached_update_missing = (
@@ -4272,18 +4295,29 @@ def _read_url_with_retries(
         attempts = max(1, int(retries))
     except (TypeError, ValueError):
         attempts = MIHOMO_DOWNLOAD_RETRIES
+    total_timeout = max(1.0, float(timeout or 1))
+    deadline = time.monotonic() + total_timeout
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         openers = [("当前网络配置", None)]
         if _environment_has_http_proxy():
             openers.append(("直连回退", urllib.request.build_opener(urllib.request.ProxyHandler({}))))
         errors = []
-        for _mode, opener in openers:
+        for mode_index, (_mode, opener) in enumerate(openers):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_error = TimeoutError(f"{label}超过总等待时间")
+                break
+            remaining_slots = max(
+                1,
+                (attempts - attempt) * len(openers) + len(openers) - mode_index,
+            )
+            request_timeout = max(0.5, min(total_timeout, remaining / remaining_slots))
             try:
                 response_context = (
-                    urllib.request.urlopen(request, timeout=timeout)
+                    urllib.request.urlopen(request, timeout=request_timeout)
                     if opener is None
-                    else opener.open(request, timeout=timeout)
+                    else opener.open(request, timeout=request_timeout)
                 )
                 with response_context as response:
                     return _read_bounded_response(response, max_bytes=max_bytes, label=label)
@@ -4294,8 +4328,9 @@ def _read_url_with_retries(
             last_error = RuntimeError("；".join(dict.fromkeys(errors)))
         if attempt < attempts:
             delay = remote_proxy._retry_delay_seconds(1.0, attempt)
-            if delay > 0:
-                time.sleep(delay)
+            remaining = deadline - time.monotonic()
+            if delay > 0 and remaining > 0:
+                time.sleep(min(delay, remaining))
     suffix = f"（已重试 {attempts} 次）" if attempts > 1 else ""
     raise RuntimeError(f"{label}失败{suffix}: {_network_error_summary(last_error)}") from last_error
 
