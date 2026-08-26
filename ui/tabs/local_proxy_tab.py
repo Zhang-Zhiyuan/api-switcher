@@ -2035,6 +2035,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                             profile_id=profile_id,
                             activate=False,
                             allow_direct_fallback=allow_direct_fallback,
+                            recovery_proxy_provider=(
+                                local_proxy.local_proxy_subscription_recovery_session
+                            ),
                         )
                     except Exception as exc:
                         payload["fetch_error"] = str(exc)
@@ -2322,6 +2325,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     profile_id=profile_id,
                     activate=False,
                     allow_direct_fallback=allow_direct_fallback,
+                    recovery_proxy_provider=(
+                        local_proxy.local_proxy_subscription_recovery_session
+                    ),
                 )
                 payload = {
                     "ok": True,

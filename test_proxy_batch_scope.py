@@ -825,9 +825,12 @@ def test_local_manual_subscription_fetch_failure_keeps_existing_nodes(monkeypatc
         (
             "https://offline.example/sub",
             {
-                "profile_id": "offline-profile",
-                "activate": False,
-                "allow_direct_fallback": False,
+                    "profile_id": "offline-profile",
+                    "activate": False,
+                    "allow_direct_fallback": False,
+                    "recovery_proxy_provider": (
+                        local_proxy.local_proxy_subscription_recovery_session
+                    ),
             },
         )
     ]
@@ -1062,9 +1065,12 @@ def test_ssh_manual_fetch_uses_persisted_strict_policy_without_overwriting_activ
         (
             "https://target.example/sub",
             {
-                "profile_id": "target-profile",
-                "activate": False,
-                "allow_direct_fallback": False,
+                    "profile_id": "target-profile",
+                    "activate": False,
+                    "allow_direct_fallback": False,
+                    "recovery_proxy_provider": (
+                        local_proxy.local_proxy_subscription_recovery_session
+                    ),
             },
         )
     ]
@@ -1483,9 +1489,12 @@ def test_local_refresh_and_hot_update_fetches_then_applies_running_proxy(monkeyp
         (
             "https://subscription.example/local",
             {
-                "profile_id": profile_id,
-                "activate": False,
-                "allow_direct_fallback": False,
+                    "profile_id": profile_id,
+                    "activate": False,
+                    "allow_direct_fallback": False,
+                    "recovery_proxy_provider": (
+                        local_proxy.local_proxy_subscription_recovery_session
+                    ),
             },
         )
     ]
@@ -1607,9 +1616,12 @@ def test_ssh_periodic_refresh_uses_persisted_strict_download_policy(monkeypatch)
         (
             "https://subscription.example/ssh",
             {
-                "profile_id": profile_id,
-                "activate": False,
-                "allow_direct_fallback": False,
+                    "profile_id": profile_id,
+                    "activate": False,
+                    "allow_direct_fallback": False,
+                    "recovery_proxy_provider": (
+                        local_proxy.local_proxy_subscription_recovery_session
+                    ),
             },
         )
     ]

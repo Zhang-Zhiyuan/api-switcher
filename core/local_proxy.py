@@ -559,6 +559,95 @@ def local_proxy_subscription_direct_fallback_allowed() -> bool:
         return not strict_privacy
 
 
+def _managed_local_subscription_recovery_nodes() -> tuple[dict, ...]:
+    """Read the bounded node pool from the app-owned mihomo configuration."""
+
+    state = _load_state()
+    config_path = _managed_local_config_path(state)
+    try:
+        if config_path.stat().st_size > 8 * 1024 * 1024:
+            return ()
+        content = config_path.read_text(encoding="utf-8", errors="strict")
+        parsed = remote_proxy.yaml.safe_load(content)
+    except Exception:
+        return ()
+    if not isinstance(parsed, dict) or remote_proxy.AI_PROXY_CONFIG_MARKER not in content:
+        return ()
+    proxy_nodes = parsed.get("proxies")
+    groups = parsed.get("proxy-groups")
+    if not isinstance(proxy_nodes, list) or not isinstance(groups, list):
+        return ()
+    group = next(
+        (
+            item
+            for item in groups
+            if isinstance(item, dict)
+            and str(item.get("name") or "").strip() == "AI-PROXY"
+        ),
+        None,
+    )
+    if not isinstance(group, dict) or str(group.get("type") or "").casefold() not in {
+        "select",
+        "fallback",
+    }:
+        return ()
+    ordered_names = group.get("proxies")
+    if not isinstance(ordered_names, list):
+        return ()
+    by_name = {
+        str(node.get("name") or "").strip(): node
+        for node in proxy_nodes
+        if isinstance(node, dict) and str(node.get("name") or "").strip()
+    }
+    selected = []
+    seen = set()
+    for raw_name in ordered_names[: remote_proxy.AI_PROXY_FALLBACK_MAX_NODES]:
+        node = by_name.get(str(raw_name or "").strip())
+        if not isinstance(node, dict):
+            continue
+        try:
+            normalized = remote_proxy._normalize_proxy_node(node)
+            connection_key = remote_proxy._proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
+            continue
+        selected.append(normalized)
+        seen.add(connection_key)
+    return tuple(selected)
+
+
+@contextmanager
+def local_proxy_subscription_recovery_session(timeout_seconds: float = 15.0):
+    """Yield an isolated proxy pool for one failed subscription refresh.
+
+    Reusing the live mixed port is insufficient in compatibility mode because
+    an arbitrary subscription domain may match ``DIRECT``. This session copies
+    only the existing managed node pool into a disposable mihomo process whose
+    sole rule is to proxy all traffic. It never reloads the live process or
+    changes config, selected node, state, environment, VS Code, or WinINET.
+    """
+
+    deadline = time.monotonic() + max(0.05, float(timeout_seconds or 0.0))
+    nodes = _managed_local_subscription_recovery_nodes()
+    binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
+    if not nodes:
+        raise RuntimeError("没有可用于订阅兜底的受管节点池")
+    if not binary_path.is_file():
+        raise RuntimeError("没有可用于订阅兜底的已安装 mihomo 内核")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("订阅兜底节点池检查超过剩余等待时间")
+    with _MIHOMO_BINARY_LOCK:
+        with _isolated_mihomo_session(
+            binary_path,
+            nodes[0],
+            fallback_proxy_nodes=nodes[1:],
+            startup_timeout_seconds=remaining,
+        ) as session:
+            yield session.proxy_url
+
+
 def local_proxy_start_on_login_enabled() -> bool:
     return bool(load_local_proxy_preferences().get("start_on_login"))
 
@@ -2390,8 +2479,14 @@ def _probe_cloudflare_transfer_round(
 
 
 @contextmanager
-def _isolated_mihomo_session(binary_path: Path, proxy_node: dict):
-    """Run one node in a disposable mihomo instance without managed state."""
+def _isolated_mihomo_session(
+    binary_path: Path,
+    proxy_node: dict,
+    *,
+    fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None = None,
+    startup_timeout_seconds: float = 3.0,
+):
+    """Run a bounded node pool in a disposable mihomo instance without managed state."""
 
     process = None
     probe_dir = Path(tempfile.mkdtemp(prefix="api-switcher-node-probe-"))
@@ -2407,7 +2502,11 @@ def _isolated_mihomo_session(binary_path: Path, proxy_node: dict):
         finally:
             mixed_socket.close()
 
-        config = _build_isolated_mihomo_probe_config(proxy_node, mixed_port)
+        config = _build_isolated_mihomo_probe_config(
+            proxy_node,
+            mixed_port,
+            fallback_proxy_nodes=fallback_proxy_nodes,
+        )
         config_path = probe_dir / "config.yaml"
         atomic_write_text(config_path, config)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -2424,12 +2523,16 @@ def _isolated_mihomo_session(binary_path: Path, proxy_node: dict):
             )
             _ISOLATED_MIHOMO_PROCESSES.add(process)
         try:
-            for _attempt in range(30):
+            startup_deadline = time.monotonic() + max(
+                0.05,
+                min(3.0, float(startup_timeout_seconds or 0.0)),
+            )
+            while time.monotonic() < startup_deadline:
                 if process.poll() is not None:
                     raise RuntimeError("临时 mihomo 启动失败")
                 if _is_port_listening(mixed_port):
                     break
-                time.sleep(0.1)
+                time.sleep(min(0.1, max(0.001, startup_deadline - time.monotonic())))
             else:
                 raise RuntimeError("临时 mihomo 启动后未监听")
             yield _IsolatedMihomoSession(
@@ -2446,31 +2549,84 @@ def _isolated_mihomo_session(binary_path: Path, proxy_node: dict):
             if process is not None and process.poll() is not None:
                 _ISOLATED_MIHOMO_PROCESSES.discard(process)
         if process is None or process.poll() is not None:
-            shutil.rmtree(probe_dir, ignore_errors=True)
+            removed = _remove_isolated_mihomo_directory(probe_dir)
             with _ISOLATED_MIHOMO_LOCK:
-                _ISOLATED_MIHOMO_DIRECTORIES.discard(probe_dir)
+                if removed:
+                    _ISOLATED_MIHOMO_DIRECTORIES.discard(probe_dir)
+            if not removed:
+                raise RuntimeError(
+                    "临时 mihomo 已退出，但凭据目录清理失败；应用退出时会再次清理"
+                )
 
 
-def _build_isolated_mihomo_probe_config(proxy_node: dict, mixed_port: int) -> str:
-    node = remote_proxy._normalize_proxy_node(proxy_node)
+def _build_isolated_mihomo_probe_config(
+    proxy_node: dict,
+    mixed_port: int,
+    *,
+    fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None = None,
+) -> str:
+    subscription_recovery = fallback_proxy_nodes is not None
+    candidates = [proxy_node, *(fallback_proxy_nodes or ())]
     # Subscription display names share mihomo's outbound namespace with
     # built-ins such as DIRECT/REJECT/PASS.  A node carrying one of those
     # names must never make the isolated quality gate test the built-in
     # outbound instead of the candidate itself.
-    proxy_name = "API-SWITCHER-PROBE-NODE"
+    nodes = []
+    names = []
+    seen = set()
+    for candidate in candidates[: remote_proxy.AI_PROXY_FALLBACK_MAX_NODES]:
+        try:
+            node = remote_proxy._normalize_proxy_node(candidate)
+            connection_key = remote_proxy._proxy_node_connection_key(node)
+        except (TypeError, ValueError):
+            continue
+        if str(node.get("dialer-proxy") or "").strip() or connection_key in seen:
+            continue
+        proxy_name = (
+            "API-SWITCHER-PROBE-NODE"
+            if not nodes
+            else f"API-SWITCHER-PROBE-NODE-{len(nodes) + 1}"
+        )
+        node["name"] = proxy_name
+        nodes.append(node)
+        names.append(proxy_name)
+        seen.add(connection_key)
+    if not nodes:
+        raise ValueError("隔离代理至少需要一个独立节点")
     group_name = "API-SWITCHER-PROBE-GROUP"
-    node["name"] = proxy_name
+    group = {
+        "name": group_name,
+        "type": "select",
+        "proxies": names,
+    }
+    if len(names) > 1:
+        group.update(
+            {
+                "type": "fallback",
+                "url": remote_proxy.AI_PROXY_HEALTH_CHECK_URL,
+                "interval": remote_proxy.AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS,
+                "lazy": False,
+                "timeout": remote_proxy.AI_PROXY_HEALTH_CHECK_TIMEOUT_MS,
+                "max-failed-times": remote_proxy.AI_PROXY_HEALTH_CHECK_MAX_FAILURES,
+                "expected-status": remote_proxy.AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS,
+            }
+        )
     config = {
         "mixed-port": int(mixed_port),
         "allow-lan": False,
         "bind-address": "127.0.0.1",
         "mode": "rule",
         "log-level": "silent",
-        "ipv6": True,
-        "proxies": [node],
-        "proxy-groups": [{"name": group_name, "type": "select", "proxies": [proxy_name]}],
+        "ipv6": not subscription_recovery,
+        "proxies": nodes,
+        "proxy-groups": [group],
         "rules": [f"MATCH,{group_name}"],
     }
+    if subscription_recovery:
+        # Subscription recovery must not fall back to plaintext/system DNS in
+        # strict privacy mode. The encrypted resolver requests themselves are
+        # covered by the MATCH rule and therefore use the isolated node pool.
+        config["dns"] = remote_proxy._strict_privacy_dns_config()
     return remote_proxy.AI_PROXY_CONFIG_MARKER + " isolated\n" + remote_proxy._dump_yaml(config)
 
 
@@ -2489,6 +2645,27 @@ def _terminate_isolated_mihomo_process(process, *, timeout_seconds: float = 2.0)
     return process.poll() is not None
 
 
+def _remove_isolated_mihomo_directory(directory: Path, *, attempts: int = 3) -> bool:
+    """Remove a credential-bearing temp directory without hiding failures."""
+
+    try:
+        attempt_count = max(1, int(attempts or 1))
+    except (TypeError, ValueError):
+        attempt_count = 3
+    for attempt in range(attempt_count):
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt + 1 < attempt_count:
+                time.sleep(0.05)
+                continue
+        if not directory.exists():
+            return True
+    return not directory.exists()
+
+
 def cleanup_isolated_mihomo_sessions_for_shutdown() -> None:
     """Cancel future probe candidates and synchronously reap disposable mihomo."""
 
@@ -2498,18 +2675,22 @@ def cleanup_isolated_mihomo_sessions_for_shutdown() -> None:
         directories = tuple(_ISOLATED_MIHOMO_DIRECTORIES)
     for process in processes:
         _terminate_isolated_mihomo_process(process, timeout_seconds=1.5)
-    for directory in directories:
-        if not any(
-            process.poll() is None
-            for process in processes
-            if process in _ISOLATED_MIHOMO_PROCESSES
-        ):
-            shutil.rmtree(directory, ignore_errors=True)
+    any_process_alive = any(process.poll() is None for process in processes)
+    removed_directories = {
+        directory
+        for directory in directories
+        if not any_process_alive and _remove_isolated_mihomo_directory(directory)
+    }
     with _ISOLATED_MIHOMO_LOCK:
         stopped = {process for process in _ISOLATED_MIHOMO_PROCESSES if process.poll() is not None}
         _ISOLATED_MIHOMO_PROCESSES.difference_update(stopped)
-        if not _ISOLATED_MIHOMO_PROCESSES:
-            _ISOLATED_MIHOMO_DIRECTORIES.clear()
+        _ISOLATED_MIHOMO_DIRECTORIES.difference_update(removed_directories)
+        missing_directories = {
+            directory
+            for directory in _ISOLATED_MIHOMO_DIRECTORIES
+            if not directory.exists()
+        }
+        _ISOLATED_MIHOMO_DIRECTORIES.difference_update(missing_directories)
 
 
 atexit.register(cleanup_isolated_mihomo_sessions_for_shutdown)
