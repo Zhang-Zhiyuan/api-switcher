@@ -48,6 +48,8 @@ def isolated_ssh(tmp_path, monkeypatch):
     monkeypatch.setattr(security, "set_secret_json", lambda key, data: secret_store.__setitem__(key, json.dumps(data)))
     monkeypatch.setattr(security, "get_secret_json", lambda key: json.loads(secret_store[key]) if key in secret_store else None)
     monkeypatch.setattr(profile_manager, "PROFILES_FILE", tmp_path / "profiles.json")
+    monkeypatch.setattr(profile_manager, "refresh_claude_account_snapshot_if_current", lambda _name: False)
+    monkeypatch.setattr(profile_manager, "refresh_codex_account_snapshot_if_current", lambda _name: False)
 
     # Remote sync now snapshots and verifies the exact destination files.  A
     # stable in-memory SSH filesystem keeps older focused tests concise while
@@ -1150,6 +1152,7 @@ def test_root_safety_forces_no_prompt_mode():
 
 def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrides(isolated_ssh, monkeypatch):
     credentials = {"claudeAiOauth": {"accessToken": "claude-token"}}
+    refreshed_credentials = {"claudeAiOauth": {"accessToken": "claude-token-rotated"}}
     security.set_secret_json("claude-account:work:credentials", credentials)
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com", username="ubuntu"))
     profile_manager.save_claude_account_profile(
@@ -1162,6 +1165,11 @@ def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrid
 
     fake_client = object()
     monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        profile_manager,
+        "refresh_claude_account_snapshot_if_current",
+        lambda _name: (security.set_secret_json("claude-account:work:credentials", refreshed_credentials), True)[1],
+    )
     _state, writes = _install_claude_sync_state(
         monkeypatch,
         isolated_ssh,
@@ -1178,11 +1186,12 @@ def test_sync_claude_account_to_server_writes_credentials_and_clears_api_overrid
 
     message = sync_manager.sync_claude_account_to_server("remote", "work")
 
-    assert writes["credentials"][-1] == (fake_client, credentials, profile_manager.list_ssh_profiles()[0])
+    assert writes["credentials"][-1] == (fake_client, refreshed_credentials, profile_manager.list_ssh_profiles()[0])
     assert "env" not in writes["settings"][-1][1]
     assert writes["settings"][-1][1]["model"] == "claude-opus-5"
     assert "primaryApiKey" not in writes["config"][-1][1]
     assert "ssh.example.com" in message
+    assert "刷新本机账号快照" in message
 
 
 def test_sync_claude_account_to_root_downgrades_existing_bypass_permissions(isolated_ssh, monkeypatch):
@@ -1340,6 +1349,11 @@ def test_sync_claude_account_vscode_readback_failure_rolls_back_every_channel(
 
 def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(isolated_ssh, monkeypatch):
     auth = {"auth_mode": "api_key", "OPENAI_API_KEY": "old-key", "tokens": {"id_token": "chatgpt-token"}}
+    refreshed_auth = {
+        "auth_mode": "api_key",
+        "OPENAI_API_KEY": "old-key",
+        "tokens": {"id_token": "chatgpt-token-rotated"},
+    }
     security.set_secret_json("codex-account:work:auth_json", auth)
     profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
     profile_manager.save_codex_account_profile(
@@ -1352,6 +1366,11 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
 
     fake_client = object()
     monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda profile: fake_client)
+    monkeypatch.setattr(
+        profile_manager,
+        "refresh_codex_account_snapshot_if_current",
+        lambda _name: (security.set_secret_json("codex-account:work:auth_json", refreshed_auth), True)[1],
+    )
     state, writes = _install_codex_sync_state(
         monkeypatch,
         isolated_ssh,
@@ -1380,6 +1399,7 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
 
     assert writes["auth"][-1][0] is fake_client
     assert writes["auth"][-1][1]["auth_mode"] == "chatgpt"
+    assert writes["auth"][-1][1]["tokens"]["id_token"] == "chatgpt-token-rotated"
     assert "OPENAI_API_KEY" not in writes["auth"][-1][1]
     assert writes["auth"][-1][2].name == "remote"
     assert writes["config"][-1][1]["model_provider"] == "openai"
@@ -1393,6 +1413,7 @@ def test_sync_codex_account_to_server_writes_chatgpt_auth_and_official_config(is
         "OPENAI_BASE_URL",
     }
     assert "ssh.example.com" in message
+    assert "刷新本机账号快照" in message
 
 
 def test_sync_codex_account_rolls_back_nested_config_and_env_on_validation_failure(isolated_ssh, monkeypatch):
@@ -1724,6 +1745,56 @@ def test_pull_official_accounts_from_server(isolated_ssh, monkeypatch):
     assert "Codex 账号" in codex_message
     assert len(profile_manager.list_codex_account_profiles()) == 1
     assert security.get_secret_json(profile_manager.list_codex_account_profiles()[0].auth_json_ref)["auth_mode"] == "chatgpt"
+
+
+def test_pull_codex_account_keeps_newer_local_snapshot_for_same_account(isolated_ssh, monkeypatch):
+    local_auth = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-08-20T12:00:00Z",
+        "tokens": {
+            "account_id": "same-account",
+            "access_token": "local-newer-access",
+            "refresh_token": "local-newer-refresh",
+        },
+    }
+    remote_auth = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-08-01T12:00:00Z",
+        "tokens": {
+            "account_id": "same-account",
+            "access_token": "remote-older-access",
+            "refresh_token": "remote-older-refresh",
+        },
+    }
+    ref = "codex-account:work:auth_json"
+    security.set_secret_json(ref, local_auth)
+    profile_manager.save_codex_account_profile(
+        CodexAccountProfile(
+            name="work",
+            auth_json_ref=ref,
+            identity=profile_manager._codex_account_identity_from_auth(local_auth),
+        )
+    )
+    profile_manager.save_ssh_profile(SSHProfile(name="remote", host="ssh.example.com"))
+    fake_client = object()
+    monkeypatch.setattr(sync_manager.ssh_manager, "connect", lambda _profile: fake_client)
+    _install_codex_sync_state(
+        monkeypatch,
+        isolated_ssh,
+        config={"model_provider": "openai", "cli_auth_credentials_store": "file"},
+        auth=remote_auth,
+    )
+    monkeypatch.setattr(
+        sync_manager,
+        "_remote_codex_login_status",
+        lambda *_args, **_kwargs: (True, "Logged in using ChatGPT"),
+    )
+
+    message = sync_manager.pull_codex_account_from_server("remote")
+
+    saved = next(profile for profile in profile_manager.list_codex_account_profiles() if profile.name == "work")
+    assert profile_manager.get_codex_account_auth(saved) == local_auth
+    assert "远端快照较旧" in message
 
 
 def test_pull_codex_account_rejects_keyring_even_with_stale_auth_file(isolated_ssh, monkeypatch):
