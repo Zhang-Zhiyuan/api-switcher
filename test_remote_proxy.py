@@ -5991,6 +5991,27 @@ def test_remote_cleanup_command_backs_up_legacy_proxy_configs_and_removes_manage
     assert "tr -cd '0-9'" not in command
 
 
+def test_remote_stale_cleanup_command_rechecks_listener_before_mutation():
+    command = remote_proxy._build_cleanup_command(
+        "/home/me",
+        7890,
+        include_legacy_config=False,
+        stale_only=True,
+    )
+
+    assert "STALE_ONLY=1" in command
+    assert "protected_running=yes" in command
+    assert "protected_unknown=yes" in command
+    assert command.count("refresh_current_port_state") == 3
+    assert 'if [ "$STALE_ONLY" = "1" ] && kill -0 "$pid"' in command
+    assert command.index('if [ "$STALE_ONLY" = "1" ]') < command.index(
+        'if [ -s "$PID_FILE" ]'
+    )
+    assert command.index("protected_running=yes") < command.index(
+        'stop_pid_if_proxy "$saved_pid"'
+    )
+
+
 def test_dead_proxy_reconcile_requires_owned_config_and_preserves_live_proxy():
     command = remote_proxy._build_dead_proxy_reconcile_command("/home/me", 7890)
 
@@ -6006,6 +6027,18 @@ def test_dead_proxy_reconcile_requires_owned_config_and_preserves_live_proxy():
     assert "\0" not in command
 
 
+def test_dead_proxy_reconcile_protects_recent_managed_startup():
+    command = remote_proxy._build_dead_proxy_reconcile_command("/home/me", 7890)
+
+    assert f"STARTUP_GRACE={remote_proxy.REMOTE_AI_PROXY_STARTUP_GRACE_SECONDS}" in command
+    assert 'reason=proxy_starting' in command
+    assert 'reason=process_age_unknown' in command
+    assert "sock.connect_ex" in command
+    assert command.index('reason=proxy_starting') < command.index(
+        'stop_managed_pid "$saved_pid"'
+    )
+
+
 def test_dead_proxy_reconcile_blocks_unknown_listener_without_killing(monkeypatch):
     monkeypatch.setattr(
         remote_proxy.ssh_manager,
@@ -6019,6 +6052,120 @@ def test_dead_proxy_reconcile_blocks_unknown_listener_without_killing(monkeypatc
 
     with pytest.raises(RuntimeError, match="为避免误杀，已停止部署"):
         remote_proxy._reconcile_dead_ai_proxy_runtime(object(), "/home/me", 7890)
+
+
+def test_dead_proxy_reconcile_reports_startup_protection_for_cleanup(monkeypatch):
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "execute_command_with_status",
+        lambda *_args, **_kwargs: (
+            0,
+            "conflict=yes\nreason=proxy_starting\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="启动保护期.*停止脏代理清理"):
+        remote_proxy._reconcile_dead_ai_proxy_runtime(
+            object(),
+            "/home/me",
+            7890,
+            conflict_action="脏代理清理",
+        )
+
+
+def test_stale_cleanup_preserves_healthy_managed_proxy(monkeypatch):
+    fake_client = object()
+    cleanup_calls = []
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(
+        remote_proxy,
+        "_reconcile_dead_ai_proxy_runtime",
+        lambda *_args, **_kwargs: {
+            "working": "yes",
+            "dirty": "no",
+            "repaired_pid": "yes",
+        },
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "_execute_ai_proxy_cleanup",
+        lambda *_args, **_kwargs: cleanup_calls.append((_args, _kwargs)),
+    )
+
+    message = remote_proxy.cleanup_stale_ai_proxy("server")
+
+    assert cleanup_calls == []
+    assert "正常监听" in message
+    assert "已修复失配的受管 PID 记录" in message
+    assert "未清理健康代理" in message
+
+
+def test_stale_cleanup_removes_only_confirmed_managed_residue(monkeypatch):
+    fake_client = object()
+    cleanup_calls = []
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(
+        remote_proxy,
+        "_reconcile_dead_ai_proxy_runtime",
+        lambda *_args, **_kwargs: {
+            "working": "no",
+            "dirty": "yes",
+            "removed_pid": "yes",
+            "stopped_pid": "2468",
+        },
+    )
+
+    def execute(client, home, port, **kwargs):
+        cleanup_calls.append((client, home, port, kwargs))
+        return {
+            "removed_files": "2",
+            "removed_blocks": "1",
+            "still_listening": "no",
+        }
+
+    monkeypatch.setattr(remote_proxy, "_execute_ai_proxy_cleanup", execute)
+
+    message = remote_proxy.cleanup_stale_ai_proxy("server")
+
+    assert cleanup_calls == [
+        (
+            fake_client,
+            "/home/me",
+            7890,
+            {"include_legacy_config": False, "stale_only": True},
+        )
+    ]
+    assert "SSH 脏代理清理完成" in message
+    assert "已停止无监听的受管进程 2468" in message
+    assert "已移除失效 PID 记录" in message
+    assert "移除受管文件 2 个" in message
+
+
+def test_stale_cleanup_second_check_preserves_new_listener(monkeypatch):
+    fake_client = object()
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(
+        remote_proxy,
+        "_reconcile_dead_ai_proxy_runtime",
+        lambda *_args, **_kwargs: {"working": "no", "dirty": "yes"},
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "_execute_ai_proxy_cleanup",
+        lambda *_args, **_kwargs: {
+            "protected_running": "yes",
+            "protected_reason": "listener",
+        },
+    )
+
+    message = remote_proxy.cleanup_stale_ai_proxy("server")
+
+    assert "端口已恢复监听" in message
+    assert "未修改任何代理入口" in message
 
 
 def test_install_auto_cleans_only_confirmed_dead_managed_state(monkeypatch):

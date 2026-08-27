@@ -187,7 +187,7 @@ class APITester:
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
     MAX_PROXY_CHECK_CACHE_ENTRIES = 64
-    USER_AGENT = "API-Switcher/2.4.14"
+    USER_AGENT = "API-Switcher/2.4.15"
     # Keep both common casings: Windows environment names are case-insensitive,
     # while copied shell variables on Unix often use lowercase names.
     LOCAL_PROXY_ENV_NAMES = (

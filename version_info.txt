@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 4, 14, 0),
-    prodvers=(2, 4, 14, 0),
+    filevers=(2, 4, 15, 0),
+    prodvers=(2, 4, 15, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,11 +17,11 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'API切换器团队'),
             StringStruct('FileDescription', 'API切换器'),
-            StringStruct('FileVersion', '2.4.14'),
+            StringStruct('FileVersion', '2.4.15'),
             StringStruct('InternalName', 'API切换器'),
             StringStruct('OriginalFilename', 'API切换器.exe'),
             StringStruct('ProductName', 'API切换器'),
-            StringStruct('ProductVersion', '2.4.14')
+            StringStruct('ProductVersion', '2.4.15')
           ]
         )
       ]

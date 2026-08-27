@@ -2052,6 +2052,7 @@ def test_current_node_hot_update_buttons_follow_busy_and_node_availability():
         "_proxy_deploy_button",
         "_proxy_inspect_button",
         "_proxy_remote_test_button",
+        "_proxy_remote_stale_cleanup_button",
         "_proxy_remote_cleanup_button",
         "_proxy_subscription_profile_save_button",
         "_proxy_subscription_profile_delete_button",
@@ -2119,6 +2120,44 @@ def test_explicit_stale_proxy_action_previews_before_cleanup(monkeypatch):
     assert cleanups == []
     dialogs[0][1]["on_confirm"]()
     assert cleanups == [inspection]
+
+
+def test_ssh_explicit_stale_proxy_action_cleans_selected_servers_without_teardown(monkeypatch):
+    assert 'text="清理脏代理"' in inspect.getsource(SSHTab._build_deployment_sections)
+    assert "cleanup_stale_ai_proxy" in inspect.getsource(SSHTab._cleanup_stale_ai_proxy)
+
+    cleanup_calls = []
+    monkeypatch.setattr(
+        remote_proxy,
+        "cleanup_stale_ai_proxy",
+        lambda server_name: cleanup_calls.append(server_name) or f"{server_name}: clean",
+    )
+    tab = object.__new__(SSHTab)
+    tab._require_selected_servers = lambda _setter=None: ["alpha", "beta"]
+    tab._format_server_target = lambda names: f"{len(names)} 台服务器"
+    tab._set_proxy_status = lambda *_args, **_kwargs: None
+    tab._sync_status_label = SimpleNamespace(cget=lambda _key: "done")
+    tab._show_server_batch_result = lambda *_args, **_kwargs: None
+    tab._run_server_batch = lambda names, action: SSHTab._run_server_batch(
+        tab,
+        names,
+        action,
+    )
+    captured = {}
+
+    def run_task(message, worker, on_done=None):
+        captured["message"] = message
+        payload = {"ok": True, "result": worker()}
+        if on_done:
+            on_done(payload)
+        return True
+
+    tab._run_proxy_ssh_task = run_task
+
+    tab._cleanup_stale_ai_proxy()
+
+    assert cleanup_calls == ["alpha", "beta"]
+    assert "逐台复核并清理" in captured["message"]
 
 
 def test_proxy_tabs_action_hint_lists_only_effective_quality_sources(monkeypatch):

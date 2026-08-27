@@ -77,6 +77,7 @@ REMOTE_AI_STABILITY_EXPECTED_PROBES = (
     REMOTE_AI_STABILITY_ROUNDS * len(REMOTE_AI_STABILITY_TARGETS) + 1
 )
 _ISOLATED_CANDIDATE_CONFIG_PORT = 17897
+REMOTE_AI_PROXY_STARTUP_GRACE_SECONDS = 20
 
 
 class _NoBypassProxyHandler(urlrequest.ProxyHandler):
@@ -3719,7 +3720,13 @@ def probe_ai_proxy_candidate_isolated(
     )
 
 
-def _reconcile_dead_ai_proxy_runtime(client, home: str, mixed_port: int) -> dict[str, str]:
+def _reconcile_dead_ai_proxy_runtime(
+    client,
+    home: str,
+    mixed_port: int,
+    *,
+    conflict_action: str = "部署",
+) -> dict[str, str]:
     """Repair or identify stale managed runtime state without touching live foreign proxies."""
 
     command = _build_dead_proxy_reconcile_command(home, mixed_port)
@@ -3741,6 +3748,17 @@ def _reconcile_dead_ai_proxy_runtime(client, home: str, mixed_port: int) -> dict
                 f"检测到本工具代理正在端口 {configured_port} 正常运行；"
                 f"拒绝将同一受管配置目录覆盖到端口 {mixed_port}，正常代理未终止"
             )
+        action_label = str(conflict_action or "操作").strip()[:20] or "操作"
+        if reason in {"proxy_starting", "process_age_unknown"}:
+            protection_reason = (
+                "仍在启动保护期"
+                if reason == "proxy_starting"
+                else "启动时长无法确认"
+            )
+            raise RuntimeError(
+                f"检测到本工具受管代理进程存在，但 {mixed_port} 端口尚未监听且{protection_reason}；"
+                f"为避免中断正在建立的 Codex/Claude 连接，已停止{action_label}，请稍后重试"
+            )
         listeners = values.get("listener_pids") or "无法读取"
         reason_labels = {
             "foreign_listener": "监听进程不属于本工具",
@@ -3748,11 +3766,13 @@ def _reconcile_dead_ai_proxy_runtime(client, home: str, mixed_port: int) -> dict
             "multiple_managed_listeners": "检测到多个受管监听进程",
             "unknown_owner": "无法确认监听进程身份",
             "listener_check_unavailable": "远端缺少端口识别工具",
+            "proxy_starting": "本工具受管代理仍在启动保护期",
+            "process_age_unknown": "无法确认本工具受管代理的启动时长",
         }
         raise RuntimeError(
             f"远端端口 {mixed_port} 已占用且不能安全自动清理："
             f"{reason_labels.get(reason, reason)}（PID: {listeners}）。"
-            "为避免误杀，已停止部署"
+            f"为避免误杀，已停止{action_label}"
         )
     return values
 
@@ -4792,18 +4812,35 @@ def probe_ai_proxy_stability(
     )
 
 
-def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_config: bool = True) -> str:
-    _ssh_profile, client = _connect_ssh(ssh_name)
-    home = remote_config._remote_home(client)
-    mixed_port = _normalize_port(mixed_port, "本地代理端口")
-    command = _build_cleanup_command(home, mixed_port, include_legacy_config)
+def _execute_ai_proxy_cleanup(
+    client,
+    home: str,
+    mixed_port: int,
+    *,
+    include_legacy_config: bool,
+    stale_only: bool = False,
+) -> dict[str, str]:
+    command = _build_cleanup_command(
+        home,
+        mixed_port,
+        include_legacy_config,
+        stale_only=stale_only,
+    )
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=180, log_command=False)
     if status != 0:
         detail = (stderr or stdout or "").strip()
         raise RuntimeError(f"远端 AI 代理清理失败: {detail or status}")
+    return _parse_key_values(stdout)
 
-    values = _parse_key_values(stdout)
-    pieces = []
+
+def _format_ai_proxy_cleanup_result(
+    ssh_name: str,
+    values: dict[str, str],
+    *,
+    completion_label: str = "AI 代理清理完成",
+    initial_pieces: tuple[str, ...] = (),
+) -> str:
+    pieces = list(initial_pieces)
     stopped_pids = values.get("stopped_pids", "")
     if stopped_pids:
         pieces.append(f"已停止进程 {stopped_pids}")
@@ -4833,9 +4870,104 @@ def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_confi
     notes = values.get("notes", "")
     if notes:
         pieces.append(notes)
+    if any(
+        (
+            bool(stopped_pids),
+            removed_files > 0,
+            removed_blocks > 0,
+            removed_settings > 0,
+            removed_systemd_env > 0,
+            backed_up_configs > 0,
+        )
+    ):
+        pieces.append("已打开的远端终端、Codex/Claude 或 VS Code 会话需断开重连后才会丢弃已继承的旧变量")
     if not pieces:
         pieces.append("未发现需要清理的远端 AI 代理")
-    return f"{ssh_name}: AI 代理清理完成；" + "；".join(pieces)
+    return f"{ssh_name}: {completion_label}；" + "；".join(pieces)
+
+
+def cleanup_stale_ai_proxy(ssh_name: str, mixed_port: int = 7890) -> str:
+    """Remove only confirmed stale tool-managed proxy residue on one SSH host.
+
+    A healthy listener, a foreign listener, an unknown owner, or a proxy still
+    inside its startup grace period is never torn down.  The cleanup command
+    also rechecks the port immediately before mutation to narrow the race with
+    another login session starting the managed proxy.
+    """
+
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    reconcile = _reconcile_dead_ai_proxy_runtime(
+        client,
+        home,
+        mixed_port,
+        conflict_action="脏代理清理",
+    )
+    if reconcile.get("working") == "yes":
+        repair_note = (
+            "；已修复失配的受管 PID 记录"
+            if reconcile.get("repaired_pid") == "yes"
+            else ""
+        )
+        return (
+            f"{ssh_name}: 受管 AI 代理正在 {mixed_port} 端口正常监听"
+            f"{repair_note}；未清理健康代理或环境入口"
+        )
+    if reconcile.get("dirty") != "yes":
+        return f"{ssh_name}: 未发现需要清理的本工具 SSH 脏代理残留"
+
+    values = _execute_ai_proxy_cleanup(
+        client,
+        home,
+        mixed_port,
+        include_legacy_config=False,
+        stale_only=True,
+    )
+    if values.get("protected_running") == "yes":
+        protected_subject = (
+            f"{mixed_port} 端口已恢复监听"
+            if values.get("protected_reason") == "listener"
+            else "代理相关进程重新活动"
+        )
+        return (
+            f"{ssh_name}: 清理前复核发现{protected_subject}；"
+            "为避免中断 Codex/Claude，未修改任何代理入口"
+        )
+    if values.get("protected_unknown") == "yes":
+        return (
+            f"{ssh_name}: 清理前无法再次确认 {mixed_port} 端口状态；"
+            "为避免误清理，未修改任何代理入口"
+        )
+
+    reconcile_pieces: list[str] = []
+    stopped_pid = reconcile.get("stopped_pid", "")
+    if stopped_pid:
+        reconcile_pieces.append(f"已停止无监听的受管进程 {stopped_pid}")
+    if reconcile.get("removed_pid") == "yes":
+        reconcile_pieces.append("已移除失效 PID 记录")
+    skipped_pid = reconcile.get("skipped_pid", "")
+    if skipped_pid:
+        reconcile_pieces.append(f"未终止身份不明的进程 {skipped_pid}")
+    return _format_ai_proxy_cleanup_result(
+        ssh_name,
+        values,
+        completion_label="SSH 脏代理清理完成",
+        initial_pieces=tuple(reconcile_pieces),
+    )
+
+
+def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_config: bool = True) -> str:
+    _ssh_profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    mixed_port = _normalize_port(mixed_port, "本地代理端口")
+    values = _execute_ai_proxy_cleanup(
+        client,
+        home,
+        mixed_port,
+        include_legacy_config=include_legacy_config,
+    )
+    return _format_ai_proxy_cleanup_result(ssh_name, values)
 
 
 def _connect_ssh(ssh_name: str):
@@ -7274,6 +7406,14 @@ def _build_dead_proxy_reconcile_command(home: str, mixed_port: int) -> str:
         shlex.quote(posixpath.join(home, path[2:]) if path.startswith("~/") else path)
         for path in VSCODE_SERVER_ENV_SETUP_PATHS
     )
+    vscode_settings_paths = " ".join(
+        shlex.quote(posixpath.join(home, path[2:]) if path.startswith("~/") else path)
+        for path in remote_config.REMOTE_VSCODE_SETTINGS_PATHS
+    )
+    legacy_config_paths = " ".join(
+        shlex.quote(posixpath.join(home, ".config", "clash", filename))
+        for filename in ("config.yaml", "config.yml")
+    )
     proxy_url = _proxy_env_values(mixed_port)["API_SWITCHER_AI_PROXY_URL"]
     return fr"""set +e
 CONFIG_DIR={shlex.quote(config_dir)}
@@ -7282,7 +7422,10 @@ APP_DIR={shlex.quote(app_dir)}
 PID_FILE="$APP_DIR/ai-proxy.pid"
 ENV_FILE="$APP_DIR/ai-proxy.env"
 START_SCRIPT="$APP_DIR/start-ai-proxy.sh"
+LOG_FILE="$APP_DIR/ai-proxy.log"
+FISH_FILE={shlex.quote(posixpath.join(home, ".config", "fish", "conf.d", "api-switcher-ai-proxy.fish"))}
 PORT={mixed_port}
+STARTUP_GRACE={REMOTE_AI_PROXY_STARTUP_GRACE_SECONDS}
 PROXY_URL={shlex.quote(proxy_url)}
 CONFIG_MARKER={shlex.quote(AI_PROXY_CONFIG_MARKER)}
 dirty=no
@@ -7335,21 +7478,34 @@ stop_managed_pid() {{
 }}
 
 if command -v ss >/dev/null 2>&1; then
-  port_listening=no
-  listener_lines="$(ss -ltnp 2>/dev/null | awk -v suffix=":$PORT" '$4 ~ suffix "$" {{print}}')"
-  [ -n "$listener_lines" ] && port_listening=yes
-  listener_pids="$(printf '%s\n' "$listener_lines" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u | xargs 2>/dev/null)"
+  all_listener_lines="$(ss -ltnp 2>/dev/null)"
+  listener_status=$?
+  if [ "$listener_status" -eq 0 ]; then
+    port_listening=no
+    listener_lines="$(printf '%s\n' "$all_listener_lines" | awk -v suffix=":$PORT" '$4 ~ suffix "$" {{print}}')"
+    [ -n "$listener_lines" ] && port_listening=yes
+    listener_pids="$(printf '%s\n' "$listener_lines" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u | xargs 2>/dev/null)"
+  fi
 elif command -v netstat >/dev/null 2>&1; then
+  all_listener_lines="$(netstat -ltnp 2>/dev/null)"
+  listener_status=$?
+  if [ "$listener_status" -eq 0 ]; then
+    port_listening=no
+    listener_lines="$(printf '%s\n' "$all_listener_lines" | awk -v suffix=":$PORT" '$4 ~ suffix "$" {{print}}')"
+    [ -n "$listener_lines" ] && port_listening=yes
+    listener_pids="$(printf '%s\n' "$listener_lines" | awk '{{print $7}}' | sed -n 's#/.*##p' | sort -u | xargs 2>/dev/null)"
+  fi
+elif command -v python3 >/dev/null 2>&1; then
   port_listening=no
-  listener_lines="$(netstat -ltnp 2>/dev/null | awk -v suffix=":$PORT" '$4 ~ suffix "$" {{print}}')"
-  [ -n "$listener_lines" ] && port_listening=yes
-  listener_pids="$(printf '%s\n' "$listener_lines" | awk '{{print $7}}' | sed -n 's#/.*##p' | sort -u | xargs 2>/dev/null)"
+  python3 -c 'import socket,sys; sock=socket.socket(); sock.settimeout(0.3); sys.exit(0 if sock.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$PORT" >/dev/null 2>&1 && port_listening=yes
 fi
 if [ -z "$listener_pids" ] && command -v lsof >/dev/null 2>&1; then
   listener_pids="$(lsof -nP -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | sort -u | xargs 2>/dev/null)"
+  [ -n "$listener_pids" ] && port_listening=yes
 fi
 if [ -z "$listener_pids" ] && command -v fuser >/dev/null 2>&1; then
   listener_pids="$(fuser -n tcp "$PORT" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs 2>/dev/null)"
+  [ -n "$listener_pids" ] && port_listening=yes
 fi
 
 for pid in $listener_pids; do
@@ -7413,6 +7569,22 @@ elif [ "$port_listening" = "no" ]; then
             conflict=yes
             reason=managed_proxy_on_other_port
             preserve_pid=yes
+          elif is_managed_pid "$saved_pid"; then
+            process_age="$(ps -p "$saved_pid" -o etimes= 2>/dev/null | tr -d '[:space:]' || true)"
+            case "$process_age" in
+              ''|*[!0-9]*) process_age="" ;;
+            esac
+            if [ -z "$process_age" ]; then
+              conflict=yes
+              reason=process_age_unknown
+              preserve_pid=yes
+            elif [ "$process_age" -lt "$STARTUP_GRACE" ]; then
+              conflict=yes
+              reason=proxy_starting
+              preserve_pid=yes
+            elif ! stop_managed_pid "$saved_pid"; then
+              skipped_pid="$saved_pid"
+            fi
           elif ! stop_managed_pid "$saved_pid"; then
             skipped_pid="$saved_pid"
           fi
@@ -7425,14 +7597,22 @@ elif [ "$port_listening" = "no" ]; then
       dirty=yes
     fi
   fi
-  if [ "$config_owned" = "yes" ] || [ -e "$ENV_FILE" ] || [ -e "$START_SCRIPT" ]; then
+  if [ "$config_owned" = "yes" ] || [ -e "$ENV_FILE" ] || [ -e "$START_SCRIPT" ] || [ -e "$LOG_FILE" ] || [ -e "$FISH_FILE" ]; then
     dirty=yes
   fi
+  for file in {legacy_config_paths}; do
+    if [ -f "$file" ] && (grep -qF "$CONFIG_MARKER" "$file" 2>/dev/null || (grep -q "AI-PROXY" "$file" 2>/dev/null && grep -q "chatgpt.com" "$file" 2>/dev/null)); then
+      dirty=yes
+    fi
+  done
   for file in {shell_paths}; do
     [ -f "$file" ] && grep -qF "# >>> API切换器 AI proxy >>>" "$file" 2>/dev/null && dirty=yes
   done
   for file in {vscode_paths}; do
     [ -f "$file" ] && grep -qF {shlex.quote(VSCODE_ENV_BLOCK_START)} "$file" 2>/dev/null && dirty=yes
+  done
+  for file in {vscode_settings_paths}; do
+    [ -f "$file" ] && grep -qF "$PROXY_URL" "$file" 2>/dev/null && dirty=yes
   done
   if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment 2>/dev/null | grep -Fx -- "API_SWITCHER_AI_PROXY_URL=$PROXY_URL" >/dev/null 2>&1; then
     dirty=yes
@@ -7446,13 +7626,20 @@ printf 'dirty=%s\nworking=%s\nrepaired_pid=%s\nremoved_pid=%s\nstopped_pid=%s\ns
 """
 
 
-def _build_cleanup_command(home: str, mixed_port: int, include_legacy_config: bool = True) -> str:
+def _build_cleanup_command(
+    home: str,
+    mixed_port: int,
+    include_legacy_config: bool = True,
+    *,
+    stale_only: bool = False,
+) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     env = _proxy_env_values(mixed_port)
     template = r'''set +e
 HOME_DIR=__HOME_DIR__
 PORT=__PORT__
 INCLUDE_LEGACY_CONFIG=__INCLUDE_LEGACY_CONFIG__
+STALE_ONLY=__STALE_ONLY__
 CONFIG_MARKER=__CONFIG_MARKER__
 PROXY_URL=__PROXY_URL__
 NO_PROXY_VALUE=__NO_PROXY_VALUE__
@@ -7473,9 +7660,56 @@ skipped_pids=""
 notes=""
 backup_dir=""
 config_owned=no
+protected_running=no
+protected_unknown=no
+protected_reason=""
 
 if [ -s "$CONFIG_FILE" ] && grep -qF "$CONFIG_MARKER" "$CONFIG_FILE" 2>/dev/null; then
   config_owned=yes
+fi
+
+refresh_current_port_state() {
+  current_port_state=unknown
+  if command -v ss >/dev/null 2>&1; then
+    if current_listener_lines="$(ss -ltn 2>/dev/null)"; then
+      current_port_state=no
+      printf '%s\n' "$current_listener_lines" | awk -v port=":$PORT" '$4 ~ (port "$") {found=1} END {exit found ? 0 : 1}' && current_port_state=yes
+    fi
+  elif command -v netstat >/dev/null 2>&1; then
+    if current_listener_lines="$(netstat -ltn 2>/dev/null)"; then
+      current_port_state=no
+      printf '%s\n' "$current_listener_lines" | awk -v port=":$PORT" '$4 ~ (port "$") {found=1} END {exit found ? 0 : 1}' && current_port_state=yes
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    current_port_state=no
+    python3 -c 'import socket,sys; sock=socket.socket(); sock.settimeout(0.3); sys.exit(0 if sock.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$PORT" >/dev/null 2>&1 && current_port_state=yes
+  elif command -v lsof >/dev/null 2>&1; then
+    current_port_state=no
+    lsof -nP -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | grep -q . && current_port_state=yes
+  elif command -v fuser >/dev/null 2>&1; then
+    current_port_state=no
+    fuser -n tcp "$PORT" >/dev/null 2>&1 && current_port_state=yes
+  fi
+}
+
+protect_stale_cleanup_if_needed() {
+  if [ "$current_port_state" = "yes" ]; then
+    printf 'protected_running=yes\nprotected_reason=listener\nstill_listening=yes\n'
+    exit 0
+  fi
+  if [ "$current_port_state" != "no" ]; then
+    printf 'protected_unknown=yes\nprotected_reason=listener_check\nstill_listening=unknown\n'
+    exit 0
+  fi
+}
+
+# A stale-only cleanup must never turn into a normal teardown because another
+# SSH/VS Code login started the proxy after the first inspection. Recheck the
+# requested port immediately before any process or file mutation and fail safe
+# when the remote host cannot provide a listener check.
+if [ "$STALE_ONLY" = "1" ]; then
+  refresh_current_port_state
+  protect_stale_cleanup_if_needed
 fi
 
 append_note() {
@@ -7504,6 +7738,11 @@ is_managed_proxy_pid() {
 stop_pid_if_proxy() {
   pid="$1"
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$STALE_ONLY" = "1" ] && kill -0 "$pid" 2>/dev/null; then
+    protected_running=yes
+    skipped_pids="$skipped_pids $pid"
+    return 0
+  fi
   if is_managed_proxy_pid "$pid"; then
     kill "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5; do
@@ -7543,6 +7782,17 @@ if command -v fuser >/dev/null 2>&1; then
   for pid in $(fuser -n tcp "$PORT" 2>/dev/null | tr ' ' '\n' | sort -u); do
     stop_pid_if_proxy "$pid"
   done
+fi
+
+if [ "$STALE_ONLY" = "1" ]; then
+  if [ "$protected_running" = "yes" ]; then
+    printf 'protected_running=yes\nprotected_reason=live_process\nstill_listening=unknown\nskipped_pids=%s\n' "$(echo "$skipped_pids" | xargs 2>/dev/null)"
+    exit 0
+  fi
+  # Narrow the remaining race with a process that wrote no PID at the first
+  # scan but began listening while ownership checks were running.
+  refresh_current_port_state
+  protect_stale_cleanup_if_needed
 fi
 
 for file in "$ENV_FILE" "$START_SCRIPT" "$PID_FILE" "$LOG_FILE"; do
@@ -7735,7 +7985,7 @@ else
   still_listening=unknown
 fi
 
-printf 'removed_files=%s\nremoved_blocks=%s\nremoved_settings=%s\nremoved_systemd_env=%s\nbacked_up_configs=%s\nbackup_dir=%s\nstopped_pids=%s\nskipped_pids=%s\nstill_listening=%s\n' "$removed_files" "$removed_blocks" "$removed_settings" "$removed_systemd_env" "$backed_up_configs" "$backup_dir" "$(echo "$stopped_pids" | xargs 2>/dev/null)" "$(echo "$skipped_pids" | xargs 2>/dev/null)" "$still_listening"
+printf 'removed_files=%s\nremoved_blocks=%s\nremoved_settings=%s\nremoved_systemd_env=%s\nbacked_up_configs=%s\nbackup_dir=%s\nstopped_pids=%s\nskipped_pids=%s\nstill_listening=%s\nprotected_running=%s\nprotected_unknown=%s\nprotected_reason=%s\n' "$removed_files" "$removed_blocks" "$removed_settings" "$removed_systemd_env" "$backed_up_configs" "$backup_dir" "$(echo "$stopped_pids" | xargs 2>/dev/null)" "$(echo "$skipped_pids" | xargs 2>/dev/null)" "$still_listening" "$protected_running" "$protected_unknown" "$protected_reason"
 if [ -n "$listener_detail" ]; then
   printf 'listener_detail=%s\n' "$(echo "$listener_detail" | tr '\n' ' ' | cut -c 1-500)"
 fi
@@ -7747,6 +7997,7 @@ fi
         "__HOME_DIR__": shlex.quote(home),
         "__PORT__": str(mixed_port),
         "__INCLUDE_LEGACY_CONFIG__": "1" if include_legacy_config else "0",
+        "__STALE_ONLY__": "1" if stale_only else "0",
         "__CONFIG_MARKER__": shlex.quote(AI_PROXY_CONFIG_MARKER),
         "__PROXY_URL__": shlex.quote(env["API_SWITCHER_AI_PROXY_URL"]),
         "__NO_PROXY_VALUE__": shlex.quote(env["NO_PROXY"]),
