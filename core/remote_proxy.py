@@ -380,6 +380,21 @@ class RemoteAIProxyStatus:
     config_path: str
     proxy_url: str
     detail: str = ""
+    environment_ready: bool = True
+    start_script_ready: bool = True
+    shell_entrypoints_ready: bool = True
+    vscode_entrypoints_ready: bool = True
+
+    @property
+    def integrations_ready(self) -> bool:
+        """Whether new shells and VS Code Remote can inherit this proxy."""
+
+        return bool(
+            self.environment_ready
+            and self.start_script_ready
+            and self.shell_entrypoints_ready
+            and self.vscode_entrypoints_ready
+        )
 
     def summary(self) -> str:
         state = "运行中" if self.running else "未运行"
@@ -3061,6 +3076,86 @@ def _managed_mihomo_proxy_nodes(
     return nodes
 
 
+def _remote_proxy_fallback_nodes(
+    primary_node: dict,
+    candidate_nodes,
+    quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
+) -> tuple[dict, ...]:
+    """Build a bounded policy-safe remote failover pool from the active cache."""
+
+    try:
+        primary_connection_key = _proxy_node_connection_key(primary_node)
+    except (TypeError, ValueError):
+        return ()
+    qualities = quality_results or {}
+    candidates = ranked_proxy_subscription_nodes_for_ai_probe(
+        automatic_proxy_subscription_nodes(candidate_nodes, qualities),
+        qualities,
+    )
+    selected: list[dict] = []
+    seen = {primary_connection_key}
+    limit = max(0, AI_PROXY_FALLBACK_MAX_NODES - 1)
+    for item in candidates:
+        if len(selected) >= limit:
+            break
+        item_key = proxy_subscription_node_key(item)
+        quality = qualities.get(item_key)
+        if (
+            proxy_node_quality_decisive_for_ai_proxy(quality)
+            and not proxy_node_quality_for_ai_proxy_ok(quality)
+        ):
+            continue
+        try:
+            normalized = _normalize_proxy_node(item.node)
+            connection_key = _proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip():
+            continue
+        if connection_key in seen:
+            continue
+        selected.append(normalized)
+        seen.add(connection_key)
+    return tuple(selected)
+
+
+def _existing_remote_proxy_fallback_nodes(
+    config_content: str,
+    primary_node: dict,
+) -> tuple[dict, ...]:
+    """Preserve a managed pool when a direct hot reload omits candidates."""
+
+    content = str(config_content or "")
+    if AI_PROXY_CONFIG_MARKER not in content:
+        return ()
+    try:
+        parsed = yaml.safe_load(content)
+        proxy_nodes = parsed.get("proxies") if isinstance(parsed, dict) else None
+        primary_key = _proxy_node_connection_key(primary_node)
+    except Exception:
+        return ()
+    if not isinstance(proxy_nodes, list):
+        return ()
+
+    selected: list[dict] = []
+    seen = {primary_key}
+    for node in proxy_nodes:
+        if len(selected) >= AI_PROXY_FALLBACK_MAX_NODES - 1:
+            break
+        if not isinstance(node, dict):
+            continue
+        try:
+            normalized = _normalize_proxy_node(node)
+            connection_key = _proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
+            continue
+        selected.append(normalized)
+        seen.add(connection_key)
+    return tuple(selected)
+
+
 def _managed_ai_proxy_group(node_names: list[str], *, health_checked: bool) -> dict:
     names = [str(name or "").strip() for name in node_names if str(name or "").strip()]
     if not names:
@@ -3289,7 +3384,13 @@ def _build_isolated_candidate_config(proxy_node: dict) -> str:
 
     mixed_port = _ISOLATED_CANDIDATE_CONFIG_PORT
     controller_port = mihomo_controller_port(mixed_port)
-    config = build_mihomo_config(proxy_node, mixed_port)
+    config = build_mihomo_config(
+        proxy_node,
+        mixed_port,
+        health_checked_group=True,
+        resilient_transport=True,
+        mainland_dns=True,
+    )
     mixed_marker = f"mixed-port: {mixed_port}"
     controller_marker = f'127.0.0.1:{controller_port}'
     if mixed_marker not in config or controller_marker not in config:
@@ -3683,6 +3784,7 @@ def install_ai_proxy(
     mixed_port: int = 7890,
     *,
     strict_privacy: bool | None = None,
+    fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
 ) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_node = parse_proxy_node(proxy_text)
@@ -3705,6 +3807,7 @@ def install_ai_proxy(
             mixed_port,
             persist_selection=False,
             strict_privacy=effective_strict_privacy,
+            fallback_nodes=fallback_nodes,
         )
         repair_note = (
             "；部署前已修复受管代理 PID 状态，正常工作的代理未终止"
@@ -3723,6 +3826,10 @@ def install_ai_proxy(
         build_mihomo_config(
             proxy_node,
             mixed_port,
+            fallback_proxy_nodes=fallback_nodes,
+            health_checked_group=True,
+            resilient_transport=True,
+            mainland_dns=True,
             strict_privacy=effective_strict_privacy,
         ),
         file_mode=0o600,
@@ -3746,7 +3853,8 @@ def install_ai_proxy(
     suffix = f"；{result[-1]}" if result else ""
     return (
         f"AI 代理已部署到 {ssh_name}: http://127.0.0.1:{mixed_port}"
-        f"{suffix}{cleanup_note}；已写入 VS Code Remote/Codex/Claude Code 环境入口 {vscode_targets} 处；"
+        f"{suffix}{cleanup_note}；内核故障切换池 {1 + len(fallback_nodes or ())} 个节点；"
+        f"已写入 VS Code Remote/Codex/Claude Code 环境入口 {vscode_targets} 处；"
         + (
             "应用层严格隐私已开启（非 VPN/TUN）"
             if effective_strict_privacy
@@ -3781,6 +3889,11 @@ def install_ai_proxy_verified(
         )
     requested_node = parse_proxy_node(proxy_text)
     requested_key = proxy_node_key(requested_node)
+    requested_fallback_nodes = _remote_proxy_fallback_nodes(
+        requested_node,
+        candidate_nodes,
+        quality_results,
+    )
     tried = []
     try:
         requested_probe = _probe_ai_proxy_candidate_with_core_bootstrap(ssh_name, proxy_text)
@@ -3792,6 +3905,7 @@ def install_ai_proxy_verified(
             ssh_name,
             proxy_text,
             mixed_port,
+            fallback_nodes=requested_fallback_nodes,
             **_strict_privacy_call_kwargs(strict_privacy),
         )
         return f"{install_message}；隔离验证通过: {_compact_probe_summary(requested_probe)}"
@@ -3840,6 +3954,11 @@ def install_ai_proxy_verified(
                     ssh_name,
                     format_proxy_node(item.node),
                     mixed_port,
+                    fallback_nodes=_remote_proxy_fallback_nodes(
+                        item.node,
+                        candidate_nodes,
+                        quality_results,
+                    ),
                     **_strict_privacy_call_kwargs(strict_privacy),
                 )
             except Exception as exc:
@@ -3868,6 +3987,7 @@ def reload_ai_proxy(
     profile_id: str = "",
     persist_selection: bool = True,
     strict_privacy: bool | None = None,
+    fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
 ) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_node = parse_proxy_node(proxy_text)
@@ -3880,9 +4000,18 @@ def reload_ai_proxy(
     config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
     old_config = ssh_manager.read_remote_file(client, config_path) or ""
     effective_strict_privacy = _resolve_managed_strict_privacy(strict_privacy, old_config)
+    if fallback_nodes is None:
+        fallback_nodes = _existing_remote_proxy_fallback_nodes(
+            old_config,
+            proxy_node,
+        )
     new_config = build_mihomo_config(
         proxy_node,
         mixed_port,
+        fallback_proxy_nodes=fallback_nodes,
+        health_checked_group=True,
+        resilient_transport=True,
+        mainland_dns=True,
         strict_privacy=effective_strict_privacy,
     )
     if old_config.strip() == new_config.strip():
@@ -3891,7 +4020,13 @@ def reload_ai_proxy(
                 set_proxy_subscription_selected_node(proxy_node, profile_id=profile_id)
             else:
                 set_proxy_subscription_selected_node(proxy_node)
-        return f"{ssh_name}: 运行节点已是最新配置，无需热更新"
+        repair_suffix = _repair_remote_proxy_integrations(
+            client,
+            home,
+            mixed_port,
+            status,
+        )
+        return f"{ssh_name}: 运行节点已是最新配置，无需热更新{repair_suffix}"
 
     ssh_manager.write_remote_file(client, config_path, new_config, file_mode=0o600)
     command = _build_reload_command(config_path, mixed_port)
@@ -3929,10 +4064,17 @@ def reload_ai_proxy(
             set_proxy_subscription_selected_node(proxy_node, profile_id=profile_id)
         else:
             set_proxy_subscription_selected_node(proxy_node)
+    repair_suffix = _repair_remote_proxy_integrations(
+        client,
+        home,
+        mixed_port,
+        status,
+    )
     privacy_label = "应用层严格隐私" if effective_strict_privacy else "兼容分流"
     return (
         f"{ssh_name}: 已热更新远端 AI 代理节点为 {describe_proxy_node(proxy_node)}"
-        f"；当前模式: {privacy_label}"
+        f"；当前模式: {privacy_label}；内核故障切换池 {1 + len(fallback_nodes or ())} 个节点"
+        f"{repair_suffix}"
     )
 
 
@@ -3988,6 +4130,11 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
         if proxy_node_key(latest_node) != original_key:
             raise RuntimeError("隔离验证期间当前节点已变化，拒绝覆盖手动更新")
         text = format_proxy_node(node)
+        fallback_nodes = _remote_proxy_fallback_nodes(
+            node,
+            candidate_nodes,
+            quality_results,
+        )
         if profile_id or not persist_selection:
             return reload_ai_proxy(
                 ssh_name,
@@ -3995,12 +4142,14 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
                 mixed_port,
                 profile_id=profile_id,
                 persist_selection=persist_selection,
+                fallback_nodes=fallback_nodes,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
         return reload_ai_proxy(
             ssh_name,
             text,
             mixed_port,
+            fallback_nodes=fallback_nodes,
             **_strict_privacy_call_kwargs(strict_privacy),
         )
 
@@ -4098,6 +4247,11 @@ def reload_ai_proxy_verified(
             strict_privacy,
         )
     requested_key = proxy_node_key(requested_node)
+    requested_fallback_nodes = _remote_proxy_fallback_nodes(
+        requested_node,
+        candidate_nodes,
+        quality_results,
+    )
     try:
         original_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
     except Exception:
@@ -4110,6 +4264,7 @@ def reload_ai_proxy_verified(
                 mixed_port,
                 profile_id=profile_id,
                 persist_selection=persist_selection,
+                fallback_nodes=requested_fallback_nodes,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
         else:
@@ -4117,6 +4272,7 @@ def reload_ai_proxy_verified(
                 ssh_name,
                 proxy_text,
                 mixed_port,
+                fallback_nodes=requested_fallback_nodes,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
     except Exception as exc:
@@ -4211,6 +4367,11 @@ def reload_ai_proxy_verified(
                     mixed_port,
                     profile_id=profile_id,
                     persist_selection=persist_selection,
+                    fallback_nodes=_remote_proxy_fallback_nodes(
+                        item.node,
+                        candidate_nodes,
+                        quality_results,
+                    ),
                     **_strict_privacy_call_kwargs(strict_privacy),
                 )
             else:
@@ -4218,6 +4379,11 @@ def reload_ai_proxy_verified(
                     ssh_name,
                     format_proxy_node(item.node),
                     mixed_port,
+                    fallback_nodes=_remote_proxy_fallback_nodes(
+                        item.node,
+                        candidate_nodes,
+                        quality_results,
+                    ),
                     **_strict_privacy_call_kwargs(strict_privacy),
                 )
             candidate_probe = probe_ai_proxy_stability(ssh_name, mixed_port)
@@ -4376,6 +4542,8 @@ shell_entrypoints=0
 vscode_entrypoints=0
 kernel_version=""
 kernel_source=""
+running_kernel_version=""
+running_kernel_source=""
 [ -s "$ENV_FILE" ] && grep -q "HTTP_PROXY=http://127.0.0.1:$PORT" "$ENV_FILE" 2>/dev/null && env_file=yes
 [ -x "$START_SCRIPT" ] && start_script=yes
 for file in {shell_paths}; do
@@ -4394,16 +4562,34 @@ else
     kernel_version="$("$detected_core" -v 2>&1 | head -n 1 | tr '\n\r' '  ' || true)"
   fi
 fi
+if [ "$pid_running" = "yes" ] && [ -n "${{pid:-}}" ] && [ -x "/proc/$pid/exe" ]; then
+  running_kernel_version="$("/proc/$pid/exe" -v 2>&1 | head -n 1 | tr '\n\r' '  ' || true)"
+  running_core_path="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+  case "$running_core_path" in
+    "$CORE_BIN"|"$CORE_BIN (deleted)") running_kernel_source=managed ;;
+    *) running_kernel_source=system ;;
+  esac
+fi
 if [ "$config_owned" = "yes" ] && [ "$pid_running" = "yes" ] && [ "$pid_managed" = "yes" ] && [ "$port_listening" = "yes" ]; then
   running=yes
 fi
-printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig_present=%s\\nconfig_owned=%s\\nconfig_legacy=%s\\nkernel_source=%s\\nkernel_version=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$config_present" "$config_owned" "$config_legacy" "$kernel_source" "$kernel_version" "$CONFIG"
+printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_listening=%s\\nenv_file=%s\\nstart_script=%s\\nshell_entrypoints=%s\\nvscode_entrypoints=%s\\nconfig_present=%s\\nconfig_owned=%s\\nconfig_legacy=%s\\nkernel_source=%s\\nkernel_version=%s\\nrunning_kernel_source=%s\\nrunning_kernel_version=%s\\nconfig=%s\\n' "$installed" "$running" "$pid_running" "$pid_managed" "$port_listening" "$env_file" "$start_script" "$shell_entrypoints" "$vscode_entrypoints" "$config_present" "$config_owned" "$config_legacy" "$kernel_source" "$kernel_version" "$running_kernel_source" "$running_kernel_version" "$CONFIG"
 """
     status, stdout, stderr = ssh_manager.execute_command_with_status(client, command, timeout=20)
     if status != 0:
         raise RuntimeError((stderr or stdout or "远端 AI 代理状态检查失败").strip())
     values = _parse_key_values(stdout)
     managed_config = ""
+    shell_entrypoint_count = _int_or_default(values.get("shell_entrypoints"), 0)
+    vscode_entrypoint_count = _int_or_default(values.get("vscode_entrypoints"), 0)
+    shell_entrypoints_ready = shell_entrypoint_count >= len(
+        _shell_proxy_profile_paths(home)
+    )
+    vscode_entrypoints_ready = vscode_entrypoint_count >= len(
+        VSCODE_SERVER_ENV_SETUP_PATHS
+    )
+    environment_ready = values.get("env_file") == "yes"
+    start_script_ready = values.get("start_script") == "yes"
     if values.get("config_owned") == "yes":
         try:
             managed_config = ssh_manager.read_remote_file(client, config_path) or ""
@@ -4421,7 +4607,22 @@ printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_liste
     )
     detail_parts = []
     kernel_version = str(values.get("kernel_version") or "").strip()[:300]
-    if kernel_version:
+    running_kernel_version = str(
+        values.get("running_kernel_version") or ""
+    ).strip()[:300]
+    if running_kernel_version:
+        running_source_label = (
+            "受管"
+            if values.get("running_kernel_source") == "managed"
+            else "系统"
+        )
+        detail_parts.append(f"当前运行的{running_source_label}代理内核: {running_kernel_version}")
+        if kernel_version and kernel_version != running_kernel_version:
+            source_label = "受管" if values.get("kernel_source") == "managed" else "系统"
+            detail_parts.append(
+                f"已安装的{source_label}内核将在下次重启使用: {kernel_version}"
+            )
+    elif kernel_version:
         source_label = "受管" if values.get("kernel_source") == "managed" else "系统"
         detail_parts.append(f"{source_label}代理内核: {kernel_version}")
     else:
@@ -4454,20 +4655,32 @@ printf 'installed=%s\\nrunning=%s\\npid_running=%s\\npid_managed=%s\\nport_liste
             detail_parts.append("严格隐私标记存在，但 fail-closed/DNS/IPv6 配置已漂移")
         else:
             detail_parts.append("兼容分流允许 DIRECT（非 VPN/TUN）")
-        if values.get("env_file") != "yes":
+        if not environment_ready:
             detail_parts.append("远端代理环境文件缺失或端口不匹配")
-        if values.get("start_script") != "yes":
+        if not start_script_ready:
             detail_parts.append("远端启动脚本缺失或不可执行")
-        if _int_or_default(values.get("shell_entrypoints"), 0) <= 0:
+        if shell_entrypoint_count <= 0:
             detail_parts.append("shell 启动入口未检测到")
-        if _int_or_default(values.get("vscode_entrypoints"), 0) <= 0:
+        elif not shell_entrypoints_ready:
+            detail_parts.append(
+                f"shell 启动入口不完整（{shell_entrypoint_count}/{len(_shell_proxy_profile_paths(home))}）"
+            )
+        if vscode_entrypoint_count <= 0:
             detail_parts.append("VS Code Remote 启动入口未检测到")
+        elif not vscode_entrypoints_ready:
+            detail_parts.append(
+                f"VS Code Remote 启动入口不完整（{vscode_entrypoint_count}/{len(VSCODE_SERVER_ENV_SETUP_PATHS)}）"
+            )
     return RemoteAIProxyStatus(
         installed=values.get("config_owned") == "yes",
         running=running_verified,
         config_path=values.get("config") or config_path,
         proxy_url=f"http://127.0.0.1:{mixed_port}",
         detail="；".join(detail_parts),
+        environment_ready=environment_ready,
+        start_script_ready=start_script_ready,
+        shell_entrypoints_ready=shell_entrypoints_ready,
+        vscode_entrypoints_ready=vscode_entrypoints_ready,
     )
 
 
@@ -8407,6 +8620,96 @@ def _write_vscode_proxy_entrypoints(
         written += 1
     written += _write_vscode_proxy_settings(client, mixed_port)
     return written
+
+
+def _repair_remote_proxy_integrations(
+    client,
+    home: str,
+    mixed_port: int,
+    status: RemoteAIProxyStatus,
+) -> str:
+    """Repair drifted shell/VS Code entrypoints without restarting the proxy.
+
+    The managed mihomo process and its active YAML are deliberately left
+    untouched.  Each integration is repaired independently so one malformed
+    shell profile does not prevent the safe environment file or VS Code entry
+    from being restored.
+    """
+
+    if status.integrations_ready:
+        return ""
+
+    config_dir = posixpath.join(home, ".config", "mihomo")
+    app_dir = posixpath.join(home, ".config", "api-switcher")
+    local_bin_dir = posixpath.join(home, ".local", "bin")
+    env_path = posixpath.join(app_dir, "ai-proxy.env")
+    start_path = posixpath.join(app_dir, "start-ai-proxy.sh")
+    repaired: list[str] = []
+    errors: list[str] = []
+
+    def attempt(label: str, action) -> None:
+        try:
+            action()
+            repaired.append(label)
+        except Exception as exc:
+            detail = str(exc).strip().splitlines()[0][:240] or type(exc).__name__
+            errors.append(f"{label}: {detail}")
+
+    if not status.environment_ready:
+        attempt(
+            "代理环境文件",
+            lambda: ssh_manager.write_remote_file(
+                client,
+                env_path,
+                _build_env_file(mixed_port),
+                file_mode=0o600,
+            ),
+        )
+    if not status.start_script_ready:
+        attempt(
+            "启动脚本",
+            lambda: ssh_manager.write_remote_file(
+                client,
+                start_path,
+                _build_start_script(
+                    config_dir,
+                    app_dir,
+                    local_bin_dir,
+                    mixed_port,
+                ),
+                file_mode=0o700,
+            ),
+        )
+    if not status.shell_entrypoints_ready:
+        attempt(
+            "shell 入口",
+            lambda: _write_shell_profile_block(
+                client,
+                home,
+                env_path,
+                start_path,
+                mixed_port,
+            ),
+        )
+    if not status.vscode_entrypoints_ready:
+        attempt(
+            "VS Code Remote 入口",
+            lambda: _write_vscode_proxy_entrypoints(
+                client,
+                env_path,
+                start_path,
+                mixed_port,
+            ),
+        )
+
+    pieces = []
+    if repaired:
+        pieces.append("已无重启自愈 " + "、".join(repaired))
+    if errors:
+        pieces.append(
+            "代理进程保持运行，但环境入口自愈未完成: " + "；".join(errors)
+        )
+    return "；" + "；".join(pieces) if pieces else ""
 
 
 def _write_vscode_proxy_settings(client, mixed_port: int) -> int:

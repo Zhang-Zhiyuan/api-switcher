@@ -269,6 +269,84 @@ def test_local_fallback_candidates_exclude_unsafe_and_cap_pool():
     assert all(server.startswith("safe-") for server in servers)
 
 
+def test_remote_fallback_candidates_exclude_unsafe_and_cap_pool():
+    primary = _node("primary", "primary.example.com")
+    duplicate = remote_proxy.ProxySubscriptionNode(
+        1,
+        _node("duplicate", "primary.example.com"),
+        region="日本",
+    )
+    hong_kong = remote_proxy.ProxySubscriptionNode(
+        2,
+        _node("hong kong", "hk.example.com"),
+        region="香港",
+    )
+    rejected = remote_proxy.ProxySubscriptionNode(
+        3,
+        _node("rejected", "rejected.example.com"),
+        region="日本",
+    )
+    dependent = remote_proxy.ProxySubscriptionNode(
+        4,
+        _node("dependent", "dependent.example.com", **{"dialer-proxy": "parent"}),
+        region="日本",
+    )
+    safe = [
+        remote_proxy.ProxySubscriptionNode(
+            5 + index,
+            _node(f"safe-{index}", f"safe-{index}.example.com"),
+            region="日本",
+        )
+        for index in range(7)
+    ]
+    rejected_key = remote_proxy.proxy_subscription_node_key(rejected)
+    qualities = {
+        rejected_key: remote_proxy.ProxyNodeQualityResult(
+            rejected_key,
+            True,
+            ip_type="VPN 高风险",
+            risk_score=95,
+            quality_score=10,
+            confidence="高",
+            coverage_complete=True,
+            classification_basis="信誉源网络/风险字段",
+        )
+    }
+
+    selected = remote_proxy._remote_proxy_fallback_nodes(
+        primary,
+        [duplicate, hong_kong, rejected, dependent, *safe],
+        qualities,
+    )
+    servers = [node["server"] for node in selected]
+
+    assert len(selected) == remote_proxy.AI_PROXY_FALLBACK_MAX_NODES - 1
+    assert "primary.example.com" not in servers
+    assert "hk.example.com" not in servers
+    assert "rejected.example.com" not in servers
+    assert "dependent.example.com" not in servers
+    assert all(server.startswith("safe-") for server in servers)
+
+
+def test_remote_existing_pool_is_preserved_for_direct_reload():
+    primary = _node("new primary", "backup-1.example.com")
+    content = remote_proxy.build_mihomo_config(
+        _node("old primary", "old.example.com"),
+        fallback_proxy_nodes=[
+            _node("backup one", "backup-1.example.com"),
+            _node("backup two", "backup-2.example.com"),
+        ],
+        health_checked_group=True,
+    )
+
+    preserved = remote_proxy._existing_remote_proxy_fallback_nodes(content, primary)
+
+    assert [node["server"] for node in preserved] == [
+        "old.example.com",
+        "backup-2.example.com",
+    ]
+
+
 def test_existing_pool_is_preserved_for_routing_only_reload(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
     primary = _node("primary", "primary.example.com")
@@ -588,3 +666,46 @@ def test_app_startup_reconciles_live_proxy_even_when_autostart_is_off(monkeypatc
 
     assert ("status", "repaired") in events
     assert ("refresh", "_local_proxy_tab") in events
+
+
+def test_app_watchdog_restores_dead_owned_proxy_and_reschedules(monkeypatch):
+    from ui import app as app_module
+
+    events = []
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    class DummyApp:
+        _exit_requested = False
+        _local_proxy_watchdog_after_id = "expired"
+        _local_proxy_watchdog_running = False
+
+        def _run_on_ui_thread(self, callback):
+            callback()
+
+        def _set_app_status(self, message):
+            events.append(("status", message))
+
+        def _refresh_loaded_tab(self, name):
+            events.append(("refresh", name))
+
+        def _schedule_local_proxy_watchdog(self):
+            events.append(("reschedule", True))
+
+    monkeypatch.setattr(app_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        local_proxy,
+        "reconcile_local_ai_proxy_startup_settings",
+        lambda: "检测到本工具上次代理已退出，已自动恢复本机设置",
+    )
+
+    app_module.App._run_local_proxy_watchdog(DummyApp())
+
+    assert ("status", "检测到本工具上次代理已退出，已自动恢复本机设置") in events
+    assert ("refresh", "_local_proxy_tab") in events
+    assert ("reschedule", True) in events
