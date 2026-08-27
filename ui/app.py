@@ -173,6 +173,8 @@ class App(ctk.CTk):
         self._switch_preview_generation = 0
         self._main_layout_after_id = None
         self._main_layout_mode = None
+        self._local_proxy_watchdog_after_id = None
+        self._local_proxy_watchdog_running = False
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             setattr(self, attr, None)
@@ -385,6 +387,7 @@ class App(ctk.CTk):
         if not self._start_minimized_to_tray:
             self.after(90, self._schedule_initial_tab_load)
         self.after(900, self._auto_start_local_proxy)
+        self.after(2500, self._schedule_local_proxy_watchdog)
         preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", DEFAULT_TAB_PRELOAD_MODE).strip().lower()
         if preload_mode != "0":
             self._schedule_lazy_tab_preload(preload_mode, delay_ms=TAB_CLASS_PRELOAD_START_MS)
@@ -1210,6 +1213,73 @@ class App(ctk.CTk):
             logger.error("Failed to create local proxy auto-start worker: %s", exc, exc_info=True)
             self._set_app_status(f"Win11 本机代理自启任务启动失败: {exc}")
 
+    def _schedule_local_proxy_watchdog(self, delay_ms: int = 15000):
+        """Keep a dead owned Win11 proxy from stranding Codex on its port."""
+
+        if (
+            self._exit_requested
+            or self._local_proxy_watchdog_after_id is not None
+            or self._local_proxy_watchdog_running
+        ):
+            return
+        try:
+            self._local_proxy_watchdog_after_id = self.after(
+                max(1000, int(delay_ms)),
+                self._run_local_proxy_watchdog,
+            )
+        except Exception as exc:
+            self._local_proxy_watchdog_after_id = None
+            logger.debug("Failed to schedule local proxy watchdog: %s", exc)
+
+    def _run_local_proxy_watchdog(self):
+        self._local_proxy_watchdog_after_id = None
+        if self._exit_requested or self._local_proxy_watchdog_running:
+            return
+        self._local_proxy_watchdog_running = True
+
+        def worker():
+            message = ""
+            try:
+                from core import local_proxy
+
+                message = local_proxy.reconcile_local_ai_proxy_startup_settings()
+            except Exception as exc:
+                logger.debug("Local proxy watchdog check skipped: %s", exc)
+
+            def finish():
+                self._local_proxy_watchdog_running = False
+                if self._exit_requested:
+                    return
+                if message:
+                    logger.info("Local proxy watchdog: %s", message)
+                    # Routine core metadata checks stay quiet; repairs and
+                    # ownership-safe warnings remain visible to the user.
+                    if any(
+                        marker in message
+                        for marker in (
+                            "已自动恢复",
+                            "自动恢复本机设置未完成",
+                            "已补齐",
+                            "未自动改动",
+                        )
+                    ):
+                        self._set_app_status(message)
+                        self._refresh_loaded_tab("_local_proxy_tab")
+                self._schedule_local_proxy_watchdog()
+
+            self._run_on_ui_thread(finish)
+
+        try:
+            threading.Thread(
+                target=worker,
+                name="local-proxy-watchdog",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self._local_proxy_watchdog_running = False
+            logger.debug("Failed to start local proxy watchdog: %s", exc)
+            self._schedule_local_proxy_watchdog()
+
     def _load_quick_switch_profiles(self, delay_ms: int = 80):
         """Load profiles for quick switch menus."""
         self._load_quick_switch_profiles_delayed(delay_ms=delay_ms)
@@ -1582,6 +1652,14 @@ class App(ctk.CTk):
         except Exception as e:
             logger.debug("Failed to close exit dialog: %s", e)
         self._close_dialog = None
+
+        watchdog_after_id = self.__dict__.get("_local_proxy_watchdog_after_id")
+        if watchdog_after_id:
+            try:
+                self.after_cancel(watchdog_after_id)
+            except Exception:
+                pass
+            self._local_proxy_watchdog_after_id = None
 
         for after_id in list(self._pending_tab_load_after_ids.values()):
             if not after_id:

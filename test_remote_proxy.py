@@ -4904,8 +4904,15 @@ def test_inspect_ai_proxy_strict_detail_does_not_claim_live_config_loaded(monkey
     status = remote_proxy.inspect_ai_proxy("server")
 
     assert status.running is True
+    assert status.environment_ready is True
+    assert status.start_script_ready is True
+    assert status.shell_entrypoints_ready is False
+    assert status.vscode_entrypoints_ready is False
+    assert status.integrations_ready is False
     assert "磁盘受管配置符合应用层严格隐私契约" in status.detail
     assert "不能单独证明当前进程内存已加载" in status.detail
+    assert "shell 启动入口不完整（1/6）" in status.detail
+    assert "VS Code Remote 启动入口不完整（1/3）" in status.detail
     assert "应用层严格隐私已开启" not in status.detail
 
 
@@ -5143,9 +5150,121 @@ def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
                 "{ name: node, type: vless, server: example.com, port: 443 }"
             ),
             7890,
+            health_checked_group=True,
+            resilient_transport=True,
+            mainland_dns=True,
         ),
         "old config",
     ]
+
+
+def test_reload_ai_proxy_repairs_missing_environment_without_restarting(monkeypatch):
+    fake_client = object()
+    node_text = "{ name: node, type: vless, server: example.com, port: 443 }"
+    node = remote_proxy.parse_proxy_node(node_text)
+    current_config = remote_proxy.build_mihomo_config(
+        node,
+        7890,
+        health_checked_group=True,
+        resilient_transport=True,
+        mainland_dns=True,
+    )
+    writes = []
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+            environment_ready=False,
+        ),
+    )
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "read_remote_file",
+        lambda *_args, **_kwargs: current_config,
+    )
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "write_remote_file",
+        lambda _client, path, content, **kwargs: writes.append(
+            (path, content, kwargs.get("file_mode"))
+        ),
+    )
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "execute_command_with_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unchanged node and env-only repair must not reload mihomo")
+        ),
+    )
+
+    message = remote_proxy.reload_ai_proxy(
+        "server",
+        node_text,
+        persist_selection=False,
+    )
+
+    assert "无需热更新" in message
+    assert "已无重启自愈 代理环境文件" in message
+    assert writes == [
+        (
+            "/home/me/.config/api-switcher/ai-proxy.env",
+            remote_proxy._build_env_file(7890),
+            0o600,
+        )
+    ]
+
+
+def test_reload_ai_proxy_reports_integration_repair_failure_without_hiding_live_proxy(
+    monkeypatch,
+):
+    fake_client = object()
+    node_text = "{ name: node, type: vless, server: example.com, port: 443 }"
+    current_config = remote_proxy.build_mihomo_config(
+        remote_proxy.parse_proxy_node(node_text),
+        7890,
+        health_checked_group=True,
+        resilient_transport=True,
+        mainland_dns=True,
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "inspect_ai_proxy",
+        lambda *_args, **_kwargs: remote_proxy.RemoteAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="/home/me/.config/mihomo/config.yaml",
+            proxy_url="http://127.0.0.1:7890",
+            environment_ready=False,
+        ),
+    )
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
+    monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "read_remote_file",
+        lambda *_args, **_kwargs: current_config,
+    )
+    monkeypatch.setattr(
+        remote_proxy.ssh_manager,
+        "write_remote_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only profile")),
+    )
+
+    message = remote_proxy.reload_ai_proxy(
+        "server",
+        node_text,
+        persist_selection=False,
+    )
+
+    assert "代理进程保持运行" in message
+    assert "环境入口自愈未完成" in message
+    assert "read-only profile" in message
 
 
 def test_reload_ai_proxy_reports_incomplete_runtime_rollback(monkeypatch):
@@ -5349,7 +5468,7 @@ def test_reload_ai_proxy_verified_restores_previous_node_when_candidates_fail(mo
         )
     }
 
-    def fake_reload(_server, text, _port=7890):
+    def fake_reload(_server, text, _port=7890, **_kwargs):
         reloads.append(remote_proxy.parse_proxy_node(text)["name"])
         return f"server: 已热更新远端 AI 代理节点为 {reloads[-1]}"
 
@@ -5399,6 +5518,7 @@ def test_reload_ai_proxy_verified_restores_previous_node_when_initial_probe_rais
         *,
         profile_id="",
         persist_selection=True,
+        **_kwargs,
     ):
         reloads.append(
             (
@@ -5692,7 +5812,7 @@ def test_reload_remote_proxy_fallback_skips_hong_kong_candidate(monkeypatch):
         ]
     )
 
-    def fake_reload(_server, text, _port=7890):
+    def fake_reload(_server, text, _port=7890, **_kwargs):
         name = remote_proxy.parse_proxy_node(text)["name"]
         reloads.append(name)
         return f"reloaded {name}"
@@ -5806,7 +5926,7 @@ def test_reload_remote_proxy_does_not_use_hong_kong_when_no_other_fallback(monke
     reloads = []
     probes = iter(["server: AI 连通性 0/3 可达", "server: AI 连通性 3/3 可达"])
 
-    def fake_reload(_server, text, _port=7890):
+    def fake_reload(_server, text, _port=7890, **_kwargs):
         name = remote_proxy.parse_proxy_node(text)["name"]
         reloads.append(name)
         return f"reloaded {name}"
@@ -6328,6 +6448,28 @@ def test_isolated_candidate_command_is_bounded_locked_and_cleans_everything():
     assert r"tr '\0' ' '" in command
 
 
+def test_isolated_candidate_config_matches_mainland_resilient_transport():
+    config = remote_proxy._build_isolated_candidate_config(
+        remote_proxy.parse_proxy_node(
+            "{ name: candidate, type: vless, server: example.com, port: 443 }"
+        )
+    )
+    parsed = remote_proxy.yaml.safe_load(
+        config.replace("__API_SWITCHER_CANDIDATE_PORT__", "17897").replace(
+            "__API_SWITCHER_CANDIDATE_CONTROLLER_PORT__",
+            "18897",
+        )
+    )
+
+    assert parsed["proxy-groups"][0]["type"] == "fallback"
+    assert parsed["tcp-concurrent"] is True
+    assert parsed["keep-alive-interval"] == 15
+    assert parsed["dns"]["nameserver-policy"]["+.openai.com"] == [
+        "https://1.1.1.1/dns-query#AI-PROXY",
+        "https://8.8.8.8/dns-query#AI-PROXY",
+    ]
+
+
 def test_isolated_candidate_probe_transfers_0600_template_and_accepts_all_results(monkeypatch):
     captured = {}
     output = _remote_stability_output()
@@ -6605,7 +6747,11 @@ def test_install_ai_proxy_verified_keeps_working_requested_node(monkeypatch):
         "inspect_ai_proxy",
         lambda *_args, **_kwargs: _remote_proxy_status(running=False),
     )
-    monkeypatch.setattr(remote_proxy, "install_ai_proxy", lambda _server, text, _port=7890: installs.append(text) or "installed")
+    monkeypatch.setattr(
+        remote_proxy,
+        "install_ai_proxy",
+        lambda _server, text, _port=7890, **_kwargs: installs.append(text) or "installed",
+    )
     monkeypatch.setattr(
         remote_proxy,
         "probe_ai_proxy_candidate_isolated",
@@ -6698,7 +6844,7 @@ def test_install_ai_proxy_verified_falls_back_to_working_candidate(monkeypatch):
         lambda *_args, **_kwargs: _remote_proxy_status(running=False),
     )
 
-    def fake_install(_server, text, _port=7890):
+    def fake_install(_server, text, _port=7890, **_kwargs):
         installs.append(remote_proxy.parse_proxy_node(text)["name"])
         return "installed"
 
@@ -7028,7 +7174,7 @@ def test_install_ai_proxy_verified_prefers_quality_ranked_candidate(monkeypatch)
         lambda *_args, **_kwargs: _remote_proxy_status(running=False),
     )
 
-    def fake_install(_server, text, _port=7890):
+    def fake_install(_server, text, _port=7890, **_kwargs):
         installs.append(remote_proxy.parse_proxy_node(text)["name"])
         return "installed"
 

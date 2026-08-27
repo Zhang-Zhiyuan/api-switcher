@@ -157,6 +157,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_load_file_button = None
         self._proxy_deploy_button = None
         self._proxy_inspect_button = None
+        self._proxy_remote_core_button = None
         self._proxy_remote_test_button = None
         self._proxy_remote_cleanup_button = None
         self._proxy_status_label = None
@@ -1231,6 +1232,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_inspect_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_remote_core_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="更新内核",
+            width=96,
+            command=self._update_remote_proxy_core,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_remote_core_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_test_button = ctk.CTkButton(
             proxy_button_frame,
             text="测试远端",
@@ -2282,6 +2291,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_load_file_button,
             self._proxy_deploy_button,
             self._proxy_inspect_button,
+            getattr(self, "_proxy_remote_core_button", None),
             self._proxy_remote_test_button,
             self._proxy_remote_cleanup_button,
             self._proxy_subscription_profile_save_button,
@@ -4121,6 +4131,45 @@ class SSHTab(ctk.CTkScrollableFrame):
                 lambda server_name: remote_proxy.probe_ai_proxy(server_name),
             ),
             on_done=done,
+        )
+
+    def _update_remote_proxy_core(self):
+        server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
+        target_label = self._format_server_target(server_names)
+
+        def do_update():
+            def done(payload):
+                self._show_server_batch_result(payload, "远端代理内核检查完成")
+                if payload["ok"]:
+                    result = payload.get("result") or {}
+                    failures = result.get("failures", [])
+                    severity = "warning" if failures and result.get("results") else "error" if failures else "success"
+                    self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+
+            self._run_proxy_ssh_task(
+                f"正在检查并更新 {target_label} 的受管 mihomo 内核...",
+                lambda: self._run_server_batch(
+                    server_names,
+                    lambda server_name: remote_proxy.ensure_remote_mihomo_core(
+                        server_name,
+                        force_check=True,
+                    ),
+                ),
+                on_done=done,
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="更新远端代理内核",
+            message=(
+                f"将通过 mihomo 官方 GitHub 发行版检查 {target_label}，"
+                "下载项会校验大小、SHA-256（官方提供时）、ELF 平台和内核自检结果。\n"
+                "只更新 ~/.local/bin/mihomo，不重启当前代理进程，也不修改节点、"
+                "代理环境或 Codex/Claude 登录状态；新内核会在下次代理重启时使用。确定继续吗？"
+            ),
+            on_confirm=do_update,
         )
 
     def _cleanup_ai_proxy(self):
