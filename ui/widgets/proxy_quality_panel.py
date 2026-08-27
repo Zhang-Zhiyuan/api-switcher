@@ -844,9 +844,17 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
 
         enabled_services = detection_settings.enabled_services()
         enabled_text = "、".join(diagnostic_constants.SERVICE_LABELS.get(item, item) for item in enabled_services) or "无"
-        self._set_status(f"正在测速公网出口；可连通后调用已启用检测源: {enabled_text}...")
+        self._set_status(
+            f"正在并行测速公网出口；可连通后并行调用已启用检测源: {enabled_text}..."
+        )
         self._clear_content()
-        self._add_info_card("检测中", [f"正在测速 IPv4、IPv6 和默认出口；只会对成功连通的 IP 调用: {enabled_text}。"])
+        self._add_info_card(
+            "检测中",
+            [
+                "正在并行测速 IPv4、IPv6 和默认出口；"
+                f"只会对成功连通的 IP 并行调用: {enabled_text}。"
+            ],
+        )
         self._set_report_text("检测中...")
 
         def worker():

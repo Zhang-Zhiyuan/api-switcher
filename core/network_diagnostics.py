@@ -30,6 +30,7 @@ from core.network_diagnostic_settings import (
 USER_AGENT = "API-Switcher-Network-Diagnostics/1.0"
 DEFAULT_TIMEOUT = 8.0
 HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
+NETWORK_ENRICHMENT_MAX_WORKERS = 12
 
 PUBLIC_IP_ENDPOINTS = (
     ("IPv4", "https://api.ipify.org?format=json"),
@@ -405,30 +406,97 @@ def detect_network(
         vpnapi_keys=vpnapi_keys,
     )
     probes = _probe_public_ip_endpoints(timeout, http_get)
-    diagnostics: list[IpDiagnostic] = []
+    reachable_probes: list[EndpointProbe] = []
     seen_ips: set[str] = set()
 
     for probe in probes:
         if not probe.ok or not probe.ip or probe.ip in seen_ips:
             continue
-
         seen_ips.add(probe.ip)
-        if SERVICE_PING0 in services:
-            ping0 = lookup_ping0_quality(probe.ip, probe.label, timeout, http_get, api_keys=ping0_keys)
-        else:
-            ping0 = _disabled_ping0_quality(probe.ip)
-        reputation = lookup_reputation(
-            probe.ip,
-            timeout,
-            http_get,
-            enabled_services=services,
-            proxycheck_api_keys=proxycheck_keys,
-            ipapi_api_keys=ipapi_keys,
-            ipqs_api_keys=ipqs_keys,
-            vpnapi_api_keys=vpnapi_keys,
-        )
-        geo = lookup_geo(probe.ip, timeout, http_get)
-        rdns = reverse_resolver(probe.ip)
+        reachable_probes.append(probe)
+
+    parts = [
+        {
+            "ping0": (
+                None
+                if SERVICE_PING0 in services
+                else _disabled_ping0_quality(probe.ip)
+            ),
+            "reputation": [],
+            "geo": GeoInfo(ip=probe.ip),
+            "rdns": "",
+        }
+        for probe in reachable_probes
+    ]
+    futures = {}
+    task_count = len(reachable_probes) * (4 if SERVICE_PING0 in services else 3)
+    if task_count:
+        with ThreadPoolExecutor(
+            max_workers=min(NETWORK_ENRICHMENT_MAX_WORKERS, task_count)
+        ) as executor:
+            for index, probe in enumerate(reachable_probes):
+                if SERVICE_PING0 in services:
+                    futures[
+                        executor.submit(
+                            lookup_ping0_quality,
+                            probe.ip,
+                            probe.label,
+                            timeout,
+                            http_get,
+                            api_keys=ping0_keys,
+                        )
+                    ] = (index, "ping0")
+                futures[
+                    executor.submit(
+                        lookup_reputation,
+                        probe.ip,
+                        timeout,
+                        http_get,
+                        enabled_services=services,
+                        proxycheck_api_keys=proxycheck_keys,
+                        ipapi_api_keys=ipapi_keys,
+                        ipqs_api_keys=ipqs_keys,
+                        vpnapi_api_keys=vpnapi_keys,
+                    )
+                ] = (index, "reputation")
+                futures[executor.submit(lookup_geo, probe.ip, timeout, http_get)] = (
+                    index,
+                    "geo",
+                )
+                futures[executor.submit(reverse_resolver, probe.ip)] = (index, "rdns")
+
+            for future in as_completed(futures):
+                index, field_name = futures[future]
+                try:
+                    parts[index][field_name] = future.result()
+                except Exception as exc:
+                    detail = str(exc).splitlines()[0][:180] or type(exc).__name__
+                    ip = reachable_probes[index].ip
+                    if field_name == "ping0":
+                        parts[index][field_name] = Ping0Quality(
+                            ip=ip,
+                            source="error",
+                            detail_url=PING0_DETAIL_URL.format(
+                                ip=urllib.parse.quote(ip, safe=":.")
+                            ),
+                            ping_url=PING0_PING_URL.format(
+                                ip=urllib.parse.quote(ip, safe=":.")
+                            ),
+                            error=detail,
+                        )
+                    elif field_name == "geo":
+                        parts[index][field_name] = GeoInfo(ip=ip, error=detail)
+                    elif field_name == "reputation":
+                        parts[index][field_name] = []
+                    else:
+                        parts[index][field_name] = ""
+
+    diagnostics: list[IpDiagnostic] = []
+    for index, probe in enumerate(reachable_probes):
+        ping0 = parts[index]["ping0"]
+        reputation = parts[index]["reputation"]
+        geo = parts[index]["geo"]
+        rdns = parts[index]["rdns"]
         classification = classify_ip(geo, rdns, ping0, reputation)
         diagnostics.append(
             IpDiagnostic(

@@ -2659,7 +2659,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._set_busy(True)
         self._set_status(
-            f"正在对 {scope_label} 的 {len(tcp_scope_nodes)} 个 TCP 节点连续测试 3 次；"
+            f"正在对 {scope_label} 的 {len(tcp_scope_nodes)} 个 TCP 节点以最多 "
+            f"{remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 路并发连续测试 3 次；"
             f"{len(data_plane_scope_nodes)} 个 UDP/其他传输节点直接进入真实数据面验证。"
             "随后用隔离临时 mihomo "
             "做 3 轮 OpenAI API/ChatGPT/Claude/Gemini 稳定验证；"
@@ -2675,7 +2676,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     tcp_scope_nodes,
                     timeout=3.0,
                     attempts=3,
-                    max_workers=20,
+                    max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
                     require_all=True,
                 )
             except Exception as e:

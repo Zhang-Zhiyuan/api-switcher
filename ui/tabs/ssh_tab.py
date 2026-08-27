@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog
 
@@ -24,6 +25,7 @@ sync_manager = LazyModule("core.sync_manager")
 auto_continue_manager = LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
 training_prompt_template_by_key = LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
 SSH_TAB_STACK_MAX_WIDTH = 820
+SSH_NETWORK_TEST_SERVER_MAX_WORKERS = 4
 
 
 def _ssh_tab_stacked(width: int) -> bool:
@@ -37,6 +39,37 @@ def _format_server_batch_item(server_name: str, result) -> str:
     if text.startswith(f"{server_name}:") or text.startswith(f"{server_name}："):
         return text
     return f"{server_name}: {text}"
+
+
+def _run_parallel_server_actions(
+    server_names,
+    action,
+    *,
+    max_workers: int = SSH_NETWORK_TEST_SERVER_MAX_WORKERS,
+):
+    """Run read-only network checks concurrently while preserving UI order."""
+
+    names = [str(name) for name in (server_names or ())]
+    if not names:
+        return []
+    try:
+        requested_workers = int(max_workers)
+    except (TypeError, ValueError, OverflowError):
+        requested_workers = SSH_NETWORK_TEST_SERVER_MAX_WORKERS
+    worker_count = min(max(1, requested_workers), len(names))
+    outcomes = [None] * len(names)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(action, server_name): (index, server_name)
+            for index, server_name in enumerate(names)
+        }
+        for future in as_completed(futures):
+            index, server_name = futures[future]
+            try:
+                outcomes[index] = (server_name, True, future.result())
+            except Exception as exc:
+                outcomes[index] = (server_name, False, exc)
+    return [outcome for outcome in outcomes if outcome is not None]
 
 
 class SSHTab(ctk.CTkScrollableFrame):
@@ -2210,6 +2243,26 @@ class SSHTab(ctk.CTkScrollableFrame):
                 failures.append(f"{server_name}: {e}")
         return {"results": results, "failures": failures, "server_names": server_names}
 
+    def _run_server_batch_parallel(self, server_names: list[str], action):
+        """Parallelize only read-only status/connectivity checks."""
+
+        outcomes = _run_parallel_server_actions(server_names, action)
+        results = [
+            _format_server_batch_item(server_name, value)
+            for server_name, ok, value in outcomes
+            if ok
+        ]
+        failures = [
+            f"{server_name}: {value}"
+            for server_name, ok, value in outcomes
+            if not ok
+        ]
+        return {
+            "results": results,
+            "failures": failures,
+            "server_names": list(server_names),
+        }
+
     def _show_server_batch_result(self, payload, success_message: str):
         result = payload.get("result") or {}
         server_count = len(result.get("server_names", []) or [])
@@ -3456,6 +3509,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._run_proxy_ssh_task(
             f"正在从 {target_label} 测试 {scope_label} 的远端延迟，"
+            f"每台最多 {remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 个节点并行、"
+            f"最多 {SSH_NETWORK_TEST_SERVER_MAX_WORKERS} 台服务器并行；"
             "完成后自动选择最低延迟的非香港节点...",
             lambda: self._measure_proxy_nodes_for_servers(server_names, scope_nodes),
             on_done=done,
@@ -3735,20 +3790,32 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _measure_proxy_nodes_for_servers(self, server_names: list[str], nodes=None) -> dict:
         measure_nodes = tuple(nodes if nodes is not None else self._proxy_subscription_nodes)
-        results = {}
-        failures = []
-        for server_name in server_names:
-            try:
-                results[server_name] = remote_proxy.measure_proxy_node_latencies_on_server(
-                    server_name,
-                    measure_nodes,
-                    timeout=3.0,
-                    attempts=2,
-                    max_workers=20,
-                )
-            except Exception as e:
-                failures.append(f"{server_name}: {e}")
-        return {"results": results, "failures": failures, "server_names": server_names}
+
+        def measure(server_name):
+            return remote_proxy.measure_proxy_node_latencies_on_server(
+                server_name,
+                measure_nodes,
+                timeout=3.0,
+                attempts=2,
+                max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+            )
+
+        outcomes = _run_parallel_server_actions(server_names, measure)
+        results = {
+            server_name: value
+            for server_name, ok, value in outcomes
+            if ok
+        }
+        failures = [
+            f"{server_name}: {value}"
+            for server_name, ok, value in outcomes
+            if not ok
+        ]
+        return {
+            "results": results,
+            "failures": failures,
+            "server_names": list(server_names),
+        }
 
     def _aggregate_proxy_latency_results(self, server_results: dict, server_count: int, nodes=None) -> dict:
         aggregate = {}
@@ -4102,8 +4169,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_proxy_status(self._sync_status_label.cget("text"), severity)
 
         self._run_proxy_ssh_task(
-            f"正在检查 {target_label} 的 AI 代理状态...",
-            lambda: self._run_server_batch(
+            f"正在并行检查 {target_label} 的 AI 代理状态...",
+            lambda: self._run_server_batch_parallel(
                 server_names,
                 lambda server_name: remote_proxy.inspect_ai_proxy(server_name).summary(),
             ),
@@ -4125,8 +4192,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_proxy_status(self._sync_status_label.cget("text"), severity)
 
         self._run_proxy_ssh_task(
-            f"正在通过 {target_label} 的 AI 代理测试 OpenAI/Claude/Gemini 连通性...",
-            lambda: self._run_server_batch(
+            f"正在通过 {target_label} 的 AI 代理并行测试 OpenAI/Claude/Gemini 连通性...",
+            lambda: self._run_server_batch_parallel(
                 server_names,
                 lambda server_name: remote_proxy.probe_ai_proxy(server_name),
             ),

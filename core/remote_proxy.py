@@ -160,6 +160,8 @@ _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE: tuple[str, int | None, int | None, st
 PROXY_QUALITY_CACHE_TTL_SECONDS = 6 * 60 * 60
 PROXY_QUALITY_CACHE_SCHEMA_VERSION = 6
 PROXY_QUALITY_HTTP_CONCURRENCY_BUDGET = 12
+PROXY_LATENCY_DEFAULT_MAX_WORKERS = 32
+PROXY_LATENCY_MAX_WORKERS = 64
 PROXY_QUALITY_ASSESSMENT_SCOPE_SERVER = "server_entry"
 PROXY_LATENCY_CACHE_TTL_SECONDS = 30 * 60
 PROXY_QUALITY_KEY_REQUIRED_SERVICES = frozenset({
@@ -1918,7 +1920,7 @@ def measure_proxy_node_latencies(
     nodes,
     timeout: float = 3.0,
     attempts: int = 2,
-    max_workers: int = 16,
+    max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
     *,
     require_all: bool = False,
 ) -> dict[str, ProxyNodeLatencyResult]:
@@ -1941,21 +1943,36 @@ def measure_proxy_node_latencies(
     if not items:
         return {}
 
-    worker_count = min(max(1, _int_or_default(max_workers, 16)), len(items))
+    worker_count = min(
+        max(1, _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS)),
+        PROXY_LATENCY_MAX_WORKERS,
+        len(items),
+    )
     results: dict[str, ProxyNodeLatencyResult] = {}
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
+        futures = {
             executor.submit(
                 measure_proxy_node_latency,
                 node,
                 timeout,
                 attempts,
                 require_all=require_all,
-            )
+            ): proxy_node_key(node)
             for node in items
-        ]
+        }
         for future in as_completed(futures):
-            result = future.result()
+            node_key = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = ProxyNodeLatencyResult(
+                    node_key=node_key,
+                    ok=False,
+                    latency_ms=None,
+                    detail=str(exc).splitlines()[0][:120] or type(exc).__name__,
+                    attempts=max(1, _int_or_default(attempts, 2)),
+                    measured_at=_now_iso(),
+                )
             results[result.node_key] = result
     return results
 
@@ -2518,7 +2535,7 @@ def measure_proxy_node_latencies_on_server(
     nodes,
     timeout: float = 3.0,
     attempts: int = 2,
-    max_workers: int = 16,
+    max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
 ) -> dict[str, ProxyNodeLatencyResult]:
     items = []
     seen = set()
@@ -2548,7 +2565,13 @@ def measure_proxy_node_latencies_on_server(
 
     timeout_value = _normalize_timeout(timeout, 3.0)
     attempts_value = max(1, _int_or_default(attempts, 2))
-    workers_value = max(1, _int_or_default(max_workers, 16))
+    workers_value = max(
+        1,
+        min(
+            _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS),
+            PROXY_LATENCY_MAX_WORKERS,
+        ),
+    )
     _ssh_profile, client = _connect_ssh(ssh_name)
     command = _build_remote_latency_command(timeout_value, attempts_value, workers_value)
     command_timeout = _remote_latency_command_timeout(len(items), timeout_value, attempts_value, workers_value)
@@ -8015,10 +8038,20 @@ probe_curl() {{
 """
 
 
-def _build_remote_latency_command(timeout: float = 3.0, attempts: int = 2, max_workers: int = 16) -> str:
+def _build_remote_latency_command(
+    timeout: float = 3.0,
+    attempts: int = 2,
+    max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+) -> str:
     timeout = _normalize_timeout(timeout, 3.0)
     attempts = max(1, _int_or_default(attempts, 2))
-    max_workers = max(1, min(_int_or_default(max_workers, 16), 64))
+    max_workers = max(
+        1,
+        min(
+            _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS),
+            PROXY_LATENCY_MAX_WORKERS,
+        ),
+    )
     return f"""set -u
 if ! command -v python3 >/dev/null 2>&1; then
   echo "远端未安装 python3，无法批量测试节点延迟" >&2
@@ -8073,9 +8106,17 @@ def measure(item):
 
 workers = max(1, min(MAX_WORKERS, len(nodes) or 1))
 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-    futures = [executor.submit(measure, item) for item in nodes if isinstance(item, dict)]
+    futures = {{
+        executor.submit(measure, item): clean(item.get("key"))
+        for item in nodes
+        if isinstance(item, dict)
+    }}
     for future in concurrent.futures.as_completed(futures):
-        key, ok, latency, detail = future.result()
+        expected_key = futures[future]
+        try:
+            key, ok, latency, detail = future.result()
+        except Exception as exc:
+            key, ok, latency, detail = expected_key, 0, "", clean(exc) or exc.__class__.__name__
         if key:
             print(f"latency\\t{{key}}\\t{{ok}}\\t{{latency}}\\t{{clean(detail)}}\\t{{ATTEMPTS}}", flush=True)
 PY
@@ -8118,8 +8159,20 @@ exit 12
 """
 
 
-def _remote_latency_command_timeout(node_count: int, timeout: float, attempts: int, max_workers: int) -> int:
-    workers = max(1, min(_int_or_default(max_workers, 16), max(1, int(node_count or 1))))
+def _remote_latency_command_timeout(
+    node_count: int,
+    timeout: float,
+    attempts: int,
+    max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+) -> int:
+    workers = max(
+        1,
+        min(
+            _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS),
+            PROXY_LATENCY_MAX_WORKERS,
+            max(1, int(node_count or 1)),
+        ),
+    )
     batches = (max(1, int(node_count or 1)) + workers - 1) // workers
     return max(45, min(300, int(batches * max(1, attempts) * _normalize_timeout(timeout, 3.0) + 30)))
 

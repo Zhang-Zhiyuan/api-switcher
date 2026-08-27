@@ -1309,7 +1309,7 @@ def _select_stable_automatic_local_candidate(
             tcp_candidates,
             timeout=3.0,
             attempts=3,
-            max_workers=20,
+            max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
             require_all=True,
         )
     selected, results = select_stable_local_proxy_node(
