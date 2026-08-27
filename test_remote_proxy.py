@@ -2840,6 +2840,28 @@ def test_measure_proxy_node_latency_uses_median_instead_of_lucky_minimum(monkeyp
     assert result.latency_ms == 60
 
 
+def test_measure_proxy_node_latencies_isolates_one_worker_failure(monkeypatch):
+    good = {"name": "good", "type": "vless", "server": "good.example.com", "port": 443}
+    bad = {"name": "bad", "type": "vless", "server": "bad.example.com", "port": 443}
+
+    def fake_measure(node, *_args, **_kwargs):
+        key = remote_proxy.proxy_node_key(node)
+        if node["server"] == "bad.example.com":
+            raise RuntimeError("unexpected worker failure")
+        return remote_proxy.ProxyNodeLatencyResult(key, True, latency_ms=25, attempts=2)
+
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latency", fake_measure)
+
+    results = remote_proxy.measure_proxy_node_latencies([good, bad])
+
+    assert len(results) == 2
+    assert results[remote_proxy.proxy_node_key(good)].ok is True
+    failed = results[remote_proxy.proxy_node_key(bad)]
+    assert failed.ok is False
+    assert "unexpected worker failure" in failed.detail
+    assert failed.attempts == 2
+
+
 def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, tmp_path):
     class Headers:
         def get_content_type(self):
@@ -6115,6 +6137,15 @@ def test_build_remote_latency_command_uses_stdin_json_temp_file():
     assert "ThreadPoolExecutor" in command
     assert "latency\\t" in command
     assert "ATTEMPTS = 3" in command
+
+
+def test_remote_latency_command_defaults_to_higher_bounded_parallelism():
+    command = remote_proxy._build_remote_latency_command()
+
+    assert remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS == 32
+    assert f"MAX_WORKERS = {remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS}" in command
+    assert "except Exception as exc:" in command
+    assert "expected_key, 0" in command
 
 
 def test_parse_remote_latency_output_returns_latency_results():

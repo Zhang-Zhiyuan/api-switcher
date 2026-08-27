@@ -1,4 +1,5 @@
 import json
+import threading
 import urllib.request
 
 import pytest
@@ -218,6 +219,66 @@ def test_detect_network_keeps_probe_order_when_endpoint_raises():
     assert report.probes[1].ok is False
     assert "ipv6 endpoint exploded" in report.probes[1].error
     assert len(report.diagnostics) == 1
+
+
+def test_detect_network_enriches_reachable_exit_in_parallel(monkeypatch):
+    ip = "198.51.100.88"
+    probe = network_diagnostics.EndpointProbe(
+        label="IPv4",
+        url="https://example.test/ip",
+        ok=True,
+        ip=ip,
+    )
+    started = set()
+    lock = threading.Lock()
+    all_started = threading.Event()
+
+    def mark_started(name, value):
+        with lock:
+            started.add(name)
+            if len(started) == 4:
+                all_started.set()
+        assert all_started.wait(2), "diagnostic enrichments did not overlap"
+        return value
+
+    monkeypatch.setattr(
+        network_diagnostics,
+        "_probe_public_ip_endpoints",
+        lambda *_args, **_kwargs: [probe],
+    )
+    monkeypatch.setattr(
+        network_diagnostics,
+        "lookup_ping0_quality",
+        lambda *_args, **_kwargs: mark_started(
+            "ping0",
+            network_diagnostics.Ping0Quality(ip=ip, ok=True, source="ping0-api"),
+        ),
+    )
+    monkeypatch.setattr(
+        network_diagnostics,
+        "lookup_reputation",
+        lambda *_args, **_kwargs: mark_started("reputation", []),
+    )
+    monkeypatch.setattr(
+        network_diagnostics,
+        "lookup_geo",
+        lambda *_args, **_kwargs: mark_started(
+            "geo",
+            network_diagnostics.GeoInfo(ip=ip, ok=True),
+        ),
+    )
+
+    report = network_diagnostics.detect_network(
+        enabled_services=[network_diagnostics.SERVICE_PING0],
+        http_get=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("network helpers are patched")
+        ),
+        reverse_resolver=lambda _ip: mark_started("rdns", "example.ptr"),
+    )
+
+    assert started == {"ping0", "reputation", "geo", "rdns"}
+    assert len(report.diagnostics) == 1
+    assert report.diagnostics[0].reverse_dns == "example.ptr"
 
 
 def test_probe_public_ip_accepts_text_response_with_extra_label():

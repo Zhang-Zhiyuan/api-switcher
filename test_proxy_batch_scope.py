@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from types import SimpleNamespace
 
 from core import local_proxy, network_diagnostic_settings, remote_proxy
 from ui.tabs.local_proxy_tab import LOCAL_YAML_NODE_ONLY_NOTICE, LocalProxyTab
-from ui.tabs.ssh_tab import SSHTab
+from ui.tabs.ssh_tab import (
+    SSH_NETWORK_TEST_SERVER_MAX_WORKERS,
+    SSHTab,
+    _run_parallel_server_actions,
+)
 from ui.theme import COLORS
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 
@@ -111,6 +116,54 @@ def _verified_stability(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_ssh_read_only_server_actions_run_in_parallel_and_keep_order():
+    barrier = threading.Barrier(2)
+
+    def action(server_name):
+        barrier.wait(timeout=2)
+        if server_name == "beta":
+            raise OSError("offline")
+        return f"{server_name}-ok"
+
+    outcomes = _run_parallel_server_actions(["alpha", "beta"], action)
+
+    assert SSH_NETWORK_TEST_SERVER_MAX_WORKERS >= 2
+    assert outcomes[0] == ("alpha", True, "alpha-ok")
+    assert outcomes[1][0:2] == ("beta", False)
+    assert "offline" in str(outcomes[1][2])
+
+
+def test_ssh_latency_batch_uses_higher_node_parallelism(monkeypatch):
+    node = _node(1, "美国-并发测速")
+    calls = []
+
+    def measure(server_name, nodes, **kwargs):
+        calls.append((server_name, tuple(nodes), kwargs))
+        return {}
+
+    monkeypatch.setattr(
+        remote_proxy,
+        "measure_proxy_node_latencies_on_server",
+        measure,
+    )
+    tab = object.__new__(SSHTab)
+    tab._proxy_subscription_nodes = [node]
+
+    result = SSHTab._measure_proxy_nodes_for_servers(
+        tab,
+        ["alpha", "beta"],
+        [node],
+    )
+
+    assert result["failures"] == []
+    assert set(result["results"]) == {"alpha", "beta"}
+    assert len(calls) == 2
+    assert all(
+        kwargs["max_workers"] == remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS
+        for _server_name, _nodes, kwargs in calls
+    )
 
 
 def test_local_quality_candidates_default_to_current_scope_when_nothing_checked():
@@ -2827,7 +2880,7 @@ def test_local_latency_gate_skips_first_unstable_and_selects_second_stable(monke
     assert calls["measure_kwargs"] == {
         "timeout": 3.0,
         "attempts": 3,
-        "max_workers": 20,
+        "max_workers": remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
         "require_all": True,
     }
     assert calls["selected"] == [selected_key]
