@@ -6,6 +6,8 @@ import re
 import shlex
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
+
 from core import auth_parser, parser, profile_manager, remote_config, remote_proxy, security, toml_parser, vscode_parser
 from core.providers import ProviderRegistry
 from core.ssh_manager import ssh_manager
@@ -64,6 +66,17 @@ class RemoteConfigCandidate:
             key_state = "有密钥" if self.has_api_key else "无密钥"
         detail = self.reason or key_state
         return f"{self.label}: {detail}"
+
+
+@dataclass(frozen=True)
+class _RemoteCodexAccountState:
+    config: dict
+    auth: dict | None
+    credentials_store: str
+    exportable: bool
+    reason: str
+    cli_status: bool | None = None
+    cli_output: str = ""
 
 
 CODEX_WIRE_API_AUTO = "auto"
@@ -1040,6 +1053,7 @@ def _remote_codex_login_status(
     ssh_profile=None,
     *,
     clear_api_env: bool = False,
+    credentials_store: str | None = None,
 ) -> tuple[bool | None, str]:
     try:
         codex_home = remote_config._expand_remote_path(
@@ -1053,13 +1067,20 @@ def _remote_codex_login_status(
         if clear_api_env
         else ""
     )
+    store_arg = ""
+    if credentials_store is not None:
+        normalized_store = str(credentials_store).strip().lower()
+        if normalized_store not in {"auto", "file", "keyring"}:
+            return None, f"无效的 Codex 凭据存储方式: {credentials_store}"
+        override = f'cli_auth_credentials_store="{normalized_store}"'
+        store_arg = f"-c {shlex.quote(override)} "
     command = (
         f"{clean_env}export CODEX_HOME={shlex.quote(codex_home)}; "
         'CODEX_BIN="$(command -v codex || true)"; '
         '[ -n "$CODEX_BIN" ] || CODEX_BIN="$(find "$HOME/.vscode-server/extensions" "$HOME/.cursor-server/extensions" '
         '-path "*/bin/*/codex" -type f 2>/dev/null | sort | tail -n 1)"; '
         '[ -n "$CODEX_BIN" ] || { echo "codex CLI not found"; exit 127; }; '
-        '"$CODEX_BIN" login status 2>&1'
+        f'"$CODEX_BIN" {store_arg}login status 2>&1'
     )
     try:
         status, stdout, stderr = ssh_manager.execute_command_with_status(
@@ -1075,8 +1096,161 @@ def _remote_codex_login_status(
     lowered = output.lower()
     if status == 127 or "codex cli not found" in lowered:
         return None, output[:300] or "codex CLI not found"
+    if any(
+        marker in lowered
+        for marker in (
+            "unrecognized subcommand",
+            "unknown subcommand",
+            "unexpected argument 'status'",
+            'unexpected argument "status"',
+        )
+    ):
+        return None, output[:300] or "当前 Codex CLI 不支持 login status"
     ok = status == 0 and "error " not in lowered and "invalid configuration" not in lowered
     return ok, output[:300]
+
+
+def _read_remote_codex_account_state(client, ssh_profile) -> _RemoteCodexAccountState:
+    """Resolve an exportable remote Codex login without trusting keyring leftovers.
+
+    ``auto`` is not equivalent to keyring: Codex uses the OS credential store
+    when available and otherwise falls back to ``auth.json``.  Force the file
+    backend for the CLI status check so a valid fallback can be imported while
+    an explicit keyring configuration still remains non-exportable.
+    """
+    config = remote_config.read_remote_codex_config(client, ssh_profile, strict=True) or {}
+    store = profile_manager._codex_credentials_store(config)
+    if store == "keyring":
+        cli_status, cli_output = _remote_codex_login_status(
+            client,
+            ssh_profile,
+            clear_api_env=True,
+        )
+        reason = (
+            "远程 Codex 登录凭据保存在系统密钥环（keyring），没有安全导出接口；"
+            "不会读取可能遗留的 auth.json"
+        )
+        if cli_output:
+            reason += f"；Codex 登录状态（仅作提示）: {cli_output}"
+        return _RemoteCodexAccountState(
+            config,
+            None,
+            store,
+            False,
+            reason,
+            cli_status,
+            cli_output,
+        )
+
+    auth = remote_config.read_remote_codex_auth(client, ssh_profile, strict=True)
+    ok, reason = profile_manager._validate_codex_account_auth(auth)
+    if not ok:
+        if store == "auto":
+            active_status, active_output = _remote_codex_login_status(
+                client,
+                ssh_profile,
+                clear_api_env=True,
+            )
+            if active_status:
+                reason = (
+                    "远程 Codex 的 auto 登录可能位于系统密钥环，但 auth.json 不可导出: "
+                    + reason
+                )
+            elif active_output:
+                reason += f"；Codex 登录状态: {active_output}"
+            return _RemoteCodexAccountState(
+                config,
+                auth if isinstance(auth, dict) else None,
+                store,
+                False,
+                reason,
+                active_status,
+                active_output,
+            )
+        return _RemoteCodexAccountState(
+            config,
+            auth if isinstance(auth, dict) else None,
+            store,
+            False,
+            reason,
+        )
+
+    cli_status, cli_output = _remote_codex_login_status(
+        client,
+        ssh_profile,
+        clear_api_env=True,
+        credentials_store="file",
+    )
+    if cli_status is False:
+        detail = cli_output or "codex login status 返回失败"
+        return _RemoteCodexAccountState(
+            config,
+            auth,
+            store,
+            False,
+            f"远程 auth.json 结构有效，但 Codex 文件凭据校验失败: {detail}",
+            cli_status,
+            cli_output,
+        )
+
+    if store == "auto":
+        if cli_status is True:
+            reason = "auto 模式已确认可使用 auth.json 文件回退"
+        else:
+            reason = "auto 模式检测到有效 auth.json；Codex CLI 不可用，文件回退未动态校验"
+    elif cli_status is True:
+        reason = "file 模式登录状态已通过 Codex CLI 校验"
+    else:
+        reason = "file 模式 auth.json 有效；Codex CLI 不可用，未动态校验"
+    return _RemoteCodexAccountState(
+        config,
+        auth,
+        store,
+        True,
+        reason,
+        cli_status,
+        cli_output,
+    )
+
+
+def _codex_auth_timestamp(value: object) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (OverflowError, ValueError):
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+
+def _codex_auth_freshness(auth: dict | None) -> tuple[float, float, float]:
+    """Return comparable refresh/expiry metadata without exposing token text."""
+    if not isinstance(auth, dict):
+        return (0.0, 0.0, 0.0)
+    refreshed_at = _codex_auth_timestamp(auth.get("last_refresh"))
+    latest_expiry = 0.0
+    tokens = auth.get("tokens")
+    if isinstance(tokens, dict):
+        for value in tokens.values():
+            if not isinstance(value, str):
+                continue
+            payload = profile_manager._decode_jwt_payload(value)
+            latest_expiry = max(latest_expiry, _codex_auth_timestamp(payload.get("exp")))
+    return (max(refreshed_at, latest_expiry), refreshed_at, latest_expiry)
+
+
+def _codex_existing_auth_is_newer(existing: dict | None, incoming: dict | None) -> bool:
+    existing_freshness = _codex_auth_freshness(existing)
+    incoming_freshness = _codex_auth_freshness(incoming)
+    return existing_freshness != (0.0, 0.0, 0.0) and existing_freshness > incoming_freshness
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -1129,6 +1303,7 @@ def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
 
 def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
     """Sync a saved Claude official account snapshot to the remote server."""
+    refreshed = profile_manager.refresh_claude_account_snapshot_if_current(account_name)
     account = _find_profile(profile_manager.list_claude_account_profiles(), account_name, "Claude 官方账号")
     credentials = profile_manager.load_claude_account_credentials(account)
 
@@ -1193,6 +1368,8 @@ def sync_claude_account_to_server(ssh_name: str, account_name: str) -> str:
 
     logger.info(f"Synced Claude account '{account_name}' to {ssh_profile.host}")
     message = f"已同步 Claude 账号 '{account_name}' 到 {ssh_profile.host}"
+    if refreshed:
+        message += " | 已在推送前刷新本机账号快照"
     return f"{message} | {ROOT_BYPASS_ADJUSTED_MESSAGE}" if root_adjusted or (is_root and vscode_root_adjusted) else message
 
 
@@ -1320,6 +1497,7 @@ def sync_codex_to_server(ssh_name: str, codex_name: str, wire_api_mode: str | No
 
 def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
     """Sync a saved Codex official account snapshot to the remote server."""
+    refreshed = profile_manager.refresh_codex_account_snapshot_if_current(account_name)
     account = _find_profile(profile_manager.list_codex_account_profiles(), account_name, "Codex 官方账号")
     auth = profile_manager.load_codex_account_auth(account)
 
@@ -1389,7 +1567,8 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
         detail = f" | 凭据已写入并回读校验，CLI 未可用，未执行登录状态检查: {validation_output}"
     else:
         detail = f" | {validation_output}" if validation_output else ""
-    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}{detail}"
+    refresh_detail = " | 已在推送前刷新本机账号快照" if refreshed else ""
+    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}{refresh_detail}{detail}"
 
 
 def sync_selected_to_server(
@@ -1889,9 +2068,7 @@ def _inspect_remote_codex_account(client, ssh_profile) -> RemoteConfigCandidate:
         remote_config._remote_path("codex_config", ssh_profile, client),
     )
     try:
-        config = remote_config.read_remote_codex_config(client, ssh_profile, strict=True) or {}
-        store = str(config.get("cli_auth_credentials_store") or "auto").strip().lower()
-        auth = remote_config.read_remote_codex_auth(client, ssh_profile, strict=True) if store == "file" else None
+        state = _read_remote_codex_account_state(client, ssh_profile)
     except Exception as e:
         return RemoteConfigCandidate(
             kind="codex_account",
@@ -1902,23 +2079,21 @@ def _inspect_remote_codex_account(client, ssh_profile) -> RemoteConfigCandidate:
             paths=paths,
         )
 
-    ok, reason = profile_manager._validate_codex_account_auth(auth)
-    if store != "file":
-        _login_ok, login_status = _remote_codex_login_status(client, ssh_profile)
-        reason = (
-            f"远程 Codex 配置使用 {store} 凭据库，不会读取可能过期的 auth.json；"
-            "请在远程明确设置 cli_auth_credentials_store=\"file\" 后重新登录"
-        )
-        if login_status:
-            reason += f"；Codex 登录状态（仅作提示）: {login_status}"
-    override_active = profile_manager._codex_account_override_active(config, auth or {}) if isinstance(auth, dict) else True
+    auth = state.auth
+    ok = state.exportable
+    reason = state.reason
+    override_active = (
+        profile_manager._codex_account_override_active(state.config, auth or {})
+        if isinstance(auth, dict)
+        else True
+    )
     identity = ""
     preferred_name = ""
     if isinstance(auth, dict) and auth:
         identity = profile_manager._codex_account_identity_from_auth(auth)
         preferred_name = profile_manager._codex_account_preferred_name(auth)
     if ok and override_active:
-        reason = "检测到第三方 API 覆盖；可导入账号快照，但远端当前优先使用 API"
+        reason = f"检测到第三方 API 覆盖；可导入账号快照，但远端当前优先使用 API；{reason}"
     return RemoteConfigCandidate(
         kind="codex_account",
         label="Codex 账号",
@@ -1928,7 +2103,7 @@ def _inspect_remote_codex_account(client, ssh_profile) -> RemoteConfigCandidate:
         provider_label=preferred_name or identity or "官方账号",
         has_api_key=ok,
         importable=ok,
-        reason=reason if ok and override_active else "可导入为 Codex 官方账号快照" if ok else reason,
+        reason=reason,
         paths=paths,
     )
 
@@ -2041,19 +2216,10 @@ def pull_claude_from_server(ssh_name: str) -> str:
 def pull_codex_account_from_server(ssh_name: str) -> str:
     """Pull Codex official account auth from server and save as an account profile."""
     ssh_profile, client = _connect_ssh(ssh_name)
-    config = remote_config.read_remote_codex_config(client, ssh_profile, strict=True) or {}
-    store = str(config.get("cli_auth_credentials_store") or "auto").strip().lower()
-    if store != "file":
-        _login_ok, login_status = _remote_codex_login_status(client, ssh_profile)
-        detail = f"；Codex 登录状态（仅作提示）: {login_status}" if login_status else ""
-        raise ValueError(
-            f"远程 Codex 配置使用 {store} 凭据库，不会读取可能过期的 auth.json；"
-            f"请在远程明确设置 cli_auth_credentials_store=\"file\" 后重新登录{detail}"
-        )
-    auth = remote_config.read_remote_codex_auth(client, ssh_profile, strict=True)
-    ok, reason = profile_manager._validate_codex_account_auth(auth)
-    if not ok:
-        raise ValueError(f"远程 Codex 账号不可导入: {reason}")
+    state = _read_remote_codex_account_state(client, ssh_profile)
+    if not state.exportable or not isinstance(state.auth, dict):
+        raise ValueError(f"远程 Codex 账号不可导入: {state.reason}")
+    auth = state.auth
     auth = profile_manager._normalize_codex_official_auth(auth)
 
     from models.profile import CodexAccountProfile
@@ -2062,6 +2228,20 @@ def pull_codex_account_from_server(ssh_name: str) -> str:
     preferred_name = profile_manager._codex_account_preferred_name(auth)
     name = profile_manager._pick_codex_account_import_name(identity, preferred_name, auth)
     ref = f"codex-account:{name}:auth_json"
+    profile_manager.refresh_codex_account_snapshot_if_current(name)
+    existing = next(
+        (profile for profile in profile_manager.list_codex_account_profiles() if profile.name == name),
+        None,
+    )
+    existing_auth = profile_manager.get_codex_account_auth(existing) if existing else None
+    if existing_auth == auth:
+        return f"已检查 {ssh_profile.host} 的 Codex 账号，本机快照已是最新 '{name}' | {state.reason}"
+    if (
+        existing
+        and profile_manager._codex_account_matches_auth(existing, auth)
+        and _codex_existing_auth_is_newer(existing_auth, auth)
+    ):
+        return f"已检查 {ssh_profile.host} 的 Codex 账号，远端快照较旧；已保留本机较新快照 '{name}'"
     profile = CodexAccountProfile(
         name=name,
         auth_json_ref=ref,
@@ -2069,7 +2249,7 @@ def pull_codex_account_from_server(ssh_name: str) -> str:
         created_at=profile_manager._now_iso(),
     )
     profile_manager.save_codex_account_profile_with_auth(profile, auth)
-    return f"已从 {ssh_profile.host} 拉取 Codex 账号，保存为 '{name}'"
+    return f"已从 {ssh_profile.host} 拉取 Codex 账号，保存为 '{name}' | {state.reason}"
 
 
 def pull_codex_from_server(ssh_name: str) -> str:

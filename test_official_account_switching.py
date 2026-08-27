@@ -272,6 +272,40 @@ def test_switch_codex_accounts_preserves_rotated_live_tokens(isolated_accounts):
     assert auth_parser.read_codex_auth() == account_a_refreshed
 
 
+def test_refresh_codex_account_snapshot_if_current_captures_rotated_tokens(isolated_accounts):
+    initial = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-01-01T00:00:00Z",
+        "tokens": {
+            "account_id": "account-stable",
+            "access_token": "access-initial",
+            "refresh_token": "refresh-initial",
+        },
+    }
+    rotated = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-02-01T00:00:00Z",
+        "tokens": {
+            "account_id": "account-stable",
+            "access_token": "access-rotated",
+            "refresh_token": "refresh-rotated",
+        },
+    }
+    toml_parser.write_codex_config({"cli_auth_credentials_store": "file"})
+    auth_parser.write_codex_auth(initial)
+    saved = profile_manager.import_current_codex_account()
+    assert saved is not None
+
+    auth_parser.write_codex_auth(rotated)
+
+    assert profile_manager.refresh_codex_account_snapshot_if_current(saved.name) is True
+    refreshed = next(
+        profile for profile in profile_manager.list_codex_account_profiles()
+        if profile.name == saved.name
+    )
+    assert profile_manager.get_codex_account_auth(refreshed) == rotated
+
+
 def test_switch_codex_account_auto_saves_unimported_file_login(isolated_accounts):
     saved_auth = {
         "auth_mode": "chatgpt",

@@ -1213,6 +1213,34 @@ def preserve_current_claude_account_snapshot() -> ClaudeAccountProfile | None:
     return _save_current_claude_account_credentials(credentials)
 
 
+def refresh_claude_account_snapshot_if_current(name: str) -> bool:
+    """Refresh ``name`` only when the live Claude credentials belong to it.
+
+    Account tokens may rotate after the original import.  Remote sync must not
+    send that older saved snapshot, but it must also never replace a different
+    saved account with whichever login happens to be live now.
+    """
+    target = next((profile for profile in list_claude_account_profiles() if profile.name == name), None)
+    if target is None or not hasattr(target, "identity"):
+        return False
+
+    from core.parser import read_claude_credentials
+
+    try:
+        credentials = read_claude_credentials()
+    except (OSError, ValueError) as exc:
+        logger.warning("Unable to refresh Claude account before sync: %s", exc)
+        return False
+
+    ok, _reason = _validate_claude_account_credentials(credentials)
+    if not ok or not _claude_account_matches_credentials(target, credentials):
+        return False
+    refreshed = _save_current_claude_account_credentials(credentials)
+    if refreshed.name != name:
+        raise RuntimeError("Claude 当前登录匹配账号，但刷新后账号名称发生变化")
+    return True
+
+
 def delete_claude_account_profile(name: str) -> None:
     _delete_profile_with_secrets(
         name,
@@ -1468,6 +1496,25 @@ def _iter_nested_strings(value: object, limit: int = 200):
             stack.extend(item)
 
 
+def _iter_nested_mappings(value: object, limit: int = 200):
+    """Yield nested JSON objects with cycle and work limits."""
+    seen_ids: set[int] = set()
+    visited = 0
+    stack = [value]
+    while stack and visited < limit:
+        item = stack.pop()
+        if isinstance(item, dict):
+            item_id = id(item)
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            visited += 1
+            yield item
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
 def _account_identity_parts(data: dict, fallback_prefix: str = "official-login") -> dict:
     human_keys = [
         "name",
@@ -1505,10 +1552,14 @@ def _account_identity_parts(data: dict, fallback_prefix: str = "official-login")
         else:
             stable_values.append(label)
 
-    for key in human_keys:
-        add_human(data.get(key))
-    for key in id_keys:
-        add_id(data.get(key))
+    # Credential schemas evolve and stable identifiers such as ``account_id``
+    # are commonly nested under ``tokens`` or an OAuth account object.  Scan
+    # JSON mappings by key instead of relying only on top-level fields/JWTs.
+    for mapping in _iter_nested_mappings(data):
+        for key in human_keys:
+            add_human(mapping.get(key))
+        for key in id_keys:
+            add_id(mapping.get(key))
 
     for value in _iter_nested_strings(data):
         if "@" in value and len(value) <= 160:
@@ -2261,6 +2312,38 @@ def preserve_current_codex_account_snapshot() -> CodexAccountProfile | None:
     if not _codex_official_auth_available(auth):
         return None
     return _save_current_codex_account_auth(auth)
+
+
+def refresh_codex_account_snapshot_if_current(name: str) -> bool:
+    """Refresh ``name`` from the live file-backed Codex login when it matches.
+
+    Codex rotates ChatGPT access and refresh tokens during normal use.  A
+    profile can therefore still identify the right account while containing
+    credentials that are no longer the newest usable pair.
+    """
+    target = next((profile for profile in list_codex_account_profiles() if profile.name == name), None)
+    if target is None or not hasattr(target, "identity"):
+        return False
+
+    from core.auth_parser import read_codex_auth
+    from core.toml_parser import read_codex_config
+
+    try:
+        config = read_codex_config()
+        if _codex_credentials_store(config) != "file":
+            return False
+        auth = read_codex_auth()
+    except (OSError, ValueError) as exc:
+        logger.warning("Unable to refresh Codex account before sync: %s", exc)
+        return False
+
+    ok, _reason = _validate_codex_account_auth(auth)
+    if not ok or not _codex_account_matches_auth(target, auth):
+        return False
+    refreshed = _save_current_codex_account_auth(auth)
+    if refreshed.name != name:
+        raise RuntimeError("Codex 当前登录匹配账号，但刷新后账号名称发生变化")
+    return True
 
 
 def delete_codex_account_profile(name: str) -> None:

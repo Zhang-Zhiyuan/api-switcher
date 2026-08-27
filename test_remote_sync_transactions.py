@@ -595,10 +595,9 @@ def test_remote_codex_sync_validates_runtime_options_before_ssh(monkeypatch):
         sync_manager.sync_codex_to_server("remote", "invalid-runtime")
 
 
-@pytest.mark.parametrize("store", ["auto", "keyring"])
-def test_inspect_remote_codex_account_ignores_stale_auth_outside_file_store(monkeypatch, store):
+def test_inspect_remote_codex_account_ignores_stale_auth_in_keyring_mode(monkeypatch):
     state, ssh_profile, client = _install_remote(monkeypatch, "never")
-    state["/remote/codex/config.toml"] = f'cli_auth_credentials_store = "{store}"\n'
+    state["/remote/codex/config.toml"] = 'cli_auth_credentials_store = "keyring"\n'
     stale_reads = []
     monkeypatch.setattr(
         remote_config,
@@ -619,14 +618,14 @@ def test_inspect_remote_codex_account_ignores_stale_auth_outside_file_store(monk
     assert candidate.importable is False
     assert candidate.has_api_key is False
     assert stale_reads == []
-    assert "不会读取可能过期的 auth.json" in candidate.reason
+    assert "keyring" in candidate.reason
+    assert "auth.json" in candidate.reason
     assert "仅作提示" in candidate.reason
 
 
-@pytest.mark.parametrize("store", ["auto", "keyring"])
-def test_pull_remote_codex_account_ignores_stale_auth_outside_file_store(monkeypatch, store):
+def test_pull_remote_codex_account_ignores_stale_auth_in_keyring_mode(monkeypatch):
     state, _ssh_profile, _client = _install_remote(monkeypatch, "never")
-    state["/remote/codex/config.toml"] = f'cli_auth_credentials_store = "{store}"\n'
+    state["/remote/codex/config.toml"] = 'cli_auth_credentials_store = "keyring"\n'
     stale_reads = []
     monkeypatch.setattr(
         remote_config,
@@ -647,10 +646,94 @@ def test_pull_remote_codex_account_ignores_stale_auth_outside_file_store(monkeyp
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale auth must not be saved")),
     )
 
-    with pytest.raises(ValueError, match=f"{store}.*auth.json"):
+    with pytest.raises(ValueError, match="keyring.*auth.json"):
         sync_manager.pull_codex_account_from_server("remote")
 
     assert stale_reads == []
+
+
+def test_inspect_remote_codex_account_accepts_verified_auto_file_fallback(monkeypatch):
+    state, ssh_profile, client = _install_remote(monkeypatch, "never")
+    state["/remote/codex/config.toml"] = 'cli_auth_credentials_store = "auto"\n'
+    auth_reads = []
+    status_calls = []
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_auth",
+        lambda *_args, **_kwargs: auth_reads.append(True) or {
+            "auth_mode": "chatgpt",
+            "tokens": {"id_token": "portable-file-token"},
+        },
+    )
+
+    def login_status(*_args, **kwargs):
+        status_calls.append(kwargs)
+        return True, "Logged in using ChatGPT"
+
+    monkeypatch.setattr(sync_manager, "_remote_codex_login_status", login_status)
+
+    candidate = sync_manager._inspect_remote_codex_account(client, ssh_profile)
+
+    assert candidate.importable is True
+    assert candidate.has_api_key is True
+    assert auth_reads == [True]
+    assert status_calls[-1]["credentials_store"] == "file"
+    assert "auto" in candidate.reason
+    assert "auth.json" in candidate.reason
+
+
+def test_pull_remote_codex_account_accepts_verified_auto_file_fallback(monkeypatch):
+    state, _ssh_profile, _client = _install_remote(monkeypatch, "never")
+    state["/remote/codex/config.toml"] = 'cli_auth_credentials_store = "auto"\n'
+    auth = {
+        "auth_mode": "chatgpt",
+        "tokens": {"id_token": "portable-file-token", "account_id": "acct-test"},
+    }
+    saved = []
+    monkeypatch.setattr(remote_config, "read_remote_codex_auth", lambda *_args, **_kwargs: auth)
+    monkeypatch.setattr(
+        sync_manager,
+        "_remote_codex_login_status",
+        lambda *_args, **kwargs: (True, "Logged in using ChatGPT")
+        if kwargs.get("credentials_store") == "file"
+        else (None, ""),
+    )
+    monkeypatch.setattr(profile_manager, "list_codex_account_profiles", lambda: [])
+    monkeypatch.setattr(profile_manager, "refresh_codex_account_snapshot_if_current", lambda _name: False)
+    monkeypatch.setattr(
+        profile_manager,
+        "save_codex_account_profile_with_auth",
+        lambda profile, data: saved.append((profile, data)),
+    )
+
+    message = sync_manager.pull_codex_account_from_server("remote")
+
+    assert len(saved) == 1
+    assert saved[0][1]["tokens"]["account_id"] == "acct-test"
+    assert "auto" in message
+
+
+def test_auto_file_fallback_rejects_cli_validation_failure(monkeypatch):
+    state, ssh_profile, client = _install_remote(monkeypatch, "never")
+    state["/remote/codex/config.toml"] = 'cli_auth_credentials_store = "auto"\n'
+    monkeypatch.setattr(
+        remote_config,
+        "read_remote_codex_auth",
+        lambda *_args, **_kwargs: {
+            "auth_mode": "chatgpt",
+            "tokens": {"id_token": "stale-file-token"},
+        },
+    )
+    monkeypatch.setattr(
+        sync_manager,
+        "_remote_codex_login_status",
+        lambda *_args, **_kwargs: (False, "Not logged in"),
+    )
+
+    candidate = sync_manager._inspect_remote_codex_account(client, ssh_profile)
+
+    assert candidate.importable is False
+    assert "校验失败" in candidate.reason
 
 
 def test_remote_claude_cleanup_covers_model_and_effort_overrides():
