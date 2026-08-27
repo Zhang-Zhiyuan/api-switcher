@@ -192,6 +192,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_inspect_button = None
         self._proxy_remote_core_button = None
         self._proxy_remote_test_button = None
+        self._proxy_remote_stale_cleanup_button = None
         self._proxy_remote_cleanup_button = None
         self._proxy_status_label = None
         self._remote_pull_type_options = {
@@ -1281,6 +1282,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_remote_test_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_remote_stale_cleanup_button = ctk.CTkButton(
+            proxy_button_frame,
+            text="清理脏代理",
+            width=96,
+            command=self._cleanup_stale_ai_proxy,
+            **button_style("warning", compact=True),
+        )
+        self._proxy_remote_stale_cleanup_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_cleanup_button = ctk.CTkButton(
             proxy_button_frame,
             text="清理远端",
@@ -2346,6 +2355,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_inspect_button,
             getattr(self, "_proxy_remote_core_button", None),
             self._proxy_remote_test_button,
+            getattr(self, "_proxy_remote_stale_cleanup_button", None),
             self._proxy_remote_cleanup_button,
             self._proxy_subscription_profile_save_button,
             self._proxy_subscription_profile_delete_button,
@@ -4272,6 +4282,43 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "检测到的旧 mihomo/clash 配置会先备份到 ~/.config/api-switcher/proxy-cleanup-backup-* 再移走。确定继续吗？"
             ),
             on_confirm=do_cleanup,
+        )
+
+    def _cleanup_stale_ai_proxy(self):
+        """Clear only confirmed stale proxy residue on selected SSH hosts."""
+
+        server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
+        target_label = self._format_server_target(server_names)
+
+        def done(payload):
+            self._show_server_batch_result(payload, "SSH 脏代理检查与清理完成")
+            if payload["ok"]:
+                result = payload.get("result") or {}
+                failures = result.get("failures", [])
+                messages = result.get("results", [])
+                protected = any(
+                    marker in message
+                    for message in messages
+                    for marker in ("无法再次确认", "为避免误清理", "身份不明")
+                )
+                severity = (
+                    "warning"
+                    if protected or (failures and messages)
+                    else "error"
+                    if failures
+                    else "success"
+                )
+                self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+
+        self._run_proxy_ssh_task(
+            f"正在逐台复核并清理 {target_label} 上确认失效的本工具代理残留...",
+            lambda: self._run_server_batch(
+                server_names,
+                lambda server_name: remote_proxy.cleanup_stale_ai_proxy(server_name),
+            ),
+            on_done=done,
         )
 
     def _run_proxy_ssh_task(self, busy_message: str, worker, on_done=None):
