@@ -2,7 +2,6 @@ import hashlib
 import json
 import logging
 import posixpath
-import re
 import shlex
 from copy import deepcopy
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from datetime import datetime, timezone
 
 from core import auth_parser, parser, profile_manager, remote_config, remote_proxy, security, toml_parser, vscode_parser
 from core.providers import ProviderRegistry
+from core.redaction import redact_sensitive_text
 from core.ssh_manager import ssh_manager
 from core.url_validation import validate_api_base_url
 
@@ -467,11 +467,8 @@ main()
 """
 
 
-_SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+")
-
-
 def _redact_output(text: str) -> str:
-    return _SECRET_PATTERN.sub(r"\1***", str(text or "")).strip()
+    return redact_sensitive_text(text).strip()
 
 
 def normalize_codex_wire_api_mode(mode: str | None) -> str:

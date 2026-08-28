@@ -3,6 +3,7 @@ import customtkinter as ctk
 
 from core import persistent_env
 from core.lazy_imports import LazyModule
+from ui.feedback import safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
@@ -394,7 +395,10 @@ class EnvTab(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._server_status_label.configure(text=message, text_color=color)
+        self._server_status_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _selected_server_name(self) -> str | None:
         if not self._server_combo:

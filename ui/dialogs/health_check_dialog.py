@@ -5,6 +5,7 @@ import customtkinter as ctk
 import threading
 import logging
 from typing import Optional
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, button_style, center_window, font, textbox_style
 from ui.ui_dispatch import run_on_ui_thread
 
@@ -177,7 +178,9 @@ class HealthCheckDialog(ctk.CTkToplevel):
         self.total_label.configure(text=f"总计: {summary['total']}")
         self.ok_label.configure(text=f"✓ 正常: {summary['ok']}")
         self.warning_label.configure(text=f"⚠ 警告: {summary['warning']}")
-        self.error_label.configure(text=f"✗ 错误: {summary['error']}")
+        self.error_label.configure(
+            text=safe_feedback_text(f"✗ 错误: {summary['error']}")
+        )
 
         # 更新状态
         if summary['has_issues']:
@@ -319,4 +322,4 @@ class HealthCheckDialog(ctk.CTkToplevel):
 
         except Exception as e:
             logger.error(f"Failed to export report: {e}", exc_info=True)
-            self.status_label.configure(text=f"导出失败: {e}")
+            self.status_label.configure(text=safe_feedback_text(f"导出失败: {e}"))

@@ -7,6 +7,7 @@ import customtkinter as ctk
 
 from core import network_diagnostic_constants as diagnostic_constants
 from core.lazy_imports import LazyModule
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, textbox_style
 from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.masked_entry import MaskedEntry
@@ -993,7 +994,7 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
         ).pack(fill="x", padx=14, pady=(12, 4))
         body = ctk.CTkFrame(card, fg_color="transparent")
         body.pack(fill="x", padx=14, pady=(0, 12))
-        clean_lines = [str(line) for line in (lines or []) if str(line)]
+        clean_lines = [safe_feedback_text(line) for line in (lines or []) if str(line)]
         if not clean_lines:
             clean_lines = ["-"]
         for line in clean_lines:
@@ -1028,10 +1029,13 @@ class ProxyQualityPanel(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._status_label.configure(text=message, text_color=color)
+        self._status_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _set_report_text(self, text: str):
-        self._pending_report_text = str(text or "")
+        self._pending_report_text = safe_feedback_text(text)
         if not self._report_box:
             if self._report_placeholder_label:
                 try:

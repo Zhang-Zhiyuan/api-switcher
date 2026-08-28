@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from core.redaction import redact_sensitive_text
+
 
 FEEDBACK_SEVERITIES = frozenset({"info", "busy", "success", "warning", "error"})
 
@@ -95,35 +97,7 @@ _SUCCESS_MARKERS = (
 def safe_feedback_text(message: object) -> str:
     """Redact common credential shapes before text reaches a visible widget."""
 
-    text = str(message or "")
-    text = re.sub(
-        r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{4,}",
-        r"\1[REDACTED]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)((?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|authorization|secret|password)"
-        r"\s*[\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]{4,}",
-        r"\1[REDACTED]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)([?&](?:api[_-]?key|key|token|access_token)=)[^&#\s]+",
-        r"\1[REDACTED]",
-        text,
-    )
-    text = re.sub(
-        r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_.-]{8,}\b",
-        "[REDACTED]",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b",
-        "[REDACTED]",
-        text,
-    )
-    return text
+    return redact_sensitive_text(message)
 
 
 def infer_feedback_severity(message: object) -> str:

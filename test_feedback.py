@@ -10,7 +10,19 @@ from ui.feedback import (
     resolve_feedback_severity,
     safe_feedback_text,
 )
+from ui.tabs.env_tab import EnvTab
+from ui.tabs.ssh_tab import SSHTab
+from ui.widgets.persistent_env_control import PersistentEnvControl
+from ui.widgets.proxy_quality_panel import ProxyQualityPanel
 from ui.widgets.toast import Toast
+
+
+class _CaptureLabel:
+    def __init__(self):
+        self.config = {}
+
+    def configure(self, **kwargs):
+        self.config.update(kwargs)
 
 
 def test_feedback_distinguishes_contained_failure_from_hard_failure():
@@ -42,6 +54,69 @@ def test_feedback_redacts_common_credentials_and_query_tokens():
     assert "abc.def.ghi" not in safe
     assert "query-secret-value" not in safe
     assert safe.count("[REDACTED]") == 3
+    assert "；Authorization:" in safe
+
+
+def test_feedback_redacts_proxy_credentials_short_tokens_and_subscription_paths():
+    github_token = "ghp_" + "a" * 36
+    message = (
+        "proxy=http://alice:proxy-password@127.0.0.1:7890；"
+        "GH_TOKEN=x；"
+        f"raw={github_token}；"
+        "https://example.test/sub/12345678-secret；"
+        "https://example.test/config?signature=request-signature；重试失败"
+    )
+
+    safe = safe_feedback_text(message)
+
+    assert "alice" not in safe
+    assert "proxy-password" not in safe
+    assert "GH_TOKEN=[REDACTED]" in safe
+    assert github_token not in safe
+    assert "12345678-secret" not in safe
+    assert "request-signature" not in safe
+    assert "http://[REDACTED]@127.0.0.1:7890" in safe
+    assert safe.endswith("；重试失败")
+
+
+def test_persistent_status_labels_redact_before_rendering():
+    message = "连接失败；API_KEY=x；proxy=http://user:password@127.0.0.1:7890"
+
+    ssh_tab = object.__new__(SSHTab)
+    ssh_labels = {
+        "_sync_status_label": SSHTab._set_sync_status,
+        "_proxy_status_label": SSHTab._set_proxy_status,
+        "_proxy_cache_label": SSHTab._set_proxy_cache_status,
+        "_proxy_selected_label": SSHTab._set_proxy_selected_summary,
+        "_git_login_status_label": SSHTab._set_git_login_status,
+        "_remote_auto_status_label": SSHTab._set_remote_auto_status,
+    }
+    rendered = []
+    for attribute, setter in ssh_labels.items():
+        label = _CaptureLabel()
+        setattr(ssh_tab, attribute, label)
+        setter(ssh_tab, message, severity="error")
+        rendered.append(label.config["text"])
+
+    env_tab = object.__new__(EnvTab)
+    env_tab._server_status_label = _CaptureLabel()
+    EnvTab._set_server_status(env_tab, message, "error")
+    rendered.append(env_tab._server_status_label.config["text"])
+
+    env_control = object.__new__(PersistentEnvControl)
+    env_control.status_label = _CaptureLabel()
+    PersistentEnvControl.set_status(env_control, message, "error")
+    rendered.append(env_control.status_label.config["text"])
+
+    quality_panel = object.__new__(ProxyQualityPanel)
+    quality_panel._status_label = _CaptureLabel()
+    ProxyQualityPanel._set_status(quality_panel, message, "error")
+    rendered.append(quality_panel._status_label.config["text"])
+
+    assert rendered
+    assert all("API_KEY=[REDACTED]" in text for text in rendered)
+    assert all("http://[REDACTED]@127.0.0.1:7890" in text for text in rendered)
+    assert all("user" not in text and "password" not in text for text in rendered)
 
 
 def test_long_and_important_feedback_stays_visible_longer():

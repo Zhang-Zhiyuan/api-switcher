@@ -4,6 +4,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 from ui.widgets.masked_entry import MaskedEntry
 from models.profile import SSHProfile
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 from ui.ui_dispatch import run_on_ui_thread
 
@@ -341,7 +342,10 @@ class SSHEditorDialog(ctk.CTkToplevel):
             profile = plan.profile
             secret_overrides = dict(plan.secret_updates)
         except Exception as e:
-            self._test_result.configure(text=f"测试失败: {e}", text_color=COLORS["danger"])
+            self._test_result.configure(
+                text=safe_feedback_text(f"测试失败: {e}"),
+                text_color=COLORS["danger"],
+            )
             return
 
         self._set_test_busy(True, "正在测试连接...")
@@ -364,7 +368,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
         except Exception as exc:
             self._set_test_busy(False)
             self._test_result.configure(
-                text=f"无法启动连接测试: {exc}",
+                text=safe_feedback_text(f"无法启动连接测试: {exc}"),
                 text_color=COLORS["danger"],
             )
 
@@ -375,14 +379,17 @@ class SSHEditorDialog(ctk.CTkToplevel):
             text="测试中..." if busy else "测试连接",
         )
         if message:
-            self._test_result.configure(text=message, text_color=COLORS["muted"])
+            self._test_result.configure(
+                text=safe_feedback_text(message),
+                text_color=COLORS["muted"],
+            )
 
     def _finish_test(self, success: bool, message: str) -> None:
         if not self.winfo_exists():
             return
         self._set_test_busy(False)
         self._test_result.configure(
-            text=message,
+            text=safe_feedback_text(message),
             text_color=COLORS["success"] if success else COLORS["danger"],
         )
 
@@ -417,4 +424,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
                 self._on_save(plan.profile, self._profile, plan.secret_updates)
             self.destroy()
         except Exception as e:
-            self._test_result.configure(text=f"保存失败: {e}", text_color=COLORS["danger"])
+            self._test_result.configure(
+                text=safe_feedback_text(f"保存失败: {e}"),
+                text_color=COLORS["danger"],
+            )
