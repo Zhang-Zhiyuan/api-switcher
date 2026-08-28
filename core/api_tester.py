@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from core.redaction import redact_sensitive_text
 from core.url_validation import validate_api_base_url
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,7 @@ class APITester:
     DEFAULT_API_TEST_TIMEOUT = 30
     INVALID_LOCAL_PROXY_CACHE_TTL = 15.0
     MAX_PROXY_CHECK_CACHE_ENTRIES = 64
-    USER_AGENT = "API-Switcher/2.4.16"
+    USER_AGENT = "API-Switcher/2.4.17"
     # Keep both common casings: Windows environment names are case-insensitive,
     # while copied shell variables on Unix often use lowercase names.
     LOCAL_PROXY_ENV_NAMES = (
@@ -634,34 +635,7 @@ class APITester:
     @staticmethod
     def _redact_sensitive_text(value: object, secrets: tuple[str, ...] = ()) -> str:
         """Redact credentials that a relay may echo in errors or response bodies."""
-        text = str(value or "")
-        for secret in sorted((str(item) for item in secrets if item), key=len, reverse=True):
-            # Values sourced from sensitive request headers are credentials
-            # regardless of length.  Test/placeholder keys can be very short,
-            # and relays sometimes echo them verbatim in an error response.
-            text = text.replace(secret, "[REDACTED]")
-
-        # Cover common bearer/API-key/JWT shapes even if a relay reformats the
-        # request before reflecting it. Keep this deliberately conservative:
-        # error details are diagnostic, never a place to expose credentials.
-        text = re.sub(
-            r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{4,}",
-            r"\1[REDACTED]",
-            text,
-        )
-        text = re.sub(
-            r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|authorization|secret)\b"
-            r"\s*[\":=]\s*[\"']?)[^\s\"',;}]{4,}",
-            r"\1[REDACTED]",
-            text,
-        )
-        text = re.sub(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{8,}\b", "[REDACTED]", text)
-        text = re.sub(
-            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b",
-            "[REDACTED]",
-            text,
-        )
-        return text[:400]
+        return redact_sensitive_text(value, secrets=secrets, max_length=400)
 
     @staticmethod
     def _parse_error_body(error_body: str, secrets: tuple[str, ...] = ()) -> str:

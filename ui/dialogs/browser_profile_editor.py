@@ -4,6 +4,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from core.lazy_imports import LazyAttribute
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
 
 browser_profile_manager = LazyAttribute("core.browser_profile_manager", "browser_profile_manager")
@@ -271,19 +272,31 @@ class BrowserProfileEditorDialog(ctk.CTkToplevel):
             if valid:
                 self._validate_result.configure(text="配置有效", text_color=COLORS["success"])
             else:
-                self._validate_result.configure(text=error, text_color=COLORS["danger"])
+                self._validate_result.configure(
+                    text=safe_feedback_text(error),
+                    text_color=COLORS["danger"],
+                )
         except Exception as e:
-            self._validate_result.configure(text=f"检查失败: {e}", text_color=COLORS["danger"])
+            self._validate_result.configure(
+                text=safe_feedback_text(f"检查失败: {e}"),
+                text_color=COLORS["danger"],
+            )
 
     def _save(self):
         try:
             profile = self._collect_profile()
             valid, error = browser_profile_manager.validate_profile(profile)
             if not valid:
-                self._validate_result.configure(text=error, text_color=COLORS["danger"])
+                self._validate_result.configure(
+                    text=safe_feedback_text(error),
+                    text_color=COLORS["danger"],
+                )
                 return
             if self._on_save:
                 self._on_save(profile, self._profile)
             self.destroy()
         except Exception as e:
-            self._validate_result.configure(text=f"保存失败: {e}", text_color=COLORS["danger"])
+            self._validate_result.configure(
+                text=safe_feedback_text(f"保存失败: {e}"),
+                text_color=COLORS["danger"],
+            )

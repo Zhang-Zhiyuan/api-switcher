@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute
+from ui.feedback import safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, button_style, combo_style, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
@@ -835,7 +836,7 @@ class UsageStatsTab(ctk.CTkScrollableFrame):
             logger.error(f"Failed to populate trend: {e}", exc_info=True)
             error_label = ctk.CTkLabel(
                 self.trend_frame,
-                text=f"加载趋势失败: {e}",
+                text=safe_feedback_text(f"加载趋势失败: {e}"),
                 text_color=COLORS["danger"],
                 font=font(11),
             )

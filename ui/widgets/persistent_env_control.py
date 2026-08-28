@@ -1,6 +1,7 @@
 import customtkinter as ctk
 
 from core import persistent_env
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font
 from ui.widgets.masked_entry import MaskedEntry
 from ui.widgets.toast import show_toast
@@ -167,7 +168,10 @@ class PersistentEnvControl(ctk.CTkFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self.status_label.configure(text=message, text_color=color)
+        self.status_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def clear_value(self) -> None:
         self.value_entry.set("")

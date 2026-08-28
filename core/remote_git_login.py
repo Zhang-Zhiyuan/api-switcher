@@ -9,6 +9,7 @@ import shlex
 import subprocess
 
 from core import profile_manager
+from core.redaction import redact_sensitive_text
 from core.ssh_manager import ssh_manager
 
 logger = logging.getLogger(__name__)
@@ -450,7 +451,12 @@ def _remote_gh_token(client, remote: dict[str, str]) -> str:
         log_command=False,
     )
     if status != 0:
-        logger.debug("Remote gh auth token failed: %s", stderr or stdout)
+        detail = redact_sensitive_text(stderr or stdout, max_length=300).strip()
+        logger.debug(
+            "Remote gh auth token failed (exit %s): %s",
+            status,
+            detail or "<no output>",
+        )
         return ""
     return stdout.strip()
 

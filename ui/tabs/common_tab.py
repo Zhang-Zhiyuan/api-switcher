@@ -6,6 +6,7 @@ from tkinter import filedialog
 
 from config import paths
 from core.lazy_imports import LazyModule
+from ui.feedback import safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font, recent_user_scroll
 from ui.ui_dispatch import run_on_ui_thread
@@ -557,9 +558,11 @@ class CommonTab(ctk.CTkScrollableFrame):
                     if not payload["ok"]:
                         message = f"刷新失败: {payload['error']}"
                         if include_storage:
-                            self._storage_info_label.configure(text=message)
+                            self._storage_info_label.configure(
+                                text=safe_feedback_text(message)
+                            )
                         if include_overview:
-                            self._set_overview_text(message)
+                            self._set_overview_text(safe_feedback_text(message))
                         show_toast(self.winfo_toplevel(), message, is_error=True)
                         return
                     if payload["bypass_enabled"] is not None:
@@ -621,7 +624,10 @@ class CommonTab(ctk.CTkScrollableFrame):
         else:
             text = "未启用。开启后会注册到当前 Windows 用户，不需要管理员权限。"
             color = COLORS["muted"]
-        self._startup_status_label.configure(text=text, text_color=color)
+        self._startup_status_label.configure(
+            text=safe_feedback_text(text),
+            text_color=color,
+        )
 
     def _toggle_startup(self):
         enabled = self._startup_var.get()

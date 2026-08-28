@@ -1,6 +1,7 @@
 """Dialog for displaying API test results."""
 import customtkinter as ctk
 from core.api_tester import APITester
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, textbox_style
 
 
@@ -66,7 +67,7 @@ class APITestResultDialog(ctk.CTkToplevel):
         if profile_name:
             profile_label = ctk.CTkLabel(
                 header,
-                text=f"配置: {profile_name}",
+                text=safe_feedback_text(f"配置: {profile_name}"),
                 font=font(12),
                 text_color=COLORS["muted"],
             )
@@ -282,6 +283,7 @@ class APITestResultDialog(ctk.CTkToplevel):
 
     def _add_detail_row(self, parent, label: str, value: str, value_color: str = None):
         """Add a detail row to the dialog."""
+        value = safe_feedback_text(value)
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=5)
 
@@ -308,6 +310,7 @@ class APITestResultDialog(ctk.CTkToplevel):
 
     def _add_text_detail(self, parent, label: str, value: str) -> None:
         """Add a compact readonly textbox for multi-line details."""
+        value = safe_feedback_text(value)
         label_widget = ctk.CTkLabel(
             parent,
             text=f"{label}:",

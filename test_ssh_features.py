@@ -31,6 +31,20 @@ def test_ssh_command_error_keeps_empty_transport_exception_actionable():
         manager.execute_command_with_status(_ExecFailureClient(), "true")
 
 
+def test_remote_gh_token_failure_never_logs_returned_token(monkeypatch, caplog):
+    token = "ghp_" + "a" * 36
+    monkeypatch.setattr(
+        remote_git_login.ssh_manager,
+        "execute_command_with_status",
+        lambda *_args, **_kwargs: (1, token, ""),
+    )
+    caplog.set_level("DEBUG", logger=remote_git_login.__name__)
+
+    assert remote_git_login._remote_gh_token(object(), {"gh_available": "1", "os": "linux"}) == ""
+    assert token not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
 class _RemoteSecretStore(dict):
     def __init__(self):
         super().__init__()

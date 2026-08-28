@@ -6,6 +6,7 @@ from models.auto_continue import (
     training_prompt_template_by_key,
     training_prompt_template_by_name,
 )
+from ui.feedback import safe_feedback_text
 from ui.theme import (
     COLORS,
     bind_wraplength,
@@ -608,4 +609,4 @@ class AutoContinueSettingsDialog(ctk.CTkToplevel):
 
             self.destroy()
         except Exception as e:
-            self._error_label.configure(text=f"保存失败: {e}")
+            self._error_label.configure(text=safe_feedback_text(f"保存失败: {e}"))

@@ -5,6 +5,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
+from ui.feedback import safe_feedback_text
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
@@ -1881,7 +1882,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         if not payload.get("ok"):
             ctk.CTkLabel(
                 self._cards_frame,
-                text=f"读取 SSH 服务器失败: {payload.get('error') or '-'}",
+                text=safe_feedback_text(
+                    f"读取 SSH 服务器失败: {payload.get('error') or '-'}"
+                ),
                 text_color=COLORS["danger"],
                 font=font(12),
                 anchor="w",
@@ -2117,7 +2120,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._sync_status_label.configure(text=message, text_color=color)
+        self._sync_status_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _profile_server_names(self) -> list[str]:
         if not self._server_profiles_loaded:
@@ -2304,7 +2310,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._proxy_status_label.configure(text=message, text_color=color)
+        self._proxy_status_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _set_proxy_cache_status(self, message: str, severity: str = "info"):
         if not self._proxy_cache_label:
@@ -2314,7 +2323,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._proxy_cache_label.configure(text=message, text_color=color)
+        self._proxy_cache_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _set_proxy_selected_summary(self, message: str, severity: str = "info"):
         if not self._proxy_selected_label:
@@ -2324,7 +2336,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._proxy_selected_label.configure(text=message, text_color=color)
+        self._proxy_selected_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _update_proxy_target_label(self):
         if not self._proxy_target_label:
@@ -4360,8 +4375,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._remote_pull_button.configure(state="disabled")
         if self._remote_pull_hint:
             self._remote_pull_hint.configure(
-                text=message
-                or "需要刚好勾选 1 台目标后读取；读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。",
+                text=safe_feedback_text(
+                    message
+                    or "需要刚好勾选 1 台目标后读取；读取实际存在的配置，再按 API/账号或 Claude/Codex 过滤。"
+                ),
                 text_color=COLORS["muted"],
             )
 
@@ -4447,7 +4464,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             detail_lines.append(f"{candidate.label} [{marker}]: {detail}")
         lines.extend(detail_lines[:4])
         self._remote_pull_hint.configure(
-            text="\n".join(lines),
+            text=safe_feedback_text("\n".join(lines)),
             text_color=COLORS["muted"] if importable else COLORS["warning"],
         )
 
@@ -4730,7 +4747,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             "warning": COLORS["warning"],
             "error": COLORS["danger"],
         }.get(severity, COLORS["muted"])
-        self._git_login_status_label.configure(text=message, text_color=color)
+        self._git_login_status_label.configure(
+            text=safe_feedback_text(message),
+            text_color=color,
+        )
 
     def _inspect_git_login(self):
         server_name = self._require_single_selected_server(self._set_git_login_status)
@@ -4989,7 +5009,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "warning": COLORS["warning"],
             }.get(level, COLORS["muted"])
             self._remote_auto_status_label.configure(
-                text=message,
+                text=safe_feedback_text(message),
                 text_color=color,
             )
 
