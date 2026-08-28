@@ -29,6 +29,9 @@ CLAUDE_MODEL_OVERRIDE_ENV_KEYS = (
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_EFFORT_LEVEL",
 )
+CLAUDE_PROVIDER_OVERRIDE_ENV_KEYS = (
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+)
 
 CLAUDE_MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
@@ -124,7 +127,12 @@ def clear_claude_api_overrides(settings: dict) -> dict:
     env = settings.get("env")
     if isinstance(env, dict):
         env = dict(env)
-        for key in (*CLAUDE_AUTH_ENV_KEYS, "ANTHROPIC_BASE_URL", *CLAUDE_MODEL_OVERRIDE_ENV_KEYS):
+        for key in (
+            *CLAUDE_AUTH_ENV_KEYS,
+            "ANTHROPIC_BASE_URL",
+            *CLAUDE_MODEL_OVERRIDE_ENV_KEYS,
+            *CLAUDE_PROVIDER_OVERRIDE_ENV_KEYS,
+        ):
             env.pop(key, None)
         if env:
             settings["env"] = env
@@ -169,12 +177,17 @@ def _fable_model_parts(model: object) -> tuple[str, str] | None:
     return "claude-fable-5[1M]", "claude-fable-5"
 
 
-def claude_model_settings(model: object, provider_env: dict | None = None) -> tuple[str, dict[str, str]]:
+def claude_model_settings(
+    model: object,
+    provider_env: dict | None = None,
+    runtime_model: object = None,
+) -> tuple[str, dict[str, str]]:
     """Build the Claude Code model fields for a profile.
 
-    Fable 5 needs an alias plus explicit default-model mappings.  Other
-    providers retain the legacy direct model fields for compatibility, while
-    stale Fable ``*_MODEL_NAME`` fields are always removed by the caller.
+    Fable 5 and providers such as GLM use a stable Claude alias plus explicit
+    model mappings. Other providers retain the legacy direct model fields for
+    compatibility, while stale ``*_MODEL_NAME`` fields are removed by the
+    caller.
     """
 
     text = str(model or "").strip()
@@ -199,6 +212,27 @@ def claude_model_settings(model: object, provider_env: dict | None = None) -> tu
             # remain authoritative when a provider supplies them.
             env.update({str(key): str(value) for key, value in provider_env.items()})
         return "opus", env
+
+    runtime_alias = str(runtime_model or "").strip()
+    if runtime_alias:
+        env = {
+            str(key): str(value)
+            for key, value in (provider_env or {}).items()
+        }
+        if text:
+            # Keep the selected model authoritative. Provider defaults may
+            # still supply a lighter Haiku fallback and other runtime flags.
+            env.update({
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": text,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": text,
+                "CLAUDE_CODE_SUBAGENT_MODEL": text,
+            })
+            env.setdefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", text)
+            if text.casefold().endswith("[1m]"):
+                env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+            else:
+                env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+        return runtime_alias, env
 
     env = {key: text for key in CLAUDE_MODEL_ENV_KEYS} if text else {}
     if provider_env:
@@ -274,11 +308,12 @@ def apply_claude_profile(settings: dict, profile) -> dict:
     else:
         settings["env"].pop("ANTHROPIC_BASE_URL", None)
 
-    for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS:
+    for key in (*CLAUDE_MODEL_OVERRIDE_ENV_KEYS, *CLAUDE_PROVIDER_OVERRIDE_ENV_KEYS):
         settings["env"].pop(key, None)
     settings["model"], model_env = claude_model_settings(
         profile.model,
         provider.claude_env if provider else None,
+        provider.claude_runtime_model if provider else None,
     )
     if model_env:
         settings["env"].update(model_env)

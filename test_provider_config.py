@@ -93,6 +93,92 @@ def test_anthropic_provider_defaults_to_current_claude_models():
     assert "claude-sonnet-5" in provider.supported_models
 
 
+def test_provider_picker_labels_are_compact_and_legacy_names_still_resolve():
+    expected = {
+        "anthropic": "Anthropic",
+        "openai": "OpenAI",
+        "deepseek": "DeepSeek",
+        "kimi": "Kimi",
+        "minimax": "MiniMax",
+        "qwen": "Qwen",
+        "gemini": "Gemini",
+        "glm": "GLM",
+        "zai": "Z.AI",
+        "custom": "自定义",
+    }
+
+    assert {
+        provider.name: provider.display_name
+        for provider in ProviderRegistry.get_all_providers()
+    } == expected
+    assert ProviderRegistry.get_provider_by_display_name("GLM (Zhipu/Z.ai)").name == "glm"
+    assert ProviderRegistry.get_provider_by_display_name("Qwen (通义千问)").name == "qwen"
+    assert ProviderRegistry.get_provider_by_display_name("Custom").name == "custom"
+
+
+def test_glm_claude_presets_use_region_specific_anthropic_endpoints():
+    glm = ProviderRegistry.get_provider("glm")
+    zai = ProviderRegistry.get_provider("zai")
+
+    assert glm is not None and glm.claude_supported is True
+    assert zai is not None and zai.claude_supported is True
+    assert glm.base_url_for_claude() == "https://open.bigmodel.cn/api/anthropic"
+    assert zai.base_url_for_claude() == "https://api.z.ai/api/anthropic"
+    assert glm.default_model_for_claude() == "glm-5.2"
+    assert zai.default_model_for_claude() == "glm-5.1"
+    assert {provider.name for provider in ProviderRegistry.get_claude_providers()} >= {"glm", "zai"}
+
+    profile = ClaudeProfile(
+        name="glm-claude",
+        auth_token_ref=None,
+        base_url=glm.base_url_for_claude(),
+        model="glm-5.2",
+        provider="glm",
+    )
+    settings = apply_claude_profile({"env": {}}, profile)
+    env = settings["env"]
+
+    assert settings["model"] == "opus"
+    assert env["ANTHROPIC_BASE_URL"] == "https://open.bigmodel.cn/api/anthropic"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.2"
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
+
+    profile.model = "glm-5.2[1m]"
+    one_million = apply_claude_profile({"env": {}}, profile)
+    assert one_million["model"] == "opus"
+    assert one_million["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2[1m]"
+    assert one_million["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "1000000"
+
+
+def test_legacy_combined_glm_profiles_migrate_to_the_endpoint_region():
+    domestic = ClaudeProfile.from_dict({
+        "name": "domestic",
+        "auth_token_ref": "ref",
+        "provider": "glm",
+        "base_url": "https://open.bigmodel.cn/api/anthropic",
+    })
+    global_profile = ClaudeProfile.from_dict({
+        "name": "global",
+        "auth_token_ref": "ref",
+        "provider": "glm",
+        "base_url": "https://api.z.ai/api/anthropic",
+    })
+    global_codex = CodexProfile.from_dict({
+        "name": "global-codex",
+        "model_provider": "glm",
+        "custom_base_url": "https://api.z.ai/api/coding/paas/v4",
+        "custom_name": "GLM (Zhipu/Z.ai)",
+    })
+
+    assert domestic.provider == "glm"
+    assert global_profile.provider == "zai"
+    assert global_codex.model_provider == "zai"
+    assert global_codex.custom_name == "Z.AI"
+
+
 def test_codex_wire_api_defaults_and_invalid_values_use_provider_preset():
     provider = ProviderRegistry.get_provider("deepseek")
     assert provider is not None
@@ -260,6 +346,13 @@ def test_claude_provider_detection():
         "glm",
         "glm provider detection",
     )
+    assert_equal(
+        detect_claude_provider(
+            {"env": {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"}}
+        ),
+        "zai",
+        "zai provider detection",
+    )
 
 
 def _set_codex_identity_test_paths(root: Path, monkeypatch) -> None:
@@ -398,11 +491,12 @@ def main():
     check_codex_provider("kimi", "kimi-k2.6", "https://api.moonshot.ai/v1", "responses", False)
     check_codex_provider("qwen", "qwen-max", "https://dashscope.aliyuncs.com/compatible-mode/v1", "responses", False)
     check_codex_provider("gemini", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai/", "responses", False)
-    check_codex_provider("glm", "GLM-5.1", "https://open.bigmodel.cn/api/coding/paas/v4", "responses", False)
+    check_codex_provider("glm", "glm-5.2", "https://open.bigmodel.cn/api/coding/paas/v4", "responses", False)
+    check_codex_provider("zai", "glm-5.1", "https://api.z.ai/api/coding/paas/v4", "responses", False)
 
     check_claude_provider("deepseek", "deepseek-v4-pro", "https://api.deepseek.com/anthropic", True)
-    check_claude_provider("gemini", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai/", False)
-    check_claude_provider("glm", "GLM-5.1", "", False)
+    check_claude_provider("gemini", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai", False)
+    test_glm_claude_presets_use_region_specific_anthropic_endpoints()
     test_claude_stale_fields_are_removed()
     test_malformed_config_shapes_are_repaired()
     test_stale_codex_auth_is_cleared()

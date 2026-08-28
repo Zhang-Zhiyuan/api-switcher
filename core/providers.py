@@ -21,6 +21,7 @@ class ProviderConfig:
     claude_auth_scheme: str = "auth_token"
     claude_default_model: Optional[str] = None
     claude_supported_models: Optional[list[str]] = None
+    claude_runtime_model: Optional[str] = None
     claude_env: dict[str, str] = field(default_factory=dict)
     claude_supported: bool = True
     codex_supported: bool = True
@@ -58,7 +59,7 @@ CLAUDE_CODE_MODEL_ALIASES = [
 PROVIDERS = {
     "anthropic": ProviderConfig(
         name="anthropic",
-        display_name="Anthropic (官方)",
+        display_name="Anthropic",
         default_base_url="https://api.anthropic.com",
         default_model=CLAUDE_OFFICIAL_DEFAULT_MODEL,
         supported_models=[
@@ -92,7 +93,7 @@ PROVIDERS = {
     ),
     "openai": ProviderConfig(
         name="openai",
-        display_name="OpenAI (官方)",
+        display_name="OpenAI",
         default_base_url="https://api.openai.com/v1",
         default_model="gpt-5.5",
         supported_models=[
@@ -133,7 +134,7 @@ PROVIDERS = {
     ),
     "kimi": ProviderConfig(
         name="kimi",
-        display_name="Kimi (Moonshot)",
+        display_name="Kimi",
         default_base_url="https://api.moonshot.ai/v1",
         claude_base_url="https://api.kimi.com/coding/",
         claude_auth_scheme="api_key",
@@ -198,7 +199,7 @@ PROVIDERS = {
     ),
     "qwen": ProviderConfig(
         name="qwen",
-        display_name="Qwen (通义千问)",
+        display_name="Qwen",
         default_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         claude_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
         default_model="qwen-max",
@@ -227,7 +228,7 @@ PROVIDERS = {
     ),
     "gemini": ProviderConfig(
         name="gemini",
-        display_name="Gemini (Google)",
+        display_name="Gemini",
         default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         claude_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         default_model="gemini-2.5-pro",
@@ -249,38 +250,77 @@ PROVIDERS = {
     ),
     "glm": ProviderConfig(
         name="glm",
-        display_name="GLM (Zhipu/Z.ai)",
+        display_name="GLM",
         default_base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        claude_base_url="",
-        default_model="GLM-5.1",
-      supported_models=[
-         "GLM-5.1",
+        claude_base_url="https://open.bigmodel.cn/api/anthropic",
+        default_model="glm-5.2",
+        supported_models=[
+            "glm-5.2",
+            "GLM-5.1",
             "GLM-5",
             "GLM-5-Turbo",
-         "GLM-4.7",
+            "GLM-4.7",
             "GLM-4.7-Flash",
             "GLM-4.6",
             "GLM-4.5",
             "GLM-4.5-Air",
-        "GLM-4.5-air",
         ],
+        claude_default_model="glm-5.2",
+        claude_supported_models=[
+            "glm-5.2",
+            "glm-5.2[1m]",
+            "glm-5.1",
+            "glm-5-turbo",
+            "glm-4.7",
+            "glm-4.5-air",
+        ],
+        claude_runtime_model="opus",
         reasoning_efforts=[],
         requires_auth=True,
         auth_header="Authorization",
         wire_api="responses",
         requires_openai_auth=False,
         codex_env_key="ZHIPUAI_API_KEY",
-      claude_env={
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "GLM-5.1",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.1",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-4.5-air",
-      },
-        claude_supported=False,
-        notes="GLM Coding Plan 配置 Responses wire API，仅支持 Codex。",
+        claude_env={
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+        },
+        notes="智谱中国站：Codex 使用 Coding Plan 端点；Claude Code 使用 Anthropic 兼容端点。",
+    ),
+    "zai": ProviderConfig(
+        name="zai",
+        display_name="Z.AI",
+        default_base_url="https://api.z.ai/api/coding/paas/v4",
+        claude_base_url="https://api.z.ai/api/anthropic",
+        default_model="glm-5.1",
+        supported_models=[
+            "glm-5.1",
+            "glm-5",
+            "glm-5-turbo",
+            "glm-4.7",
+            "glm-4.5-air",
+        ],
+        claude_default_model="glm-5.1",
+        claude_supported_models=[
+            "glm-5.1",
+            "glm-5-turbo",
+            "glm-4.7",
+            "glm-4.5-air",
+        ],
+        claude_runtime_model="opus",
+        reasoning_efforts=[],
+        requires_auth=True,
+        auth_header="Authorization",
+        wire_api="responses",
+        requires_openai_auth=False,
+        codex_env_key="ZAI_API_KEY",
+        claude_env={
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+        },
+        notes="Z.AI 国际站：Codex 和 Claude Code 使用各自的 Coding Plan 专用端点。",
     ),
     "custom": ProviderConfig(
         name="custom",
-        display_name="Custom",
+        display_name="自定义",
         default_base_url="",
         default_model="",
         supported_models=[],
@@ -290,6 +330,19 @@ PROVIDERS = {
         wire_api="responses",
         requires_openai_auth=False,
     ),
+}
+
+
+# Keep stored profiles and imports created by older releases resolvable after
+# simplifying the provider labels shown in the UI.
+_LEGACY_PROVIDER_DISPLAY_NAMES = {
+    "anthropic (官方)": "anthropic",
+    "openai (官方)": "openai",
+    "kimi (moonshot)": "kimi",
+    "qwen (通义千问)": "qwen",
+    "gemini (google)": "gemini",
+    "glm (zhipu/z.ai)": "glm",
+    "custom": "custom",
 }
 
 
@@ -330,10 +383,17 @@ class ProviderRegistry:
 
     @staticmethod
     def get_provider_by_display_name(display_name: str) -> Optional[ProviderConfig]:
+        normalized = str(display_name or "").strip()
+        if not normalized:
+            return None
+        direct = PROVIDERS.get(normalized.casefold())
+        if direct:
+            return direct
         for provider in PROVIDERS.values():
-            if provider.display_name == display_name:
+            if provider.display_name.casefold() == normalized.casefold():
                 return provider
-        return None
+        legacy_id = _LEGACY_PROVIDER_DISPLAY_NAMES.get(normalized.casefold())
+        return PROVIDERS.get(legacy_id) if legacy_id else None
 
     @staticmethod
     def get_models(provider_name: str) -> list[str]:

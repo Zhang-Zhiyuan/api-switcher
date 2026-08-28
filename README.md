@@ -5,7 +5,7 @@
 ## ✨ 主要功能
 
 ### 1. API 管理
-- 支持多个第三方 API 提供商（DeepSeek V4、Kimi、GLM、自定义 OpenAI-compatible / Anthropic-compatible）
+- 支持多个第三方 API 提供商（DeepSeek、Kimi、GLM、Z.AI、自定义 OpenAI-compatible / Anthropic-compatible）
 - 快速切换不同的 API 配置
 - 支持 Claude Code / Codex CLI 官方账号快照切换
 - 支持切换前预览和配置健康检查
@@ -172,10 +172,11 @@
 
 ## 🎯 支持的 API 提供商
 
-- **DeepSeek V4** (Codex OpenAI-compatible / Claude Code Anthropic-compatible)
-- **Kimi** (Moonshot OpenAI-compatible)
-- **智谱 AI / Z.ai** (GLM Coding Plan)
-- **其他兼容 OpenAI API 的提供商**
+- **DeepSeek**：支持 Codex 与 Claude Code 兼容端点
+- **Kimi**：支持 Moonshot 与 Kimi Code 专用端点
+- **GLM**：智谱中国站 Coding Plan
+- **Z.AI**：国际站 Coding Plan
+- **自定义**：其他兼容 OpenAI 或 Anthropic 协议的 API
 
 ## 🔧 系统要求
 
@@ -272,7 +273,13 @@
 
 ## 🔄 更新日志
 
-### v2.4.15 (2026-08-28) - 当前版本
+### v2.4.16 (2026-08-28) - 当前版本
+- ✅ API 提供商选择统一使用简洁官方品牌名，移除中英文混合括注；旧版显示名称继续兼容，不影响已有 Profile
+- ✅ 新增独立 GLM 与 Z.AI 预设，分别使用智谱中国站和 Z.AI 国际站的 Claude/Codex 专用端点，避免跨站密钥和套餐地址混用
+- ✅ Claude Code 正式支持 GLM 模型映射，默认使用稳定的 `glm-5.2`；选择 `glm-5.2[1m]` 时自动写入 100 万上下文压缩窗口参数
+- ✅ API 文本自动解析可依据智谱/Z.AI 密钥或域名补全对应 Claude 端点；切换配置时保留用户自己的超时与非必要流量偏好，不干扰官方账号识别
+
+### v2.4.15 (2026-08-28)
 - ✅ SSH 远端代理区新增独立“清理脏代理”按钮；只清理由本工具标记且确认已经无监听的 PID、环境文件、shell/VS Code Remote/systemd 入口和配置残留，不等同于完整卸载
 - ✅ 健康受管代理会直接保留并自动修复失配 PID；外部端口占用、无法确认归属或缺少监听检测工具时 fail-safe 拒绝清理，不终止身份不明的进程
 - ✅ 受管进程增加 20 秒启动保护，真正删除前再次检查目标端口，避免 SSH/VS Code 新会话刚启动代理时误清导致 Codex/Claude 中断
@@ -434,6 +441,6 @@
 
 ---
 
-**版本**: v2.4.15
+**版本**: v2.4.16
 **发布日期**: 2026-08-28
 **开发者**: API切换器团队

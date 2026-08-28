@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL
 
@@ -71,6 +72,21 @@ def _clean_str_list(value) -> list[str]:
 def _clean_choice(value, choices: set[str], default: str) -> str:
     text = _clean_str(value, default).lower()
     return text if text in choices else default
+
+
+def _migrate_legacy_glm_provider(provider: str, base_url: str | None) -> str:
+    """Split legacy combined GLM/Z.AI profiles without changing their endpoint."""
+
+    cleaned = _clean_str(provider)
+    if cleaned.casefold() != "glm":
+        return cleaned
+    try:
+        host = (urlsplit(_clean_str(base_url)).hostname or "").casefold()
+    except (TypeError, ValueError):
+        host = ""
+    if host == "z.ai" or host.endswith(".z.ai"):
+        return "zai"
+    return "glm"
 
 
 CLAUDE_AUTH_SCHEMES = {"auth_token", "api_key"}
@@ -150,12 +166,16 @@ class ClaudeProfile:
     @classmethod
     def from_dict(cls, data: dict) -> "ClaudeProfile":
         item = _known_data(cls, data)
-        provider = _clean_str(item.get("provider"), "anthropic")
+        base_url = _clean_str(item.get("base_url"))
+        provider = _migrate_legacy_glm_provider(
+            _clean_str(item.get("provider"), "anthropic"),
+            base_url,
+        )
         default_auth_scheme = "api_key" if provider == "anthropic" else "auth_token"
         return cls(
             name=_clean_str(item.get("name")),
             auth_token_ref=_clean_str(item.get("auth_token_ref")),
-            base_url=_clean_str(item.get("base_url")),
+            base_url=base_url,
             primary_api_key_ref=_clean_optional_str(item.get("primary_api_key_ref")),
             auth_scheme=normalize_claude_auth_scheme(item.get("auth_scheme"), default_auth_scheme),
             model=_clean_str(item.get("model"), CLAUDE_OFFICIAL_DEFAULT_MODEL),
@@ -207,16 +227,24 @@ class CodexProfile:
     @classmethod
     def from_dict(cls, data: dict) -> "CodexProfile":
         item = _known_data(cls, data)
+        custom_base_url = _clean_optional_str(item.get("custom_base_url"))
+        model_provider = _migrate_legacy_glm_provider(
+            _clean_str(item.get("model_provider"), "openai"),
+            custom_base_url,
+        )
+        custom_name = _clean_optional_str(item.get("custom_name"))
+        if custom_name and custom_name.casefold() == "glm (zhipu/z.ai)":
+            custom_name = "Z.AI" if model_provider == "zai" else "GLM"
         return cls(
             name=_clean_str(item.get("name")),
             api_key_ref=_clean_optional_str(item.get("api_key_ref")),
             model=_clean_str(item.get("model"), "gpt-5.5"),
-            model_provider=_clean_str(item.get("model_provider"), "openai"),
+            model_provider=model_provider,
             model_reasoning_effort=_clean_str(item.get("model_reasoning_effort"), "high"),
             approval_policy=normalize_codex_approval_policy(item.get("approval_policy")),
             sandbox_mode=normalize_codex_sandbox_mode(item.get("sandbox_mode")),
-            custom_base_url=_clean_optional_str(item.get("custom_base_url")),
-            custom_name=_clean_optional_str(item.get("custom_name")),
+            custom_base_url=custom_base_url,
+            custom_name=custom_name,
             custom_wire_api=_clean_optional_str(item.get("custom_wire_api")),
             custom_env_key=_clean_optional_str(item.get("custom_env_key")),
             custom_requires_openai_auth=_clean_bool(item.get("custom_requires_openai_auth"), False),
