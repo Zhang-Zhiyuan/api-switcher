@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - POSIX
     _msvcrt = None
 
 from config.paths import STORAGE_DIR
-from core import persistent_env, remote_proxy, vscode_parser
+from core import persistent_env, remote_proxy, vscode_parser, wsl_proxy
 from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_text, replace_with_retry
 from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITE_IDS, LOCAL_PROXY_BUILTIN_SITES
 
@@ -480,17 +480,39 @@ def _load_local_proxy_routing_preferences_strict() -> dict:
                 f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 必须是 JSON 对象，已中止配置变更"
             )
         strict_privacy = _strict_privacy_authority_value(data)
+        share_to_wsl = _boolean_preference_authority_value(
+            data,
+            "share_to_wsl",
+            default=False,
+            label="share_to_wsl",
+        )
         preferences = _normalize_local_proxy_preferences(data)
         preferences["strict_privacy"] = strict_privacy
+        preferences["share_to_wsl"] = share_to_wsl
         return preferences
 
 
 def _strict_privacy_authority_value(preferences: dict) -> bool:
     """Parse the persisted privacy intent without treating bad types as off."""
 
-    if "strict_privacy" not in preferences:
-        return False
-    value = preferences["strict_privacy"]
+    return _boolean_preference_authority_value(
+        preferences,
+        "strict_privacy",
+        default=False,
+        label="strict_privacy",
+    )
+
+
+def _boolean_preference_authority_value(
+    preferences: dict,
+    key: str,
+    *,
+    default: bool,
+    label: str,
+) -> bool:
+    if key not in preferences:
+        return default
+    value = preferences[key]
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -502,7 +524,7 @@ def _strict_privacy_authority_value(preferences: dict) -> bool:
     elif isinstance(value, (int, float)) and value in {0, 1}:
         return bool(value)
     raise RuntimeError(
-        f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 的 strict_privacy 值无效，"
+        f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 的 {label} 值无效，"
         "已中止配置变更"
     )
 
@@ -755,6 +777,220 @@ def local_proxy_startup_node_summary() -> str:
 
 def set_local_proxy_non_cn_mode(enabled: bool) -> dict:
     return save_local_proxy_preferences(proxy_non_cn=_coerce_bool(enabled))
+
+
+def local_proxy_wsl_sharing_enabled() -> bool:
+    return bool(load_local_proxy_preferences().get("share_to_wsl"))
+
+
+def set_local_proxy_wsl_sharing(enabled: bool) -> dict:
+    return save_local_proxy_preferences(share_to_wsl=_coerce_bool(enabled))
+
+
+def _managed_wsl_state(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    if str(value.get("owner") or "").casefold() != "api-switcher":
+        raise RuntimeError("WSL 代理记录不属于本工具，已拒绝自动覆盖")
+    return value
+
+
+def _wsl_state_matches_target(
+    value,
+    target: wsl_proxy.WSLProxyTarget,
+    mixed_port: int,
+) -> bool:
+    try:
+        state = _managed_wsl_state(value)
+    except RuntimeError:
+        return False
+    if state is None:
+        return False
+    configured = wsl_proxy._parse_relative_path_list(state.get("configured_profiles"))
+    try:
+        version = int(state.get("version"))
+        port = remote_proxy._normalize_port(state.get("mixed_port"), "WSL 代理端口")
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        state.get("enabled") is True
+        and configured
+        and str(state.get("distro") or "").strip() == target.distro
+        and version == target.version
+        and str(state.get("network_mode") or "").strip().casefold() == target.network_mode
+        and str(state.get("gateway") or "").strip() == target.gateway
+        and str(state.get("guest_cidr") or "").strip() == target.guest_cidr
+        and port == mixed_port
+    )
+
+
+def _merged_wsl_integration_state(
+    previous,
+    result: wsl_proxy.WSLProxyIntegrationResult,
+) -> dict:
+    merged = result.state()
+    old = _managed_wsl_state(previous)
+    if old is None or str(old.get("distro") or "").strip() != result.target.distro:
+        return merged
+    created = list(wsl_proxy._parse_relative_path_list(old.get("created_profiles")))
+    for item in wsl_proxy._parse_relative_path_list(merged.get("created_profiles")):
+        if item not in created:
+            created.append(item)
+    merged["created_profiles"] = created
+    return merged
+
+
+def _reconcile_wsl_integration_state(
+    state: dict,
+    target: wsl_proxy.WSLProxyTarget,
+    mixed_port: int,
+    *,
+    force: bool,
+    binary_path: Path | None = None,
+) -> tuple[str, wsl_proxy.WSLProxyIntegrationResult | None]:
+    previous = _managed_wsl_state(state.get("managed_wsl_proxy"))
+    if not force and _wsl_state_matches_target(previous, target, mixed_port):
+        return "", None
+
+    # A different default distribution cannot share profile ownership.  Remove
+    # only the old distribution's marked hooks first; the firewall rule is
+    # handed to the installer below so it can be retained or replaced safely.
+    if previous is not None and str(previous.get("distro") or "").strip() != target.distro:
+        old_profiles = dict(previous)
+        old_profiles["firewall_rule"] = ""
+        wsl_proxy.remove_proxy_integration(old_profiles)
+
+    firewall_binary = binary_path or _running_managed_mihomo_binary_path(state)
+    result = wsl_proxy.install_proxy_integration(
+        target,
+        mixed_port,
+        firewall_binary,
+        previous_state=previous,
+    )
+    state["managed_wsl_proxy"] = _merged_wsl_integration_state(previous, result)
+    return result.summary(), result
+
+
+def _remove_managed_wsl_integration_state(state: dict) -> str:
+    previous = _managed_wsl_state(state.get("managed_wsl_proxy"))
+    if previous is None:
+        return ""
+    detail = wsl_proxy.remove_proxy_integration(previous)
+    state.pop("managed_wsl_proxy", None)
+    return detail
+
+
+def _running_managed_mihomo_binary_path(state: dict) -> Path:
+    pid = _read_pid()
+    if not pid or not _is_managed_mihomo_pid(pid, state=state):
+        raise RuntimeError("无法确认当前 mihomo 进程所有权，未修改 WSL 防火墙规则")
+    image_path = _windows_process_image_path(pid)
+    binary = Path(image_path) if image_path else Path()
+    if binary.name.casefold() not in {"mihomo.exe", "clash.exe"} or not binary.is_file():
+        raise RuntimeError("无法确认当前 mihomo 程序路径，未修改 WSL 防火墙规则")
+    return binary
+
+
+@_serialized_local_proxy_operation("优化 WSL 网络")
+def optimize_wsl_networking() -> str:
+    return wsl_proxy.optimize_wsl_networking(shutdown=True)
+
+
+@_serialized_local_proxy_operation("切换 WSL 代理共享")
+def set_local_proxy_wsl_sharing_and_apply(enabled: bool) -> str:
+    """Persist WSL sharing and transactionally update a running proxy."""
+
+    desired = _coerce_bool(enabled)
+    previous_preferences = _load_local_proxy_routing_preferences_strict()
+    previous_desired = _coerce_bool(previous_preferences.get("share_to_wsl"))
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+        "本机代理端口",
+    )
+    running = _managed_local_proxy_is_running(state) and _is_port_listening(mixed_port)
+    save_local_proxy_preferences(share_to_wsl=desired)
+    if not running:
+        action = "开启" if desired else "关闭"
+        return f"WSL 代理共享偏好已{action}；本机代理未运行，将在下次启动时生效"
+
+    try:
+        if desired:
+            return repair_wsl_proxy_integration(full_probe=True)
+        apply_message = apply_local_proxy_routing_to_running()
+        current_state = _load_state()
+        cleanup = _remove_managed_wsl_integration_state(current_state)
+        _save_state(current_state)
+        return "；".join(
+            item
+            for item in (
+                "已关闭 WSL 代理共享",
+                apply_message,
+                cleanup,
+                "已打开的 WSL 终端需重开",
+            )
+            if item
+        )
+    except Exception as exc:
+        rollback_errors = []
+        try:
+            save_local_proxy_preferences(share_to_wsl=previous_desired)
+            if previous_desired:
+                repair_wsl_proxy_integration(full_probe=False)
+            else:
+                apply_local_proxy_routing_to_running()
+        except Exception as rollback_exc:
+            rollback_errors.append(f"原代理监听配置恢复失败: {rollback_exc}")
+        suffix = f"；{'；'.join(rollback_errors)}" if rollback_errors else "；已恢复原偏好"
+        raise RuntimeError(f"切换 WSL 代理共享失败: {exc}{suffix}") from exc
+
+
+@_serialized_local_proxy_operation("修复 WSL 代理共享")
+def repair_wsl_proxy_integration(*, full_probe: bool = True) -> str:
+    """Rebuild the WSL listener/hooks and verify credential-free API paths."""
+
+    preferences = _load_local_proxy_routing_preferences_strict()
+    if not _coerce_bool(preferences.get("share_to_wsl")):
+        return "WSL 代理共享未开启；请先勾选“共享到 WSL”"
+    state = _load_state()
+    mixed_port = remote_proxy._normalize_port(
+        state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
+        "本机代理端口",
+    )
+    if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
+        return "WSL 代理共享偏好已保存；Windows 本机代理未运行，请先启动本机代理"
+
+    target = wsl_proxy.discover_default_wsl_target()
+    state_was_current = _wsl_state_matches_target(
+        state.get("managed_wsl_proxy"),
+        target,
+        mixed_port,
+    )
+    apply_message = apply_local_proxy_routing_to_running()
+    current_state = _load_state()
+    integration_message, _result = _reconcile_wsl_integration_state(
+        current_state,
+        target,
+        mixed_port,
+        # A stale/missing state is reconciled by the routing reload itself.  If
+        # state was already current, force a rewrite so this explicit repair
+        # also restores hooks that the user may have removed manually.
+        force=state_was_current,
+    )
+    _save_state(current_state)
+    inspection = wsl_proxy.inspect_proxy_integration(
+        mixed_port,
+        full_probe=full_probe,
+    )
+    return "；".join(
+        item
+        for item in (
+            integration_message,
+            apply_message,
+            inspection.summary(),
+        )
+        if item
+    )
 
 
 def set_local_proxy_strict_privacy(enabled: bool) -> dict:
@@ -1176,6 +1412,11 @@ def install_local_ai_proxy(
     # This preflight must precede directory/binary/state/config/process/env
     # mutations.  A corrupt strict-privacy authority is a hard stop.
     routing_preferences = _load_local_proxy_routing_preferences_strict()
+    wsl_target = (
+        wsl_proxy.discover_default_wsl_target()
+        if _coerce_bool(routing_preferences.get("share_to_wsl"))
+        else None
+    )
     mixed_port = _select_local_mixed_port(mixed_port)
     proxy_node = remote_proxy.parse_proxy_node(proxy_text)
     _ensure_local_dirs()
@@ -1187,6 +1428,7 @@ def install_local_ai_proxy(
         mixed_port,
         preferences=routing_preferences,
         fallback_nodes=fallback_nodes,
+        wsl_target=wsl_target,
     )
     fallback_candidates = _managed_proxy_pool_size(config_content)
 
@@ -1197,6 +1439,61 @@ def install_local_ai_proxy(
         state["previous_vscode"] = _capture_vscode_proxy_state(vscode_parser.read_vscode_settings())
     if not isinstance(state.get("previous_system_proxy"), dict):
         state["previous_system_proxy"] = _capture_windows_system_proxy_state()
+    previous_wsl_state = _managed_wsl_state(state.get("managed_wsl_proxy"))
+    if wsl_target is None and previous_wsl_state is not None:
+        _remove_managed_wsl_integration_state(state)
+    elif wsl_target is not None:
+        if (
+            previous_wsl_state is not None
+            and str(previous_wsl_state.get("distro") or "").strip() != wsl_target.distro
+        ):
+            old_profiles = dict(previous_wsl_state)
+            old_profiles["firewall_rule"] = ""
+            wsl_proxy.remove_proxy_integration(old_profiles)
+        pending_rule = (
+            str(previous_wsl_state.get("firewall_rule") or "").strip()
+            if previous_wsl_state is not None
+            else ""
+        )
+        if not wsl_proxy._owned_firewall_rule_name(pending_rule):
+            pending_rule = (
+                f"{wsl_proxy.WSL_FIREWALL_RULE_PREFIX}{mixed_port}"
+                if wsl_target.requires_lan_listener
+                else ""
+            )
+        same_distro = bool(
+            previous_wsl_state is not None
+            and str(previous_wsl_state.get("distro") or "").strip() == wsl_target.distro
+        )
+        state["managed_wsl_proxy"] = {
+            "owner": "api-switcher",
+            "enabled": True,
+            "distro": wsl_target.distro,
+            "version": wsl_target.version,
+            "network_mode": wsl_target.network_mode,
+            "gateway": wsl_target.gateway,
+            "guest_cidr": wsl_target.guest_cidr,
+            "mixed_port": mixed_port,
+            "configured_profiles": (
+                list(
+                    wsl_proxy._parse_relative_path_list(
+                        previous_wsl_state.get("configured_profiles")
+                    )
+                )
+                if same_distro
+                else []
+            ),
+            "created_profiles": (
+                list(
+                    wsl_proxy._parse_relative_path_list(
+                        previous_wsl_state.get("created_profiles")
+                    )
+                )
+                if same_distro
+                else []
+            ),
+            "firewall_rule": pending_rule,
+        }
     state.update(
         {
             "mixed_port": mixed_port,
@@ -1216,6 +1513,7 @@ def install_local_ai_proxy(
     )
     _save_state(state)
 
+    wsl_result = None
     try:
         atomic_write_text(config_path, config_content)
         _start_local_mihomo(binary_path, mixed_port)
@@ -1226,7 +1524,36 @@ def install_local_ai_proxy(
         _apply_local_env(mixed_port)
         _apply_local_vscode_proxy(mixed_port)
         _apply_windows_system_proxy(mixed_port)
+        if wsl_target is not None:
+            wsl_result = wsl_proxy.install_proxy_integration(
+                wsl_target,
+                mixed_port,
+                binary_path,
+                previous_state=previous_wsl_state,
+            )
+            state["managed_wsl_proxy"] = _merged_wsl_integration_state(
+                previous_wsl_state,
+                wsl_result,
+            )
+            # Persist immediately: a later process interruption must still
+            # know which WSL hooks/firewall rule it owns and can remove.
+            _save_state(state)
     except Exception as exc:
+        if wsl_result is None and isinstance(state.get("managed_wsl_proxy"), dict):
+            # A normal (non-crash) failure from the WSL installer rolls back any
+            # rule it created before raising.  Avoid asking a standard user to
+            # delete a merely pending rule that never existed.  The persisted
+            # preflight state still protects the abrupt-process-crash window.
+            previous_rule = (
+                str(previous_wsl_state.get("firewall_rule") or "").strip()
+                if previous_wsl_state is not None
+                else ""
+            )
+            state["managed_wsl_proxy"]["firewall_rule"] = (
+                previous_rule
+                if wsl_proxy._owned_firewall_rule_name(previous_rule)
+                else ""
+            )
         restore_errors = _restore_managed_settings(state, mixed_port)
         _cleanup_managed_process(binary_path, state)
         _save_restore_retry_state(state, mixed_port, restore_errors)
@@ -1273,7 +1600,9 @@ def install_local_ai_proxy(
         + ("内核更新检查已转入后台，不阻塞代理启动；" if update_scheduled else "")
         + f"内核故障切换池 {fallback_candidates} 个节点；"
         "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
-        "并临时关闭系统 PAC/自动检测代理；新终端或重开的 VS Code 窗口生效"
+        "并临时关闭系统 PAC/自动检测代理；"
+        + (f"{wsl_result.summary()}；" if wsl_result is not None else "")
+        + "新终端或重开的 VS Code 窗口生效"
     )
 
 
@@ -1455,7 +1784,13 @@ def reload_local_ai_proxy(
     # Fail before touching the active YAML/controller/state when the persisted
     # routing authority cannot be trusted.
     routing_preferences = _load_local_proxy_routing_preferences_strict()
+    wsl_target = (
+        wsl_proxy.discover_default_wsl_target()
+        if _coerce_bool(routing_preferences.get("share_to_wsl"))
+        else None
+    )
     state = _load_state()
+    managed_wsl = _managed_wsl_state(state.get("managed_wsl_proxy"))
     mixed_port = remote_proxy._normalize_port(
         state.get("mixed_port") or mixed_port,
         "本机代理端口",
@@ -1477,23 +1812,57 @@ def reload_local_ai_proxy(
         mixed_port,
         preferences=routing_preferences,
         fallback_nodes=fallback_nodes,
+        wsl_target=wsl_target,
     )
     current_pid = _read_pid()
     same_config = old_config.strip() == new_config.strip()
-    if same_config and _applied_local_config_matches(
+    applied_matches = _applied_local_config_matches(
         state,
         config_path,
         mixed_port,
         pid=current_pid,
-    ):
+    )
+    wsl_reconcile_needed = bool(
+        (wsl_target is not None and not _wsl_state_matches_target(managed_wsl, wsl_target, mixed_port))
+        or (wsl_target is None and managed_wsl is not None)
+    )
+    if same_config and applied_matches and not wsl_reconcile_needed:
         _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
         return "本机 AI 代理运行节点已是最新配置，无需热更新"
+    if same_config and applied_matches:
+        if wsl_target is not None:
+            wsl_detail, _result = _reconcile_wsl_integration_state(
+                state,
+                wsl_target,
+                mixed_port,
+                force=False,
+            )
+        else:
+            wsl_detail = _remove_managed_wsl_integration_state(state)
+        state["updated_at"] = remote_proxy._now_iso()
+        _save_state(state)
+        _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
+        return "；".join(
+            item
+            for item in ("本机 AI 代理配置已是最新", wsl_detail)
+            if item
+        )
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not same_config:
         atomic_write_text(config_path, new_config)
+    wsl_detail = ""
     try:
         _reload_local_mihomo_config(config_path, mixed_port)
+        if wsl_target is not None:
+            wsl_detail, _result = _reconcile_wsl_integration_state(
+                state,
+                wsl_target,
+                mixed_port,
+                force=False,
+            )
+        elif managed_wsl is not None:
+            wsl_detail = _remove_managed_wsl_integration_state(state)
     except Exception as exc:
         restore_error = None
         state_error = None
@@ -1549,6 +1918,7 @@ def reload_local_ai_proxy(
     return (
         f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}；"
         f"内核故障切换池 {fallback_candidates} 个节点"
+        + (f"；{wsl_detail}" if wsl_detail else "")
     )
 
 
@@ -1917,6 +2287,7 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
     running = managed_pid_running and port_listening
     preferences = load_local_proxy_preferences()
     strict_privacy_desired = _coerce_bool(preferences.get("strict_privacy"))
+    wsl_sharing_desired = _coerce_bool(preferences.get("share_to_wsl"))
     strict_config_contract = running and _managed_local_config_has_strict_privacy(config_path)
     applied_config_matches = running and _applied_local_config_matches(
         state,
@@ -1943,6 +2314,20 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         details.append(core_detail)
     if failover_status.detail:
         details.append(failover_status.detail)
+    managed_wsl = state.get("managed_wsl_proxy") if isinstance(state, dict) else None
+    if wsl_sharing_desired:
+        if isinstance(managed_wsl, dict) and managed_wsl.get("enabled"):
+            distro = str(managed_wsl.get("distro") or "默认发行版").strip()
+            mode = str(managed_wsl.get("network_mode") or "未知网络模式").strip()
+            details.append(f"WSL 共享已配置: {distro}（{mode}）；完整连通性请点“测试 WSL”")
+        elif running:
+            details.append("WSL 共享已开启但环境入口尚未完成，请点“测试/修复 WSL”")
+        else:
+            details.append("WSL 共享偏好已开启，将在下次启动本机代理时配置")
+    elif isinstance(managed_wsl, dict):
+        details.append("检测到待回收的旧 WSL 代理入口，请停止并恢复或执行脏代理清理")
+    else:
+        details.append("WSL 共享未开启")
     system_proxy_endpoint = _windows_enabled_simple_loopback_proxy_endpoint()
     if system_proxy_endpoint is not None and system_proxy_endpoint[1] != mixed_port:
         external_host, external_port = system_proxy_endpoint
@@ -2960,6 +3345,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
     return {
         "start_on_login": _coerce_bool(raw.get("start_on_login")),
         "keep_running_on_exit": _coerce_bool(raw.get("keep_running_on_exit"), True),
+        "share_to_wsl": _coerce_bool(raw.get("share_to_wsl")),
         "proxy_non_cn": _coerce_bool(raw.get("proxy_non_cn")),
         "strict_privacy": _coerce_bool(raw.get("strict_privacy")),
         "builtin_sites": builtin_sites,
@@ -3043,7 +3429,15 @@ def _build_local_mihomo_config(
     *,
     preferences: dict | None = None,
     fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
+    wsl_target: wsl_proxy.WSLProxyTarget | None = None,
 ) -> str:
+    if preferences is None:
+        preferences = _load_local_proxy_routing_preferences_strict()
+    if _coerce_bool(preferences.get("share_to_wsl")) and wsl_target is None:
+        if os.name != "nt":
+            raise RuntimeError("WSL 代理共享只支持 Windows")
+        wsl_target = wsl_proxy.discover_default_wsl_target()
+    lan_allowed_ips = wsl_target.lan_allowed_ips if wsl_target is not None else ()
     return remote_proxy.build_mihomo_config(
         proxy_node,
         mixed_port,
@@ -3057,6 +3451,7 @@ def _build_local_mihomo_config(
         # containing destination metadata.
         log_level="silent",
         **_routing_options_from_preferences(preferences),
+        lan_allowed_ips=lan_allowed_ips,
     )
 
 
@@ -3549,6 +3944,12 @@ def _restore_local_env(state: dict, mixed_port: int) -> None:
 
 def _restore_managed_settings(state: dict, mixed_port: int) -> list[str]:
     errors = []
+    managed_wsl = state.get("managed_wsl_proxy") if isinstance(state, dict) else None
+    if isinstance(managed_wsl, dict):
+        try:
+            wsl_proxy.remove_proxy_integration(managed_wsl)
+        except Exception as exc:
+            errors.append(f"WSL 代理入口: {exc}")
     try:
         _restore_local_env(state, mixed_port)
     except Exception as exc:

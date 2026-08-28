@@ -104,6 +104,7 @@ class _NoBypassProxyHandler(urlrequest.ProxyHandler):
 
 AI_PROXY_CONFIG_MARKER = "# Managed by API切换器 AI proxy"
 AI_PROXY_STRICT_PRIVACY_MARKER = "# API-Switcher-Strict-Privacy: application-layer"
+AI_PROXY_WSL_SHARE_MARKER = "# API-Switcher-WSL-Share: restricted"
 AI_PROXY_INTERNAL_NODE_NAME = "API-SWITCHER-NODE"
 AI_PROXY_FALLBACK_NODE_PREFIX = "API-SWITCHER-FALLBACK-"
 AI_PROXY_FALLBACK_MAX_NODES = 5
@@ -2982,6 +2983,7 @@ def build_mihomo_config(
     strict_privacy: bool = False,
     resilient_transport: bool = False,
     mainland_dns: bool = False,
+    lan_allowed_ips: tuple[str, ...] | list[str] | None = None,
 ) -> str:
     primary_node = _normalize_proxy_node(proxy_node)
     display_name = str(primary_node.get("name") or "AI_PROXY").strip() or "AI_PROXY"
@@ -3010,11 +3012,12 @@ def build_mihomo_config(
         ])
     else:
         rules.append("MATCH,DIRECT")
+    managed_lan_allowed_ips = _normalize_managed_lan_allowed_ips(lan_allowed_ips)
     config = {
         "mixed-port": mixed_port,
         "external-controller": f"127.0.0.1:{mihomo_controller_port(mixed_port)}",
-        "allow-lan": False,
-        "bind-address": "127.0.0.1",
+        "allow-lan": bool(managed_lan_allowed_ips),
+        "bind-address": "*" if managed_lan_allowed_ips else "127.0.0.1",
         "mode": "rule",
         "log-level": _normalize_mihomo_log_level(log_level),
         "ipv6": not strict_privacy,
@@ -3027,6 +3030,8 @@ def build_mihomo_config(
         ],
         "rules": rules,
     }
+    if managed_lan_allowed_ips:
+        config["lan-allowed-ips"] = list(managed_lan_allowed_ips)
     if resilient_transport:
         # Mainland routes commonly return several addresses with very uneven
         # reachability. Race them and keep idle streaming sessions alive so a
@@ -3057,12 +3062,77 @@ def build_mihomo_config(
     ]
     if strict_privacy:
         markers.append(AI_PROXY_STRICT_PRIVACY_MARKER)
+    if managed_lan_allowed_ips:
+        markers.append(AI_PROXY_WSL_SHARE_MARKER)
     return "\n".join(markers) + "\n" + _dump_yaml(config)
 
 
 def _normalize_mihomo_log_level(value: object) -> str:
     level = str(value or "warning").strip().casefold()
     return level if level in {"silent", "error", "warning", "info", "debug"} else "warning"
+
+
+def _normalize_managed_lan_allowed_ips(
+    values: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    """Validate the narrow listener contract used only for WSL NAT sharing."""
+
+    if not values:
+        return ()
+    normalized = []
+    networks = []
+    for raw_value in values:
+        try:
+            network = ipaddress.ip_network(str(raw_value or "").strip(), strict=True)
+        except ValueError as exc:
+            raise ValueError(f"WSL 代理白名单包含无效网段: {raw_value}") from exc
+        canonical = str(network)
+        if canonical in normalized:
+            continue
+        normalized.append(canonical)
+        networks.append(network)
+    if len(networks) > 6:
+        raise ValueError("WSL 代理白名单网段过多")
+    if "127.0.0.0/8" not in normalized or "::1/128" not in normalized:
+        raise ValueError("WSL 代理白名单必须保留 IPv4/IPv6 回环地址")
+    guest_networks = [
+        network
+        for network in networks
+        if str(network) not in {"127.0.0.0/8", "::1/128"}
+    ]
+    if not guest_networks:
+        raise ValueError("WSL 代理白名单缺少虚拟子网")
+    private_ipv4_networks = tuple(
+        ipaddress.ip_network(value)
+        for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    )
+    for network in guest_networks:
+        if (
+            not isinstance(network, ipaddress.IPv4Network)
+            or not any(network.subnet_of(parent) for parent in private_ipv4_networks)
+            or network.prefixlen < 16
+        ):
+            raise ValueError("WSL 代理只允许范围受限的私有 IPv4 虚拟子网")
+    return tuple(normalized)
+
+
+def _managed_wsl_listener_contract_valid(parsed: dict, text: str) -> bool:
+    marker_present = re.search(
+        rf"(?m)^[ \t]*{re.escape(AI_PROXY_WSL_SHARE_MARKER)}[ \t]*\r?$",
+        str(text or ""),
+    ) is not None
+    allowed = parsed.get("lan-allowed-ips")
+    if not marker_present or not isinstance(allowed, list):
+        return False
+    try:
+        normalized = _normalize_managed_lan_allowed_ips(allowed)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.get("allow-lan") is True
+        and str(parsed.get("bind-address") or "").strip() == "*"
+        and list(normalized) == allowed
+    )
 
 
 def _proxy_node_connection_key(node: dict) -> str:
@@ -3307,12 +3377,23 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     except (TypeError, ValueError):
         controller_is_loopback = False
 
+    listener_is_loopback_only = bool(
+        parsed.get("allow-lan") is False
+        and str(parsed.get("bind-address") or "").strip() == "127.0.0.1"
+        and "lan-allowed-ips" not in parsed
+        and re.search(
+            rf"(?m)^[ \t]*{re.escape(AI_PROXY_WSL_SHARE_MARKER)}[ \t]*\r?$",
+            text,
+        )
+        is None
+    )
+    listener_is_restricted_wsl = _managed_wsl_listener_contract_valid(parsed, text)
+
     return bool(
         isinstance(rules, list)
         and rules
-        and parsed.get("allow-lan") is False
+        and (listener_is_loopback_only or listener_is_restricted_wsl)
         and proxy_group_contract_valid
-        and str(parsed.get("bind-address") or "").strip() == "127.0.0.1"
         and str(parsed.get("mode") or "").strip() == "rule"
         and controller_is_loopback
         and normalized_rules[-1] == "MATCH,AI-PROXY"

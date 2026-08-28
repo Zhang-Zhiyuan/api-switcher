@@ -84,6 +84,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._startup_refresh_after_id = None
         self._start_on_login_var = ctk.BooleanVar(value=False)
         self._keep_running_on_exit_var = ctk.BooleanVar(value=True)
+        self._wsl_share_var = ctk.BooleanVar(value=False)
+        self._wsl_share_check = None
+        self._wsl_optimize_button = None
         self._proxy_non_cn_var = ctk.BooleanVar(value=False)
         self._strict_privacy_var = ctk.BooleanVar(value=False)
         self._strict_privacy_check = None
@@ -106,6 +109,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._core_update_button = None
         self._cleanup_proxy_button = None
         self._test_button = None
+        self._wsl_test_button = None
         self._stop_button = None
         self._status_label = None
         self._subscription_nodes = []
@@ -133,7 +137,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         subtitle = ctk.CTkLabel(
             header,
             text=(
-                "只托管当前 Windows 用户的系统代理、环境变量和 VS Code 本机设置；"
+                "托管当前 Windows 用户的系统代理、环境变量和 VS Code 本机设置；"
+                "可安全共享给默认 WSL 发行版中的 Codex/Claude Code。"
                 "这是应用层代理，不是 VPN/TUN。"
             ),
             text_color=COLORS["muted"],
@@ -199,6 +204,25 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(12),
         )
         proxy_non_cn_check.grid(row=0, column=2, sticky="w")
+        self._wsl_share_check = ctk.CTkCheckBox(
+            startup_box,
+            text="共享到 WSL（Codex/Claude）",
+            variable=self._wsl_share_var,
+            command=self._on_wsl_share_toggle,
+            checkbox_width=18,
+            checkbox_height=18,
+            text_color=COLORS["text"],
+            font=font(12),
+        )
+        self._wsl_share_check.grid(row=0, column=3, sticky="w")
+        self._wsl_optimize_button = ctk.CTkButton(
+            startup_box,
+            text="优化 WSL 网络",
+            width=108,
+            command=self._optimize_wsl_network,
+            **button_style("secondary", compact=True),
+        )
+        self._wsl_optimize_button.grid(row=1, column=0, sticky="w", pady=(6, 0))
         self._apply_routing_button = ctk.CTkButton(
             startup_box,
             text="应用规则",
@@ -206,11 +230,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             command=self._apply_saved_routing,
             **button_style("secondary", compact=True),
         )
-        self._apply_routing_button.grid(row=0, column=3, sticky="e")
+        self._apply_routing_button.grid(row=1, column=3, sticky="e", pady=(6, 0))
         self._startup_items = [
             start_on_login_check,
             keep_running_check,
             proxy_non_cn_check,
+            self._wsl_share_check,
+            self._wsl_optimize_button,
             self._apply_routing_button,
         ]
 
@@ -705,6 +731,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._test_button.pack(anchor="e", pady=(0, 6))
+        self._wsl_test_button = ctk.CTkButton(
+            actions,
+            text="测试/修复 WSL",
+            width=104,
+            command=self._test_and_repair_wsl_proxy,
+            **button_style("secondary", compact=True),
+        )
+        self._wsl_test_button.pack(anchor="e", pady=(0, 6))
         self._stop_button = ctk.CTkButton(
             actions,
             text="停止并恢复",
@@ -716,7 +750,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         self._status_label = ctk.CTkLabel(
             controls,
-            text="本页只影响 Windows 本机；默认从 17897 端口启动，端口占用时会自动顺延。停止会恢复本工具启动前保存的代理设置。",
+            text=(
+                "默认从 17897 端口启动，端口占用时会自动顺延。开启 WSL 共享后只接入默认发行版；"
+                "停止时同时恢复 Windows 设置并清理本工具写入的 WSL 环境入口。"
+            ),
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1175,9 +1212,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             getattr(self, "_cleanup_proxy_button", None),
             getattr(self, "_core_update_button", None),
             self._test_button,
+            getattr(self, "_wsl_test_button", None),
             self._stop_button,
             self._apply_routing_button,
             getattr(self, "_strict_privacy_check", None),
+            getattr(self, "_wsl_share_check", None),
+            getattr(self, "_wsl_optimize_button", None),
             self._subscription_profile_save_button,
             self._subscription_profile_delete_button,
         ):
@@ -1259,6 +1299,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _apply_proxy_preferences_ui(self, preferences: dict):
         self._start_on_login_var.set(bool(preferences.get("start_on_login")))
         self._keep_running_on_exit_var.set(bool(preferences.get("keep_running_on_exit", True)))
+        self._wsl_share_var.set(bool(preferences.get("share_to_wsl")))
         self._proxy_non_cn_var.set(bool(preferences.get("proxy_non_cn")))
         self._strict_privacy_var.set(bool(preferences.get("strict_privacy")))
         builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
@@ -1273,8 +1314,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         else:
             mode = "大陆境外 IP 走代理" if preferences.get("proxy_non_cn") else "仅规则命中的站点走代理"
             boundary = "应用层代理不保证阻止系统 DNS、WebRTC/UDP 或忽略代理的程序绕过"
+        wsl_mode = "WSL 共享已开启" if preferences.get("share_to_wsl") else "WSL 共享未开启"
         self._set_routing_status(
-            f"当前规则: {mode}；内置站点 {enabled_sites} 个，自定义目标 {enabled_custom} 个。{boundary}。"
+            f"当前规则: {mode}；{wsl_mode}；内置站点 {enabled_sites} 个，"
+            f"自定义目标 {enabled_custom} 个。{boundary}。"
         )
 
     def _render_custom_targets(self, entries):
@@ -1399,6 +1442,103 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_routing_status("已设置为退出程序后继续保持 Win11 本机代理运行。", "success")
         else:
             self._set_routing_status("已设置为退出程序时停止 Win11 本机代理并恢复启动前代理设置。", "warning")
+
+    def _wsl_share_selected(self) -> bool:
+        value = getattr(self, "_wsl_share_var", None)
+        try:
+            return bool(value.get()) if value is not None else False
+        except Exception:
+            return False
+
+    def _on_wsl_share_toggle(self):
+        enabled = self._wsl_share_selected()
+        # Do not visually commit a cross-environment change until confirmed.
+        self._wsl_share_var.set(not enabled)
+        if enabled:
+            title = "开启 WSL 代理共享"
+            action = "开启"
+            message = (
+                "开启后，启动 Win11 本机代理时会同时配置默认 WSL 发行版，让其中新启动的 "
+                "Codex、Claude Code、普通终端和 VS Code Remote WSL 使用同一代理。\n\n"
+                "WSL1/镜像网络继续只使用 127.0.0.1；传统 NAT/VirtioProxy 只对白名单中的 "
+                "WSL 虚拟子网开放端口，必要时创建限定程序、端口和子网的防火墙规则。"
+                "不会写入任何 API Key，也不会修改 Codex/Claude 登录文件。\n\n"
+                "若当前是 NAT 且没有管理员权限，可先点“优化 WSL 网络”切换为微软推荐的镜像模式。"
+            )
+        else:
+            title = "关闭 WSL 代理共享"
+            action = "关闭"
+            message = (
+                "关闭后会把运行配置恢复为仅监听 Windows 回环地址，并删除本工具在默认 WSL "
+                "发行版写入的 shell/VS Code Remote 环境入口和受管防火墙规则。\n\n"
+                "已打开的 WSL 终端仍保留旧进程环境，关闭并重新打开后才会完全生效。"
+            )
+
+        def commit():
+            self._wsl_share_var.set(enabled)
+
+            def restore_visible_preference(_error=None):
+                self._wsl_share_var.set(not enabled)
+                self._load_proxy_preferences_ui()
+
+            self._run_local_task(
+                f"正在{action} WSL 代理共享并核对安全监听边界...",
+                lambda: local_proxy.set_local_proxy_wsl_sharing_and_apply(enabled),
+                f"{action} WSL 代理共享",
+                on_success=lambda _result: self._load_proxy_preferences_ui(),
+                on_error=restore_visible_preference,
+                severity_from_result=lambda value: "warning"
+                if any(marker in value for marker in ("未运行", "未安装", "不可达", "失败"))
+                else "success",
+            )
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title=title,
+            message=message,
+            on_confirm=commit,
+        )
+
+    def _optimize_wsl_network(self):
+        def optimize():
+            message = local_proxy.optimize_wsl_networking()
+            local_proxy.set_local_proxy_wsl_sharing(True)
+            repair = local_proxy.repair_wsl_proxy_integration(full_probe=True)
+            return f"{message}；已开启 WSL 代理共享偏好；{repair}"
+
+        ConfirmDialog(
+            self.winfo_toplevel(),
+            title="优化 WSL 网络",
+            message=(
+                "将安全合并当前 Windows 用户的 .wslconfig：启用 networkingMode=mirrored、"
+                "dnsTunneling=true 和 autoProxy=true，并保留其他段落与设置。若原文件存在，"
+                "会先生成不覆盖旧文件的 .wslconfig.api-switcher.bak 备份。\n\n"
+                "为使网络模式生效，确认后会执行 wsl --shutdown；所有正在运行的 WSL 终端、"
+                "任务和 VS Code Remote WSL 会被关闭，请先保存其中的工作。重新打开 WSL 后，"
+                "Linux 可通过 127.0.0.1 安全访问 Windows 代理，不需要向局域网开放端口。"
+            ),
+            on_confirm=lambda: self._run_local_task(
+                "正在备份并优化 WSL 网络配置，然后安全关闭 WSL...",
+                optimize,
+                "优化 WSL 网络",
+                on_success=lambda _result: self._load_proxy_preferences_ui(),
+                severity_from_result=lambda value: "warning"
+                if any(marker in value for marker in ("未能", "未运行", "不可达", "失败"))
+                else "success",
+                failure_hint="WSL 网络配置未完整应用；可根据提示手动检查 .wslconfig",
+            ),
+        )
+
+    def _test_and_repair_wsl_proxy(self):
+        self._run_local_task(
+            "正在核对 WSL 网络模式、修复环境入口，并测试 Codex/Claude Code 无凭据路径...",
+            lambda: local_proxy.repair_wsl_proxy_integration(full_probe=True),
+            "测试/修复 WSL 代理",
+            severity_from_result=lambda value: "success"
+            if all(marker in value for marker in ("Codex 路径可达", "Claude Code 路径可达"))
+            else "warning",
+            failure_hint="未修改 Codex/Claude 登录状态；请按错误提示检查 WSL 网络或管理员权限",
+        )
 
     def _on_proxy_non_cn_toggle(self):
         enabled = bool(self._proxy_non_cn_var.get())
@@ -3486,6 +3626,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _start_local_proxy(self):
         proxy_text = self._node_input()
         strict_privacy = self._strict_privacy_selected()
+        wsl_sharing = self._wsl_share_selected()
         try:
             proxy_node = remote_proxy.parse_proxy_node(proxy_text)
             node_summary = remote_proxy.describe_proxy_node(proxy_node)
@@ -3544,6 +3685,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     else "严格隐私未开启：未命中代理规则的流量可能 DIRECT。\n"
                 )
                 + "如果当前订阅有合格候选，会一并装载最多 4 个备用节点，主节点失效后由 mihomo 为新连接自动切换。\n"
+                + (
+                    "WSL 共享已开启：会识别默认发行版的实际网络模式；镜像网络只走回环，"
+                    "NAT 只对白名单虚拟子网开放，并写入可撤销的 shell/VS Code Remote 环境入口。\n"
+                    if wsl_sharing
+                    else "WSL 共享未开启：本次不会修改 WSL 环境或监听边界。\n"
+                )
                 + "启动只执行有上限的快速验证；耗时的逐节点长会话深测请在节点页手动执行。\n"
                 + "这不是 VPN/TUN，无法阻止忽略代理的程序、WebRTC/UDP 或系统 DNS/IPv6 绕过。"
                 "启动后已打开的 Codex/Claude Code 不会自动继承新环境，"
@@ -3680,6 +3827,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ConfirmDialog(
             self.winfo_toplevel(),
             title="停止 Win11 本机代理",
-            message="将停止本工具启动的本机 mihomo，并尽量恢复启动前的 Windows 用户代理环境变量、Win11 系统代理和 VS Code 代理设置。",
+            message=(
+                "将停止本工具启动的本机 mihomo，并尽量恢复启动前的 Windows 用户代理环境变量、"
+                "Win11 系统代理和 VS Code 代理设置；同时删除本工具写入的 WSL shell/VS Code Remote "
+                "环境入口及受管防火墙规则。"
+            ),
             on_confirm=do_stop,
         )
