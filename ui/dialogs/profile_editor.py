@@ -205,7 +205,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._sync_codex_auth_fields(self._current_codex_provider())
 
         profile_label = "Claude" if parsed.profile_type == "claude" else "Codex"
-        provider_label = parsed.provider_name or parsed.provider_id or "Custom"
+        provider_label = parsed.provider_name or parsed.provider_id or "自定义"
         auth_label = (
             "Bearer Auth Token"
             if parsed.profile_type == "claude" and parsed.auth_scheme == "auth_token"
@@ -456,7 +456,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._add_field(parent, "跳过危险提示", "skip_dangerous_prompt",
                         p.skip_dangerous_prompt if p else False, "switch")
 
-        # 自定义提供商名称（仅当 Provider = Custom 时显示）
+        # 自定义提供商名称（仅选择“自定义”时显示）
         self._add_field(parent, "自定义名称", "custom_provider_name",
                         p.custom_provider_name if (p and hasattr(p, 'custom_provider_name')) else "")
 
@@ -484,7 +484,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         # Provider 选择（扩展）
         provider_options = [provider.display_name for provider in codex_providers]
-        self._add_field(parent, "Provider", "codex_provider", provider_options, "combo")
+        self._add_field(parent, "API 提供商", "codex_provider", provider_options, "combo")
 
         # Official OpenAI login belongs to the account section. Opening a
         # legacy API profile selects Custom explicitly instead of silently
@@ -597,7 +597,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         if provider.reasoning_efforts:
             parts.append(f"推理力度会随模型调整，基础可选: {', '.join(provider.reasoning_efforts)}；Opus 类模型会额外显示 max。")
         else:
-            parts.append("该 provider 不暴露推理力度；保存时会自动忽略推理力度字段。")
+            parts.append("该提供商不暴露推理力度；保存时会自动忽略推理力度字段。")
 
         if not is_codex:
             auth_label = CLAUDE_AUTH_SCHEME_LABELS.get(
@@ -611,11 +611,13 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             if provider.name == "custom":
                 parts.append("仅当网关明确要求 Codex 使用现有 OpenAI 登录态时，才开启“使用 OpenAI 登录认证”。")
             if getattr(self, "_legacy_openai_profile", False):
-                parts.append("当前为旧版 OpenAI API 项，已转入 Custom 编辑；填写第三方端点后才能保存。官方登录请使用“官方账号”区域。")
+                parts.append("当前为旧版 OpenAI API 项，已转入自定义配置；填写第三方端点后才能保存。官方登录请使用“官方账号”区域。")
         if provider.name == "kimi":
             parts.append("Kimi 国际平台默认使用 .ai；中国平台密钥可把端点改为 https://api.moonshot.cn/v1。")
         if provider.name == "glm":
-            parts.append("GLM 使用 Coding Plan 兼容端点；Claude Code 会写入 GLM 推荐的模型环境变量。")
+            parts.append("GLM 对应智谱中国站；Claude Code 会写入官方推荐的模型映射。")
+        if provider.name == "zai":
+            parts.append("Z.AI 对应国际站，请勿与智谱中国站的密钥和端点混用。")
 
         return " ".join(parts)
 
@@ -911,7 +913,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 provider.name == "openai"
                 or not getattr(provider, "codex_supported", True)
             ):
-                self._show_error("OpenAI 官方登录请使用“官方账号”区域；API 配置只能使用第三方或 Custom Provider")
+                self._show_error("OpenAI 官方登录请使用“官方账号”区域；API 配置只能使用第三方或自定义提供商")
                 return
             try:
                 validate_codex_approval_policy(
@@ -1292,7 +1294,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 provider.name == "openai"
                 or not getattr(provider, "codex_supported", True)
             ):
-                self._show_error("OpenAI 官方登录请使用“官方账号”区域；请改选第三方或 Custom Provider")
+                self._show_error("OpenAI 官方登录请使用“官方账号”区域；请改选第三方或自定义提供商")
                 return
 
             requires_openai_auth = self._codex_requires_openai_auth(data, provider)

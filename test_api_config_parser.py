@@ -351,6 +351,42 @@ def test_parse_vendor_key_uses_provider_fallback_and_claude_auth_contract():
 
 
 @pytest.mark.parametrize(
+    ("text", "provider_id", "expected_url"),
+    [
+        (
+            "ZHIPUAI_API_KEY=sk-glm-domestic-only",
+            "glm",
+            "https://open.bigmodel.cn/api/anthropic",
+        ),
+        (
+            "ZAI_API_KEY=sk-zai-global-only",
+            "zai",
+            "https://api.z.ai/api/anthropic",
+        ),
+    ],
+)
+def test_parse_glm_vendor_key_selects_the_matching_claude_region(
+    text, provider_id, expected_url
+):
+    parsed = parse_api_config_text(text, "claude")
+
+    assert parsed.provider_id == provider_id
+    assert parsed.base_url == expected_url
+    assert parsed.auth_scheme == "auth_token"
+
+
+def test_parse_zai_endpoint_is_not_misclassified_as_domestic_glm():
+    parsed = parse_api_config_text(
+        "ANTHROPIC_AUTH_TOKEN=sk-zai-explicit\n"
+        "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic",
+        "claude",
+    )
+
+    assert parsed.provider_id == "zai"
+    assert parsed.base_url == "https://api.z.ai/api/anthropic"
+
+
+@pytest.mark.parametrize(
     ("text", "profile_type", "expected_url", "expected_key"),
     [
         (

@@ -116,6 +116,7 @@ _PROVIDER_ENV_KEYS = {
     "qwen": "DASHSCOPE_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "glm": "ZHIPUAI_API_KEY",
+    "zai": "ZAI_API_KEY",
 }
 
 _PROVIDER_HOST_HINTS = (
@@ -124,7 +125,8 @@ _PROVIDER_HOST_HINTS = (
     ("minimax", ("minimax.io", "minimax.chat", "minimaxi.com")),
     ("qwen", ("dashscope.aliyuncs.com",)),
     ("gemini", ("generativelanguage.googleapis.com",)),
-    ("glm", ("bigmodel.cn", "z.ai")),
+    ("glm", ("bigmodel.cn",)),
+    ("zai", ("z.ai",)),
 )
 _FALLBACK_URLS = {
     "claude": {
@@ -132,6 +134,8 @@ _FALLBACK_URLS = {
         "kimi": "https://api.kimi.com/coding",
         "minimax": "https://api.minimax.io/anthropic",
         "qwen": "https://dashscope.aliyuncs.com/apps/anthropic",
+        "glm": "https://open.bigmodel.cn/api/anthropic",
+        "zai": "https://api.z.ai/api/anthropic",
     },
     "codex": {
         "deepseek": "https://api.deepseek.com",
@@ -140,6 +144,7 @@ _FALLBACK_URLS = {
         "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
         "glm": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "zai": "https://api.z.ai/api/coding/paas/v4",
     },
 }
 _PROVIDER_KEY_HINTS = (
@@ -149,6 +154,7 @@ _PROVIDER_KEY_HINTS = (
     ("qwen", ("QWEN", "DASHSCOPE")),
     ("gemini", ("GEMINI", "GOOGLE")),
     ("glm", ("GLM", "ZHIPU", "BIGMODEL")),
+    ("zai", ("ZAI",)),
 )
 
 _NON_API_URL_HOST_HINTS = (
@@ -277,6 +283,7 @@ def _provider_id_from_label(value: object) -> str:
         "zhipu": "glm",
         "zhipuai": "glm",
         "bigmodel": "glm",
+        "zai": "zai",
     }
     return aliases.get(compact, "custom")
 
@@ -721,6 +728,8 @@ def _claude_auth_scheme(token_key: str, provider_id: str) -> str:
         "deepseek": "auth_token",
         "minimax": "auth_token",
         "qwen": "auth_token",
+        "glm": "auth_token",
+        "zai": "auth_token",
     }
     if provider_id in provider_defaults:
         return provider_defaults[provider_id]

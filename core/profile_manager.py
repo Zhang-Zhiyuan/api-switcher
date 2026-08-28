@@ -546,6 +546,18 @@ def detect_claude_provider(settings: dict) -> str:
         if provider.claude_env and all(env.get(key) == value for key, value in provider.claude_env.items()):
             return provider.name
 
+    model_values = [
+        settings.get("model"),
+        env.get("ANTHROPIC_MODEL"),
+        env.get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        env.get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+    ]
+    if any(str(value or "").strip().casefold().startswith("glm-") for value in model_values):
+        # Old profiles may contain only GLM model mappings and no base URL.
+        # Preserve their historical domestic-provider identity.
+        return "glm"
+
     if base_url and base_url not in {"https://api.anthropic.com", "https://api.anthropic.com/v1"}:
         return "custom"
 
@@ -743,13 +755,22 @@ def _claude_profile_config_matches(profile: ClaudeProfile, settings: dict) -> bo
     from core.parser import (
         CLAUDE_MODEL_ENV_KEYS,
         CLAUDE_MODEL_NAME_ENV_KEYS,
+        CLAUDE_PROVIDER_OVERRIDE_ENV_KEYS,
         claude_model_settings,
     )
 
-    expected_top_model, expected_env = claude_model_settings(profile.model, provider_env)
+    expected_top_model, expected_env = claude_model_settings(
+        profile.model,
+        provider_env,
+        provider.claude_runtime_model if provider else None,
+    )
     if settings.get("model", "") != expected_top_model:
         return False
-    expected_model_keys = set((*CLAUDE_MODEL_ENV_KEYS, *CLAUDE_MODEL_NAME_ENV_KEYS))
+    expected_model_keys = set((
+        *CLAUDE_MODEL_ENV_KEYS,
+        *CLAUDE_MODEL_NAME_ENV_KEYS,
+        *CLAUDE_PROVIDER_OVERRIDE_ENV_KEYS,
+    ))
     expected_models = {key: value for key, value in expected_env.items() if key in expected_model_keys}
     if any((env.get(key) or "") != value for key, value in expected_models.items()):
         return False

@@ -121,10 +121,33 @@ def test_clear_claude_overrides_removes_model_and_auth_precedence():
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "model",
         "CLAUDE_CODE_SUBAGENT_MODEL": "model",
         "CLAUDE_CODE_EFFORT_LEVEL": "max",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
     }
-    settings = parser.clear_claude_api_overrides({"env": {**managed, "KEEP": "yes"}})
+    settings = parser.clear_claude_api_overrides({
+        "env": {
+            **managed,
+            "API_TIMEOUT_MS": "3000000",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "KEEP": "yes",
+        }
+    })
 
-    assert settings["env"] == {"KEEP": "yes"}
+    assert settings["env"] == {
+        "API_TIMEOUT_MS": "3000000",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "KEEP": "yes",
+    }
+
+
+def test_generic_claude_runtime_preferences_do_not_mask_official_login():
+    settings = {
+        "env": {
+            "API_TIMEOUT_MS": "3000000",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+    }
+
+    assert profile_manager._claude_api_override_active(settings, {}) is False
 
 
 def test_clear_claude_overrides_rejects_max_as_persistent_effort():
@@ -154,6 +177,10 @@ def test_claude_provider_presets_use_anthropic_endpoints():
     assert ProviderRegistry.get_provider("kimi").default_model == "kimi-k2.6"
     assert ProviderRegistry.get_claude_default_model("minimax") == "MiniMax-M2.7"
     assert ProviderRegistry.get_provider("minimax").default_model == "MiniMax-Text-01"
+    assert ProviderRegistry.get_claude_base_url("glm") == "https://open.bigmodel.cn/api/anthropic"
+    assert ProviderRegistry.get_claude_base_url("zai") == "https://api.z.ai/api/anthropic"
+    assert ProviderRegistry.get_provider("glm").claude_supported is True
+    assert ProviderRegistry.get_provider("zai").claude_supported is True
     assert ProviderRegistry.get_provider("gemini").claude_supported is False
     assert "gemini" not in {provider.name for provider in ProviderRegistry.get_claude_providers()}
 
