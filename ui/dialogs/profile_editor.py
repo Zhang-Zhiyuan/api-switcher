@@ -5,6 +5,7 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo
 from ui.ui_dispatch import run_on_ui_thread
 from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL, ProviderRegistry
 from core.api_config_parser import ParsedAPIConfig, parse_api_config_text
+from core.redaction import redact_sensitive_text
 from core.url_validation import normalize_claude_base_url, validate_api_base_url
 from models.profile import (
     CODEX_APPROVAL_POLICIES,
@@ -215,10 +216,13 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         )
         source_note = "URL 已自动嗅探并补全" if parsed.url_inferred else "URL 已识别并规范化"
         model_note = f"；模型 {parsed.model}" if parsed.model else "；文本未含模型，保留当前推荐值"
-        self._show_status(
+        status = (
             f"解析完成：{profile_label} / {provider_label} / {auth_label}；"
             f"{source_note}为 {parsed.base_url}{model_note}；"
-            "密钥仅填入当前编辑器，点击保存后才写入密钥库",
+            "密钥仅填入当前编辑器，点击保存后才写入密钥库"
+        )
+        self._show_status(
+            redact_sensitive_text(status, secrets=(parsed.token,), max_length=1200),
             "success",
         )
 

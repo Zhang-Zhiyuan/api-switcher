@@ -258,6 +258,12 @@ def install_proxy_integration(
     """Install marked user-level WSL environment hooks and verify the TCP path."""
 
     port = _validated_port(mixed_port)
+    previous = previous_state if isinstance(previous_state, dict) else {}
+    previous_compatible_hooks = bool(
+        str(previous.get("owner") or "").casefold() == "api-switcher"
+        and str(previous.get("distro") or "").strip() == target.distro
+        and _state_port(previous.get("mixed_port")) == port
+    )
     install_result = _run_wsl_command(
         target.distro,
         _build_install_script(port),
@@ -267,35 +273,42 @@ def install_proxy_integration(
     configured_profiles = _parse_relative_path_list(values.get("profiles"))
     created_profiles = _parse_relative_path_list(values.get("created"))
     if install_result.returncode != 0:
-        # The installer reports incremental ownership on failure.  Remove only
-        # our marked blocks/files so an I/O error cannot leave a half-installed
-        # proxy environment behind.
-        _remove_profile_hooks(
-            target.distro,
-            created_profiles=created_profiles,
-            strict=False,
-        )
+        # The installer reports incremental ownership on failure. Remove only
+        # a brand-new attempt; an existing compatible integration must remain
+        # available when a repair encounters a transient profile-file error.
+        if not previous_compatible_hooks:
+            _remove_profile_hooks(
+                target.distro,
+                created_profiles=created_profiles,
+                strict=False,
+            )
         raise RuntimeError(_safe_process_error(install_result, "写入 WSL 代理环境入口失败"))
-    previous = previous_state if isinstance(previous_state, dict) else {}
     previous_rule = ""
     if str(previous.get("owner") or "").casefold() == "api-switcher":
         candidate = str(previous.get("firewall_rule") or "").strip()
         if _owned_firewall_rule_name(candidate):
             previous_rule = candidate
-    expected_rule = f"{WSL_FIREWALL_RULE_PREFIX}{port}"
     same_firewall_scope = bool(
         target.requires_lan_listener
-        and previous_rule == expected_rule
+        and previous_rule
         and str(previous.get("guest_cidr") or "").strip() == target.guest_cidr
         and _state_port(previous.get("mixed_port")) == port
     )
     firewall_rule = previous_rule if same_firewall_scope else ""
+    new_rule_created = False
     try:
-        if previous_rule and not same_firewall_scope:
-            _delete_firewall_rule(previous_rule, strict=True)
         reachable = probe_wsl_proxy_tcp(target, port)
-        if not reachable and target.requires_lan_listener:
-            firewall_rule = _ensure_scoped_firewall_rule(target, port, Path(binary_path))
+        if target.requires_lan_listener and (
+            (previous_rule and not same_firewall_scope) or not reachable
+        ):
+            staged_rule = _next_scoped_firewall_rule_name(target, port, previous_rule)
+            firewall_rule = _ensure_scoped_firewall_rule(
+                target,
+                port,
+                Path(binary_path),
+                staged_rule,
+            )
+            new_rule_created = firewall_rule != previous_rule
             reachable = probe_wsl_proxy_tcp(target, port)
         if not reachable:
             if target.requires_lan_listener:
@@ -304,10 +317,20 @@ def install_proxy_integration(
                     "或使用“优化 WSL 网络”切换到微软推荐的镜像模式"
                 )
             raise RuntimeError("WSL 无法连接 Windows 回环代理，请确认 WSL 镜像网络已实际生效")
+        # Publish the new scoped rule before retiring the old one. This keeps
+        # the previous WSL route usable if elevation, netsh, or the final TCP
+        # verification fails while the virtual subnet is changing.
+        if previous_rule and previous_rule != firewall_rule:
+            _delete_firewall_rule(previous_rule, strict=True)
     except Exception:
-        if firewall_rule:
+        if new_rule_created and firewall_rule:
             _delete_firewall_rule(firewall_rule, strict=False)
-        _remove_profile_hooks(target.distro, created_profiles=created_profiles, strict=False)
+        # Rewriting an already-managed distro is safe to retain: the managed
+        # shell script resolves the current WSL gateway dynamically and still
+        # uses the same active proxy port. For a brand-new distro, remove only
+        # the hooks created by this failed attempt.
+        if not previous_compatible_hooks:
+            _remove_profile_hooks(target.distro, created_profiles=created_profiles, strict=False)
         raise
 
     return WSLProxyIntegrationResult(
@@ -336,15 +359,15 @@ def remove_proxy_integration(state: dict | None, *, strict: bool = True) -> str:
             _remove_profile_hooks(distro, created_profiles=created_profiles, strict=True)
         except Exception as exc:
             errors.append(str(exc))
-    firewall_rule = str(data.get("firewall_rule") or "").strip()
-    if firewall_rule:
+    firewall_rules = _managed_firewall_rule_names(data)
+    for firewall_rule in firewall_rules:
         try:
             _delete_firewall_rule(firewall_rule, strict=True)
         except Exception as exc:
-            errors.append(str(exc))
+            errors.append(f"{firewall_rule}: {exc}")
     if errors and strict:
         raise RuntimeError("；".join(errors))
-    return "WSL 用户环境入口和受管防火墙规则已清理" if distro or firewall_rule else ""
+    return "WSL 用户环境入口和受管防火墙规则已清理" if distro or firewall_rules else ""
 
 
 def inspect_proxy_integration(
@@ -824,6 +847,7 @@ def _ensure_scoped_firewall_rule(
     target: WSLProxyTarget,
     mixed_port: int,
     binary_path: Path,
+    rule_name: str | None = None,
 ) -> str:
     if not target.requires_lan_listener:
         return ""
@@ -833,7 +857,13 @@ def _ensure_scoped_firewall_rule(
     if not binary.is_file():
         raise RuntimeError("未找到受管 mihomo 程序，无法创建精确防火墙规则")
     port = _validated_port(mixed_port)
-    rule_name = f"{WSL_FIREWALL_RULE_PREFIX}{port}"
+    allowed_rule_names = {
+        _scoped_firewall_rule_name(target, port, slot="a"),
+        _scoped_firewall_rule_name(target, port, slot="b"),
+    }
+    rule_name = str(rule_name or _scoped_firewall_rule_name(target, port)).strip()
+    if rule_name not in allowed_rule_names:
+        raise RuntimeError("WSL 防火墙暂存规则与当前虚拟子网不匹配")
     _delete_firewall_rule(rule_name, strict=False)
     args = [
         _netsh_executable(),
@@ -884,12 +914,69 @@ def _delete_firewall_rule(rule_name: str, *, strict: bool) -> None:
 def _owned_firewall_rule_name(value: str) -> bool:
     clean = str(value or "").strip()
     suffix = clean[len(WSL_FIREWALL_RULE_PREFIX) :] if clean.startswith(WSL_FIREWALL_RULE_PREFIX) else ""
-    if not suffix.isdigit():
+    match = re.fullmatch(r"(\d{1,5})(?:-([0-9a-fA-F]{12})(?:-([ab]))?)?", suffix)
+    if not match:
         return False
     try:
-        return _validated_port(suffix) == int(suffix)
+        return _validated_port(match.group(1)) == int(match.group(1))
     except (TypeError, ValueError):
         return False
+
+
+def _scoped_firewall_rule_name(
+    target: WSLProxyTarget,
+    mixed_port: int,
+    *,
+    slot: str = "a",
+) -> str:
+    """Return a stable per-subnet name so a new rule can be staged safely."""
+
+    port = _validated_port(mixed_port)
+    network = _validated_wsl_guest_network(target.guest_cidr)
+    clean_slot = str(slot or "").casefold()
+    if clean_slot not in {"a", "b"}:
+        raise ValueError("WSL 防火墙规则槽位无效")
+    scope_digest = hashlib.sha256(str(network).encode("ascii")).hexdigest()[:12]
+    return f"{WSL_FIREWALL_RULE_PREFIX}{port}-{scope_digest}-{clean_slot}"
+
+
+def _next_scoped_firewall_rule_name(
+    target: WSLProxyTarget,
+    mixed_port: int,
+    previous_rule: str,
+) -> str:
+    """Choose the inactive A/B slot so an existing rule is never deleted first."""
+
+    first = _scoped_firewall_rule_name(target, mixed_port, slot="a")
+    second = _scoped_firewall_rule_name(target, mixed_port, slot="b")
+    return second if str(previous_rule or "").strip() == first else first
+
+
+def _managed_firewall_rule_names(state: dict) -> tuple[str, ...]:
+    """Return every exact rule name that a recorded WSL integration may own."""
+
+    result: list[str] = []
+    recorded = str(state.get("firewall_rule") or "").strip()
+    if _owned_firewall_rule_name(recorded):
+        result.append(recorded)
+    port = _state_port(state.get("mixed_port"))
+    guest_cidr = str(state.get("guest_cidr") or "").strip()
+    if port is not None and guest_cidr:
+        try:
+            network = _validated_wsl_guest_network(guest_cidr)
+        except RuntimeError:
+            network = None
+        if network is not None:
+            digest = hashlib.sha256(str(network).encode("ascii")).hexdigest()[:12]
+            # Include the pre-A/B v2.4.19 development name for safe migration.
+            for candidate in (
+                f"{WSL_FIREWALL_RULE_PREFIX}{port}-{digest}",
+                f"{WSL_FIREWALL_RULE_PREFIX}{port}-{digest}-a",
+                f"{WSL_FIREWALL_RULE_PREFIX}{port}-{digest}-b",
+            ):
+                if candidate not in result:
+                    result.append(candidate)
+    return tuple(result)
 
 
 def _state_port(value) -> int | None:

@@ -852,13 +852,10 @@ def _reconcile_wsl_integration_state(
     if not force and _wsl_state_matches_target(previous, target, mixed_port):
         return "", None
 
-    # A different default distribution cannot share profile ownership.  Remove
-    # only the old distribution's marked hooks first; the firewall rule is
-    # handed to the installer below so it can be retained or replaced safely.
-    if previous is not None and str(previous.get("distro") or "").strip() != target.distro:
-        old_profiles = dict(previous)
-        old_profiles["firewall_rule"] = ""
-        wsl_proxy.remove_proxy_integration(old_profiles)
+    different_distro = bool(
+        previous is not None
+        and str(previous.get("distro") or "").strip() != target.distro
+    )
 
     firewall_binary = binary_path or _running_managed_mihomo_binary_path(state)
     result = wsl_proxy.install_proxy_integration(
@@ -868,6 +865,14 @@ def _reconcile_wsl_integration_state(
         previous_state=previous,
     )
     state["managed_wsl_proxy"] = _merged_wsl_integration_state(previous, result)
+    if different_distro:
+        # Keep the old distro functional until the new one has passed its TCP
+        # verification. Cleanup is best-effort after the new ownership record
+        # is already ready to persist, so a transient old-home permission issue
+        # cannot roll back a healthy new default distro.
+        old_profiles = dict(previous)
+        old_profiles["firewall_rule"] = ""
+        wsl_proxy.remove_proxy_integration(old_profiles, strict=False)
     return result.summary(), result
 
 
@@ -1457,7 +1462,7 @@ def install_local_ai_proxy(
         )
         if not wsl_proxy._owned_firewall_rule_name(pending_rule):
             pending_rule = (
-                f"{wsl_proxy.WSL_FIREWALL_RULE_PREFIX}{mixed_port}"
+                wsl_proxy._scoped_firewall_rule_name(wsl_target, mixed_port)
                 if wsl_target.requires_lan_listener
                 else ""
             )
