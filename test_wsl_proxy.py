@@ -375,6 +375,41 @@ def test_profile_write_failure_uses_reported_partial_ownership_for_cleanup(monke
     ]
 
 
+def test_existing_compatible_hooks_survive_profile_rewrite_failure(monkeypatch, tmp_path):
+    binary = tmp_path / "mihomo.exe"
+    binary.write_bytes(b"MZ")
+    removed = []
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_run_wsl_command",
+        lambda *_args, **_kwargs: _completed(
+            returncode=1,
+            stdout="profiles=.profile\ncreated=\n",
+            stderr="profile path is temporarily locked: .bashrc",
+        ),
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_remove_profile_hooks",
+        lambda distro, **kwargs: removed.append((distro, kwargs)),
+    )
+    previous = {
+        "owner": "api-switcher",
+        "distro": "Ubuntu-Test",
+        "mixed_port": 17897,
+    }
+
+    with pytest.raises(RuntimeError, match="写入 WSL 代理环境入口失败"):
+        wsl_proxy.install_proxy_integration(
+            _target(),
+            17897,
+            binary,
+            previous_state=previous,
+        )
+
+    assert removed == []
+
+
 def test_existing_owned_firewall_rule_is_retained_when_scope_is_unchanged(monkeypatch, tmp_path):
     binary = tmp_path / "mihomo.exe"
     binary.write_bytes(b"MZ")
@@ -445,6 +480,148 @@ def test_switching_to_mirrored_mode_removes_old_nat_firewall_rule(monkeypatch, t
 
     assert result.firewall_rule == ""
     assert deleted == [("API-Switcher-WSL-Proxy-17897", {"strict": True})]
+
+
+def test_changed_subnet_stages_new_firewall_rule_before_retiring_old(monkeypatch, tmp_path):
+    binary = tmp_path / "mihomo.exe"
+    binary.write_bytes(b"MZ")
+    actions = []
+    new_rule = wsl_proxy._scoped_firewall_rule_name(_target(), 17897)
+    old_rule = "API-Switcher-WSL-Proxy-17897-deadbeefcafe"
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_run_wsl_command",
+        lambda *_args, **_kwargs: _completed(stdout="configured=1\nprofiles=.profile\ncreated=\n"),
+    )
+    monkeypatch.setattr(wsl_proxy, "probe_wsl_proxy_tcp", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_ensure_scoped_firewall_rule",
+        lambda *_args: actions.append(("add", new_rule)) or new_rule,
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_delete_firewall_rule",
+        lambda rule, **kwargs: actions.append(("delete", rule, kwargs)),
+    )
+    previous = {
+        "owner": "api-switcher",
+        "distro": "Ubuntu-Test",
+        "guest_cidr": "172.30.0.0/20",
+        "mixed_port": 17897,
+        "firewall_rule": old_rule,
+    }
+
+    result = wsl_proxy.install_proxy_integration(
+        _target(),
+        17897,
+        binary,
+        previous_state=previous,
+    )
+
+    assert result.firewall_rule == new_rule
+    assert actions == [
+        ("add", new_rule),
+        ("delete", old_rule, {"strict": True}),
+    ]
+
+
+def test_changed_subnet_failure_keeps_old_rule_and_hooks(monkeypatch, tmp_path):
+    binary = tmp_path / "mihomo.exe"
+    binary.write_bytes(b"MZ")
+    probes = iter([True, False])
+    deleted = []
+    removed = []
+    new_rule = wsl_proxy._scoped_firewall_rule_name(_target(), 17897)
+    old_rule = "API-Switcher-WSL-Proxy-17897-deadbeefcafe"
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_run_wsl_command",
+        lambda *_args, **_kwargs: _completed(stdout="configured=1\nprofiles=.profile\ncreated=\n"),
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "probe_wsl_proxy_tcp",
+        lambda *_args, **_kwargs: next(probes),
+    )
+    monkeypatch.setattr(wsl_proxy, "_ensure_scoped_firewall_rule", lambda *_args: new_rule)
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_delete_firewall_rule",
+        lambda rule, **kwargs: deleted.append((rule, kwargs)),
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_remove_profile_hooks",
+        lambda distro, **kwargs: removed.append((distro, kwargs)),
+    )
+    previous = {
+        "owner": "api-switcher",
+        "distro": "Ubuntu-Test",
+        "guest_cidr": "172.30.0.0/20",
+        "mixed_port": 17897,
+        "firewall_rule": old_rule,
+    }
+
+    with pytest.raises(RuntimeError, match="WSL NAT"):
+        wsl_proxy.install_proxy_integration(
+            _target(),
+            17897,
+            binary,
+            previous_state=previous,
+        )
+
+    assert deleted == [(new_rule, {"strict": False})]
+    assert removed == []
+
+
+def test_same_subnet_repair_uses_alternate_rule_slot_before_failure(monkeypatch, tmp_path):
+    binary = tmp_path / "mihomo.exe"
+    binary.write_bytes(b"MZ")
+    target = _target()
+    old_rule = wsl_proxy._scoped_firewall_rule_name(target, 17897, slot="a")
+    staged_rule = wsl_proxy._scoped_firewall_rule_name(target, 17897, slot="b")
+    staged = []
+    deleted = []
+    probes = iter([False, False])
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_run_wsl_command",
+        lambda *_args, **_kwargs: _completed(stdout="configured=1\nprofiles=.profile\ncreated=\n"),
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "probe_wsl_proxy_tcp",
+        lambda *_args, **_kwargs: next(probes),
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_ensure_scoped_firewall_rule",
+        lambda *_args: staged.append(_args[-1]) or _args[-1],
+    )
+    monkeypatch.setattr(
+        wsl_proxy,
+        "_delete_firewall_rule",
+        lambda rule, **kwargs: deleted.append((rule, kwargs)),
+    )
+    previous = {
+        "owner": "api-switcher",
+        "distro": target.distro,
+        "guest_cidr": target.guest_cidr,
+        "mixed_port": 17897,
+        "firewall_rule": old_rule,
+    }
+
+    with pytest.raises(RuntimeError, match="WSL NAT"):
+        wsl_proxy.install_proxy_integration(
+            target,
+            17897,
+            binary,
+            previous_state=previous,
+        )
+
+    assert staged == [staged_rule]
+    assert deleted == [(staged_rule, {"strict": False})]
 
 
 def test_remove_refuses_unowned_state(monkeypatch):
@@ -600,6 +777,46 @@ def test_reconcile_preserves_created_profile_ownership_on_same_distro(monkeypatc
     assert state["managed_wsl_proxy"]["created_profiles"] == [".profile"]
 
 
+def test_reconcile_does_not_remove_old_distro_before_new_install_succeeds(monkeypatch):
+    previous = {
+        "owner": "api-switcher",
+        "enabled": True,
+        "distro": "Ubuntu-Old",
+        "version": 2,
+        "network_mode": "nat",
+        "gateway": "172.30.0.1",
+        "guest_cidr": "172.30.0.0/20",
+        "mixed_port": 17897,
+        "configured_profiles": [".profile"],
+        "created_profiles": [],
+        "firewall_rule": "API-Switcher-WSL-Proxy-17897-deadbeefcafe",
+    }
+    state = {"managed_wsl_proxy": previous}
+    removed = []
+    monkeypatch.setattr(
+        local_proxy.wsl_proxy,
+        "install_proxy_integration",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("new distro failed")),
+    )
+    monkeypatch.setattr(
+        local_proxy.wsl_proxy,
+        "remove_proxy_integration",
+        lambda value, **kwargs: removed.append((value, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="new distro failed"):
+        local_proxy._reconcile_wsl_integration_state(
+            state,
+            _target(),
+            17897,
+            force=True,
+            binary_path=local_proxy.LOCAL_PROXY_BIN_DIR / "mihomo.exe",
+        )
+
+    assert removed == []
+    assert state["managed_wsl_proxy"] == previous
+
+
 def test_firewall_rule_is_program_port_and_subnet_scoped(monkeypatch, tmp_path):
     binary = tmp_path / "mihomo.exe"
     binary.write_bytes(b"MZ")
@@ -614,9 +831,51 @@ def test_firewall_rule_is_program_port_and_subnet_scoped(monkeypatch, tmp_path):
 
     rule = wsl_proxy._ensure_scoped_firewall_rule(_target(), 17897, binary)
 
-    assert rule == "API-Switcher-WSL-Proxy-17897"
+    assert rule == wsl_proxy._scoped_firewall_rule_name(_target(), 17897)
     add = commands[-1]
     assert "localport=17897" in add
     assert "remoteip=172.31.112.0/20" in add
     assert f"program={binary.resolve()}" in add
     assert "edge=no" in add
+
+
+def test_firewall_rule_name_is_scoped_and_legacy_names_remain_removable():
+    first = wsl_proxy._scoped_firewall_rule_name(_target(), 17897)
+    second = wsl_proxy._scoped_firewall_rule_name(
+        wsl_proxy.WSLProxyTarget(
+            distro="Ubuntu-Test",
+            version=2,
+            network_mode="nat",
+            home="/home/test",
+            shell="/bin/bash",
+            gateway="172.30.0.1",
+            guest_cidr="172.30.0.0/20",
+        ),
+        17897,
+    )
+
+    assert first != second
+    assert wsl_proxy._next_scoped_firewall_rule_name(_target(), 17897, first).endswith("-b")
+    assert wsl_proxy._owned_firewall_rule_name(first) is True
+    assert wsl_proxy._owned_firewall_rule_name("API-Switcher-WSL-Proxy-17897") is True
+    assert wsl_proxy._owned_firewall_rule_name(first.rsplit("-", 1)[0]) is True
+    assert wsl_proxy._owned_firewall_rule_name("API-Switcher-WSL-Proxy-17897-bad") is False
+
+
+def test_cleanup_enumerates_recorded_and_both_scoped_rule_slots():
+    target = _target()
+    first = wsl_proxy._scoped_firewall_rule_name(target, 17897, slot="a")
+    second = wsl_proxy._scoped_firewall_rule_name(target, 17897, slot="b")
+    state = {
+        "owner": "api-switcher",
+        "distro": target.distro,
+        "guest_cidr": target.guest_cidr,
+        "mixed_port": 17897,
+        "firewall_rule": first,
+    }
+
+    names = wsl_proxy._managed_firewall_rule_names(state)
+
+    assert names[0] == first
+    assert first in names and second in names
+    assert first.rsplit("-", 1)[0] in names

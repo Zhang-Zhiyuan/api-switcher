@@ -21,7 +21,7 @@ _ASSIGNMENT_RE = re.compile(
     r"(?:^|[\r\n;&])\s*(?:(?:export|set|env)\s+)?"
     r"(?:\$env:)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`|[^\r\n;&]*?)"
-    r"(?=\s*(?:[;&]|$))",
+    r"(?=\s*(?:\#.*)?(?:[;&]|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 _SETX_RE = re.compile(
@@ -47,7 +47,7 @@ _POWERSHELL_SET_RE = re.compile(
 _POWER_SHELL_RE = re.compile(
     r"(?:^|[\r\n;&])\s*\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`|[^\r\n;&]*?)"
-    r"(?=\s*(?:[;&]|$))",
+    r"(?=\s*(?:\#.*)?(?:[;&]|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 _URL_RE = re.compile(
@@ -616,12 +616,24 @@ def _normalize_url(value: str, *, profile_type: str, inferred: bool) -> str:
         parsed = urlsplit(raw)
         path = parsed.path.rstrip("/")
         lowered = path.lower()
-        suffixes = (
-            ("/v1/chat/completions", "/v1"), ("/chat/completions", ""),
-            ("/v1/responses", "/v1"), ("/responses", ""),
-            ("/v1/messages", "/v1"), ("/messages", ""),
-            ("/v1/models", "/v1"), ("/models", ""),
-        )
+        if profile_type == "claude":
+            # A copied Anthropic request URL may include a provider prefix,
+            # for example ``/gateway/anthropic/v1/messages``. Claude Code
+            # appends ``/v1/messages`` itself, so remove the complete resource
+            # suffix here. Keeping the intermediate ``/v1`` would otherwise
+            # produce ``.../v1/v1/messages``. An explicit base ending only in
+            # ``/api/v1`` is still preserved by normalize_claude_base_url().
+            suffixes = (
+                ("/v1/messages", ""), ("/messages", ""),
+                ("/v1/models", ""), ("/models", ""),
+            )
+        else:
+            suffixes = (
+                ("/v1/chat/completions", "/v1"), ("/chat/completions", ""),
+                ("/v1/responses", "/v1"), ("/responses", ""),
+                ("/v1/messages", "/v1"), ("/messages", ""),
+                ("/v1/models", "/v1"), ("/models", ""),
+            )
         for suffix, replacement in suffixes:
             if lowered.endswith(suffix):
                 path = path[: -len(suffix)] + replacement

@@ -286,7 +286,8 @@ def test_parse_additional_command_and_local_endpoint_formats(
     ("profile_type", "endpoint", "expected"),
     [
         ("claude", "https://relay.example.test/v1/messages", "https://relay.example.test"),
-        ("claude", "https://relay.example.test/anthropic/v1/messages", "https://relay.example.test/anthropic/v1"),
+        ("claude", "https://relay.example.test/anthropic/v1/messages", "https://relay.example.test/anthropic"),
+        ("claude", "https://relay.example.test/gateway/anthropic/v1/models", "https://relay.example.test/gateway/anthropic"),
         ("codex", "https://relay.example.test/v1/models", "https://relay.example.test/v1"),
         ("codex", "https://relay.example.test/responses", "https://relay.example.test"),
     ],
@@ -299,6 +300,17 @@ def test_parse_normalizes_resource_urls_to_api_base(profile_type, endpoint, expe
     )
 
     assert parsed.base_url == expected
+
+
+def test_parse_quoted_shell_assignments_with_inline_comments():
+    parsed = parse_api_config_text(
+        'export ANTHROPIC_BASE_URL="https://relay.example.test/gateway/v1/messages" # endpoint\n'
+        'export ANTHROPIC_AUTH_TOKEN="sk-inline-comment" # secret',
+        "claude",
+    )
+
+    assert parsed.base_url == "https://relay.example.test/gateway"
+    assert parsed.token == "sk-inline-comment"
 
 
 def test_parse_invalid_explicit_url_falls_back_to_best_valid_sniffed_candidate():
