@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 from dataclasses import dataclass
 
+from core.redaction import redact_sensitive_text
+
 
 SUCCESSFUL_RECOVERY_ACTIONS = {
     "recovered",
@@ -348,7 +350,7 @@ class ErrorRecoveryAnalyzer:
             f.write(f"成功恢复数: {stats.total_recoveries}\n")
             f.write(f"恢复成功率: {stats.recovery_success_rate:.1f}%\n")
             f.write(f"平均恢复次数: {stats.avg_recovery_count:.1f}\n")
-            f.write(f"最常见错误: {stats.most_common_error or 'N/A'}\n\n")
+            f.write(f"最常见错误: {redact_sensitive_text(stats.most_common_error or 'N/A')}\n\n")
 
             # 按错误类型统计
             f.write("=" * 80 + "\n")
@@ -356,7 +358,8 @@ class ErrorRecoveryAnalyzer:
             f.write("=" * 80 + "\n\n")
             for error_type, count in sorted(stats.errors_by_type.items(), key=lambda x: x[1], reverse=True):
                 percentage = (count / stats.total_errors * 100) if stats.total_errors > 0 else 0
-                f.write(f"{error_type:30s} {count:5d} ({percentage:5.1f}%)\n")
+                safe_error_type = redact_sensitive_text(error_type)
+                f.write(f"{safe_error_type:30s} {count:5d} ({percentage:5.1f}%)\n")
             f.write("\n")
 
             # 按会话统计
@@ -365,7 +368,8 @@ class ErrorRecoveryAnalyzer:
             f.write("=" * 80 + "\n\n")
             top_sessions = sorted(stats.errors_by_session.items(), key=lambda x: x[1], reverse=True)[:10]
             for session_id, count in top_sessions:
-                f.write(f"{session_id:40s} {count:5d} 次错误\n")
+                safe_session_id = redact_sensitive_text(session_id)
+                f.write(f"{safe_session_id:40s} {count:5d} 次错误\n")
             f.write("\n")
 
             # 时间线
@@ -379,7 +383,7 @@ class ErrorRecoveryAnalyzer:
                 # 按错误类型分组
                 type_counts = Counter(e.get("error_type", "unknown") for e in errors)
                 for error_type, count in type_counts.most_common():
-                    f.write(f"  - {error_type}: {count}\n")
+                    f.write(f"  - {redact_sensitive_text(error_type)}: {count}\n")
                 f.write("\n")
 
             # 最近的错误
@@ -394,11 +398,11 @@ class ErrorRecoveryAnalyzer:
                 action = entry.get("action", "N/A")
                 recovery_count = entry.get("recovery_count", 0)
 
-                f.write(f"时间: {timestamp}\n")
-                f.write(f"类型: {error_type}\n")
-                f.write(f"代码: {error_code}\n")
-                f.write(f"消息: {error_message}\n")
-                f.write(f"操作: {action}\n")
+                f.write(f"时间: {redact_sensitive_text(timestamp)}\n")
+                f.write(f"类型: {redact_sensitive_text(error_type)}\n")
+                f.write(f"代码: {redact_sensitive_text(error_code)}\n")
+                f.write(f"消息: {redact_sensitive_text(error_message)}\n")
+                f.write(f"操作: {redact_sensitive_text(action)}\n")
                 f.write(f"恢复次数: {recovery_count}\n")
                 f.write("-" * 80 + "\n\n")
 

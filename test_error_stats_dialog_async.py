@@ -25,6 +25,15 @@ class _Widget:
         return None
 
 
+class _TaggedText:
+    def __init__(self):
+        self.configured = {}
+
+    def tag_config(self, tag, **kwargs):
+        assert "font" not in kwargs
+        self.configured[tag] = kwargs
+
+
 def test_error_stats_captures_tk_values_before_starting_worker(monkeypatch):
     analyzed_days = []
     applied = threading.Event()
@@ -117,3 +126,20 @@ def test_error_stats_thread_start_failure_reports_error(monkeypatch):
     ErrorStatsDialog._load_stats(dialog)
 
     assert errors == ["thread unavailable"]
+
+
+def test_error_stats_text_tags_use_scaling_safe_options_only():
+    dialog = object.__new__(ErrorStatsDialog)
+    dialog.detail_text = _TaggedText()
+
+    ErrorStatsDialog._configure_detail_tags(dialog)
+
+    assert set(dialog.detail_text.configured) == {
+        "header",
+        "separator",
+        "label",
+        "count",
+        "percentage",
+        "highlight",
+        "muted",
+    }

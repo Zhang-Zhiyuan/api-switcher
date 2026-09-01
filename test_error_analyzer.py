@@ -147,3 +147,29 @@ def test_error_analyzer_keeps_same_file_repeats_but_dedupes_migrated_copy(tmp_pa
     assert stats.total_recoveries == 2
     assert len(analyzer.get_error_timeline(days=1)[now.strftime("%Y-%m-%d")]) == 2
     assert len(analyzer.get_session_details("same-session")) == 2
+
+
+def test_error_analyzer_export_redacts_credentials_from_log_messages(tmp_path):
+    log_path = tmp_path / "error_recovery_log.jsonl"
+    report_path = tmp_path / "report.txt"
+    secret = "sk-example-export-secret-token"
+    _write_jsonl(
+        log_path,
+        [
+            {
+                "timestamp": datetime.now().astimezone().isoformat(),
+                "session_id": "credential-report",
+                "error_type": "authentication_error",
+                "error_code": "unauthorized",
+                "error_message": f"Authorization: Bearer {secret}",
+                "action": "notify_user",
+                "recovery_count": 0,
+            }
+        ],
+    )
+
+    ErrorRecoveryAnalyzer(log_path).export_report(report_path, days=1)
+    report = report_path.read_text(encoding="utf-8")
+
+    assert secret not in report
+    assert "[REDACTED]" in report

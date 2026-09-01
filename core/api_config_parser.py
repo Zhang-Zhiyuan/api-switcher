@@ -21,7 +21,11 @@ _ASSIGNMENT_RE = re.compile(
     r"(?:^|[\r\n;&])\s*(?:(?:export|set|env)\s+)?"
     r"(?:\$env:)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`|[^\r\n;&]*?)"
-    r"(?=\s*(?:\#.*)?(?:[;&]|$))",
+    # In POSIX shells ``#`` only starts a comment when it is separated from
+    # the value.  Requiring horizontal whitespace here preserves legitimate
+    # unquoted secrets such as ``token#suffix`` while still accepting
+    # ``VALUE=token # comment``.
+    r"(?=(?:[ \t]+\#.*)?[ \t]*(?:[;&]|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 _SETX_RE = re.compile(
@@ -47,7 +51,7 @@ _POWERSHELL_SET_RE = re.compile(
 _POWER_SHELL_RE = re.compile(
     r"(?:^|[\r\n;&])\s*\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`|[^\r\n;&]*?)"
-    r"(?=\s*(?:\#.*)?(?:[;&]|$))",
+    r"(?=(?:[ \t]+\#.*)?[ \t]*(?:[;&]|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 _URL_RE = re.compile(

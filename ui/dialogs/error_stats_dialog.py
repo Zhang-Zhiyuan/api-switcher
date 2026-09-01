@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, button_style, card_frame_kwargs, center_window, combo_style, font, textbox_style
 from ui.ui_dispatch import run_on_ui_thread
 
@@ -106,6 +107,7 @@ class ErrorStatsDialog(ctk.CTkToplevel):
             **textbox_style(monospace=True),
         )
         self.detail_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._configure_detail_tags()
 
         # 按钮栏
         button_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -302,27 +304,26 @@ class ErrorStatsDialog(ctk.CTkToplevel):
     def _insert_text(self, text: str, tag: str = "normal"):
         """插入带标签的文本"""
         start_index = self.detail_text.index("end-1c")
-        self.detail_text.insert("end", text)
+        self.detail_text.insert("end", safe_feedback_text(text))
         end_index = self.detail_text.index("end-1c")
 
         if tag:
             self.detail_text.tag_add(tag, start_index, end_index)
 
-        # 配置标签样式
-        if tag == "header":
-            self.detail_text.tag_config(tag, font=("Microsoft YaHei UI", 13, "bold"), foreground=COLORS["primary"])
-        elif tag == "separator":
-            self.detail_text.tag_config(tag, foreground=COLORS["border"])
-        elif tag == "label":
-            self.detail_text.tag_config(tag, font=("Consolas", 11, "bold"), foreground=COLORS["text"])
-        elif tag == "count":
-            self.detail_text.tag_config(tag, foreground=COLORS["danger"], font=("Consolas", 11, "bold"))
-        elif tag == "percentage":
-            self.detail_text.tag_config(tag, foreground=COLORS["muted"])
-        elif tag == "highlight":
-            self.detail_text.tag_config(tag, foreground=COLORS["danger"], font=("Consolas", 12, "bold"))
-        elif tag == "muted":
-            self.detail_text.tag_config(tag, foreground=COLORS["muted"], font=("Consolas", 11, "italic"))
+    def _configure_detail_tags(self) -> None:
+        """Configure text colors once; CTkTextbox rejects per-tag fonts."""
+
+        colors = {
+            "header": COLORS["primary"],
+            "separator": COLORS["border"],
+            "label": COLORS["text"],
+            "count": COLORS["danger"],
+            "percentage": COLORS["muted"],
+            "highlight": COLORS["danger"],
+            "muted": COLORS["muted"],
+        }
+        for tag, foreground in colors.items():
+            self.detail_text.tag_config(tag, foreground=foreground)
 
     def _display_error(self, error_message: str):
         """显示错误信息"""
