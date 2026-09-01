@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import sys
 import threading
-from types import ModuleType
+from datetime import datetime
+from types import ModuleType, SimpleNamespace
 
 from ui.dialogs.health_check_dialog import HealthCheckDialog
 
@@ -16,6 +17,15 @@ class _Widget:
 
     def delete(self, *_args):
         return None
+
+
+class _TaggedText:
+    def __init__(self):
+        self.configured = {}
+
+    def tag_config(self, tag, **kwargs):
+        assert "font" not in kwargs
+        self.configured[tag] = kwargs
 
 
 def test_health_check_worker_uses_dispatcher_without_direct_tk_calls(monkeypatch):
@@ -86,3 +96,56 @@ def test_health_check_start_failure_restores_controls(monkeypatch):
     assert dialog.export_button.calls[-1] == {"state": "normal"}
     assert dialog.status_label.calls[-1] == {"text": "健康检查启动失败"}
     assert errors == ["thread unavailable"]
+
+
+def test_health_report_uses_current_snapshot_and_redacts_credentials():
+    results = [
+        SimpleNamespace(
+            category="API 连接",
+            item="自定义端点",
+            status="ok",
+            message=(
+                "请求 https://relay.example.test/sub?token=subscription-secret "
+                "使用 sk-example-super-secret-token"
+            ),
+            suggestion="Authorization: Bearer oauth-secret-value",
+        ),
+        SimpleNamespace(
+            category="扩展检查",
+            item="未知状态",
+            status="unexpected",
+            message="需要复核",
+            suggestion=None,
+        ),
+    ]
+
+    summary = HealthCheckDialog._summarize_results(results)
+    report = HealthCheckDialog._build_report_text(results, datetime(2026, 9, 2, 12, 0, 0))
+
+    assert summary == {
+        "total": 2,
+        "ok": 1,
+        "warning": 0,
+        "error": 1,
+        "has_issues": True,
+    }
+    assert "subscription-secret" not in report
+    assert "sk-example-super-secret-token" not in report
+    assert "oauth-secret-value" not in report
+    assert "✗ 状态无效" in report
+
+
+def test_health_text_tags_use_scaling_safe_options_only():
+    dialog = object.__new__(HealthCheckDialog)
+    dialog.result_text = _TaggedText()
+
+    HealthCheckDialog._configure_result_tags(dialog)
+
+    assert set(dialog.result_text.configured) == {
+        "bold",
+        "category",
+        "green",
+        "orange",
+        "red",
+        "suggestion",
+    }

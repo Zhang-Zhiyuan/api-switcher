@@ -313,6 +313,24 @@ def test_parse_quoted_shell_assignments_with_inline_comments():
     assert parsed.token == "sk-inline-comment"
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "export ANTHROPIC_AUTH_TOKEN=",
+        "$env:ANTHROPIC_AUTH_TOKEN=",
+    ],
+)
+def test_parse_unquoted_hash_in_secret_is_not_mistaken_for_comment(prefix):
+    parsed = parse_api_config_text(
+        "export ANTHROPIC_BASE_URL=https://relay.example.test # endpoint\n"
+        f"{prefix}sk-example-hash#suffix # actual comment",
+        "claude",
+    )
+
+    assert parsed.base_url == "https://relay.example.test"
+    assert parsed.token == "sk-example-hash#suffix"
+
+
 def test_parse_invalid_explicit_url_falls_back_to_best_valid_sniffed_candidate():
     parsed = parse_api_config_text(
         "API_KEY=sk-valid-fallback\n"

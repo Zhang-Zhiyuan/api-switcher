@@ -75,6 +75,7 @@ class HealthCheckDialog(ctk.CTkToplevel):
             **textbox_style(monospace=True),
         )
         self.result_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._configure_result_tags()
 
         # 按钮栏
         button_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -162,17 +163,73 @@ class HealthCheckDialog(ctk.CTkToplevel):
         self.check_button.configure(state="normal", text="重新检查")
         self.export_button.configure(state="normal")
 
+    @staticmethod
+    def _summarize_results(results) -> dict[str, int | bool]:
+        """Summarize this dialog's immutable result snapshot.
+
+        Do not read the module-level validator here: a delayed UI callback or
+        another check must not replace the counts shown for this run. Unknown
+        statuses are counted as errors so malformed plugin results fail safe.
+        """
+
+        statuses = [str(getattr(result, "status", "")).strip().lower() for result in results]
+        ok_count = statuses.count("ok")
+        warning_count = statuses.count("warning")
+        error_count = len(statuses) - ok_count - warning_count
+        return {
+            "total": len(statuses),
+            "ok": ok_count,
+            "warning": warning_count,
+            "error": error_count,
+            "has_issues": warning_count > 0 or error_count > 0,
+        }
+
+    @classmethod
+    def _build_report_text(cls, results, checked_at) -> str:
+        """Build a credential-redacted report from one result snapshot."""
+
+        summary = cls._summarize_results(results)
+        lines = [
+            "=" * 80,
+            "系统健康检查报告",
+            "=" * 80,
+            "",
+            f"检查时间: {checked_at.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"总计: {summary['total']} 项",
+            f"正常: {summary['ok']} 项",
+            f"警告: {summary['warning']} 项",
+            f"错误: {summary['error']} 项",
+            "",
+        ]
+        categories = {}
+        for result in results:
+            category = safe_feedback_text(getattr(result, "category", "未分类"))
+            categories.setdefault(category, []).append(result)
+
+        status_labels = {"ok": "✓ 正常", "warning": "⚠ 警告", "error": "✗ 错误"}
+        for category, items in categories.items():
+            lines.extend(("=" * 80, category, "=" * 80, ""))
+            for item in items:
+                status = str(getattr(item, "status", "")).strip().lower()
+                status_text = status_labels.get(status, "✗ 状态无效")
+                item_name = safe_feedback_text(getattr(item, "item", "未知检查项"))
+                message = safe_feedback_text(getattr(item, "message", ""))
+                lines.append(f"{status_text} - {item_name}: {message}")
+                suggestion = safe_feedback_text(getattr(item, "suggestion", ""))
+                if suggestion:
+                    lines.append(f"  建议: {suggestion}")
+                lines.append("")
+        return "\n".join(lines) + "\n"
+
     def _display_results(self, results):
         """显示检查结果"""
         if not self.winfo_exists():
             return
-        from core.validator import config_validator
-
         # 清空文本框
         self.result_text.delete("1.0", "end")
 
         # 获取摘要
-        summary = config_validator.get_summary()
+        summary = self._summarize_results(results)
 
         # 更新统计信息
         self.total_label.configure(text=f"总计: {summary['total']}")
@@ -200,7 +257,7 @@ class HealthCheckDialog(ctk.CTkToplevel):
         # 显示结果
         for category, items in categories.items():
             self._insert_text(f"\n{'=' * 80}\n", "bold")
-            self._insert_text(f"{category}\n", "category")
+            self._insert_text(f"{safe_feedback_text(category)}\n", "category")
             self._insert_text(f"{'=' * 80}\n\n", "bold")
 
             for item in items:
@@ -217,12 +274,15 @@ class HealthCheckDialog(ctk.CTkToplevel):
 
                 # 检查项
                 self._insert_text(f"{icon} ", color)
-                self._insert_text(f"{item.item}: ", "bold")
-                self._insert_text(f"{item.message}\n", color)
+                self._insert_text(f"{safe_feedback_text(item.item)}: ", "bold")
+                self._insert_text(f"{safe_feedback_text(item.message)}\n", color)
 
                 # 修复建议
                 if item.suggestion:
-                    self._insert_text(f"   建议: {item.suggestion}\n", "suggestion")
+                    self._insert_text(
+                        f"   建议: {safe_feedback_text(item.suggestion)}\n",
+                        "suggestion",
+                    )
 
                 self._insert_text("\n")
 
@@ -238,19 +298,19 @@ class HealthCheckDialog(ctk.CTkToplevel):
         if tag:
             self.result_text.tag_add(tag, start_index, end_index)
 
-        # 配置标签样式
-        if tag == "bold":
-            self.result_text.tag_config(tag, font=("Consolas", 11, "bold"))
-        elif tag == "category":
-            self.result_text.tag_config(tag, font=("Microsoft YaHei UI", 13, "bold"), foreground=COLORS["primary"])
-        elif tag == "green":
-            self.result_text.tag_config(tag, foreground=COLORS["success"])
-        elif tag == "orange":
-            self.result_text.tag_config(tag, foreground=COLORS["warning"])
-        elif tag == "red":
-            self.result_text.tag_config(tag, foreground=COLORS["danger"])
-        elif tag == "suggestion":
-            self.result_text.tag_config(tag, foreground=COLORS["muted"], font=("Consolas", 10, "italic"))
+    def _configure_result_tags(self) -> None:
+        """Configure scalable CTkTextbox tags without its forbidden font option."""
+
+        colors = {
+            "bold": COLORS["text"],
+            "category": COLORS["primary"],
+            "green": COLORS["success"],
+            "orange": COLORS["warning"],
+            "red": COLORS["danger"],
+            "suggestion": COLORS["muted"],
+        }
+        for tag, foreground in colors.items():
+            self.result_text.tag_config(tag, foreground=foreground)
 
     def _display_error(self, error_message: str):
         """显示错误信息"""
@@ -259,7 +319,7 @@ class HealthCheckDialog(ctk.CTkToplevel):
         self.status_label.configure(text="检查失败")
         self.result_text.delete("1.0", "end")
         self._insert_text("健康检查失败\n\n", "bold")
-        self._insert_text(f"错误信息: {error_message}\n", "red")
+        self._insert_text(f"错误信息: {safe_feedback_text(error_message)}\n", "red")
 
     def _export_report(self):
         """导出检查报告"""
@@ -283,39 +343,9 @@ class HealthCheckDialog(ctk.CTkToplevel):
             if not filepath:
                 return
 
-            # 生成报告内容
-            from core.validator import config_validator
-            summary = config_validator.get_summary()
-
+            report = self._build_report_text(self.results, datetime.now())
             with open(filepath, "w", encoding="utf-8") as f:
-                f.write("=" * 80 + "\n")
-                f.write("系统健康检查报告\n")
-                f.write("=" * 80 + "\n\n")
-                f.write(f"检查时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"总计: {summary['total']} 项\n")
-                f.write(f"正常: {summary['ok']} 项\n")
-                f.write(f"警告: {summary['warning']} 项\n")
-                f.write(f"错误: {summary['error']} 项\n\n")
-
-                # 按类别分组
-                categories = {}
-                for result in self.results:
-                    if result.category not in categories:
-                        categories[result.category] = []
-                    categories[result.category].append(result)
-
-                # 写入详细结果
-                for category, items in categories.items():
-                    f.write("=" * 80 + "\n")
-                    f.write(f"{category}\n")
-                    f.write("=" * 80 + "\n\n")
-
-                    for item in items:
-                        status_text = {"ok": "✓ 正常", "warning": "⚠ 警告", "error": "✗ 错误"}[item.status]
-                        f.write(f"{status_text} - {item.item}: {item.message}\n")
-                        if item.suggestion:
-                            f.write(f"  建议: {item.suggestion}\n")
-                        f.write("\n")
+                f.write(report)
 
             logger.info(f"Health check report exported to: {filepath}")
             self.status_label.configure(text=f"报告已导出: {filepath}")

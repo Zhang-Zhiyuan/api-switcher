@@ -2,11 +2,14 @@
 配置验证器 - 统一的健康检查系统
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 import sys
 
 logger = logging.getLogger(__name__)
+
+SSH_HEALTH_MAX_WORKERS = 8
 
 
 @dataclass
@@ -358,12 +361,11 @@ class ConfigValidator:
             if profiles:
                 self._add_result(category, "Profile 数量", "ok", f"{len(profiles)} 个")
 
-                # 测试连接（仅测试前3个，避免耗时过长）
-                test_profiles = profiles[:3]
-                connected_count = 0
-                failed_count = 0
-
-                for profile in test_profiles:
+                # Test every saved target. A small bounded pool keeps a dead
+                # server from serially delaying all remaining profiles while
+                # avoiding an unbounded burst of SSH handshakes.
+                def test_profile(profile) -> tuple[str, bool]:
+                    profile_name = str(getattr(profile, "name", "未命名")).strip() or "未命名"
                     try:
                         client = ssh_manager.connect(profile, timeout=4, max_retries=1)
                         stdout, _stderr = ssh_manager.execute_command(
@@ -371,36 +373,41 @@ class ConfigValidator:
                             "printf 'Connection OK' 2>/dev/null || echo Connection OK",
                             timeout=4,
                         )
-                        success = "Connection OK" in stdout
-                        if success:
-                            connected_count += 1
-                        else:
-                            failed_count += 1
+                        return profile_name, "Connection OK" in stdout
                     except Exception:
-                        failed_count += 1
+                        return profile_name, False
+
+                worker_count = min(SSH_HEALTH_MAX_WORKERS, len(profiles))
+                with ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="ssh-health",
+                ) as executor:
+                    outcomes = list(executor.map(test_profile, profiles))
+
+                connected_count = sum(success for _name, success in outcomes)
+                failed_count = len(profiles) - connected_count
+                failed_names = [name for name, success in outcomes if not success]
+                visible_failed = "、".join(failed_names[:5])
+                if len(failed_names) > 5:
+                    visible_failed += f" 等 {len(failed_names)} 个"
+                failure_detail = f"；失败: {visible_failed}" if visible_failed else ""
 
                 if failed_count == 0:
                     self._add_result(
                         category, "连接测试", "ok",
-                        f"测试通过 ({connected_count}/{len(test_profiles)})"
+                        f"全部测试通过 ({connected_count}/{len(profiles)}，并行度 {worker_count})"
                     )
                 elif connected_count > 0:
                     self._add_result(
                         category, "连接测试", "warning",
-                        f"{connected_count} 个成功，{failed_count} 个失败",
+                        f"{connected_count} 个成功，{failed_count} 个失败{failure_detail}",
                         "在 SSH Tab 中查看详情"
                     )
                 else:
                     self._add_result(
                         category, "连接测试", "error",
-                        f"全部失败 ({failed_count}/{len(test_profiles)})",
+                        f"全部失败 ({failed_count}/{len(profiles)}){failure_detail}",
                         "检查网络连接和 SSH 配置"
-                    )
-
-                if len(profiles) > 3:
-                    self._add_result(
-                        category, "连接测试", "ok",
-                        f"仅测试了前 3 个 Profile，共 {len(profiles)} 个"
                     )
             else:
                 self._add_result(category, "Profile 数量", "ok", "未配置")
@@ -472,7 +479,14 @@ class ConfigValidator:
                 profiles = profile_manager.list_switchable_codex_profiles()
                 profile = next((p for p in profiles if p.name == active_codex), None)
 
-                if profile:
+                if profile and bool(getattr(profile, "custom_requires_openai_auth", False)):
+                    self._add_result(
+                        category,
+                        f"Codex ({active_codex})",
+                        "ok",
+                        "使用 OpenAI 登录认证，无需独立 Provider API Key；登录状态由静态检查验证",
+                    )
+                elif profile:
                     # 获取 API Key
                     api_key = security.get_secret(profile.api_key_ref) if profile.api_key_ref else ""
 
