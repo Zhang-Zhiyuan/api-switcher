@@ -4617,6 +4617,39 @@ def test_load_cached_proxy_subscription_reuses_parsed_nodes(monkeypatch, tmp_pat
     assert calls["count"] == 1
 
 
+def test_load_cached_proxy_subscription_reuses_multiple_profile_nodes(monkeypatch, tmp_path):
+    remote_proxy.clear_proxy_subscription_state_cache()
+    first_path = tmp_path / "subscription-a.yaml"
+    second_path = tmp_path / "subscription-b.yaml"
+    first_path.write_text(
+        "proxies:\n  - { name: residential, type: vless, server: a.example.com, port: 443 }\n",
+        encoding="utf-8",
+    )
+    second_path.write_text(
+        "proxies:\n  - { name: datacenter, type: vless, server: b.example.com, port: 443 }\n",
+        encoding="utf-8",
+    )
+    calls = {"count": 0}
+    original_parse = remote_proxy.parse_proxy_subscription_content
+
+    def counting_parse(text):
+        calls["count"] += 1
+        return original_parse(text)
+
+    monkeypatch.setattr(remote_proxy, "parse_proxy_subscription_content", counting_parse)
+    first_state = {"saved_path": str(first_path), "charset": "utf-8"}
+    second_state = {"saved_path": str(second_path), "charset": "utf-8"}
+
+    first = remote_proxy.load_cached_proxy_subscription(first_state)
+    second = remote_proxy.load_cached_proxy_subscription(second_state)
+    first_again = remote_proxy.load_cached_proxy_subscription(first_state)
+
+    assert first is not None and first.nodes[0].node["name"] == "residential"
+    assert second is not None and second.nodes[0].node["name"] == "datacenter"
+    assert first_again is not None and first_again.nodes[0].node["name"] == "residential"
+    assert calls["count"] == 2
+
+
 def test_proxy_subscription_profiles_migrate_legacy_state(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     state_dir = tmp_path / "proxy_subscriptions"

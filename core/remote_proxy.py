@@ -30,6 +30,7 @@ import yaml
 
 from config.paths import STORAGE_DIR
 from core.lazy_imports import LazyAttribute, LazyModule
+from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES
 
 
 network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
@@ -39,23 +40,10 @@ remote_config = LazyModule("core.remote_config")
 ssh_manager = LazyAttribute("core.ssh_manager", "ssh_manager")
 
 
-AI_PROXY_DOMAINS = (
-    "chatgpt.com",
-    "openai.com",
-    "oaistatic.com",
-    "oaiusercontent.com",
-    "auth0.openai.com",
-    "anthropic.com",
-    "claude.ai",
-    "gemini.google.com",
-    "generativelanguage.googleapis.com",
-    "oauth2.googleapis.com",
-    "www.googleapis.com",
-    "aiplatform.googleapis.com",
-    "cloudcode-pa.googleapis.com",
-    "aistudio.google.com",
-    "ai.google.dev",
-    "makersuite.google.com",
+AI_PROXY_DOMAINS = tuple(
+    str(domain)
+    for service in LOCAL_PROXY_AI_SERVICES
+    for domain in service.get("targets") or ()
 )
 
 REMOTE_AI_PROBE_TARGETS = (
@@ -119,6 +107,20 @@ AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 10
 AI_PROXY_HEALTH_CHECK_TIMEOUT_MS = 5000
 AI_PROXY_HEALTH_CHECK_MAX_FAILURES = 1
 AI_PROXY_DISPLAY_NAME_MARKER = "# API-Switcher-Node-Name-B64:"
+AI_PROXY_ADDITIONAL_GROUP_PATTERN = re.compile(r"^SUB-[0-9A-F]{12}-PROXY$")
+AI_PROXY_ADDITIONAL_HEALTH_CHECKS = frozenset(
+    {
+        (
+            str(service.get("health_check_url") or ""),
+            str(service.get("health_check_expected_status") or ""),
+        )
+        for service in LOCAL_PROXY_AI_SERVICES
+    }
+    | {
+        ("https://www.youtube.com/generate_204", "204"),
+        ("https://www.gstatic.com/generate_204", "204"),
+    }
+)
 PRIVATE_DIRECT_IP_RULES = (
     "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
     "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
@@ -157,8 +159,11 @@ _PROXY_SUBSCRIPTION_STATE_LOCK = threading.RLock()
 _PROXY_SUBSCRIPTION_HOT_UPDATE_LOCK = threading.Lock()
 _PROXY_SUBSCRIPTION_STATE_CACHE: dict | None = None
 _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE: tuple[str, int | None, int | None] | None = None
-_PROXY_SUBSCRIPTION_NODES_CACHE: tuple[ProxySubscriptionNode, ...] | None = None
-_PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE: tuple[str, int | None, int | None, str] | None = None
+_PROXY_SUBSCRIPTION_NODES_CACHES: dict[
+    tuple[str, int | None, int | None, str],
+    tuple[ProxySubscriptionNode, ...],
+] = {}
+PROXY_SUBSCRIPTION_NODES_CACHE_MAX_ENTRIES = 16
 PROXY_QUALITY_CACHE_TTL_SECONDS = 6 * 60 * 60
 PROXY_QUALITY_CACHE_SCHEMA_VERSION = 6
 PROXY_QUALITY_HTTP_CONCURRENCY_BUDGET = 12
@@ -204,14 +209,49 @@ PROXY_NODE_FORBIDDEN_OUTBOUND_TYPES = frozenset(
 )
 
 
-def _strict_privacy_dns_config(proxy_route: str = "AI-PROXY") -> dict:
+def _managed_proxy_route_name(value: object, *, label: str = "代理路由") -> str:
+    route = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", route):
+        raise ValueError(f"{label}名称无效")
+    if route.casefold() in {"direct", "reject", "reject-drop", "pass", "pass-rule", "compatible"}:
+        raise ValueError(f"{label}不能使用 mihomo 内置出站名称")
+    return route
+
+
+def _proxy_doh_nameservers(proxy_route: str) -> list[str]:
+    route = _managed_proxy_route_name(proxy_route, label="DNS 代理路由")
+    return [
+        f"https://1.1.1.1/dns-query#{route}",
+        f"https://8.8.8.8/dns-query#{route}",
+    ]
+
+
+def _normalized_domain_route_map(domain_routes) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for raw_domain, raw_route in (domain_routes or {}).items():
+        domain = _normalized_proxy_domain(raw_domain)
+        if not domain:
+            continue
+        normalized[domain] = _managed_proxy_route_name(raw_route)
+    return normalized
+
+
+def _normalized_proxy_domain(value: object) -> str:
+    domain = str(value or "").strip().strip(".").casefold()
+    while domain.startswith(("*.", "+.")):
+        domain = domain[2:]
+    return domain.strip(".")
+
+
+def _strict_privacy_dns_config(
+    proxy_route: str = "AI-PROXY",
+    domain_routes=None,
+) -> dict:
     """Return strict DNS bound to the exact managed/isolated proxy route."""
 
-    route = str(proxy_route or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", route):
-        raise ValueError("严格 DNS 代理路由名称无效")
+    route = _managed_proxy_route_name(proxy_route, label="严格 DNS 代理路由")
 
-    return {
+    config = {
         "enable": True,
         "ipv6": False,
         "enhanced-mode": "redir-host",
@@ -229,14 +269,19 @@ def _strict_privacy_dns_config(proxy_route: str = "AI-PROXY") -> dict:
             "https://doh.pub/dns-query#DIRECT",
             "https://dns.alidns.com/dns-query#DIRECT",
         ],
-        "nameserver": [
-            f"https://1.1.1.1/dns-query#{route}",
-            f"https://8.8.8.8/dns-query#{route}",
-        ],
+        "nameserver": _proxy_doh_nameservers(route),
     }
+    policy = {
+        f"+.{domain}": _proxy_doh_nameservers(domain_route)
+        for domain, domain_route in _normalized_domain_route_map(domain_routes).items()
+        if domain_route != route
+    }
+    if policy:
+        config["nameserver-policy"] = policy
+    return config
 
 
-def _mainland_compatible_dns_config(proxy_domains) -> dict:
+def _mainland_compatible_dns_config(proxy_domains, domain_routes=None) -> dict:
     """Keep DIRECT names on the host resolver and proxy selected-domain DNS.
 
     The managed HTTP proxy receives every WinINET request, including traffic
@@ -253,19 +298,14 @@ def _mainland_compatible_dns_config(proxy_domains) -> dict:
         "https://doh.pub/dns-query#DIRECT",
         "https://dns.alidns.com/dns-query#DIRECT",
     ]
-    proxied_doh = [
-        "https://1.1.1.1/dns-query#AI-PROXY",
-        "https://8.8.8.8/dns-query#AI-PROXY",
-    ]
+    normalized_routes = _normalized_domain_route_map(domain_routes)
     policy = {}
     for value in proxy_domains or ():
-        domain = str(value or "").strip().strip(".").casefold()
-        if domain.startswith("*."):
-            domain = domain[2:]
-        if domain.startswith("+."):
-            domain = domain[2:]
+        domain = _normalized_proxy_domain(value)
         if domain:
-            policy[f"+.{domain}"] = list(proxied_doh)
+            policy[f"+.{domain}"] = _proxy_doh_nameservers(
+                normalized_routes.get(domain, "AI-PROXY")
+            )
     return {
         "enable": True,
         "ipv6": True,
@@ -1260,12 +1300,10 @@ def _proxy_subscription_default_name(url: str) -> str:
 
 def clear_proxy_subscription_state_cache() -> None:
     global _PROXY_SUBSCRIPTION_STATE_CACHE, _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE
-    global _PROXY_SUBSCRIPTION_NODES_CACHE, _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
         _PROXY_SUBSCRIPTION_STATE_CACHE = None
         _PROXY_SUBSCRIPTION_STATE_CACHE_SIGNATURE = None
-        _PROXY_SUBSCRIPTION_NODES_CACHE = None
-        _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE = None
+        _PROXY_SUBSCRIPTION_NODES_CACHES.clear()
 
 
 def _proxy_subscription_state_signature(path: Path | None = None) -> tuple[str, int | None, int | None]:
@@ -1325,13 +1363,14 @@ def _load_cached_proxy_subscription_nodes(
     charset: str,
     signature: tuple[str, int | None, int | None, str],
 ) -> tuple[ProxySubscriptionNode, ...]:
-    global _PROXY_SUBSCRIPTION_NODES_CACHE, _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
-        if (
-            _PROXY_SUBSCRIPTION_NODES_CACHE is not None
-            and _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE == signature
-        ):
-            return _PROXY_SUBSCRIPTION_NODES_CACHE
+        cached = _PROXY_SUBSCRIPTION_NODES_CACHES.get(signature)
+        if cached is not None:
+            # Refresh insertion order so frequently used A/B subscription
+            # profiles stay resident while the cache remains strictly bounded.
+            _PROXY_SUBSCRIPTION_NODES_CACHES.pop(signature, None)
+            _PROXY_SUBSCRIPTION_NODES_CACHES[signature] = cached
+            return cached
     # State files are user-editable and may point outside the managed cache.
     # Reject ordinary oversized files before reading, then verify again to
     # cover a file that grew between stat and read. Keep raw OSError semantics
@@ -1351,8 +1390,10 @@ def _load_cached_proxy_subscription_nodes(
     text = _decode_subscription_bytes(payload, charset)
     nodes = parse_proxy_subscription_content(text)
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
-        _PROXY_SUBSCRIPTION_NODES_CACHE = nodes
-        _PROXY_SUBSCRIPTION_NODES_CACHE_SIGNATURE = signature
+        _PROXY_SUBSCRIPTION_NODES_CACHES[signature] = nodes
+        while len(_PROXY_SUBSCRIPTION_NODES_CACHES) > PROXY_SUBSCRIPTION_NODES_CACHE_MAX_ENTRIES:
+            oldest_signature = next(iter(_PROXY_SUBSCRIPTION_NODES_CACHES))
+            _PROXY_SUBSCRIPTION_NODES_CACHES.pop(oldest_signature, None)
     return nodes
 
 
@@ -2985,10 +3026,13 @@ def build_mihomo_config(
     mixed_port: int = 7890,
     *,
     fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None = None,
+    additional_proxy_groups: tuple[dict, ...] | list[dict] | None = None,
     health_checked_group: bool = False,
     log_level: str = "warning",
     extra_proxy_domains: tuple[str, ...] | list[str] | None = None,
     extra_proxy_ip_cidrs: tuple[str, ...] | list[str] | None = None,
+    proxy_domain_routes: dict[str, str] | None = None,
+    proxy_ip_cidr_routes: dict[str, str] | None = None,
     proxy_non_cn: bool = False,
     strict_privacy: bool = False,
     resilient_transport: bool = False,
@@ -3002,12 +3046,71 @@ def build_mihomo_config(
     # or AI-PROXY become a routing target.
     nodes = _managed_mihomo_proxy_nodes(primary_node, fallback_proxy_nodes)
     node_names = [str(node["name"]) for node in nodes]
+    additional_nodes, additional_groups = _managed_additional_proxy_groups(
+        additional_proxy_groups
+    )
+    allowed_routes = {"AI-PROXY", *(str(group["name"]) for group in additional_groups)}
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_domains = _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains)
+    normalized_domain_routes = _normalized_domain_route_map(proxy_domain_routes)
+    normalized_ip_routes = {
+        str(cidr or "").strip(): _managed_proxy_route_name(route)
+        for cidr, route in (proxy_ip_cidr_routes or {}).items()
+        if str(cidr or "").strip()
+    }
+    unknown_routes = (
+        set(normalized_domain_routes.values())
+        | set(normalized_ip_routes.values())
+    ) - allowed_routes
+    if unknown_routes:
+        raise ValueError(
+            "代理规则引用了未定义的策略组: " + "、".join(sorted(unknown_routes))
+        )
+    known_domains = {
+        normalized
+        for domain in proxy_domains
+        if (normalized := _normalized_proxy_domain(domain))
+    }
+    unused_domain_overrides = set(normalized_domain_routes) - known_domains
+    if unused_domain_overrides:
+        raise ValueError(
+            "服务分流包含未启用的域名规则: "
+            + "、".join(sorted(unused_domain_overrides))
+        )
+    proxy_ip_cidrs = _unique_clean_values(extra_proxy_ip_cidrs)
+    unused_ip_overrides = set(normalized_ip_routes) - set(proxy_ip_cidrs)
+    if unused_ip_overrides:
+        raise ValueError(
+            "服务分流包含未启用的 IP 规则: "
+            + "、".join(sorted(unused_ip_overrides))
+        )
+    resolved_domain_routes = {
+        _normalized_proxy_domain(domain): normalized_domain_routes.get(
+            _normalized_proxy_domain(domain),
+            "AI-PROXY",
+        )
+        for domain in proxy_domains
+    }
     rules = [
-        *(f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in proxy_domains),
-        *(_ip_cidr_rule(cidr) for cidr in _unique_clean_values(extra_proxy_ip_cidrs)),
+        *(
+            f"DOMAIN-SUFFIX,{_normalized_proxy_domain(domain)},{resolved_domain_routes[_normalized_proxy_domain(domain)]}"
+            for domain in proxy_domains
+        ),
+        *(
+            _ip_cidr_rule(cidr, normalized_ip_routes.get(cidr, "AI-PROXY"))
+            for cidr in proxy_ip_cidrs
+        ),
     ]
+    referenced_additional_routes = {
+        *resolved_domain_routes.values(),
+        *(normalized_ip_routes.get(cidr, "AI-PROXY") for cidr in proxy_ip_cidrs),
+    } - {"AI-PROXY"}
+    defined_additional_routes = allowed_routes - {"AI-PROXY"}
+    if referenced_additional_routes != defined_additional_routes:
+        unused = defined_additional_routes - referenced_additional_routes
+        raise ValueError(
+            "存在未被任何服务使用的订阅策略组: " + "、".join(sorted(unused))
+        )
     if strict_privacy:
         # This is deliberately fail-closed for every public destination that
         # has already entered mihomo.  It remains an application-layer proxy:
@@ -3031,12 +3134,13 @@ def build_mihomo_config(
         "mode": "rule",
         "log-level": _normalize_mihomo_log_level(log_level),
         "ipv6": not strict_privacy,
-        "proxies": nodes,
+        "proxies": [*nodes, *additional_nodes],
         "proxy-groups": [
             _managed_ai_proxy_group(
                 node_names,
                 health_checked=bool(health_checked_group or len(node_names) > 1),
-            )
+            ),
+            *additional_groups,
         ],
         "rules": rules,
     }
@@ -3060,12 +3164,17 @@ def build_mihomo_config(
         # but independent of those rules to resolve a hostname-based node.
         # Mainland-reachable bootstrap IPs resolve only those DoH hostnames;
         # ordinary public destination DNS still follows AI-PROXY.
-        config["dns"] = _strict_privacy_dns_config()
+        config["dns"] = _strict_privacy_dns_config(
+            domain_routes=resolved_domain_routes,
+        )
     elif mainland_dns:
         # Compatibility mode keeps normal/direct names on mainland-reachable
         # encrypted resolvers, but selected AI names are resolved through the
         # already bootstrapped AI-PROXY route to avoid poisoned system DNS.
-        config["dns"] = _mainland_compatible_dns_config(proxy_domains)
+        config["dns"] = _mainland_compatible_dns_config(
+            proxy_domains,
+            resolved_domain_routes,
+        )
     markers = [
         AI_PROXY_CONFIG_MARKER,
         _managed_proxy_display_name_marker(display_name),
@@ -3155,9 +3264,19 @@ def _proxy_node_connection_key(node: dict) -> str:
 def _managed_mihomo_proxy_nodes(
     primary_node: dict,
     fallback_proxy_nodes: tuple[dict, ...] | list[dict] | None,
+    *,
+    primary_name: str = AI_PROXY_INTERNAL_NODE_NAME,
+    fallback_name_prefix: str = AI_PROXY_FALLBACK_NODE_PREFIX,
 ) -> list[dict]:
     primary = _normalize_proxy_node(primary_node)
-    primary["name"] = AI_PROXY_INTERNAL_NODE_NAME
+    normalized_primary_name = _managed_proxy_route_name(
+        primary_name,
+        label="mihomo 受管节点",
+    )
+    normalized_fallback_prefix = str(fallback_name_prefix or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", normalized_fallback_prefix):
+        raise ValueError("mihomo 受管备用节点前缀无效")
+    primary["name"] = normalized_primary_name
     nodes = [primary]
     seen = {_proxy_node_connection_key(primary_node)}
     for candidate in fallback_proxy_nodes or ():
@@ -3174,10 +3293,79 @@ def _managed_mihomo_proxy_nodes(
             continue
         if connection_key in seen:
             continue
-        normalized["name"] = f"{AI_PROXY_FALLBACK_NODE_PREFIX}{len(nodes)}"
+        normalized["name"] = f"{normalized_fallback_prefix}{len(nodes)}"
         nodes.append(normalized)
         seen.add(connection_key)
     return nodes
+
+
+def _managed_additional_node_names(group_name: str) -> tuple[str, str]:
+    name = _managed_proxy_route_name(group_name, label="订阅策略组")
+    if AI_PROXY_ADDITIONAL_GROUP_PATTERN.fullmatch(name) is None:
+        raise ValueError("订阅策略组名称不符合受管格式")
+    token = name.removeprefix("SUB-").removesuffix("-PROXY")
+    return (
+        f"API-SWITCHER-SUB-{token}-NODE",
+        f"API-SWITCHER-SUB-{token}-FALLBACK-",
+    )
+
+
+def _managed_additional_proxy_groups(
+    values: tuple[dict, ...] | list[dict] | None,
+) -> tuple[list[dict], list[dict]]:
+    specs = list(values or ())
+    if len(specs) > 16:
+        raise ValueError("服务分流使用的订阅策略组过多")
+    all_nodes: list[dict] = []
+    groups: list[dict] = []
+    seen_groups: set[str] = set()
+    seen_node_names: set[str] = {AI_PROXY_INTERNAL_NODE_NAME}
+    for raw_spec in specs:
+        if not isinstance(raw_spec, dict):
+            raise ValueError("订阅策略组配置格式无效")
+        group_name = _managed_proxy_route_name(
+            raw_spec.get("name"),
+            label="订阅策略组",
+        )
+        _managed_additional_node_names(group_name)
+        if group_name in seen_groups or group_name == "AI-PROXY":
+            raise ValueError(f"订阅策略组重复: {group_name}")
+        primary_node = raw_spec.get("proxy_node")
+        if not isinstance(primary_node, dict):
+            raise ValueError(f"订阅策略组 {group_name} 缺少主节点")
+        primary_name, fallback_prefix = _managed_additional_node_names(group_name)
+        nodes = _managed_mihomo_proxy_nodes(
+            primary_node,
+            raw_spec.get("fallback_proxy_nodes"),
+            primary_name=primary_name,
+            fallback_name_prefix=fallback_prefix,
+        )
+        node_names = [str(node["name"]) for node in nodes]
+        if any(name in seen_node_names for name in node_names):
+            raise ValueError("订阅策略组生成了重复的受管节点名称")
+        health_url = str(
+            raw_spec.get("health_check_url")
+            or "https://www.gstatic.com/generate_204"
+        ).strip()
+        expected_status = str(
+            raw_spec.get("health_check_expected_status") or "204"
+        ).strip()
+        if (health_url, expected_status) not in AI_PROXY_ADDITIONAL_HEALTH_CHECKS:
+            raise ValueError(f"订阅策略组 {group_name} 的健康检查契约不受支持")
+        health_checked = bool(raw_spec.get("health_checked", True) or len(nodes) > 1)
+        groups.append(
+            _managed_proxy_group(
+                group_name,
+                node_names,
+                health_checked=health_checked,
+                health_check_url=health_url,
+                expected_status=expected_status,
+            )
+        )
+        all_nodes.extend(nodes)
+        seen_groups.add(group_name)
+        seen_node_names.update(node_names)
+    return all_nodes, groups
 
 
 def _remote_proxy_fallback_nodes(
@@ -3235,17 +3423,37 @@ def _existing_remote_proxy_fallback_nodes(
     try:
         parsed = yaml.safe_load(content)
         proxy_nodes = parsed.get("proxies") if isinstance(parsed, dict) else None
+        proxy_groups = parsed.get("proxy-groups") if isinstance(parsed, dict) else None
         primary_key = _proxy_node_connection_key(primary_node)
     except Exception:
         return ()
-    if not isinstance(proxy_nodes, list):
+    if not isinstance(proxy_nodes, list) or not isinstance(proxy_groups, list):
         return ()
+
+    ai_group = next(
+        (
+            group
+            for group in proxy_groups
+            if isinstance(group, dict)
+            and str(group.get("name") or "").strip() == "AI-PROXY"
+        ),
+        None,
+    )
+    member_names = ai_group.get("proxies") if isinstance(ai_group, dict) else None
+    if not isinstance(member_names, list):
+        return ()
+    nodes_by_name = {
+        str(node.get("name") or "").strip(): node
+        for node in proxy_nodes
+        if isinstance(node, dict) and str(node.get("name") or "").strip()
+    }
 
     selected: list[dict] = []
     seen = {primary_key}
-    for node in proxy_nodes:
+    for member_name in member_names:
         if len(selected) >= AI_PROXY_FALLBACK_MAX_NODES - 1:
             break
+        node = nodes_by_name.get(str(member_name or "").strip())
         if not isinstance(node, dict):
             continue
         try:
@@ -3260,23 +3468,41 @@ def _existing_remote_proxy_fallback_nodes(
     return tuple(selected)
 
 
-def _managed_ai_proxy_group(node_names: list[str], *, health_checked: bool) -> dict:
+def _managed_proxy_group(
+    group_name: str,
+    node_names: list[str],
+    *,
+    health_checked: bool,
+    health_check_url: str,
+    expected_status: str,
+) -> dict:
+    group = _managed_proxy_route_name(group_name, label="mihomo 受管代理组")
     names = [str(name or "").strip() for name in node_names if str(name or "").strip()]
     if not names:
         raise ValueError("mihomo 受管代理组至少需要一个节点")
     if not health_checked:
-        return {"name": "AI-PROXY", "type": "select", "proxies": names}
+        return {"name": group, "type": "select", "proxies": names}
     return {
-        "name": "AI-PROXY",
+        "name": group,
         "type": "fallback",
         "proxies": names,
-        "url": AI_PROXY_HEALTH_CHECK_URL,
+        "url": str(health_check_url),
         "interval": AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS,
         "lazy": False,
         "timeout": AI_PROXY_HEALTH_CHECK_TIMEOUT_MS,
         "max-failed-times": AI_PROXY_HEALTH_CHECK_MAX_FAILURES,
-        "expected-status": AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS,
+        "expected-status": str(expected_status),
     }
+
+
+def _managed_ai_proxy_group(node_names: list[str], *, health_checked: bool) -> dict:
+    return _managed_proxy_group(
+        "AI-PROXY",
+        node_names,
+        health_checked=health_checked,
+        health_check_url=AI_PROXY_HEALTH_CHECK_URL,
+        expected_status=AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS,
+    )
 
 
 def _managed_proxy_display_name_marker(display_name: str) -> str:
@@ -3314,57 +3540,101 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     dns = parsed.get("dns")
     proxy_nodes = parsed.get("proxies")
     proxy_groups = parsed.get("proxy-groups")
-    node_names = [
-        str(node.get("name") or "").strip()
-        for node in proxy_nodes or ()
-        if isinstance(node, dict)
-    ]
-    expected_node_names = [AI_PROXY_INTERNAL_NODE_NAME]
-    expected_node_names.extend(
-        f"{AI_PROXY_FALLBACK_NODE_PREFIX}{index}"
-        for index in range(1, len(node_names))
-    )
-    managed_nodes_valid = bool(
-        isinstance(proxy_nodes, list)
-        and 1 <= len(proxy_nodes) <= AI_PROXY_FALLBACK_MAX_NODES
-        and len(node_names) == len(proxy_nodes)
-        and node_names == expected_node_names
-    )
-    if managed_nodes_valid:
-        try:
-            connection_keys = [_proxy_node_connection_key(node) for node in proxy_nodes]
-        except (TypeError, ValueError):
-            managed_nodes_valid = False
-        else:
-            managed_nodes_valid = len(connection_keys) == len(set(connection_keys)) and all(
-                not str(node.get("dialer-proxy") or "").strip()
-                for node in proxy_nodes[1:]
-                if isinstance(node, dict)
-            )
-    ai_proxy_groups = [
-        group
-        for group in proxy_groups or ()
-        if isinstance(group, dict) and str(group.get("name") or "").strip() == "AI-PROXY"
-    ]
-    ai_proxy_group = ai_proxy_groups[0] if len(ai_proxy_groups) == 1 else None
-    group_proxy_names = (
-        ai_proxy_group.get("proxies")
-        if isinstance(ai_proxy_group, dict)
-        else None
-    )
-    if not node_names:
+    if (
+        not isinstance(proxy_nodes, list)
+        or not isinstance(proxy_groups, list)
+        or not 1 <= len(proxy_groups) <= 17
+        or not 1 <= len(proxy_nodes) <= 17 * AI_PROXY_FALLBACK_MAX_NODES
+        or any(not isinstance(node, dict) for node in proxy_nodes)
+        or any(not isinstance(group, dict) for group in proxy_groups)
+    ):
         return False
-    select_group = _managed_ai_proxy_group(node_names, health_checked=False)
-    fallback_group = _managed_ai_proxy_group(node_names, health_checked=True)
+
+    node_names = [str(node.get("name") or "").strip() for node in proxy_nodes]
+    if any(not name for name in node_names) or len(node_names) != len(set(node_names)):
+        return False
+    node_by_name = dict(zip(node_names, proxy_nodes))
+    seen_group_names: set[str] = set()
+    flattened_member_names: list[str] = []
+
+    for group in proxy_groups:
+        group_name = str(group.get("name") or "").strip()
+        members = group.get("proxies")
+        if (
+            not group_name
+            or group_name in seen_group_names
+            or not isinstance(members, list)
+            or not 1 <= len(members) <= AI_PROXY_FALLBACK_MAX_NODES
+            or any(not isinstance(member, str) or not member.strip() for member in members)
+        ):
+            return False
+        member_names = [member.strip() for member in members]
+        if len(member_names) != len(set(member_names)):
+            return False
+        if group_name == "AI-PROXY":
+            expected_names = [AI_PROXY_INTERNAL_NODE_NAME]
+            expected_names.extend(
+                f"{AI_PROXY_FALLBACK_NODE_PREFIX}{index}"
+                for index in range(1, len(member_names))
+            )
+            allowed_health_checks = {
+                (AI_PROXY_HEALTH_CHECK_URL, AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS)
+            }
+        else:
+            try:
+                primary_name, fallback_prefix = _managed_additional_node_names(group_name)
+            except (TypeError, ValueError):
+                return False
+            expected_names = [primary_name]
+            expected_names.extend(
+                f"{fallback_prefix}{index}"
+                for index in range(1, len(member_names))
+            )
+            allowed_health_checks = AI_PROXY_ADDITIONAL_HEALTH_CHECKS
+        if member_names != expected_names or any(name not in node_by_name for name in member_names):
+            return False
+        select_group = _managed_proxy_group(
+            group_name,
+            member_names,
+            health_checked=False,
+            health_check_url=AI_PROXY_HEALTH_CHECK_URL,
+            expected_status=AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS,
+        )
+        valid_group_contract = group == select_group
+        if not valid_group_contract:
+            valid_group_contract = any(
+                group
+                == _managed_proxy_group(
+                    group_name,
+                    member_names,
+                    health_checked=True,
+                    health_check_url=health_url,
+                    expected_status=expected_status,
+                )
+                for health_url, expected_status in allowed_health_checks
+            )
+        if not valid_group_contract:
+            return False
+        try:
+            connection_keys = [
+                _proxy_node_connection_key(node_by_name[name]) for name in member_names
+            ]
+        except (TypeError, ValueError):
+            return False
+        if len(connection_keys) != len(set(connection_keys)) or any(
+            str(node_by_name[name].get("dialer-proxy") or "").strip()
+            for name in member_names[1:]
+        ):
+            return False
+        seen_group_names.add(group_name)
+        flattened_member_names.extend(member_names)
+
     proxy_group_contract_valid = bool(
-        managed_nodes_valid
-        and isinstance(proxy_groups, list)
-        and len(proxy_groups) == 1
-        and isinstance(ai_proxy_group, dict)
-        and isinstance(group_proxy_names, list)
-        and group_proxy_names == node_names
-        and ai_proxy_group in (select_group, fallback_group)
+        "AI-PROXY" in seen_group_names
+        and flattened_member_names == node_names
+        and len(flattened_member_names) == len(set(flattened_member_names))
     )
+
     def strict_rule_action(rule) -> str:
         text_rule = str(rule or "").strip()
         parts = [part.strip() for part in text_rule.split(",")]
@@ -3376,6 +3646,21 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     direct_rules = tuple(
         rule for rule in normalized_rules if strict_rule_action(rule) == "DIRECT"
     )
+    rule_actions = tuple(strict_rule_action(rule) for rule in normalized_rules)
+    additional_group_names = seen_group_names - {"AI-PROXY"}
+    referenced_additional_groups = set(rule_actions) & additional_group_names
+    strict_domain_routes: dict[str, str] = {}
+    for rule in normalized_rules:
+        parts = [part.strip() for part in rule.split(",")]
+        if len(parts) < 3 or parts[0] != "DOMAIN-SUFFIX":
+            continue
+        domain = _normalized_proxy_domain(parts[1])
+        action = strict_rule_action(rule)
+        if not domain or action == "AI-PROXY":
+            continue
+        if domain in strict_domain_routes and strict_domain_routes[domain] != action:
+            return False
+        strict_domain_routes[domain] = action
 
     controller = str(parsed.get("external-controller") or "").strip()
     try:
@@ -3408,9 +3693,11 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         and controller_is_loopback
         and normalized_rules[-1] == "MATCH,AI-PROXY"
         and all(
-            rule in PRIVATE_DIRECT_IP_RULES or strict_rule_action(rule) == "AI-PROXY"
+            rule in PRIVATE_DIRECT_IP_RULES
+            or strict_rule_action(rule) in seen_group_names
             for rule in normalized_rules
         )
+        and referenced_additional_groups == additional_group_names
         and direct_rules == PRIVATE_DIRECT_IP_RULES
         and parsed.get("ipv6") is False
         # This is an intentionally exact managed-config contract.  Besides
@@ -3423,7 +3710,7 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         and dns.get("use-hosts") is True
         and dns.get("use-system-hosts") is False
         and dns.get("respect-rules") is True
-        and dns == _strict_privacy_dns_config()
+        and dns == _strict_privacy_dns_config(domain_routes=strict_domain_routes)
     )
 
 
@@ -3481,10 +3768,11 @@ def _unique_clean_values(*groups) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _ip_cidr_rule(cidr: str) -> str:
+def _ip_cidr_rule(cidr: str, proxy_route: str = "AI-PROXY") -> str:
     text = str(cidr or "").strip()
     rule_type = "IP-CIDR6" if ":" in text else "IP-CIDR"
-    return f"{rule_type},{text},AI-PROXY,no-resolve"
+    route = _managed_proxy_route_name(proxy_route)
+    return f"{rule_type},{text},{route},no-resolve"
 
 
 def mihomo_controller_port(mixed_port: int) -> int:
