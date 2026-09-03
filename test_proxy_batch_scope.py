@@ -788,6 +788,11 @@ def test_ssh_delete_profile_restores_next_local_yaml_cache(monkeypatch):
         "saved_path": "managed.yaml",
     }
     calls = {"loaded": [], "release": 0}
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        lambda _profile_id: (),
+    )
     monkeypatch.setattr(remote_proxy, "try_acquire_proxy_subscription_hot_update", lambda: True)
     monkeypatch.setattr(remote_proxy, "delete_proxy_subscription_profile", lambda _profile_id: {})
     monkeypatch.setattr(remote_proxy, "load_proxy_subscription_state", lambda: state)
@@ -822,6 +827,33 @@ def test_ssh_delete_profile_restores_next_local_yaml_cache(monkeypatch):
     assert calls["loaded"] == [(state, 3)]
 
 
+def test_ssh_delete_profile_refuses_when_win11_service_route_uses_it(monkeypatch):
+    calls = {"deleted": 0, "status": []}
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        lambda _profile_id: ("youtube",),
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "delete_proxy_subscription_profile",
+        lambda _profile_id: calls.__setitem__("deleted", calls["deleted"] + 1),
+    )
+    monkeypatch.setattr("ui.tabs.ssh_tab.show_toast", lambda *_args, **_kwargs: None)
+
+    tab = object.__new__(SSHTab)
+    tab._proxy_busy = False
+    tab._proxy_subscription_profile_combo = _ValueStub("used")
+    tab._proxy_subscription_profile_options = {"used": "profile-b"}
+    tab._set_proxy_status = lambda message, *_args: calls["status"].append(message)
+    tab.winfo_toplevel = lambda: object()
+
+    tab._delete_proxy_subscription_profile()
+
+    assert calls["deleted"] == 0
+    assert "Win11 服务分流" in calls["status"][-1]
+
+
 def test_local_manual_subscription_fetch_failure_keeps_existing_nodes(monkeypatch):
     old_node = _node(1, "美国-旧缓存")
     old_key = remote_proxy.proxy_subscription_node_key(old_node)
@@ -842,6 +874,11 @@ def test_local_manual_subscription_fetch_failure_keeps_existing_nodes(monkeypatc
         local_proxy,
         "local_proxy_subscription_direct_fallback_allowed",
         lambda: False,
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        lambda _profile_id: (),
     )
     monkeypatch.setattr("ui.tabs.local_proxy_tab.threading.Thread", _ImmediateThread)
     monkeypatch.setattr(
@@ -1487,6 +1524,11 @@ def test_local_refresh_and_hot_update_fetches_then_applies_running_proxy(monkeyp
         local_proxy,
         "local_proxy_subscription_direct_fallback_allowed",
         lambda: False,
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        lambda _profile_id: (),
     )
     monkeypatch.setattr(
         remote_proxy,

@@ -2535,6 +2535,23 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
+        try:
+            local_bindings = local_proxy.local_proxy_service_bindings_for_profile(
+                profile_id
+            )
+        except Exception as exc:
+            message = f"无法确认该订阅是否正被 Win11 服务分流使用，已取消删除: {exc}"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        if local_bindings:
+            message = (
+                "该订阅正被 Win11 服务分流使用；请先在“Win11 本机代理”中"
+                "把对应服务改为“跟随当前节点”或其他订阅，再删除"
+            )
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
 
         def do_delete():
             lock_owned = False

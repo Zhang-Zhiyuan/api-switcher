@@ -48,7 +48,14 @@ except ImportError:  # pragma: no cover - POSIX
 from config.paths import STORAGE_DIR
 from core import persistent_env, remote_proxy, vscode_parser, wsl_proxy
 from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_text, replace_with_retry
-from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITE_IDS, LOCAL_PROXY_BUILTIN_SITES
+from core.local_proxy_constants import (
+    LOCAL_PROXY_AI_SERVICE_IDS,
+    LOCAL_PROXY_AI_SERVICES,
+    LOCAL_PROXY_BUILTIN_SITE_IDS,
+    LOCAL_PROXY_BUILTIN_SITES,
+    LOCAL_PROXY_CUSTOM_ROUTE_ID,
+    LOCAL_PROXY_SERVICE_ROUTE_IDS,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -502,9 +509,11 @@ def _load_local_proxy_routing_preferences_strict() -> dict:
             default=False,
             label="share_to_wsl",
         )
+        service_profile_bindings = _service_profile_bindings_authority_value(data)
         preferences = _normalize_local_proxy_preferences(data)
         preferences["strict_privacy"] = strict_privacy
         preferences["share_to_wsl"] = share_to_wsl
+        preferences["service_profile_bindings"] = service_profile_bindings
         return preferences
 
 
@@ -543,6 +552,39 @@ def _boolean_preference_authority_value(
         f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 的 {label} 值无效，"
         "已中止配置变更"
     )
+
+
+def _service_profile_bindings_authority_value(preferences: dict) -> dict[str, str]:
+    """Read service bindings without silently dropping a configured route."""
+
+    if "service_profile_bindings" not in preferences:
+        return {}
+    raw = preferences.get("service_profile_bindings")
+    if not isinstance(raw, dict):
+        raise RuntimeError(
+            f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 的 service_profile_bindings "
+            "必须是对象，已中止配置变更"
+        )
+    normalized: dict[str, str] = {}
+    for raw_service_id, raw_profile_id in raw.items():
+        service_id = str(raw_service_id or "").strip()
+        if service_id not in LOCAL_PROXY_SERVICE_ROUTE_IDS:
+            continue
+        if not isinstance(raw_profile_id, str):
+            raise RuntimeError(
+                f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 的 {service_id} "
+                "订阅绑定值无效，已中止配置变更"
+            )
+        profile_id = raw_profile_id.strip()
+        if not profile_id:
+            continue
+        if len(profile_id) > 64 or any(ord(char) < 32 for char in profile_id):
+            raise RuntimeError(
+                f"本机代理路由偏好 {LOCAL_PROXY_PREFS_PATH} 的 {service_id} "
+                "订阅绑定标识无效，已中止配置变更"
+            )
+        normalized[service_id] = profile_id
+    return normalized
 
 
 def local_proxy_strict_privacy_desired_authoritative() -> bool:
@@ -1157,6 +1199,154 @@ def set_builtin_proxy_site_enabled(site_id: str, enabled: bool) -> dict:
     return save_local_proxy_preferences(builtin_sites=builtin_sites)
 
 
+def _local_proxy_service_label(service_id: str) -> str:
+    key = str(service_id or "").strip()
+    for item in (*LOCAL_PROXY_AI_SERVICES, *LOCAL_PROXY_BUILTIN_SITES):
+        if str(item.get("id") or "") == key:
+            return str(item.get("label") or key)
+    if key == LOCAL_PROXY_CUSTOM_ROUTE_ID:
+        return "自定义目标"
+    return key or "服务"
+
+
+def _proxy_subscription_profile_for_route(profile_id: str) -> dict:
+    clean_id = str(profile_id or "").strip()
+    state = remote_proxy.load_proxy_subscription_state()
+    profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+    profile = profiles.get(clean_id)
+    if not isinstance(profile, dict):
+        raise ValueError("选择的订阅配置不存在，请重新选择")
+    cached = remote_proxy.load_cached_proxy_subscription(profile)
+    if cached is None or not cached.nodes:
+        name = str(profile.get("name") or "该订阅").strip() or "该订阅"
+        raise ValueError(f"订阅“{name}”还没有可用缓存，请先切换到它并拉取一次")
+    return profile
+
+
+def local_proxy_service_bindings_for_profile(profile_id: str) -> tuple[str, ...]:
+    clean_id = str(profile_id or "").strip()
+    if not clean_id:
+        return ()
+    # Subscription deletion and refresh decisions are authority-sensitive: a
+    # malformed preference file must not be normalized to an empty mapping and
+    # accidentally orphan a live route.
+    bindings = (
+        _load_local_proxy_routing_preferences_strict().get("service_profile_bindings")
+        or {}
+    )
+    return tuple(
+        service_id
+        for service_id, bound_profile_id in bindings.items()
+        if isinstance(bound_profile_id, str)
+        and hmac.compare_digest(bound_profile_id, clean_id)
+    )
+
+
+@_serialized_local_proxy_operation("应用服务订阅分流")
+def set_local_proxy_service_profile_binding_and_apply(
+    service_id: str,
+    profile_id: str = "",
+) -> str:
+    service_key = str(service_id or "").strip()
+    if service_key not in LOCAL_PROXY_SERVICE_ROUTE_IDS:
+        raise ValueError(f"未知代理服务: {service_id}")
+    target_profile_id = str(profile_id or "").strip()
+    target_profile = (
+        _proxy_subscription_profile_for_route(target_profile_id)
+        if target_profile_id
+        else {}
+    )
+    if target_profile:
+        _selected_subscription_route_pool(
+            target_profile,
+            ai_sensitive=service_key in LOCAL_PROXY_AI_SERVICE_IDS,
+        )
+    previous = _load_local_proxy_routing_preferences_strict()
+    previous_bindings = dict(previous.get("service_profile_bindings") or {})
+    previous_builtin_sites = dict(previous.get("builtin_sites") or {})
+    updated_bindings = dict(previous_bindings)
+    updated_builtin_sites = dict(previous_builtin_sites)
+    if target_profile_id:
+        updated_bindings[service_key] = target_profile_id
+        if service_key in LOCAL_PROXY_BUILTIN_SITE_IDS:
+            updated_builtin_sites[service_key] = True
+    else:
+        updated_bindings.pop(service_key, None)
+    if (
+        updated_bindings == previous_bindings
+        and updated_builtin_sites == previous_builtin_sites
+    ):
+        return f"{_local_proxy_service_label(service_key)} 的订阅线路未变化"
+
+    save_local_proxy_preferences(
+        service_profile_bindings=updated_bindings,
+        builtin_sites=updated_builtin_sites,
+    )
+    try:
+        apply_message = apply_local_proxy_routing_to_running()
+    except Exception as exc:
+        rollback_error = None
+        try:
+            save_local_proxy_preferences(
+                service_profile_bindings=previous_bindings,
+                builtin_sites=previous_builtin_sites,
+            )
+        except Exception as rollback_exc:
+            rollback_error = rollback_exc
+        suffix = (
+            f"；原绑定回滚失败: {rollback_error}"
+            if rollback_error is not None
+            else "；已恢复原绑定"
+        )
+        raise RuntimeError(f"服务订阅分流应用失败: {exc}{suffix}") from exc
+
+    service_label = _local_proxy_service_label(service_key)
+    if target_profile_id:
+        profile_name = str(target_profile.get("name") or "未命名订阅").strip()
+        binding_message = f"{service_label} 已绑定订阅“{profile_name}”"
+    else:
+        binding_message = f"{service_label} 已恢复跟随当前节点"
+    return f"{binding_message}；{apply_message}"
+
+
+@_serialized_local_proxy_operation("清理订阅服务绑定")
+def clear_local_proxy_service_profile_bindings_and_apply(profile_id: str) -> str:
+    clean_id = str(profile_id or "").strip()
+    if not clean_id:
+        return "没有需要清理的服务订阅绑定"
+    previous = _load_local_proxy_routing_preferences_strict()
+    previous_bindings = dict(previous.get("service_profile_bindings") or {})
+    affected = [
+        service_id
+        for service_id, bound_id in previous_bindings.items()
+        if hmac.compare_digest(str(bound_id), clean_id)
+    ]
+    if not affected:
+        return "该订阅没有被服务分流使用"
+    updated_bindings = {
+        service_id: bound_id
+        for service_id, bound_id in previous_bindings.items()
+        if service_id not in affected
+    }
+    save_local_proxy_preferences(service_profile_bindings=updated_bindings)
+    try:
+        apply_message = apply_local_proxy_routing_to_running()
+    except Exception as exc:
+        rollback_error = None
+        try:
+            save_local_proxy_preferences(service_profile_bindings=previous_bindings)
+        except Exception as rollback_exc:
+            rollback_error = rollback_exc
+        suffix = (
+            f"；原绑定回滚失败: {rollback_error}"
+            if rollback_error is not None
+            else "；已恢复原绑定"
+        )
+        raise RuntimeError(f"解除订阅服务绑定失败: {exc}{suffix}") from exc
+    labels = "、".join(_local_proxy_service_label(service_id) for service_id in affected)
+    return f"已将 {labels} 恢复为跟随当前节点；{apply_message}"
+
+
 @_serialized_local_proxy_operation("添加自定义代理目标")
 def add_custom_proxy_target(target: str, enabled: bool = True) -> dict:
     normalized = normalize_proxy_target(target)
@@ -1452,6 +1642,7 @@ def install_local_ai_proxy(
         wsl_target=wsl_target,
     )
     fallback_candidates = _managed_proxy_pool_size(config_content)
+    service_route_groups = _managed_service_route_count(config_content)
 
     state = _load_state()
     if not isinstance(state.get("previous_env"), dict):
@@ -1528,6 +1719,7 @@ def install_local_ai_proxy(
             "binary_path": str(binary_path),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
             "fallback_candidates": fallback_candidates,
+            "service_route_groups": service_route_groups,
             "installing": True,
             "updated_at": remote_proxy._now_iso(),
         }
@@ -1600,6 +1792,7 @@ def install_local_ai_proxy(
             "node_name": str(proxy_node.get("name") or ""),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
             "fallback_candidates": fallback_candidates,
+            "service_route_groups": service_route_groups,
             "installing": False,
             "updated_at": remote_proxy._now_iso(),
         }
@@ -1620,8 +1813,13 @@ def install_local_ai_proxy(
         + (f"{core_detail}；" if core_detail else "")
         + ("内核更新检查已转入后台，不阻塞代理启动；" if update_scheduled else "")
         + f"内核故障切换池 {fallback_candidates} 个节点；"
-        "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
-        "并临时关闭系统 PAC/自动检测代理；"
+        + (
+            f"服务订阅分流 {service_route_groups} 条独立线路；"
+            if service_route_groups
+            else ""
+        )
+        + "已写入 Windows 用户环境变量、VS Code 本机设置和当前用户系统代理，"
+        + "并临时关闭系统 PAC/自动检测代理；"
         + (f"{wsl_result.summary()}；" if wsl_result is not None else "")
         + "新终端或重开的 VS Code 窗口生效"
     )
@@ -1870,6 +2068,7 @@ def reload_local_ai_proxy(
         wsl_target=wsl_target,
     )
     current_pid = _read_pid()
+    service_route_groups = _managed_service_route_count(new_config)
     same_config = old_config.strip() == new_config.strip()
     applied_matches = _applied_local_config_matches(
         state,
@@ -1957,6 +2156,7 @@ def reload_local_ai_proxy(
             "node_name": str(proxy_node.get("name") or ""),
             "controller_port": remote_proxy.mihomo_controller_port(mixed_port),
             "fallback_candidates": _managed_proxy_pool_size(new_config),
+            "service_route_groups": service_route_groups,
             "updated_at": remote_proxy._now_iso(),
         }
     )
@@ -1973,6 +2173,11 @@ def reload_local_ai_proxy(
     return (
         f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}；"
         f"内核故障切换池 {fallback_candidates} 个节点"
+        + (
+            f"；服务订阅分流 {service_route_groups} 条独立线路"
+            if service_route_groups
+            else ""
+        )
         + (f"；{wsl_detail}" if wsl_detail else "")
     )
 
@@ -2148,6 +2353,67 @@ def refresh_running_local_ai_proxy_from_subscription(
         _prevalidated_result=selected_result,
         _expected_original_node=current_node,
     )
+
+
+@_serialized_local_proxy_operation("刷新服务订阅线路")
+def refresh_running_local_service_routes_from_subscription(
+    nodes,
+    *,
+    profile_id: str,
+) -> str:
+    """Refresh a bound profile without promoting it to the global main node."""
+
+    clean_id = str(profile_id or "").strip()
+    bound_services = local_proxy_service_bindings_for_profile(clean_id)
+    if not bound_services:
+        return "该订阅未绑定独立服务线路，已仅更新缓存"
+    candidates = tuple(
+        item
+        for item in (nodes or ())
+        if isinstance(item, remote_proxy.ProxySubscriptionNode)
+    )
+    if not candidates:
+        raise RuntimeError("订阅里没有可用于服务分流的节点")
+    state = remote_proxy.load_proxy_subscription_state()
+    profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+    profile = profiles.get(clean_id)
+    if not isinstance(profile, dict):
+        raise RuntimeError("服务分流订阅在刷新期间已被删除")
+    selected_key = str(profile.get("selected_node_key") or "").strip()
+    selected = next(
+        (
+            item
+            for item in candidates
+            if selected_key
+            and hmac.compare_digest(
+                remote_proxy.proxy_subscription_node_key(item),
+                selected_key,
+            )
+            and not str(item.node.get("dialer-proxy") or "").strip()
+        ),
+        None,
+    )
+    selection_changed = selected is None
+    if selected is None:
+        selected = next(
+            (
+                item
+                for item in candidates
+                if not str(item.node.get("dialer-proxy") or "").strip()
+            ),
+            None,
+        )
+    if selected is None:
+        raise RuntimeError("订阅节点都依赖订阅内其他出站，无法建立独立服务线路")
+    if selection_changed:
+        remote_proxy.set_proxy_subscription_selected_node(
+            selected.node,
+            profile_id=clean_id,
+        )
+    apply_message = apply_local_proxy_routing_to_running()
+    labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
+    selection_note = "；原选择已失效，已改用订阅中的首个独立节点" if selection_changed else ""
+    return f"已刷新 {labels} 的独立订阅节点池{selection_note}；{apply_message}"
 
 
 def current_local_ai_proxy_node_key() -> str:
@@ -2369,6 +2635,30 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
         details.append(core_detail)
     if failover_status.detail:
         details.append(failover_status.detail)
+    configured_service_bindings = len(preferences.get("service_profile_bindings") or {})
+    active_service_routes = 0
+    if installed:
+        try:
+            active_service_routes = _managed_service_route_count(
+                config_path.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            active_service_routes = 0
+    if running and configured_service_bindings and applied_config_matches:
+        if active_service_routes:
+            details.append(
+                f"服务订阅分流已生效: {configured_service_bindings} 项绑定，"
+                f"{active_service_routes} 条独立订阅线路"
+            )
+        else:
+            details.append(
+                f"服务订阅分流已生效: {configured_service_bindings} 项绑定均复用当前主线路"
+            )
+    elif configured_service_bindings:
+        details.append(
+            f"已保存 {configured_service_bindings} 项服务订阅绑定；"
+            + ("当前运行配置尚未应用" if running else "将在下次启动时应用")
+        )
     managed_wsl = state.get("managed_wsl_proxy") if isinstance(state, dict) else None
     if wsl_sharing_desired:
         if isinstance(managed_wsl, dict) and managed_wsl.get("enabled"):
@@ -3567,6 +3857,24 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
         except Exception:
             last_node = None
 
+    service_profile_bindings = {}
+    raw_bindings = raw.get("service_profile_bindings")
+    if isinstance(raw_bindings, dict):
+        for raw_service_id, raw_profile_id in raw_bindings.items():
+            service_id = str(raw_service_id or "").strip()
+            profile_id = (
+                str(raw_profile_id or "").strip()
+                if isinstance(raw_profile_id, str)
+                else ""
+            )
+            if (
+                service_id in LOCAL_PROXY_SERVICE_ROUTE_IDS
+                and profile_id
+                and len(profile_id) <= 64
+                and not any(ord(char) < 32 for char in profile_id)
+            ):
+                service_profile_bindings[service_id] = profile_id
+
     return {
         "start_on_login": _coerce_bool(raw.get("start_on_login")),
         "keep_running_on_exit": _coerce_bool(raw.get("keep_running_on_exit"), True),
@@ -3575,6 +3883,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
         "strict_privacy": _coerce_bool(raw.get("strict_privacy")),
         "builtin_sites": builtin_sites,
         "custom_targets": custom_targets,
+        "service_profile_bindings": service_profile_bindings,
         "last_node": last_node,
         "updated_at": str(raw.get("updated_at") or ""),
     }
@@ -3648,6 +3957,216 @@ def _routing_options_from_preferences(preferences: dict | None = None) -> dict:
     }
 
 
+def _subscription_route_group_name(profile_id: str) -> str:
+    digest = hashlib.sha256(str(profile_id).encode("utf-8")).hexdigest()[:12].upper()
+    return f"SUB-{digest}-PROXY"
+
+
+def _service_route_health_contract(service_ids) -> tuple[str, str]:
+    requested = {str(service_id or "").strip() for service_id in service_ids or ()}
+    for service in LOCAL_PROXY_AI_SERVICES:
+        if str(service.get("id") or "") in requested:
+            return (
+                str(service.get("health_check_url") or ""),
+                str(service.get("health_check_expected_status") or ""),
+            )
+    if "youtube" in requested:
+        return "https://www.youtube.com/generate_204", "204"
+    return "https://www.gstatic.com/generate_204", "204"
+
+
+def _explicit_subscription_fallback_nodes(
+    primary_node: dict,
+    candidate_nodes,
+) -> tuple[dict, ...]:
+    """Keep an explicitly bound profile inside its own bounded node pool."""
+
+    try:
+        primary_connection_key = remote_proxy._proxy_node_connection_key(primary_node)
+    except (TypeError, ValueError):
+        return ()
+    selected = []
+    seen = {primary_connection_key}
+    for item in candidate_nodes or ():
+        if len(selected) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES - 1:
+            break
+        if not isinstance(item, remote_proxy.ProxySubscriptionNode):
+            continue
+        try:
+            normalized = remote_proxy._normalize_proxy_node(item.node)
+            connection_key = remote_proxy._proxy_node_connection_key(normalized)
+        except (TypeError, ValueError):
+            continue
+        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
+            continue
+        selected.append(normalized)
+        seen.add(connection_key)
+    return tuple(selected)
+
+
+def _selected_subscription_route_pool(
+    profile: dict,
+    *,
+    ai_sensitive: bool,
+) -> tuple[dict, tuple[dict, ...]]:
+    cached = remote_proxy.load_cached_proxy_subscription(profile)
+    if cached is None or not cached.nodes:
+        name = str(profile.get("name") or "该订阅").strip() or "该订阅"
+        raise RuntimeError(f"服务分流订阅“{name}”没有可用缓存，请先拉取或导入")
+    selected_key = str(profile.get("selected_node_key") or "").strip()
+    selected_item = next(
+        (
+            item
+            for item in cached.nodes
+            if selected_key
+            and hmac.compare_digest(
+                remote_proxy.proxy_subscription_node_key(item),
+                selected_key,
+            )
+        ),
+        None,
+    )
+    if selected_item is None:
+        selected_item = cached.nodes[0]
+    primary_node = remote_proxy._normalize_proxy_node(selected_item.node)
+    if str(primary_node.get("dialer-proxy") or "").strip():
+        name = str(profile.get("name") or "该订阅").strip() or "该订阅"
+        raise RuntimeError(
+            f"服务分流订阅“{name}”当前节点依赖订阅内其他出站，"
+            "请在该订阅中选择一个可独立运行的节点"
+        )
+    if ai_sensitive:
+        qualities = remote_proxy.load_proxy_subscription_qualities(profile)
+        fallback_nodes = _local_proxy_fallback_nodes(
+            primary_node,
+            cached.nodes,
+            qualities,
+        )
+    else:
+        fallback_nodes = _explicit_subscription_fallback_nodes(
+            primary_node,
+            cached.nodes,
+        )
+    return primary_node, fallback_nodes
+
+
+def _active_service_route_targets(preferences: dict) -> dict[str, dict[str, tuple[str, ...]]]:
+    targets: dict[str, dict[str, tuple[str, ...]]] = {}
+    for service in LOCAL_PROXY_AI_SERVICES:
+        service_id = str(service.get("id") or "")
+        targets[service_id] = {
+            "domains": tuple(str(value) for value in service.get("targets") or ()),
+            "ip_cidrs": (),
+        }
+    builtin_sites = (
+        preferences.get("builtin_sites")
+        if isinstance(preferences.get("builtin_sites"), dict)
+        else {}
+    )
+    for site in LOCAL_PROXY_BUILTIN_SITES:
+        site_id = str(site.get("id") or "")
+        if _coerce_bool(builtin_sites.get(site_id)):
+            targets[site_id] = {
+                "domains": tuple(str(value) for value in site.get("targets") or ()),
+                "ip_cidrs": (),
+            }
+    custom_domains = []
+    custom_ip_cidrs = []
+    for entry in preferences.get("custom_targets") or ():
+        if not isinstance(entry, dict) or not _coerce_bool(entry.get("enabled"), True):
+            continue
+        if entry.get("kind") == "domain":
+            custom_domains.append(str(entry.get("value") or ""))
+        elif entry.get("kind") == "ip-cidr":
+            custom_ip_cidrs.append(str(entry.get("value") or ""))
+    if custom_domains or custom_ip_cidrs:
+        targets[LOCAL_PROXY_CUSTOM_ROUTE_ID] = {
+            "domains": tuple(custom_domains),
+            "ip_cidrs": tuple(custom_ip_cidrs),
+        }
+    return targets
+
+
+def _resolve_service_subscription_routes(
+    preferences: dict,
+) -> dict:
+    bindings = (
+        preferences.get("service_profile_bindings")
+        if isinstance(preferences.get("service_profile_bindings"), dict)
+        else {}
+    )
+    active_targets = _active_service_route_targets(preferences)
+    requested: dict[str, dict] = {}
+    for service_id, target in active_targets.items():
+        profile_id = str(bindings.get(service_id) or "").strip()
+        if not profile_id:
+            continue
+        entry = requested.setdefault(
+            profile_id,
+            {"service_ids": [], "domains": [], "ip_cidrs": []},
+        )
+        entry["service_ids"].append(service_id)
+        entry["domains"].extend(target.get("domains") or ())
+        entry["ip_cidrs"].extend(target.get("ip_cidrs") or ())
+    if not requested:
+        return {
+            "additional_proxy_groups": (),
+            "proxy_domain_routes": {},
+            "proxy_ip_cidr_routes": {},
+        }
+
+    state = remote_proxy.load_proxy_subscription_state()
+    profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+    additional_groups = []
+    domain_routes: dict[str, str] = {}
+    ip_cidr_routes: dict[str, str] = {}
+    seen_group_names: dict[str, str] = {}
+    for profile_id, request in requested.items():
+        profile = profiles.get(profile_id)
+        if not isinstance(profile, dict):
+            services = "、".join(
+                _local_proxy_service_label(service_id)
+                for service_id in request["service_ids"]
+            )
+            raise RuntimeError(f"{services} 绑定的订阅已被删除，请重新选择")
+        ai_sensitive = bool(set(request["service_ids"]) & LOCAL_PROXY_AI_SERVICE_IDS)
+        route_node, route_fallbacks = _selected_subscription_route_pool(
+            profile,
+            ai_sensitive=ai_sensitive,
+        )
+        # An explicit binding always owns an isolated group, even when its
+        # selected node currently matches AI-PROXY.  This keeps subsequent
+        # subscription refreshes and fallback changes independent from the
+        # global main-node lifecycle.
+        group_name = _subscription_route_group_name(profile_id)
+        collision_profile = seen_group_names.get(group_name)
+        if collision_profile and collision_profile != profile_id:
+            raise RuntimeError("服务订阅分流标识发生冲突，请重新保存其中一个订阅")
+        seen_group_names[group_name] = profile_id
+        health_url, expected_status = _service_route_health_contract(
+            request["service_ids"]
+        )
+        additional_groups.append(
+            {
+                "name": group_name,
+                "proxy_node": route_node,
+                "fallback_proxy_nodes": route_fallbacks,
+                "health_checked": True,
+                "health_check_url": health_url,
+                "health_check_expected_status": expected_status,
+            }
+        )
+        for domain in request["domains"]:
+            domain_routes[str(domain)] = group_name
+        for cidr in request["ip_cidrs"]:
+            ip_cidr_routes[str(cidr)] = group_name
+    return {
+        "additional_proxy_groups": tuple(additional_groups),
+        "proxy_domain_routes": domain_routes,
+        "proxy_ip_cidr_routes": ip_cidr_routes,
+    }
+
+
 def _build_local_mihomo_config(
     proxy_node: dict,
     mixed_port: int,
@@ -3663,6 +4182,8 @@ def _build_local_mihomo_config(
             raise RuntimeError("WSL 代理共享只支持 Windows")
         wsl_target = wsl_proxy.discover_default_wsl_target()
     lan_allowed_ips = wsl_target.lan_allowed_ips if wsl_target is not None else ()
+    routing_options = _routing_options_from_preferences(preferences)
+    service_routes = _resolve_service_subscription_routes(preferences)
     return remote_proxy.build_mihomo_config(
         proxy_node,
         mixed_port,
@@ -3675,7 +4196,8 @@ def _build_local_mihomo_config(
         # explicit probes provide bounded diagnostics without an unbounded log
         # containing destination metadata.
         log_level="silent",
-        **_routing_options_from_preferences(preferences),
+        **routing_options,
+        **service_routes,
         lan_allowed_ips=lan_allowed_ips,
     )
 
@@ -3685,8 +4207,38 @@ def _managed_proxy_pool_size(config_content: str) -> int:
         parsed = remote_proxy.yaml.safe_load(str(config_content or ""))
     except Exception:
         return 0
-    proxies = parsed.get("proxies") if isinstance(parsed, dict) else None
-    return len(proxies) if isinstance(proxies, list) else 0
+    groups = parsed.get("proxy-groups") if isinstance(parsed, dict) else None
+    if not isinstance(groups, list):
+        return 0
+    ai_group = next(
+        (
+            group
+            for group in groups
+            if isinstance(group, dict)
+            and str(group.get("name") or "").strip() == "AI-PROXY"
+        ),
+        None,
+    )
+    members = ai_group.get("proxies") if isinstance(ai_group, dict) else None
+    return len(members) if isinstance(members, list) else 0
+
+
+def _managed_service_route_count(config_content: str) -> int:
+    try:
+        parsed = remote_proxy.yaml.safe_load(str(config_content or ""))
+    except Exception:
+        return 0
+    groups = parsed.get("proxy-groups") if isinstance(parsed, dict) else None
+    if not isinstance(groups, list):
+        return 0
+    return sum(
+        1
+        for group in groups
+        if isinstance(group, dict)
+        and remote_proxy.AI_PROXY_ADDITIONAL_GROUP_PATTERN.fullmatch(
+            str(group.get("name") or "").strip()
+        )
+    )
 
 
 def _local_proxy_fallback_nodes(
@@ -3741,20 +4293,41 @@ def _existing_local_proxy_fallback_nodes(primary_node: dict) -> tuple[dict, ...]
         content = config_path.read_text(encoding="utf-8", errors="replace")
         parsed = remote_proxy.yaml.safe_load(content)
         proxy_nodes = parsed.get("proxies") if isinstance(parsed, dict) else None
+        proxy_groups = parsed.get("proxy-groups") if isinstance(parsed, dict) else None
         primary_key = remote_proxy._proxy_node_connection_key(primary_node)
     except Exception:
         return ()
     if (
         remote_proxy.AI_PROXY_CONFIG_MARKER not in content
         or not isinstance(proxy_nodes, list)
+        or not isinstance(proxy_groups, list)
     ):
         return ()
 
+    ai_group = next(
+        (
+            group
+            for group in proxy_groups
+            if isinstance(group, dict)
+            and str(group.get("name") or "").strip() == "AI-PROXY"
+        ),
+        None,
+    )
+    member_names = ai_group.get("proxies") if isinstance(ai_group, dict) else None
+    if not isinstance(member_names, list):
+        return ()
+    nodes_by_name = {
+        str(node.get("name") or "").strip(): node
+        for node in proxy_nodes
+        if isinstance(node, dict) and str(node.get("name") or "").strip()
+    }
+
     selected = []
     seen = {primary_key}
-    for node in proxy_nodes:
+    for member_name in member_names:
         if len(selected) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES - 1:
             break
+        node = nodes_by_name.get(str(member_name or "").strip())
         if not isinstance(node, dict):
             continue
         try:

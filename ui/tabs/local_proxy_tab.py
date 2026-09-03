@@ -5,7 +5,11 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
-from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITES
+from core.local_proxy_constants import (
+    LOCAL_PROXY_AI_SERVICES,
+    LOCAL_PROXY_BUILTIN_SITES,
+    LOCAL_PROXY_CUSTOM_ROUTE_ID,
+)
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import infer_feedback_severity, safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
@@ -20,6 +24,8 @@ remote_proxy = LazyModule("core.remote_proxy")
 startup_manager = LazyModule("core.startup_manager")
 
 LOCAL_YAML_NODE_ONLY_NOTICE = "本地 YAML 只导入 proxies 节点，不继承顶层 dns/tun。"
+SERVICE_ROUTE_DEFAULT_LABEL = "跟随当前节点"
+SERVICE_ROUTE_MISSING_LABEL = "原订阅已删除（请重新选择）"
 
 
 def _local_proxy_tab_layout(width: int) -> tuple[bool, int, int, int, bool]:
@@ -54,6 +60,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_profile_save_button = None
         self._subscription_profile_delete_button = None
         self._subscription_profile_options = {}
+        self._subscription_profiles_snapshot = []
         self._subscription_profile_loading = False
         self._subscription_picker = None
         self._subscription_picker_host = None
@@ -91,6 +98,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._strict_privacy_var = ctk.BooleanVar(value=False)
         self._strict_privacy_check = None
         self._builtin_site_vars = {}
+        self._builtin_site_tiles = []
+        self._service_route_combos = {}
+        self._service_route_bindings = {}
+        self._service_route_profile_options = {SERVICE_ROUTE_DEFAULT_LABEL: ""}
+        self._service_route_profile_labels = {"": SERVICE_ROUTE_DEFAULT_LABEL}
+        self._service_route_combo_loading = False
         self._custom_target_entry = None
         self._custom_target_frame = None
         self._routing_status_label = None
@@ -269,6 +282,55 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         privacy_notice.pack(anchor="w", fill="x", pady=(5, 0))
         bind_wraplength(privacy_box, privacy_notice, padding=8, min_width=240, max_width=920)
 
+        self._service_routes_label = ctk.CTkLabel(
+            policy,
+            text="AI 服务线路",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        )
+        self._service_routes_label.grid(row=3, column=0, sticky="nw", pady=(12, 0))
+        ai_route_box = ctk.CTkFrame(policy, fg_color="transparent")
+        self._ai_route_box = ai_route_box
+        ai_route_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self._ai_route_tiles = []
+        for index, service in enumerate(LOCAL_PROXY_AI_SERVICES):
+            service_id = str(service["id"])
+            tile = ctk.CTkFrame(ai_route_box, fg_color="transparent")
+            tile.grid(row=0, column=index, sticky="ew", padx=(0, 10) if index < 2 else 0)
+            ctk.CTkLabel(
+                tile,
+                text=str(service["label"]),
+                text_color=COLORS["text"],
+                font=font(11),
+                anchor="w",
+            ).pack(anchor="w")
+            combo = ctk.CTkComboBox(
+                tile,
+                values=[SERVICE_ROUTE_DEFAULT_LABEL],
+                command=lambda label, value=service_id: self._on_service_route_selected(value, label),
+                **combo_style(),
+            )
+            combo.pack(fill="x", pady=(3, 0))
+            combo.set(SERVICE_ROUTE_DEFAULT_LABEL)
+            self._service_route_combos[service_id] = combo
+            self._ai_route_tiles.append(tile)
+        route_notice = ctk.CTkLabel(
+            ai_route_box,
+            text=(
+                "可把每项绑定到任一已保存订阅；绑定只读取该订阅已选节点和备用池，"
+                "不会切换订阅页面，也不会改动 Codex/Claude 登录状态。"
+                "第三方 API 地址请先加入下方自定义目标，再为自定义目标选择线路。"
+            ),
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+            justify="left",
+        )
+        self._service_route_notice = route_notice
+        route_notice.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        bind_wraplength(ai_route_box, route_notice, padding=8, min_width=220, max_width=850)
+
         self._builtin_sites_label = ctk.CTkLabel(
             policy,
             text="内置站点",
@@ -276,19 +338,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         )
-        self._builtin_sites_label.grid(row=3, column=0, sticky="nw", pady=(12, 0))
+        self._builtin_sites_label.grid(row=4, column=0, sticky="nw", pady=(12, 0))
         builtin_box = ctk.CTkFrame(policy, fg_color="transparent")
         self._builtin_box = builtin_box
-        builtin_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        builtin_box.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
         builtin_box.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self._builtin_site_vars = {}
         self._builtin_site_checks = []
+        self._builtin_site_tiles = []
         for index, site in enumerate(LOCAL_PROXY_BUILTIN_SITES):
             site_id = str(site["id"])
             var = ctk.BooleanVar(value=False)
             self._builtin_site_vars[site_id] = var
+            tile = ctk.CTkFrame(builtin_box, fg_color="transparent")
+            tile.grid(row=index // 4, column=index % 4, sticky="ew", padx=(0, 12), pady=(0, 8))
             checkbox = ctk.CTkCheckBox(
-                builtin_box,
+                tile,
                 text=str(site["label"]),
                 variable=var,
                 command=lambda value=site_id: self._on_builtin_site_toggle(value),
@@ -297,8 +362,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 text_color=COLORS["text"],
                 font=font(12),
             )
-            checkbox.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 14), pady=(0, 8))
+            checkbox.pack(anchor="w")
+            combo = ctk.CTkComboBox(
+                tile,
+                values=[SERVICE_ROUTE_DEFAULT_LABEL],
+                command=lambda label, value=site_id: self._on_service_route_selected(value, label),
+                **combo_style(),
+            )
+            combo.pack(fill="x", pady=(4, 0))
+            combo.set(SERVICE_ROUTE_DEFAULT_LABEL)
+            self._service_route_combos[site_id] = combo
             self._builtin_site_checks.append(checkbox)
+            self._builtin_site_tiles.append(tile)
 
         self._custom_target_label = ctk.CTkLabel(
             policy,
@@ -307,10 +382,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         )
-        self._custom_target_label.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self._custom_target_label.grid(row=5, column=0, sticky="w", pady=(6, 0))
         custom_box = ctk.CTkFrame(policy, fg_color="transparent")
         self._custom_box = custom_box
-        custom_box.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        custom_box.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         custom_box.grid_columnconfigure(0, weight=1)
         self._custom_target_entry = ctk.CTkEntry(
             custom_box,
@@ -327,8 +402,30 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._custom_add_button.grid(row=0, column=1, sticky="e")
 
+        self._custom_route_row = ctk.CTkFrame(custom_box, fg_color="transparent")
+        self._custom_route_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ctk.CTkLabel(
+            self._custom_route_row,
+            text="自定义目标线路",
+            text_color=COLORS["muted_soft"],
+            font=font(11),
+            anchor="w",
+        ).pack(side="left", padx=(0, 8))
+        custom_route_combo = ctk.CTkComboBox(
+            self._custom_route_row,
+            values=[SERVICE_ROUTE_DEFAULT_LABEL],
+            command=lambda label: self._on_service_route_selected(
+                LOCAL_PROXY_CUSTOM_ROUTE_ID,
+                label,
+            ),
+            **combo_style(),
+        )
+        custom_route_combo.pack(side="left", fill="x", expand=True)
+        custom_route_combo.set(SERVICE_ROUTE_DEFAULT_LABEL)
+        self._service_route_combos[LOCAL_PROXY_CUSTOM_ROUTE_ID] = custom_route_combo
+
         self._custom_target_frame = ctk.CTkFrame(policy, fg_color="transparent")
-        self._custom_target_frame.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self._custom_target_frame.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
 
         self._routing_status_label = ctk.CTkLabel(
             policy,
@@ -341,7 +438,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._routing_status_label.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self._routing_status_label.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         bind_wraplength(policy, self._routing_status_label, padding=20)
 
         node_frame = ctk.CTkFrame(self, **card_frame_kwargs())
@@ -826,11 +923,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pady=(0, 6) if index < len(self._startup_items) - startup_columns else 0,
             )
 
+        ai_route_box = self._ai_route_box
+        self._reset_grid_columns(ai_route_box, 4)
+        ai_route_columns = min(3, builtin_columns)
+        for column in range(ai_route_columns):
+            ai_route_box.grid_columnconfigure(column, weight=1, uniform="proxy-ai-routes")
+        for index, widget in enumerate(self._ai_route_tiles):
+            widget.grid(
+                row=index // ai_route_columns,
+                column=index % ai_route_columns,
+                sticky="ew",
+                padx=(0, 10) if index % ai_route_columns < ai_route_columns - 1 else 0,
+                pady=(0, 6) if index < len(self._ai_route_tiles) - ai_route_columns else 0,
+            )
+        self._service_route_notice.grid(
+            row=(len(self._ai_route_tiles) + ai_route_columns - 1) // ai_route_columns,
+            column=0,
+            columnspan=ai_route_columns,
+            sticky="ew",
+            pady=(4, 0),
+        )
+
         builtin_box = self._builtin_box
         self._reset_grid_columns(builtin_box, 4)
         for column in range(builtin_columns):
             builtin_box.grid_columnconfigure(column, weight=1, uniform="proxy-builtins")
-        for index, widget in enumerate(self._builtin_site_checks):
+        for index, widget in enumerate(self._builtin_site_tiles):
             widget.grid(
                 row=index // builtin_columns,
                 column=index % builtin_columns,
@@ -856,21 +974,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             sticky="ew" if custom_stacked else "e",
             pady=(6, 0) if custom_stacked else 0,
         )
+        self._custom_route_row.grid(
+            row=2 if custom_stacked else 1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(6, 0),
+        )
 
         if stacked:
-            self._builtin_sites_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(12, 0))
-            builtin_box.grid(row=4, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
-            self._custom_target_label.grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
-            custom_box.grid(row=6, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._custom_target_frame.grid(row=7, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
-            self._routing_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+            self._service_routes_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(12, 0))
+            ai_route_box.grid(row=4, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
+            self._builtin_sites_label.grid(row=5, column=0, columnspan=4, sticky="w", pady=(12, 0))
+            builtin_box.grid(row=6, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
+            self._custom_target_label.grid(row=7, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            custom_box.grid(row=8, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._custom_target_frame.grid(row=9, column=0, columnspan=4, sticky="ew", padx=0, pady=(8, 0))
+            self._routing_status_label.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         else:
-            self._builtin_sites_label.grid(row=3, column=0, columnspan=1, sticky="nw", pady=(12, 0))
-            builtin_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
-            self._custom_target_label.grid(row=4, column=0, columnspan=1, sticky="w", pady=(6, 0))
-            custom_box.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
-            self._custom_target_frame.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
-            self._routing_status_label.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+            self._service_routes_label.grid(row=3, column=0, columnspan=1, sticky="nw", pady=(12, 0))
+            ai_route_box.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            self._builtin_sites_label.grid(row=4, column=0, columnspan=1, sticky="nw", pady=(12, 0))
+            builtin_box.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            self._custom_target_label.grid(row=5, column=0, columnspan=1, sticky="w", pady=(6, 0))
+            custom_box.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._custom_target_frame.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            self._routing_status_label.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
 
         controls = self._controls_grid
         self._reset_grid_columns(controls, 4)
@@ -1271,6 +1400,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 widget.configure(state=state)
             except Exception:
                 pass
+        for combo in getattr(self, "_service_route_combos", {}).values():
+            try:
+                combo.configure(state=state)
+            except Exception:
+                pass
 
     def _load_proxy_preferences_ui(self):
         self._preferences_load_generation += 1
@@ -1308,6 +1442,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         builtin_sites = preferences.get("builtin_sites") if isinstance(preferences.get("builtin_sites"), dict) else {}
         for site_id, var in self._builtin_site_vars.items():
             var.set(bool(builtin_sites.get(site_id)))
+        self._service_route_bindings = dict(
+            preferences.get("service_profile_bindings")
+            if isinstance(preferences.get("service_profile_bindings"), dict)
+            else {}
+        )
+        self._refresh_service_route_profile_options()
         self._render_custom_targets(preferences.get("custom_targets") or [])
         enabled_sites = sum(1 for enabled in builtin_sites.values() if enabled)
         enabled_custom = sum(1 for item in preferences.get("custom_targets") or [] if item.get("enabled", True))
@@ -1321,9 +1461,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 "或忽略代理的程序绕过"
             )
         wsl_mode = "WSL 共享已开启" if preferences.get("share_to_wsl") else "WSL 共享未开启"
+        binding_count = len(self._service_route_bindings)
         self._set_routing_status(
             f"当前规则: {mode}；{wsl_mode}；内置站点 {enabled_sites} 个，"
-            f"自定义目标 {enabled_custom} 个。{boundary}。"
+            f"自定义目标 {enabled_custom} 个；服务独立订阅绑定 {binding_count} 项。{boundary}。"
         )
 
     def _render_custom_targets(self, entries):
@@ -1687,6 +1828,100 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if value:
             entry.insert(0, value)
 
+    def _service_route_label(self, service_id: str) -> str:
+        key = str(service_id or "").strip()
+        for item in (*LOCAL_PROXY_AI_SERVICES, *LOCAL_PROXY_BUILTIN_SITES):
+            if str(item.get("id") or "") == key:
+                return str(item.get("label") or key)
+        if key == LOCAL_PROXY_CUSTOM_ROUTE_ID:
+            return "自定义目标"
+        return key or "服务"
+
+    def _refresh_service_route_profile_options(self, profiles=None):
+        if profiles is not None:
+            self._subscription_profiles_snapshot = [
+                dict(profile) for profile in profiles if isinstance(profile, dict)
+            ]
+        snapshots = list(getattr(self, "_subscription_profiles_snapshot", []) or [])
+        values = [SERVICE_ROUTE_DEFAULT_LABEL]
+        mapping = {SERVICE_ROUTE_DEFAULT_LABEL: ""}
+        labels_by_id = {"": SERVICE_ROUTE_DEFAULT_LABEL}
+        seen = {SERVICE_ROUTE_DEFAULT_LABEL}
+        for index, profile in enumerate(snapshots, 1):
+            profile_id = str(profile.get("id") or "").strip()
+            if not profile_id:
+                continue
+            label = self._subscription_profile_label(profile)
+            if not str(profile.get("saved_path") or "").strip():
+                label = f"{label} · 未拉取"
+            candidate = label
+            suffix = 2
+            while candidate in seen:
+                candidate = f"{label} ({suffix})"
+                suffix += 1
+            label = candidate
+            seen.add(label)
+            values.append(label)
+            mapping[label] = profile_id
+            labels_by_id[profile_id] = label
+        self._service_route_profile_options = mapping
+        self._service_route_profile_labels = labels_by_id
+        self._service_route_combo_loading = True
+        try:
+            bindings = dict(getattr(self, "_service_route_bindings", {}) or {})
+            for service_id, combo in getattr(self, "_service_route_combos", {}).items():
+                profile_id = str(bindings.get(service_id) or "").strip()
+                selected_label = labels_by_id.get(
+                    profile_id,
+                    SERVICE_ROUTE_MISSING_LABEL if profile_id else SERVICE_ROUTE_DEFAULT_LABEL,
+                )
+                combo_values = list(values)
+                if selected_label == SERVICE_ROUTE_MISSING_LABEL:
+                    combo_values.append(SERVICE_ROUTE_MISSING_LABEL)
+                try:
+                    combo.configure(values=combo_values)
+                    combo.set(selected_label)
+                except Exception:
+                    continue
+        finally:
+            self._service_route_combo_loading = False
+
+    def _on_service_route_selected(self, service_id: str, label: str):
+        if self._service_route_combo_loading:
+            return
+        service_key = str(service_id or "").strip()
+        selected_label = str(label or "").strip()
+        if self._busy:
+            self._refresh_service_route_profile_options()
+            show_toast(
+                self.winfo_toplevel(),
+                "当前代理操作正在运行，请稍后再修改服务线路",
+                is_error=True,
+            )
+            return
+        if selected_label not in self._service_route_profile_options:
+            self._refresh_service_route_profile_options()
+            message = "原订阅绑定已失效，请从现有订阅或“跟随当前节点”中重新选择"
+            self._set_routing_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        profile_id = self._service_route_profile_options[selected_label]
+        if str(self._service_route_bindings.get(service_key) or "") == profile_id:
+            return
+        service_label = self._service_route_label(service_key)
+
+        self._run_local_task(
+            f"正在保存并应用 {service_label} 的订阅线路...",
+            lambda: local_proxy.set_local_proxy_service_profile_binding_and_apply(
+                service_key,
+                profile_id,
+            ),
+            "应用服务订阅分流",
+            on_success=lambda _result: self._load_proxy_preferences_ui(),
+            on_error=lambda _error=None: self._load_proxy_preferences_ui(),
+            failure_hint="旧运行配置与原服务绑定已保留，不会切换账号登录状态",
+        )
+
     def _subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()
         url = str(profile.get("url") or "").strip()
@@ -1704,6 +1939,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _refresh_subscription_profile_options(self, state: dict | None = None):
         profiles = remote_proxy.list_proxy_subscription_profiles()
+        self._refresh_service_route_profile_options(profiles)
         active_id = str((state or remote_proxy.load_proxy_subscription_state()).get("active_profile_id") or "")
         values = []
         mapping = {}
@@ -1833,6 +2069,28 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         profile_id = self._subscription_profile_options.get(label)
         if not profile_id:
             message = "当前没有可删除的订阅配置"
+            self._set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
+        try:
+            bound_service_ids = local_proxy.local_proxy_service_bindings_for_profile(
+                profile_id
+            )
+        except Exception:
+            bound_service_ids = tuple(
+                service_id
+                for service_id, bound_profile_id in self._service_route_bindings.items()
+                if str(bound_profile_id or "") == profile_id
+            )
+        bound_services = [
+            self._service_route_label(service_id)
+            for service_id in bound_service_ids
+        ]
+        if bound_services:
+            message = (
+                f"该订阅正被 {'、'.join(bound_services)} 使用；"
+                "请先把对应线路改为“跟随当前节点”或其他订阅，再删除"
+            )
             self._set_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
@@ -2190,6 +2448,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     "apply_error": "",
                     "profile": dict(profile),
                     "profile_changed": False,
+                    "bound_route": False,
                 }
                 try:
                     try:
@@ -2215,31 +2474,49 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                             profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
                             profile_snapshot = dict(profiles.get(profile_id) or profile)
                             payload["profile"] = profile_snapshot
-                            if str(state.get("active_profile_id") or "") != profile_id:
-                                payload["profile_changed"] = True
-                                payload["apply"] = "订阅分组已切换，仅刷新原分组缓存，未更新运行中的本机代理"
-                            else:
-                                quality_results = dict(profile_snapshot.get("node_qualities") or {})
-                                try:
+                            payload["profile_changed"] = (
+                                str(state.get("active_profile_id") or "") != profile_id
+                            )
+                            quality_results = dict(profile_snapshot.get("node_qualities") or {})
+                            try:
+                                bound_services = (
+                                    local_proxy.local_proxy_service_bindings_for_profile(
+                                        profile_id
+                                    )
+                                )
+                                payload["bound_route"] = bool(bound_services)
+                                if bound_services:
+                                    payload["apply"] = (
+                                        local_proxy.refresh_running_local_service_routes_from_subscription(
+                                            result.nodes,
+                                            profile_id=profile_id,
+                                        )
+                                    )
+                                elif payload["profile_changed"]:
+                                    payload["apply"] = (
+                                        "订阅分组已切换，仅刷新原分组缓存，"
+                                        "未更新运行中的本机主节点"
+                                    )
+                                else:
                                     payload["apply"] = local_proxy.refresh_running_local_ai_proxy_from_subscription(
                                         result.nodes,
                                         quality_results=quality_results,
                                         profile_id=profile_id,
                                     )
-                                except Exception as exc:
-                                    payload["apply_error"] = str(exc)
-                                try:
-                                    refreshed_state = remote_proxy.load_proxy_subscription_state()
-                                    refreshed_profiles = (
-                                        refreshed_state.get("profiles")
-                                        if isinstance(refreshed_state.get("profiles"), dict)
-                                        else {}
-                                    )
-                                    payload["profile"] = dict(
-                                        refreshed_profiles.get(profile_id) or profile_snapshot
-                                    )
-                                except Exception:
-                                    pass
+                            except Exception as exc:
+                                payload["apply_error"] = str(exc)
+                            try:
+                                refreshed_state = remote_proxy.load_proxy_subscription_state()
+                                refreshed_profiles = (
+                                    refreshed_state.get("profiles")
+                                    if isinstance(refreshed_state.get("profiles"), dict)
+                                    else {}
+                                )
+                                payload["profile"] = dict(
+                                    refreshed_profiles.get(profile_id) or profile_snapshot
+                                )
+                            except Exception:
+                                pass
                         except Exception as exc:
                             payload["apply_error"] = f"无法确认当前订阅分组，已跳过运行态更新: {exc}"
                 finally:
@@ -2268,7 +2545,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
                         profile_snapshot = payload.get("profile") or {}
                         if payload["profile_changed"]:
-                            message = f"Win11 代理{mode}热更新完成；{payload['apply']}"
+                            if payload["apply_error"]:
+                                message = (
+                                    f"Win11 代理{mode}订阅已刷新，但独立服务线路更新失败，"
+                                    f"已保留原运行配置: {payload['apply_error']}"
+                                )
+                            else:
+                                message = f"Win11 代理{mode}热更新完成；{payload['apply']}"
                             if proxy_warning:
                                 message = f"{proxy_warning}；{message}"
                             self._set_status(message, "warning")
@@ -2278,10 +2561,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
                         current_state = remote_proxy.load_proxy_subscription_state()
                         if str(current_state.get("active_profile_id") or "") != profile_id:
-                            message = (
-                                f"Win11 代理{mode}热更新已完成，但当前分组已切换；"
-                                "新节点保存在原分组，当前界面保持不变"
-                            )
+                            if payload["bound_route"] and payload["apply_error"]:
+                                message = (
+                                    f"Win11 代理{mode}订阅已刷新，但独立服务线路更新失败，"
+                                    f"已保留原运行配置: {payload['apply_error']}"
+                                )
+                            elif payload["bound_route"]:
+                                message = (
+                                    f"Win11 代理{mode}热更新已完成；{payload['apply']}；"
+                                    "当前订阅页面已切换，界面保持新分组"
+                                )
+                            else:
+                                message = (
+                                    f"Win11 代理{mode}热更新已完成，但当前分组已切换；"
+                                    "新节点保存在原分组，当前界面保持不变"
+                                )
                             if proxy_warning:
                                 message = f"{proxy_warning}；{message}"
                             self._set_status(message, "warning")
@@ -2495,6 +2789,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         local_proxy.local_proxy_subscription_recovery_session
                     ),
                 )
+                route_apply = ""
+                route_apply_error = ""
+                try:
+                    if local_proxy.local_proxy_service_bindings_for_profile(profile_id):
+                        route_apply = (
+                            local_proxy.refresh_running_local_service_routes_from_subscription(
+                                result.nodes,
+                                profile_id=profile_id,
+                            )
+                        )
+                except Exception as exc:
+                    route_apply_error = str(exc)
                 payload = {
                     "ok": True,
                     "result": result,
@@ -2503,6 +2809,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     "cached_state": {},
                     "latencies": {},
                     "qualities": {},
+                    "route_apply": route_apply,
+                    "route_apply_error": route_apply_error,
                 }
             except Exception as e:
                 cached = None
@@ -2532,6 +2840,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     "cached_state": cached_state,
                     "latencies": latencies,
                     "qualities": qualities,
+                    "route_apply": "",
+                    "route_apply_error": "",
                 }
 
             def finish():
@@ -2558,6 +2868,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     message = "订阅操作完成时当前分组已切换，未覆盖当前页面。"
                     if not payload["ok"]:
                         message = f"订阅拉取失败，且当前分组已切换: {payload['error']}"
+                    elif payload.get("route_apply_error"):
+                        message += (
+                            " 独立服务线路更新失败，已保留原运行配置: "
+                            f"{payload['route_apply_error']}"
+                        )
+                    elif payload.get("route_apply"):
+                        message += f" {payload['route_apply']}"
                     self._set_status(message, "warning")
                     if str(current_state.get("saved_path") or "").strip():
                         self._load_subscription_cache_for_state(current_state, generation)
@@ -2623,6 +2940,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if proxy_warning:
                     message = f"{proxy_warning}；{message}"
                     severity = "warning"
+                if payload.get("route_apply_error"):
+                    message += (
+                        " 独立服务线路更新失败，已保留原运行配置: "
+                        f"{payload['route_apply_error']}"
+                    )
+                    severity = "warning"
+                elif payload.get("route_apply"):
+                    message += f" {payload['route_apply']}"
                 self._set_status(message, severity)
                 if show_message:
                     show_toast(self.winfo_toplevel(), message)
@@ -3347,6 +3672,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._node_text.delete("1.0", "end")
             self._node_text.insert("1.0", node_text)
         selection_save_error = ""
+        target_profile_id = ""
         if persist_selection:
             target_profile_id = profile_id or self._current_subscription_profile_id()
             if target_profile_id:
@@ -3368,6 +3694,19 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._set_status(message, severity)
         if show_message:
             show_toast(self.winfo_toplevel(), message, is_error=bool(selection_save_error))
+            if not selection_save_error and target_profile_id:
+                try:
+                    bound_services = (
+                        local_proxy.local_proxy_service_bindings_for_profile(
+                            target_profile_id
+                        )
+                    )
+                except Exception:
+                    bound_services = ()
+                if bound_services:
+                    self._apply_saved_routing(
+                        "已保存所选节点，正在同步该订阅绑定的独立服务线路。"
+                    )
 
     def _hot_update_selected_subscription_node(self):
         if self._periodic_update_running:
@@ -3633,6 +3972,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         proxy_text = self._node_input()
         strict_privacy = self._strict_privacy_selected()
         wsl_sharing = self._wsl_share_selected()
+        service_binding_count = len(self._service_route_bindings)
         try:
             proxy_node = remote_proxy.parse_proxy_node(proxy_text)
             node_summary = remote_proxy.describe_proxy_node(proxy_node)
@@ -3691,6 +4031,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     else "严格隐私未开启：未命中代理规则的流量使用系统 DNS 并可能 DIRECT。\n"
                 )
                 + "如果当前订阅有合格候选，会一并装载最多 4 个备用节点，主节点失效后由 mihomo 为新连接自动切换。\n"
+                + (
+                    f"已配置 {service_binding_count} 项服务订阅绑定；会从各自订阅缓存装载独立节点池，"
+                    "不会切换订阅页面或改写 Codex/Claude 登录状态。\n"
+                    if service_binding_count
+                    else "服务线路均跟随当前节点，保持原有单订阅行为。\n"
+                )
                 + (
                     "WSL 共享已开启：会识别默认发行版的实际网络模式；镜像网络只走回环，"
                     "NAT 只对白名单虚拟子网开放，并写入可撤销的 shell/VS Code Remote 环境入口。\n"
