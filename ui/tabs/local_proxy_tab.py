@@ -26,13 +26,16 @@ startup_manager = LazyModule("core.startup_manager")
 LOCAL_YAML_NODE_ONLY_NOTICE = "本地 YAML 只导入 proxies 节点，不继承顶层 dns/tun。"
 SERVICE_ROUTE_DEFAULT_LABEL = "跟随当前节点"
 SERVICE_ROUTE_MISSING_LABEL = "原订阅已删除（请重新选择）"
+NEW_SUBSCRIPTION_PROFILE_LABEL = "＋ 新建订阅"
 
 
 def _local_proxy_tab_layout(width: int) -> tuple[bool, int, int, int, bool]:
     """Return outer stacking and inner column counts for the proxy form."""
 
     available = max(1, int(width))
-    stacked = available < 760
+    # Keep the explicitly labelled profile rows side by side on ordinary
+    # desktop widths, but stack before the subscription action bar is squeezed.
+    stacked = available <= 1000
     return (
         stacked,
         2 if stacked else 4,
@@ -58,10 +61,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_profile_combo = None
         self._subscription_name_entry = None
         self._subscription_profile_save_button = None
+        self._subscription_profile_reset_button = None
         self._subscription_profile_delete_button = None
         self._subscription_profile_options = {}
         self._subscription_profiles_snapshot = []
         self._subscription_profile_loading = False
+        self._subscription_profile_edit_id = ""
+        self._subscription_form_snapshot = None
         self._subscription_picker = None
         self._subscription_picker_host = None
         self._subscription_picker_after_id = None
@@ -467,28 +473,45 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_profile_label_widget.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._subscription_profile_combo = ctk.CTkComboBox(
             controls,
-            values=["新订阅"],
+            values=[NEW_SUBSCRIPTION_PROFILE_LABEL],
             command=self._on_subscription_profile_selected,
+            state="readonly",
             **combo_style(),
         )
-        self._subscription_profile_combo.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_profile_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_name_label = ctk.CTkLabel(
+            controls,
+            text="显示名称",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        )
+        self._subscription_name_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
         self._subscription_name_entry = ctk.CTkEntry(
             controls,
-            placeholder_text="订阅名称，例如 香港家宽 / 备用机场",
+            placeholder_text="可选，例如 香港家宽 / 备用机场",
             **input_style(),
         )
-        self._subscription_name_entry.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(8, 0))
+        self._subscription_name_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         profile_actions = ctk.CTkFrame(controls, fg_color="transparent")
         self._profile_actions = profile_actions
-        profile_actions.grid(row=1, column=3, sticky="e", pady=(8, 0))
+        profile_actions.grid(row=2, column=3, sticky="e", pady=(8, 0))
         self._subscription_profile_save_button = ctk.CTkButton(
             profile_actions,
-            text="保存",
-            width=56,
+            text="新增订阅",
+            width=76,
             command=self._save_subscription_profile,
             **button_style("accent", compact=True),
         )
         self._subscription_profile_save_button.pack(side="left", padx=(0, 6))
+        self._subscription_profile_reset_button = ctk.CTkButton(
+            profile_actions,
+            text="清空",
+            width=52,
+            command=self._reset_subscription_profile_form,
+            **button_style("secondary", compact=True),
+        )
+        self._subscription_profile_reset_button.pack(side="left", padx=(0, 6))
         self._subscription_profile_delete_button = ctk.CTkButton(
             profile_actions,
             text="删除",
@@ -504,16 +527,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         )
-        self._subscription_link_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self._subscription_link_label.grid(row=3, column=0, sticky="w", pady=(8, 0))
         self._subscription_entry = ctk.CTkEntry(
             controls,
             placeholder_text="粘贴 Clash/mihomo 订阅链接；只保存在本机缓存",
             **input_style(),
         )
-        self._subscription_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        for entry in (self._subscription_name_entry, self._subscription_entry):
+            entry.bind("<KeyRelease>", self._on_subscription_profile_form_edited, add="+")
+            entry.bind("<Return>", self._submit_subscription_profile_form, add="+")
+            entry.bind("<Escape>", self._reset_subscription_profile_form, add="+")
         sub_actions = ctk.CTkFrame(controls, fg_color="transparent")
         self._subscription_actions = sub_actions
-        sub_actions.grid(row=2, column=3, sticky="e", pady=(8, 0))
+        sub_actions.grid(row=3, column=3, sticky="e", pady=(8, 0))
         self._fetch_button = ctk.CTkButton(
             sub_actions,
             text="拉取订阅",
@@ -594,7 +621,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._cache_label.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        self._cache_label.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         bind_wraplength(controls, self._cache_label, padding=20)
 
         self._node_selection_heading = ctk.CTkLabel(
@@ -604,7 +631,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(13, "bold"),
             anchor="w",
         )
-        self._node_selection_heading.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        self._node_selection_heading.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         self._subscription_nodes_label = ctk.CTkLabel(
             controls,
             text="订阅节点",
@@ -612,7 +639,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         )
-        self._subscription_nodes_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self._subscription_nodes_label.grid(row=6, column=0, sticky="w", pady=(8, 0))
         self._subscription_picker_host = ctk.CTkFrame(
             controls,
             height=360,
@@ -621,7 +648,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        self._subscription_picker_host.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_picker_host.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._subscription_picker_host.grid_propagate(False)
         ctk.CTkLabel(
             self._subscription_picker_host,
@@ -631,7 +658,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).pack(expand=True)
         node_actions = ctk.CTkFrame(controls, fg_color="transparent")
         self._node_actions = node_actions
-        node_actions.grid(row=5, column=3, sticky="e", pady=(8, 0))
+        node_actions.grid(row=6, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
             node_actions,
             text="检测",
@@ -730,7 +757,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._selected_label.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        self._selected_label.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         bind_wraplength(controls, self._selected_label, padding=20)
 
         self._proxy_start_heading = ctk.CTkLabel(
@@ -740,7 +767,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(13, "bold"),
             anchor="w",
         )
-        self._proxy_start_heading.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        self._proxy_start_heading.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         self._pending_node_label = ctk.CTkLabel(
             controls,
             text="待启动节点",
@@ -748,7 +775,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             width=82,
             anchor="w",
         )
-        self._pending_node_label.grid(row=8, column=0, sticky="nw", pady=(8, 0))
+        self._pending_node_label.grid(row=9, column=0, sticky="nw", pady=(8, 0))
         self._node_text_host = ctk.CTkFrame(
             controls,
             height=96,
@@ -757,7 +784,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             border_width=1,
             border_color=COLORS["border"],
         )
-        self._node_text_host.grid(row=8, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._node_text_host.grid(row=9, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._node_text_host.grid_propagate(False)
         ctk.CTkLabel(
             self._node_text_host,
@@ -768,7 +795,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         actions = ctk.CTkFrame(controls, fg_color="transparent")
         self._proxy_actions = actions
-        actions.grid(row=8, column=3, sticky="ne", pady=(8, 0))
+        actions.grid(row=9, column=3, sticky="ne", pady=(8, 0))
         ctk.CTkLabel(
             actions,
             text="节点来源",
@@ -859,7 +886,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._status_label.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(controls, self._status_label, padding=20)
         self.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._schedule_responsive_layout(delay_ms=0)
@@ -1025,41 +1052,43 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if stacked:
             self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
             self._subscription_profile_combo.grid(row=2, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._subscription_name_entry.grid(row=3, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._profile_actions.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
-            self._subscription_link_label.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
-            self._subscription_entry.grid(row=6, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            subscription_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-            self._cache_label.grid(row=8, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._node_selection_heading.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-            self._subscription_nodes_label.grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 0))
-            self._subscription_picker_host.grid(row=11, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._node_actions.grid(row=12, column=0, columnspan=4, sticky="w", pady=(8, 0))
-            self._selected_label.grid(row=13, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._proxy_start_heading.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-            self._pending_node_label.grid(row=15, column=0, columnspan=4, sticky="nw", pady=(8, 0))
-            self._node_text_host.grid(row=16, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._proxy_actions.grid(row=17, column=0, columnspan=4, sticky="w", pady=(8, 0))
-            self._status_label.grid(row=18, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+            self._subscription_name_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_name_entry.grid(row=4, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._profile_actions.grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+            self._subscription_link_label.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_entry.grid(row=7, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            subscription_actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+            self._cache_label.grid(row=9, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._node_selection_heading.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._subscription_nodes_label.grid(row=11, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_picker_host.grid(row=12, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._node_actions.grid(row=13, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._selected_label.grid(row=14, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._proxy_start_heading.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._pending_node_label.grid(row=16, column=0, columnspan=4, sticky="nw", pady=(8, 0))
+            self._node_text_host.grid(row=17, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
+            self._proxy_actions.grid(row=18, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._status_label.grid(row=19, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         else:
             self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=1, sticky="w", pady=(8, 0))
-            self._subscription_profile_combo.grid(row=1, column=1, columnspan=1, sticky="ew", padx=(8, 8), pady=(8, 0))
-            self._subscription_name_entry.grid(row=1, column=2, columnspan=1, sticky="ew", padx=(0, 8), pady=(8, 0))
-            self._profile_actions.grid(row=1, column=3, columnspan=1, sticky="e", pady=(8, 0))
-            self._subscription_link_label.grid(row=2, column=0, columnspan=1, sticky="w", pady=(8, 0))
-            self._subscription_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-            subscription_actions.grid(row=2, column=3, columnspan=1, sticky="e", pady=(8, 0))
-            self._cache_label.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
-            self._node_selection_heading.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-            self._subscription_nodes_label.grid(row=5, column=0, columnspan=1, sticky="w", pady=(8, 0))
-            self._subscription_picker_host.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-            self._node_actions.grid(row=5, column=3, columnspan=1, sticky="e", pady=(8, 0))
-            self._selected_label.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
-            self._proxy_start_heading.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-            self._pending_node_label.grid(row=8, column=0, columnspan=1, sticky="nw", pady=(8, 0))
-            self._node_text_host.grid(row=8, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-            self._proxy_actions.grid(row=8, column=3, columnspan=1, sticky="ne", pady=(8, 0))
-            self._status_label.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+            self._subscription_profile_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._subscription_name_label.grid(row=2, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_name_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._profile_actions.grid(row=2, column=3, columnspan=1, sticky="e", pady=(8, 0))
+            self._subscription_link_label.grid(row=3, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            subscription_actions.grid(row=3, column=3, columnspan=1, sticky="e", pady=(8, 0))
+            self._cache_label.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._node_selection_heading.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._subscription_nodes_label.grid(row=6, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_picker_host.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._node_actions.grid(row=6, column=3, columnspan=1, sticky="e", pady=(8, 0))
+            self._selected_label.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._proxy_start_heading.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._pending_node_label.grid(row=9, column=0, columnspan=1, sticky="nw", pady=(8, 0))
+            self._node_text_host.grid(row=9, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._proxy_actions.grid(row=9, column=3, columnspan=1, sticky="ne", pady=(8, 0))
+            self._status_label.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None
@@ -1234,6 +1263,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             getattr(self, "_busy", False)
             or getattr(self, "_periodic_update_running", False)
             or not getattr(self, "_saved_subscription_loaded", False)
+            or self._subscription_profile_blocks_automatic_refresh()
         ):
             return False
         try:
@@ -1351,6 +1381,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             getattr(self, "_wsl_share_check", None),
             getattr(self, "_wsl_optimize_button", None),
             self._subscription_profile_save_button,
+            getattr(self, "_subscription_profile_reset_button", None),
             self._subscription_profile_delete_button,
         ):
             if not button:
@@ -1389,17 +1420,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._subscription_picker.set_enabled((not busy) and bool(self._subscription_options))
             except Exception:
                 pass
-        for widget in (
-            self._subscription_profile_combo,
-            self._subscription_name_entry,
-            self._subscription_entry,
-        ):
+        if self._subscription_profile_combo:
+            try:
+                self._subscription_profile_combo.configure(
+                    state="disabled" if busy else "readonly"
+                )
+            except Exception:
+                pass
+        for widget in (self._subscription_name_entry, self._subscription_entry):
             if not widget:
                 continue
             try:
                 widget.configure(state=state)
             except Exception:
                 pass
+        self._update_subscription_profile_form_controls()
         for combo in getattr(self, "_service_route_combos", {}).values():
             try:
                 combo.configure(state=state)
@@ -1941,14 +1976,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         profiles = remote_proxy.list_proxy_subscription_profiles()
         self._refresh_service_route_profile_options(profiles)
         active_id = str((state or remote_proxy.load_proxy_subscription_state()).get("active_profile_id") or "")
-        values = []
+        values = [NEW_SUBSCRIPTION_PROFILE_LABEL]
         mapping = {}
-        seen = set()
-        active_label = "新订阅"
+        seen = {NEW_SUBSCRIPTION_PROFILE_LABEL}
+        active_label = NEW_SUBSCRIPTION_PROFILE_LABEL
         for index, profile in enumerate(profiles, 1):
             label = self._subscription_profile_label(profile)
-            if label in seen:
-                label = f"{label} ({index})"
+            base_label = label
+            suffix = index
+            while label in seen:
+                label = f"{base_label} ({suffix})"
+                suffix += 1
             seen.add(label)
             values.append(label)
             mapping[label] = str(profile.get("id") or "")
@@ -1958,15 +1996,180 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if self._subscription_profile_combo:
             self._subscription_profile_loading = True
             try:
-                self._subscription_profile_combo.configure(values=values or ["新订阅"])
-                self._subscription_profile_combo.set(active_label if values else "新订阅")
+                self._subscription_profile_combo.configure(values=values)
+                self._subscription_profile_combo.set(active_label)
             finally:
                 self._subscription_profile_loading = False
 
     def _apply_subscription_profile_inputs(self, state: dict):
-        profile = remote_proxy.active_proxy_subscription_profile()
-        self._set_entry_text(self._subscription_name_entry, str(profile.get("name") or ""))
-        self._set_entry_text(self._subscription_entry, str(state.get("url") or ""))
+        active_id = str(state.get("active_profile_id") or "")
+        profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+        profile = dict(profiles.get(active_id) or {})
+        if not profile and active_id:
+            profile = remote_proxy.active_proxy_subscription_profile()
+        name = str(profile.get("name") or "").strip()
+        url = str(profile.get("url") or state.get("url") or "").strip()
+        self._set_entry_text(self._subscription_name_entry, name)
+        self._set_entry_text(self._subscription_entry, url)
+        self._subscription_profile_edit_id = active_id if profile else ""
+        self._subscription_form_snapshot = (
+            self._subscription_profile_edit_id,
+            name,
+            url,
+        )
+        self._update_subscription_profile_form_controls()
+
+    def _subscription_profile_form_values(self) -> tuple[str, str]:
+        try:
+            name = self._subscription_name_entry.get().strip()
+        except Exception:
+            name = ""
+        try:
+            url = self._subscription_entry.get().strip()
+        except Exception:
+            url = ""
+        return name, url
+
+    def _subscription_profile_form_dirty(self) -> bool:
+        snapshot = getattr(self, "_subscription_form_snapshot", None)
+        if not isinstance(snapshot, tuple) or len(snapshot) != 3:
+            return False
+        name, url = self._subscription_profile_form_values()
+        current = (
+            str(getattr(self, "_subscription_profile_edit_id", "") or ""),
+            name,
+            url,
+        )
+        return current != snapshot
+
+    def _subscription_profile_is_new_draft(self) -> bool:
+        if str(getattr(self, "_subscription_profile_edit_id", "") or ""):
+            return False
+        combo = getattr(self, "_subscription_profile_combo", None)
+        try:
+            return bool(combo and combo.get() == NEW_SUBSCRIPTION_PROFILE_LABEL)
+        except Exception:
+            return False
+
+    def _subscription_profile_blocks_automatic_refresh(self) -> bool:
+        return self._subscription_profile_is_new_draft() or self._subscription_profile_form_dirty()
+
+    def _update_subscription_profile_form_controls(self, _event=None):
+        profile_id = str(getattr(self, "_subscription_profile_edit_id", "") or "")
+        name, url = self._subscription_profile_form_values()
+        dirty = self._subscription_profile_form_dirty()
+        busy = bool(getattr(self, "_busy", False))
+        is_new = not profile_id
+        save_button = getattr(self, "_subscription_profile_save_button", None)
+        reset_button = getattr(self, "_subscription_profile_reset_button", None)
+        delete_button = getattr(self, "_subscription_profile_delete_button", None)
+        if save_button:
+            try:
+                save_button.configure(
+                    text="新增订阅" if is_new else "保存修改",
+                    state=(
+                        "normal"
+                        if not busy and ((is_new and bool(url)) or (not is_new and dirty))
+                        else "disabled"
+                    ),
+                )
+            except Exception:
+                pass
+        if reset_button:
+            try:
+                reset_button.configure(
+                    text="清空" if is_new else "撤销",
+                    state="normal" if not busy and bool(name or url) and (is_new or dirty) else "disabled",
+                )
+            except Exception:
+                pass
+        if delete_button:
+            try:
+                delete_button.configure(
+                    state="normal" if not busy and not is_new else "disabled"
+                )
+            except Exception:
+                pass
+
+    def _on_subscription_profile_form_edited(self, _event=None):
+        self._update_subscription_profile_form_controls()
+
+    def _submit_subscription_profile_form(self, _event=None):
+        self._save_subscription_profile()
+        return "break"
+
+    def _subscription_profile_combo_label_for_id(self, profile_id: str) -> str:
+        clean_id = str(profile_id or "")
+        for label, candidate_id in self._subscription_profile_options.items():
+            if str(candidate_id or "") == clean_id:
+                return label
+        return NEW_SUBSCRIPTION_PROFILE_LABEL
+
+    def _restore_subscription_profile_combo(self):
+        combo = getattr(self, "_subscription_profile_combo", None)
+        if not combo:
+            return
+        label = self._subscription_profile_combo_label_for_id(
+            str(getattr(self, "_subscription_profile_edit_id", "") or "")
+        )
+        self._subscription_profile_loading = True
+        try:
+            combo.set(label)
+        finally:
+            self._subscription_profile_loading = False
+
+    def _enter_new_subscription_profile(self, *, announce: bool = True):
+        combo = getattr(self, "_subscription_profile_combo", None)
+        if combo:
+            self._subscription_profile_loading = True
+            try:
+                combo.set(NEW_SUBSCRIPTION_PROFILE_LABEL)
+            finally:
+                self._subscription_profile_loading = False
+        self._subscription_profile_edit_id = ""
+        self._set_entry_text(self._subscription_name_entry, "")
+        self._set_entry_text(self._subscription_entry, "")
+        self._subscription_form_snapshot = ("", "", "")
+        self._latency_results = {}
+        self._quality_results = {}
+        self._prefer_quality_sort = False
+        self._saved_subscription_load_generation += 1
+        self._set_subscription_nodes(())
+        self._set_cache_status("本机缓存: 新订阅尚未保存")
+        if announce:
+            self._set_status("正在新建订阅：填写名称和链接后点击“新增订阅”。")
+        try:
+            self._subscription_name_entry.focus_set()
+        except Exception:
+            pass
+        self._update_subscription_profile_form_controls()
+
+    def _reset_subscription_profile_form(self, _event=None):
+        profile_id = str(getattr(self, "_subscription_profile_edit_id", "") or "")
+        if not profile_id:
+            self._enter_new_subscription_profile(announce=False)
+            self._set_status("已清空新订阅草稿。")
+            return "break"
+        try:
+            state = remote_proxy.load_proxy_subscription_state()
+            profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+            profile = dict(profiles.get(profile_id) or {})
+            if not profile:
+                raise ValueError("订阅配置已被删除")
+            name = str(profile.get("name") or "").strip()
+            url = str(profile.get("url") or "").strip()
+            self._set_entry_text(self._subscription_name_entry, name)
+            self._set_entry_text(self._subscription_entry, url)
+            self._subscription_form_snapshot = (profile_id, name, url)
+            self._restore_subscription_profile_combo()
+            self._update_subscription_profile_form_controls()
+            self._set_status("已撤销未保存的订阅修改。")
+        except Exception as exc:
+            self._refresh_subscription_profile_options()
+            message = f"订阅草稿恢复失败: {exc}"
+            self._set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+        return "break"
 
     def _begin_subscription_profile_mutation(
         self,
@@ -1991,17 +2194,41 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if show_message:
                 show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再保存订阅配置", is_error=True)
             return None
-        url = self._subscription_url_input()
+        profile_id = str(getattr(self, "_subscription_profile_edit_id", "") or "")
+        if not profile_id:
+            profile_id = self._current_subscription_profile_id()
+        name, url = self._subscription_profile_form_values()
+        snapshot = getattr(self, "_subscription_form_snapshot", None)
+        if profile_id and isinstance(snapshot, tuple) and not self._subscription_profile_form_dirty():
+            try:
+                state = remote_proxy.load_proxy_subscription_state()
+                profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+                existing = dict(profiles.get(profile_id) or {})
+            except Exception:
+                existing = {}
+            if existing:
+                if show_message:
+                    message = "订阅名称和链接没有变化，无需保存。"
+                    self._set_status(message)
+                    show_toast(self.winfo_toplevel(), message)
+                return existing
         if not url:
-            active = remote_proxy.active_proxy_subscription_profile()
-            if active.get("source_path"):
-                return self._rename_local_subscription_profile(active, show_message=show_message)
+            try:
+                state = remote_proxy.load_proxy_subscription_state()
+                profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+                existing = dict(profiles.get(profile_id) or {})
+            except Exception:
+                existing = {}
+            if existing.get("source_path"):
+                return self._rename_local_subscription_profile(
+                    existing,
+                    show_message=show_message,
+                )
             message = "请先填写订阅链接，再保存订阅配置"
             self._set_status(message, "warning")
             if show_message:
                 show_toast(self.winfo_toplevel(), message, is_error=True)
             return None
-        name = self._subscription_name_entry.get().strip() if self._subscription_name_entry else ""
         allowed, release_needed = self._begin_subscription_profile_mutation(
             "保存",
             show_message=show_message,
@@ -2009,7 +2236,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not allowed:
             return None
         try:
-            profile = remote_proxy.save_proxy_subscription_profile(name, url, activate=True)
+            if profile_id:
+                current_state = remote_proxy.load_proxy_subscription_state()
+                current_profiles = (
+                    current_state.get("profiles")
+                    if isinstance(current_state.get("profiles"), dict)
+                    else {}
+                )
+                if profile_id not in current_profiles:
+                    raise ValueError("订阅配置已被其他操作删除，请重新选择")
+            profile = remote_proxy.save_proxy_subscription_profile(
+                name,
+                url,
+                profile_id=profile_id,
+                activate=True,
+            )
             state = remote_proxy.load_proxy_subscription_state()
         except Exception as exc:
             message = f"订阅配置保存失败: {exc}"
@@ -2023,7 +2264,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._refresh_subscription_profile_options(state)
         self._apply_subscription_profile_inputs(state)
         if show_message:
-            message = f"已保存订阅配置: {profile.get('name') or '未命名订阅'}"
+            action = "保存订阅修改" if profile_id else "新增订阅"
+            message = f"已{action}: {profile.get('name') or '未命名订阅'}"
             self._set_status(message, "success")
             show_toast(self.winfo_toplevel(), message)
         return profile
@@ -2162,21 +2404,51 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if self._subscription_profile_loading:
             return
         if self._busy:
+            self._restore_subscription_profile_combo()
             show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再切换订阅配置", is_error=True)
             return
-        profile_id = self._subscription_profile_options.get(str(label or ""))
+        target_label = str(label or "")
+        profile_id = str(self._subscription_profile_options.get(target_label) or "")
+        current_id = str(getattr(self, "_subscription_profile_edit_id", "") or "")
+        if profile_id == current_id and (
+            profile_id or target_label == NEW_SUBSCRIPTION_PROFILE_LABEL
+        ):
+            self._restore_subscription_profile_combo()
+            return
+        if not profile_id and target_label != NEW_SUBSCRIPTION_PROFILE_LABEL:
+            self._restore_subscription_profile_combo()
+            return
+        if self._subscription_profile_form_dirty():
+            self._restore_subscription_profile_combo()
+            ConfirmDialog(
+                self.winfo_toplevel(),
+                title="放弃未保存的订阅修改？",
+                message=(
+                    "当前订阅名称或链接尚未保存。切换后这些修改会丢失；"
+                    "如需保留，请先点击“保存修改”。"
+                ),
+                on_confirm=lambda: self._select_subscription_profile(
+                    target_label,
+                    profile_id,
+                ),
+            )
+            return
+        self._select_subscription_profile(target_label, profile_id)
+
+    def _select_subscription_profile(self, label: str, profile_id: str):
         if not profile_id:
+            self._enter_new_subscription_profile()
             return
         allowed, release_needed = self._begin_subscription_profile_mutation("切换")
         if not allowed:
-            self._refresh_subscription_profile_options()
+            self._restore_subscription_profile_combo()
             return
         try:
             remote_proxy.set_active_proxy_subscription_profile(profile_id)
             state = remote_proxy.load_proxy_subscription_state()
         except Exception as exc:
             try:
-                self._refresh_subscription_profile_options()
+                self._restore_subscription_profile_combo()
             except Exception:
                 pass
             message = f"订阅配置切换失败: {exc}"
@@ -2186,6 +2458,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         finally:
             if release_needed:
                 remote_proxy.release_proxy_subscription_hot_update()
+        if self._subscription_profile_combo:
+            self._subscription_profile_loading = True
+            try:
+                self._subscription_profile_combo.set(label)
+            finally:
+                self._subscription_profile_loading = False
         self._apply_subscription_profile_inputs(state)
         self._latency_results = {}
         self._quality_results = {}
@@ -2413,6 +2691,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 message = "已有代理操作或热更新正在进行，请稍等"
                 self._set_status(message, "warning")
                 show_toast(self.winfo_toplevel(), message, is_error=True)
+            self._schedule_periodic_update()
+            return
+        if not manual and self._subscription_profile_blocks_automatic_refresh():
+            self._set_status(
+                "检测到正在新建订阅或存在未保存修改，本次定时热更新已延后。",
+                "warning",
+            )
             self._schedule_periodic_update()
             return
         url = self._subscription_url_input()
@@ -2778,6 +3063,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if self._busy or self._periodic_update_running:
             if show_message:
                 show_toast(self.winfo_toplevel(), "订阅正在拉取中，请稍等", is_error=True)
+            return
+        if auto and self._subscription_profile_blocks_automatic_refresh():
+            self._set_status(
+                "检测到正在新建订阅或存在未保存修改，本次启动自动刷新已跳过。",
+                "warning",
+            )
             return
         url = self._subscription_url_input()
         if not url:

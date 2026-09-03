@@ -26,13 +26,21 @@ sync_manager = LazyModule("core.sync_manager")
 auto_continue_manager = LazyAttribute("core.auto_continue.manager", "auto_continue_manager")
 training_prompt_template_by_key = LazyAttribute("models.auto_continue", "training_prompt_template_by_key")
 SSH_TAB_STACK_MAX_WIDTH = 820
+SSH_PROXY_FORM_STACK_MAX_WIDTH = 1000
 SSH_NETWORK_TEST_SERVER_MAX_WORKERS = 4
+NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL = "＋ 新建订阅"
 
 
 def _ssh_tab_stacked(width: int) -> bool:
     """Return whether dense SSH controls need a vertical layout."""
 
     return int(width) <= SSH_TAB_STACK_MAX_WIDTH
+
+
+def _ssh_proxy_form_stacked(width: int) -> bool:
+    """Return whether the wider proxy deployment form must be stacked."""
+
+    return int(width) <= SSH_PROXY_FORM_STACK_MAX_WIDTH
 
 
 def _format_server_batch_item(server_name: str, result) -> str:
@@ -143,9 +151,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_profile_combo = None
         self._proxy_subscription_name_entry = None
         self._proxy_subscription_profile_save_button = None
+        self._proxy_subscription_profile_reset_button = None
         self._proxy_subscription_profile_delete_button = None
         self._proxy_subscription_profile_options = {}
         self._proxy_subscription_profile_loading = False
+        self._proxy_subscription_profile_edit_id = ""
+        self._proxy_subscription_form_snapshot = None
         self._proxy_subscription_picker = None
         self._proxy_subscription_picker_host = None
         self._proxy_subscription_picker_after_id = None
@@ -628,10 +639,13 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._responsive_after_id = None
 
     def _apply_responsive_layout(self) -> None:
-        stacked = _ssh_tab_stacked(self._logical_layout_width())
-        if stacked == self._responsive_state:
+        logical_width = self._logical_layout_width()
+        stacked = _ssh_tab_stacked(logical_width)
+        proxy_stacked = _ssh_proxy_form_stacked(logical_width)
+        responsive_state = (stacked, proxy_stacked)
+        if responsive_state == self._responsive_state:
             return
-        self._responsive_state = stacked
+        self._responsive_state = responsive_state
 
         for column in range(3):
             self._overview_content.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
@@ -727,7 +741,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._git_login_status_label.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
         self._git_button_frame.grid(row=7, column=3, sticky="e", pady=(10, 0))
         self._sync_status_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        self._apply_deployment_responsive_layout(stacked=False)
+        self._apply_deployment_responsive_layout(stacked=proxy_stacked)
 
     @staticmethod
     def _capture_grid_layout(frame) -> tuple[tuple[object, dict], ...]:
@@ -924,27 +938,44 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_profile_combo = ctk.CTkComboBox(
             proxy_controls,
-            values=["新订阅"],
+            values=[NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL],
             command=self._on_proxy_subscription_profile_selected,
+            state="readonly",
             **combo_style(),
         )
-        self._proxy_subscription_profile_combo.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_subscription_profile_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_subscription_name_label = ctk.CTkLabel(
+            proxy_controls,
+            text="显示名称",
+            text_color=COLORS["muted"],
+            width=82,
+            anchor="w",
+        )
+        self._proxy_subscription_name_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_name_entry = ctk.CTkEntry(
             proxy_controls,
-            placeholder_text="订阅名称，例如 香港家宽 / 备用机场",
+            placeholder_text="可选，例如 香港家宽 / 备用机场",
             **input_style(),
         )
-        self._proxy_subscription_name_entry.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(8, 0))
+        self._proxy_subscription_name_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         proxy_profile_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_profile_actions.grid(row=1, column=3, sticky="e", pady=(8, 0))
+        proxy_profile_actions.grid(row=2, column=3, sticky="e", pady=(8, 0))
         self._proxy_subscription_profile_save_button = ctk.CTkButton(
             proxy_profile_actions,
-            text="保存",
-            width=56,
+            text="新增订阅",
+            width=76,
             command=self._save_proxy_subscription_profile,
             **button_style("accent", compact=True),
         )
         self._proxy_subscription_profile_save_button.pack(side="left", padx=(0, 6))
+        self._proxy_subscription_profile_reset_button = ctk.CTkButton(
+            proxy_profile_actions,
+            text="清空",
+            width=52,
+            command=self._reset_proxy_subscription_profile_form,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_subscription_profile_reset_button.pack(side="left", padx=(0, 6))
         self._proxy_subscription_profile_delete_button = ctk.CTkButton(
             proxy_profile_actions,
             text="删除",
@@ -959,15 +990,19 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_entry = ctk.CTkEntry(
             proxy_controls,
             placeholder_text="粘贴 Clash/mihomo 订阅链接；只保存在本机缓存，不写入远端",
             **input_style(),
         )
-        self._proxy_subscription_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_subscription_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        for entry in (self._proxy_subscription_name_entry, self._proxy_subscription_entry):
+            entry.bind("<KeyRelease>", self._on_proxy_subscription_profile_form_edited, add="+")
+            entry.bind("<Return>", self._submit_proxy_subscription_profile_form, add="+")
+            entry.bind("<Escape>", self._reset_proxy_subscription_profile_form, add="+")
         proxy_sub_action_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_sub_action_frame.grid(row=2, column=3, sticky="e", pady=(8, 0))
+        proxy_sub_action_frame.grid(row=3, column=3, sticky="e", pady=(8, 0))
         self._proxy_fetch_button = ctk.CTkButton(
             proxy_sub_action_frame,
             text="拉取订阅",
@@ -1029,7 +1064,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._proxy_cache_label.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        self._proxy_cache_label.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         bind_wraplength(proxy_controls, self._proxy_cache_label, padding=20)
 
         ctk.CTkLabel(
@@ -1038,16 +1073,16 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
-        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        ).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ctk.CTkLabel(
             proxy_controls,
             text="订阅节点",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_picker_host = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        self._proxy_subscription_picker_host.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_subscription_picker_host.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         ctk.CTkLabel(
             self._proxy_subscription_picker_host,
             text="节点列表稍后加载...",
@@ -1060,7 +1095,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._build_proxy_subscription_picker,
         )
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_node_actions.grid(row=5, column=3, sticky="e", pady=(8, 0))
+        proxy_node_actions.grid(row=6, column=3, sticky="e", pady=(8, 0))
         ctk.CTkLabel(
             proxy_node_actions,
             text="检测",
@@ -1159,7 +1194,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._proxy_selected_label.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+        self._proxy_selected_label.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
         bind_wraplength(proxy_controls, self._proxy_selected_label, padding=20)
 
         ctk.CTkLabel(
@@ -1168,14 +1203,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
-        ).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        ).grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ctk.CTkLabel(
             proxy_controls,
             text="隐私模式",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=8, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=9, column=0, sticky="w", pady=(8, 0))
         self._proxy_strict_privacy_check = ctk.CTkCheckBox(
             proxy_controls,
             text="严格隐私（应用层：进入 mihomo 的公网流量全部走节点）",
@@ -1185,7 +1220,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12, "bold"),
         )
         self._proxy_strict_privacy_check.grid(
-            row=8,
+            row=9,
             column=1,
             columnspan=3,
             sticky="w",
@@ -1205,7 +1240,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             justify="left",
         )
         self._proxy_privacy_notice_label.grid(
-            row=9,
+            row=10,
             column=0,
             columnspan=4,
             sticky="ew",
@@ -1219,16 +1254,16 @@ class SSHTab(ctk.CTkScrollableFrame):
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=10, column=0, sticky="nw", pady=(8, 0))
+        ).grid(row=11, column=0, sticky="nw", pady=(8, 0))
         self._proxy_node_text = ctk.CTkTextbox(
             proxy_controls,
             height=96,
             **textbox_style(monospace=True),
         )
-        self._proxy_node_text.grid(row=10, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_node_text.grid(row=11, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
 
         proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_button_frame.grid(row=10, column=3, sticky="ne", pady=(8, 0))
+        proxy_button_frame.grid(row=11, column=3, sticky="ne", pady=(8, 0))
         ctk.CTkLabel(
             proxy_button_frame,
             text="节点来源",
@@ -1308,10 +1343,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
         )
-        self._proxy_status_label.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._proxy_status_label.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
         self._proxy_grid_layout = self._capture_grid_layout(proxy_controls)
-        self._apply_deployment_responsive_layout(_ssh_tab_stacked(self._logical_layout_width()))
+        self._apply_deployment_responsive_layout(_ssh_proxy_form_stacked(self._logical_layout_width()))
         self._update_proxy_target_label()
 
         self._install_remote_auto_section_placeholder(deployment_parent)
@@ -1584,7 +1619,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         bind_wraplength(auto_controls, self._remote_auto_status_label, padding=20)
 
         self._remote_switch_layout = self._capture_grid_layout(remote_switch_frame)
-        self._apply_deployment_responsive_layout(_ssh_tab_stacked(self._logical_layout_width()))
+        self._apply_deployment_responsive_layout(_ssh_proxy_form_stacked(self._logical_layout_width()))
         self._update_remote_auto_feature_label()
         self._refresh_remote_auto_switch_availability()
 
@@ -1730,6 +1765,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             or getattr(self, "_ssh_busy", False)
             or getattr(self, "_proxy_periodic_update_running", False)
             or not getattr(self, "_proxy_saved_subscription_loaded", False)
+            or self._proxy_subscription_profile_blocks_automatic_refresh()
         ):
             return False
         try:
@@ -2373,6 +2409,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             getattr(self, "_proxy_remote_stale_cleanup_button", None),
             self._proxy_remote_cleanup_button,
             self._proxy_subscription_profile_save_button,
+            getattr(self, "_proxy_subscription_profile_reset_button", None),
             self._proxy_subscription_profile_delete_button,
         ):
             if not button:
@@ -2420,8 +2457,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._proxy_subscription_picker.set_enabled((not busy) and bool(self._proxy_subscription_options))
             except Exception:
                 pass
+        if self._proxy_subscription_profile_combo:
+            try:
+                self._proxy_subscription_profile_combo.configure(
+                    state="disabled" if busy else "readonly"
+                )
+            except Exception:
+                pass
         for widget in (
-            self._proxy_subscription_profile_combo,
             self._proxy_subscription_name_entry,
             self._proxy_subscription_entry,
         ):
@@ -2431,6 +2474,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 widget.configure(state=state)
             except Exception:
                 pass
+        self._update_proxy_subscription_profile_form_controls()
 
     def _set_proxy_entry_text(self, entry, value: str):
         if not entry:
@@ -2457,14 +2501,17 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _refresh_proxy_subscription_profile_options(self, state: dict | None = None):
         profiles = remote_proxy.list_proxy_subscription_profiles()
         active_id = str((state or remote_proxy.load_proxy_subscription_state()).get("active_profile_id") or "")
-        values = []
+        values = [NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL]
         mapping = {}
-        seen = set()
-        active_label = "新订阅"
+        seen = {NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL}
+        active_label = NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL
         for index, profile in enumerate(profiles, 1):
             label = self._proxy_subscription_profile_label(profile)
-            if label in seen:
-                label = f"{label} ({index})"
+            base_label = label
+            suffix = index
+            while label in seen:
+                label = f"{base_label} ({suffix})"
+                suffix += 1
             seen.add(label)
             values.append(label)
             mapping[label] = str(profile.get("id") or "")
@@ -2474,36 +2521,260 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_subscription_profile_combo:
             self._proxy_subscription_profile_loading = True
             try:
-                self._proxy_subscription_profile_combo.configure(values=values or ["新订阅"])
-                self._proxy_subscription_profile_combo.set(active_label if values else "新订阅")
+                self._proxy_subscription_profile_combo.configure(values=values)
+                self._proxy_subscription_profile_combo.set(active_label)
             finally:
                 self._proxy_subscription_profile_loading = False
 
     def _apply_proxy_subscription_profile_inputs(self, state: dict):
-        profile = remote_proxy.active_proxy_subscription_profile()
-        self._set_proxy_entry_text(self._proxy_subscription_name_entry, str(profile.get("name") or ""))
-        self._set_proxy_entry_text(self._proxy_subscription_entry, str(state.get("url") or ""))
+        active_id = str(state.get("active_profile_id") or "")
+        profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+        profile = dict(profiles.get(active_id) or {})
+        if not profile and active_id:
+            profile = remote_proxy.active_proxy_subscription_profile()
+        name = str(profile.get("name") or "").strip()
+        url = str(profile.get("url") or state.get("url") or "").strip()
+        self._set_proxy_entry_text(self._proxy_subscription_name_entry, name)
+        self._set_proxy_entry_text(self._proxy_subscription_entry, url)
+        self._proxy_subscription_profile_edit_id = active_id if profile else ""
+        self._proxy_subscription_form_snapshot = (
+            self._proxy_subscription_profile_edit_id,
+            name,
+            url,
+        )
+        self._update_proxy_subscription_profile_form_controls()
+
+    def _proxy_subscription_profile_form_values(self) -> tuple[str, str]:
+        try:
+            name = self._proxy_subscription_name_entry.get().strip()
+        except Exception:
+            name = ""
+        try:
+            url = self._proxy_subscription_entry.get().strip()
+        except Exception:
+            url = ""
+        return name, url
+
+    def _proxy_subscription_profile_form_dirty(self) -> bool:
+        snapshot = getattr(self, "_proxy_subscription_form_snapshot", None)
+        if not isinstance(snapshot, tuple) or len(snapshot) != 3:
+            return False
+        name, url = self._proxy_subscription_profile_form_values()
+        current = (
+            str(getattr(self, "_proxy_subscription_profile_edit_id", "") or ""),
+            name,
+            url,
+        )
+        return current != snapshot
+
+    def _proxy_subscription_profile_is_new_draft(self) -> bool:
+        if str(getattr(self, "_proxy_subscription_profile_edit_id", "") or ""):
+            return False
+        combo = getattr(self, "_proxy_subscription_profile_combo", None)
+        try:
+            return bool(combo and combo.get() == NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL)
+        except Exception:
+            return False
+
+    def _proxy_subscription_profile_blocks_automatic_refresh(self) -> bool:
+        return (
+            self._proxy_subscription_profile_is_new_draft()
+            or self._proxy_subscription_profile_form_dirty()
+        )
+
+    def _update_proxy_subscription_profile_form_controls(self, _event=None):
+        profile_id = str(
+            getattr(self, "_proxy_subscription_profile_edit_id", "") or ""
+        )
+        name, url = self._proxy_subscription_profile_form_values()
+        dirty = self._proxy_subscription_profile_form_dirty()
+        busy = bool(getattr(self, "_proxy_busy", False))
+        is_new = not profile_id
+        save_button = getattr(self, "_proxy_subscription_profile_save_button", None)
+        reset_button = getattr(self, "_proxy_subscription_profile_reset_button", None)
+        delete_button = getattr(self, "_proxy_subscription_profile_delete_button", None)
+        if save_button:
+            try:
+                save_button.configure(
+                    text="新增订阅" if is_new else "保存修改",
+                    state=(
+                        "normal"
+                        if not busy and ((is_new and bool(url)) or (not is_new and dirty))
+                        else "disabled"
+                    ),
+                )
+            except Exception:
+                pass
+        if reset_button:
+            try:
+                reset_button.configure(
+                    text="清空" if is_new else "撤销",
+                    state=(
+                        "normal"
+                        if not busy and bool(name or url) and (is_new or dirty)
+                        else "disabled"
+                    ),
+                )
+            except Exception:
+                pass
+        if delete_button:
+            try:
+                delete_button.configure(
+                    state="normal" if not busy and not is_new else "disabled"
+                )
+            except Exception:
+                pass
+
+    def _on_proxy_subscription_profile_form_edited(self, _event=None):
+        self._update_proxy_subscription_profile_form_controls()
+
+    def _submit_proxy_subscription_profile_form(self, _event=None):
+        self._save_proxy_subscription_profile()
+        return "break"
+
+    def _proxy_subscription_profile_combo_label_for_id(self, profile_id: str) -> str:
+        clean_id = str(profile_id or "")
+        for label, candidate_id in self._proxy_subscription_profile_options.items():
+            if str(candidate_id or "") == clean_id:
+                return label
+        return NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL
+
+    def _restore_proxy_subscription_profile_combo(self):
+        combo = getattr(self, "_proxy_subscription_profile_combo", None)
+        if not combo:
+            return
+        label = self._proxy_subscription_profile_combo_label_for_id(
+            str(getattr(self, "_proxy_subscription_profile_edit_id", "") or "")
+        )
+        self._proxy_subscription_profile_loading = True
+        try:
+            combo.set(label)
+        finally:
+            self._proxy_subscription_profile_loading = False
+
+    def _enter_new_proxy_subscription_profile(self, *, announce: bool = True):
+        combo = getattr(self, "_proxy_subscription_profile_combo", None)
+        if combo:
+            self._proxy_subscription_profile_loading = True
+            try:
+                combo.set(NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL)
+            finally:
+                self._proxy_subscription_profile_loading = False
+        self._proxy_subscription_profile_edit_id = ""
+        self._set_proxy_entry_text(self._proxy_subscription_name_entry, "")
+        self._set_proxy_entry_text(self._proxy_subscription_entry, "")
+        self._proxy_subscription_form_snapshot = ("", "", "")
+        self._proxy_latency_results = {}
+        self._proxy_latency_server_count = 0
+        self._proxy_quality_results = {}
+        self._proxy_prefer_quality_sort = False
+        self._proxy_saved_subscription_load_generation += 1
+        self._set_proxy_subscription_nodes(())
+        self._set_proxy_cache_status("本机缓存: 新订阅尚未保存")
+        if announce:
+            self._set_proxy_status("正在新建订阅：填写名称和链接后点击“新增订阅”。")
+        try:
+            self._proxy_subscription_name_entry.focus_set()
+        except Exception:
+            pass
+        self._update_proxy_subscription_profile_form_controls()
+
+    def _reset_proxy_subscription_profile_form(self, _event=None):
+        profile_id = str(
+            getattr(self, "_proxy_subscription_profile_edit_id", "") or ""
+        )
+        if not profile_id:
+            self._enter_new_proxy_subscription_profile(announce=False)
+            self._set_proxy_status("已清空新订阅草稿。")
+            return "break"
+        try:
+            state = remote_proxy.load_proxy_subscription_state()
+            profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+            profile = dict(profiles.get(profile_id) or {})
+            if not profile:
+                raise ValueError("订阅配置已被删除")
+            name = str(profile.get("name") or "").strip()
+            url = str(profile.get("url") or "").strip()
+            self._set_proxy_entry_text(self._proxy_subscription_name_entry, name)
+            self._set_proxy_entry_text(self._proxy_subscription_entry, url)
+            self._proxy_subscription_form_snapshot = (profile_id, name, url)
+            self._restore_proxy_subscription_profile_combo()
+            self._update_proxy_subscription_profile_form_controls()
+            self._set_proxy_status("已撤销未保存的订阅修改。")
+        except Exception as exc:
+            self._refresh_proxy_subscription_profile_options()
+            message = f"订阅草稿恢复失败: {exc}"
+            self._set_proxy_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+        return "break"
 
     def _save_proxy_subscription_profile(self, show_message: bool = True):
         if self._proxy_busy:
             if show_message:
                 show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再保存订阅配置", is_error=True)
             return None
-        url = self._proxy_subscription_url_input()
+        profile_id = str(
+            getattr(self, "_proxy_subscription_profile_edit_id", "") or ""
+        )
+        if not profile_id:
+            profile_id = self._current_proxy_subscription_profile_id()
+        name, url = self._proxy_subscription_profile_form_values()
+        snapshot = getattr(self, "_proxy_subscription_form_snapshot", None)
+        if (
+            profile_id
+            and isinstance(snapshot, tuple)
+            and not self._proxy_subscription_profile_form_dirty()
+        ):
+            try:
+                state = remote_proxy.load_proxy_subscription_state()
+                profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+                existing = dict(profiles.get(profile_id) or {})
+            except Exception:
+                existing = {}
+            if existing:
+                if show_message:
+                    message = "订阅名称和链接没有变化，无需保存。"
+                    self._set_proxy_status(message)
+                    show_toast(self.winfo_toplevel(), message)
+                return existing
         if not url:
+            try:
+                state = remote_proxy.load_proxy_subscription_state()
+                profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
+                existing = dict(profiles.get(profile_id) or {})
+            except Exception:
+                existing = {}
+            if existing.get("source_path"):
+                return self._rename_proxy_local_subscription_profile(
+                    existing,
+                    show_message=show_message,
+                )
             message = "请先填写订阅链接，再保存订阅配置"
             self._set_proxy_status(message, "warning")
             if show_message:
                 show_toast(self.winfo_toplevel(), message, is_error=True)
             return None
-        name = self._proxy_subscription_name_entry.get().strip() if self._proxy_subscription_name_entry else ""
         lock_owned = False
         try:
             if not getattr(self, "_proxy_subscription_hot_update_lock_owned", False):
                 if not remote_proxy.try_acquire_proxy_subscription_hot_update():
                     raise RuntimeError("另一个标签页正在热更新订阅，请稍后再保存或切换分组")
                 lock_owned = True
-            profile = remote_proxy.save_proxy_subscription_profile(name, url, activate=True)
+            if profile_id:
+                current_state = remote_proxy.load_proxy_subscription_state()
+                current_profiles = (
+                    current_state.get("profiles")
+                    if isinstance(current_state.get("profiles"), dict)
+                    else {}
+                )
+                if profile_id not in current_profiles:
+                    raise ValueError("订阅配置已被其他操作删除，请重新选择")
+            profile = remote_proxy.save_proxy_subscription_profile(
+                name,
+                url,
+                profile_id=profile_id,
+                activate=True,
+            )
             state = remote_proxy.load_proxy_subscription_state()
         except Exception as exc:
             message = f"订阅配置保存失败: {exc}"
@@ -2517,10 +2788,46 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._refresh_proxy_subscription_profile_options(state)
         self._apply_proxy_subscription_profile_inputs(state)
         if show_message:
-            message = f"已保存订阅配置: {profile.get('name') or '未命名订阅'}"
+            action = "保存订阅修改" if profile_id else "新增订阅"
+            message = f"已{action}: {profile.get('name') or '未命名订阅'}"
             self._set_proxy_status(message, "success")
             show_toast(self.winfo_toplevel(), message)
         return profile
+
+    def _rename_proxy_local_subscription_profile(
+        self,
+        profile: dict,
+        *,
+        show_message: bool,
+    ):
+        profile_id = str(profile.get("id") or "")
+        name, _url = self._proxy_subscription_profile_form_values()
+        if not name:
+            name = Path(str(profile.get("source_path") or "")).stem or "本地 Clash 配置"
+        lock_owned = False
+        try:
+            if not getattr(self, "_proxy_subscription_hot_update_lock_owned", False):
+                if not remote_proxy.try_acquire_proxy_subscription_hot_update():
+                    raise RuntimeError("另一个标签页正在热更新订阅，请稍后再改名")
+                lock_owned = True
+            updated = remote_proxy.rename_proxy_subscription_profile(profile_id, name)
+            state = remote_proxy.load_proxy_subscription_state()
+        except Exception as exc:
+            message = f"本地 Clash 配置改名失败: {exc}"
+            self._set_proxy_status(message, "error")
+            if show_message:
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+            return None
+        finally:
+            if lock_owned:
+                remote_proxy.release_proxy_subscription_hot_update()
+        self._refresh_proxy_subscription_profile_options(state)
+        self._apply_proxy_subscription_profile_inputs(state)
+        if show_message:
+            message = f"已保存本地 Clash 配置名称: {updated.get('name')}"
+            self._set_proxy_status(message, "success")
+            show_toast(self.winfo_toplevel(), message)
+        return updated
 
     def _delete_proxy_subscription_profile(self):
         if self._proxy_busy:
@@ -2616,10 +2923,42 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_subscription_profile_loading:
             return
         if self._proxy_busy:
+            self._restore_proxy_subscription_profile_combo()
             show_toast(self.winfo_toplevel(), "当前代理操作正在运行，请稍后再切换订阅配置", is_error=True)
             return
-        profile_id = self._proxy_subscription_profile_options.get(str(label or ""))
+        target_label = str(label or "")
+        profile_id = str(self._proxy_subscription_profile_options.get(target_label) or "")
+        current_id = str(
+            getattr(self, "_proxy_subscription_profile_edit_id", "") or ""
+        )
+        if profile_id == current_id and (
+            profile_id or target_label == NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL
+        ):
+            self._restore_proxy_subscription_profile_combo()
+            return
+        if not profile_id and target_label != NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL:
+            self._restore_proxy_subscription_profile_combo()
+            return
+        if self._proxy_subscription_profile_form_dirty():
+            self._restore_proxy_subscription_profile_combo()
+            ConfirmDialog(
+                self.winfo_toplevel(),
+                title="放弃未保存的订阅修改？",
+                message=(
+                    "当前订阅名称或链接尚未保存。切换后这些修改会丢失；"
+                    "如需保留，请先点击“保存修改”。"
+                ),
+                on_confirm=lambda: self._select_proxy_subscription_profile(
+                    target_label,
+                    profile_id,
+                ),
+            )
+            return
+        self._select_proxy_subscription_profile(target_label, profile_id)
+
+    def _select_proxy_subscription_profile(self, label: str, profile_id: str):
         if not profile_id:
+            self._enter_new_proxy_subscription_profile()
             return
         lock_owned = False
         try:
@@ -2630,7 +2969,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             state = remote_proxy.load_proxy_subscription_state()
         except Exception as exc:
             try:
-                self._refresh_proxy_subscription_profile_options()
+                self._restore_proxy_subscription_profile_combo()
             except Exception:
                 pass
             message = f"订阅配置切换失败: {exc}"
@@ -2640,6 +2979,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         finally:
             if lock_owned:
                 remote_proxy.release_proxy_subscription_hot_update()
+        if self._proxy_subscription_profile_combo:
+            self._proxy_subscription_profile_loading = True
+            try:
+                self._proxy_subscription_profile_combo.set(label)
+            finally:
+                self._proxy_subscription_profile_loading = False
         self._apply_proxy_subscription_profile_inputs(state)
         self._proxy_latency_results = {}
         self._proxy_latency_server_count = 0
@@ -2901,6 +3246,13 @@ class SSHTab(ctk.CTkScrollableFrame):
                 message = "已有 SSH 或代理操作正在进行，请稍等"
                 self._set_proxy_status(message, "warning")
                 show_toast(self.winfo_toplevel(), message, is_error=True)
+            self._schedule_proxy_periodic_update()
+            return
+        if not manual and self._proxy_subscription_profile_blocks_automatic_refresh():
+            self._set_proxy_status(
+                "检测到正在新建订阅或存在未保存修改，本次 SSH 定时热更新已延后。",
+                "warning",
+            )
             self._schedule_proxy_periodic_update()
             return
         url = self._proxy_subscription_url_input()
@@ -3295,6 +3647,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_busy or self._proxy_periodic_update_running:
             if show_message:
                 show_toast(self.winfo_toplevel(), "订阅正在拉取中，请稍等", is_error=True)
+            return
+        if auto and self._proxy_subscription_profile_blocks_automatic_refresh():
+            self._set_proxy_status(
+                "检测到正在新建订阅或存在未保存修改，本次启动自动刷新已跳过。",
+                "warning",
+            )
             return
         url = self._proxy_subscription_url_input()
         if not url:

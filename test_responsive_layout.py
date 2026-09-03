@@ -27,7 +27,7 @@ from ui.tabs.claude_tab import _profile_tab_stacked as _claude_profile_tab_stack
 from ui.tabs.codex_tab import _profile_tab_stacked as _codex_profile_tab_stacked
 from ui.tabs.local_proxy_tab import _local_proxy_tab_layout
 from ui.tabs.log_viewer_tab import _log_viewer_stacked
-from ui.tabs.ssh_tab import _ssh_tab_stacked
+from ui.tabs.ssh_tab import _ssh_proxy_form_stacked, _ssh_tab_stacked
 from ui.tabs.usage_stats_tab import _usage_stats_layout
 from ui.widgets.proxy_node_picker import _proxy_node_picker_layout
 from ui.widgets.auto_continue_control import _auto_continue_layout
@@ -347,7 +347,11 @@ def test_compact_picker_and_editor_switch_to_stacked_layouts():
 
 
 def test_local_proxy_outer_form_stacks_before_controls_are_squeezed():
-    assert _local_proxy_tab_layout(900) == (False, 4, 4, 4, False)
+    assert _local_proxy_tab_layout(1700) == (False, 4, 4, 4, False)
+    assert _local_proxy_tab_layout(1200) == (False, 4, 4, 4, False)
+    assert _local_proxy_tab_layout(1001) == (False, 4, 4, 4, False)
+    assert _local_proxy_tab_layout(1000) == (True, 2, 4, 4, False)
+    assert _local_proxy_tab_layout(900) == (True, 2, 4, 4, False)
     assert _local_proxy_tab_layout(720) == (True, 2, 4, 4, False)
     assert _local_proxy_tab_layout(560) == (True, 2, 2, 2, False)
     assert _local_proxy_tab_layout(480) == (True, 2, 2, 2, True)
@@ -366,3 +370,7 @@ def test_profile_ssh_and_log_sections_stack_on_narrow_tabs():
     assert _ssh_tab_stacked(821) is False
     assert _ssh_tab_stacked(820) is True
     assert _ssh_tab_stacked(680) is True
+
+    assert _ssh_proxy_form_stacked(1001) is False
+    assert _ssh_proxy_form_stacked(1000) is True
+    assert _ssh_proxy_form_stacked(1180) is False
