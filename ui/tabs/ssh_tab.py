@@ -2559,6 +2559,28 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if not remote_proxy.try_acquire_proxy_subscription_hot_update():
                     raise RuntimeError("另一个标签页正在热更新订阅，请稍后再删除分组")
                 lock_owned = True
+                try:
+                    latest_bindings = (
+                        local_proxy.local_proxy_service_bindings_for_profile(
+                            profile_id
+                        )
+                    )
+                except Exception as exc:
+                    message = (
+                        "删除前无法重新确认该订阅是否正被 Win11 服务分流使用，"
+                        f"已取消删除: {exc}"
+                    )
+                    self._set_proxy_status(message, "warning")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+                if latest_bindings:
+                    message = (
+                        "删除前检测到该订阅已被 Win11 服务分流使用；"
+                        "已取消删除，请先调整对应服务线路"
+                    )
+                    self._set_proxy_status(message, "warning")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
                 remote_proxy.delete_proxy_subscription_profile(profile_id)
                 state = remote_proxy.load_proxy_subscription_state()
             except Exception as exc:

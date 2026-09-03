@@ -2076,12 +2076,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             bound_service_ids = local_proxy.local_proxy_service_bindings_for_profile(
                 profile_id
             )
-        except Exception:
-            bound_service_ids = tuple(
-                service_id
-                for service_id, bound_profile_id in self._service_route_bindings.items()
-                if str(bound_profile_id or "") == profile_id
+        except Exception as exc:
+            message = (
+                "无法确认该订阅是否正被服务分流使用，已取消删除: "
+                f"{exc}"
             )
+            self._set_status(message, "warning")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+            return
         bound_services = [
             self._service_route_label(service_id)
             for service_id in bound_service_ids
@@ -2100,6 +2102,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if not allowed:
                 return
             try:
+                try:
+                    latest_bound_ids = (
+                        local_proxy.local_proxy_service_bindings_for_profile(
+                            profile_id
+                        )
+                    )
+                except Exception as exc:
+                    message = (
+                        "删除前无法重新确认该订阅的服务绑定状态，已取消删除: "
+                        f"{exc}"
+                    )
+                    self._set_status(message, "warning")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
+                if latest_bound_ids:
+                    latest_labels = "、".join(
+                        self._service_route_label(service_id)
+                        for service_id in latest_bound_ids
+                    )
+                    message = (
+                        f"删除前检测到该订阅已被 {latest_labels} 使用；"
+                        "已取消删除，请先调整服务线路"
+                    )
+                    self._set_status(message, "warning")
+                    show_toast(self.winfo_toplevel(), message, is_error=True)
+                    return
                 remote_proxy.delete_proxy_subscription_profile(profile_id)
                 state = remote_proxy.load_proxy_subscription_state()
             except Exception as exc:

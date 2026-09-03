@@ -1454,7 +1454,13 @@ def apply_local_proxy_routing_to_running() -> str:
     node = _read_local_managed_proxy_node() or _load_last_proxy_node()
     if not node:
         raise RuntimeError("未读取到当前运行节点，无法热更新代理范围")
-    return reload_local_ai_proxy(remote_proxy.format_proxy_node(node))
+    # This is a routing-only rebuild.  Persisting ``node`` as the selected node
+    # of whichever subscription happens to be active would cross-contaminate
+    # otherwise independent A/B subscriptions.
+    return reload_local_ai_proxy(
+        remote_proxy.format_proxy_node(node),
+        persist_subscription_selection=False,
+    )
 
 
 @_serialized_local_proxy_operation("自动启动本机代理")
@@ -2031,6 +2037,7 @@ def reload_local_ai_proxy(
     *,
     profile_id: str = "",
     fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
+    persist_subscription_selection: bool = True,
 ) -> str:
     if os.name != "nt":
         raise RuntimeError("本机 AI 代理目前只支持 Windows")
@@ -2081,7 +2088,8 @@ def reload_local_ai_proxy(
         or (wsl_target is None and managed_wsl is not None)
     )
     if same_config and applied_matches and not wsl_reconcile_needed:
-        _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
+        if persist_subscription_selection:
+            _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
         return "本机 AI 代理运行节点已是最新配置，无需热更新"
     if same_config and applied_matches:
         if wsl_target is not None:
@@ -2095,7 +2103,8 @@ def reload_local_ai_proxy(
             wsl_detail = _remove_managed_wsl_integration_state(state)
         state["updated_at"] = remote_proxy._now_iso()
         _save_state(state)
-        _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
+        if persist_subscription_selection:
+            _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
         return "；".join(
             item
             for item in ("本机 AI 代理配置已是最新", wsl_detail)
@@ -2168,7 +2177,8 @@ def reload_local_ai_proxy(
     )
     _save_state(state)
     _save_last_proxy_node(proxy_node)
-    _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
+    if persist_subscription_selection:
+        _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
     fallback_candidates = _managed_proxy_pool_size(new_config)
     return (
         f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}；"
@@ -2652,7 +2662,8 @@ def inspect_local_ai_proxy(mixed_port: int = DEFAULT_LOCAL_MIXED_PORT) -> LocalA
             )
         else:
             details.append(
-                f"服务订阅分流已生效: {configured_service_bindings} 项绑定均复用当前主线路"
+                f"已保存 {configured_service_bindings} 项服务订阅绑定；"
+                "对应内置站点或自定义目标当前未启用，因此未生成独立线路"
             )
     elif configured_service_bindings:
         details.append(
