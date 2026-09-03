@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from core import remote_proxy
 from ui.tabs.local_proxy_tab import (
     NEW_SUBSCRIPTION_PROFILE_LABEL,
@@ -36,6 +38,14 @@ class _WidgetStub:
         self.focused = True
 
 
+class _ImmediateThread:
+    def __init__(self, *, target, **_kwargs):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
 def _isolated_subscription_storage(monkeypatch, path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", path)
     remote_proxy.clear_proxy_subscription_state_cache()
@@ -49,6 +59,7 @@ def _local_tab_stub() -> LocalProxyTab:
     tab._subscription_profile_loading = False
     tab._subscription_profile_edit_id = ""
     tab._subscription_form_snapshot = None
+    tab._subscription_profile_new_mode_selected = False
     tab._subscription_profile_options = {}
     tab._subscription_profiles_snapshot = []
     tab._subscription_profile_combo = _WidgetStub(NEW_SUBSCRIPTION_PROFILE_LABEL)
@@ -80,6 +91,7 @@ def _ssh_tab_stub() -> SSHTab:
     tab._proxy_subscription_profile_loading = False
     tab._proxy_subscription_profile_edit_id = ""
     tab._proxy_subscription_form_snapshot = None
+    tab._proxy_subscription_profile_new_mode_selected = False
     tab._proxy_subscription_profile_options = {}
     tab._proxy_subscription_profile_combo = _WidgetStub(
         NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL
@@ -366,3 +378,174 @@ def test_existing_profile_actions_start_in_safe_clean_state(monkeypatch, tmp_pat
     assert ssh._proxy_subscription_profile_save_button.options["state"] == "disabled"
     assert ssh._proxy_subscription_profile_reset_button.options["state"] == "disabled"
     assert ssh._proxy_subscription_profile_delete_button.options["state"] == "normal"
+
+
+def test_local_initial_state_load_preserves_fast_new_draft(monkeypatch, tmp_path):
+    _isolated_subscription_storage(monkeypatch, tmp_path)
+    first, _second = _seed_two_profiles()
+    tab = _local_tab_stub()
+    tab._saved_subscription_after_id = None
+    tab._deferred_saved_subscription_pending = False
+    tab._saved_subscription_loaded = False
+    tab._auto_refresh_var = SimpleNamespace(set=lambda _value: None)
+    tab._periodic_update_var = SimpleNamespace(set=lambda _value: None)
+    tab._periodic_update_entry = None
+    tab._schedule_periodic_update = lambda **_kwargs: None
+    tab._run_on_ui_thread = lambda callback: callback()
+    tab.winfo_exists = lambda: True
+    statuses = []
+    tab._set_status = lambda message, severity="info": statuses.append(
+        (message, severity)
+    )
+    monkeypatch.setattr("ui.tabs.local_proxy_tab.is_active_tab", lambda _tab: True)
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.threading.Thread",
+        _ImmediateThread,
+    )
+    tab._subscription_profile_combo.value = ""
+    tab._subscription_name_entry.value = "刚粘贴的草稿"
+    tab._subscription_entry.value = "https://draft.example/subscription"
+    tab._on_subscription_profile_form_edited()
+
+    tab._load_saved_subscription_ui()
+
+    assert tab._saved_subscription_loaded is True
+    assert tab._subscription_profile_combo.get() == NEW_SUBSCRIPTION_PROFILE_LABEL
+    assert tab._subscription_name_entry.get() == "刚粘贴的草稿"
+    assert tab._subscription_entry.get() == "https://draft.example/subscription"
+    assert first["id"] in tab._subscription_profile_options.values()
+    assert statuses[-1][1] == "warning"
+    assert "保留当前草稿" in statuses[-1][0]
+
+
+def test_ssh_initial_state_load_preserves_fast_new_draft(monkeypatch, tmp_path):
+    _isolated_subscription_storage(monkeypatch, tmp_path)
+    first, _second = _seed_two_profiles()
+    tab = _ssh_tab_stub()
+    tab._proxy_saved_subscription_after_id = None
+    tab._deferred_proxy_saved_subscription_pending = False
+    tab._proxy_saved_subscription_loaded = False
+    tab._proxy_auto_refresh_var = SimpleNamespace(set=lambda _value: None)
+    tab._proxy_periodic_update_var = SimpleNamespace(set=lambda _value: None)
+    tab._proxy_periodic_update_entry = None
+    tab._proxy_strict_privacy_var = None
+    tab._schedule_proxy_periodic_update = lambda **_kwargs: None
+    statuses = []
+    tab._set_proxy_status = lambda message, severity="info": statuses.append(
+        (message, severity)
+    )
+    monkeypatch.setattr("ui.tabs.ssh_tab.is_active_tab", lambda _tab: True)
+    tab._proxy_subscription_profile_combo.value = ""
+    tab._proxy_subscription_name_entry.value = "刚粘贴的草稿"
+    tab._proxy_subscription_entry.value = "https://draft.example/subscription"
+    tab._on_proxy_subscription_profile_form_edited()
+
+    tab._load_saved_proxy_subscription_ui()
+
+    assert tab._proxy_saved_subscription_loaded is True
+    assert (
+        tab._proxy_subscription_profile_combo.get()
+        == NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL
+    )
+    assert tab._proxy_subscription_name_entry.get() == "刚粘贴的草稿"
+    assert tab._proxy_subscription_entry.get() == "https://draft.example/subscription"
+    assert first["id"] in tab._proxy_subscription_profile_options.values()
+    assert statuses[-1][1] == "warning"
+    assert "保留当前草稿" in statuses[-1][0]
+
+
+def test_ssh_initial_state_read_failure_is_recoverable(monkeypatch):
+    tab = _ssh_tab_stub()
+    tab._proxy_saved_subscription_after_id = None
+    tab._deferred_proxy_saved_subscription_pending = False
+    tab._proxy_saved_subscription_loaded = False
+    cache_statuses = []
+    statuses = []
+    tab._set_proxy_cache_status = lambda message, severity="info": cache_statuses.append(
+        (message, severity)
+    )
+    tab._set_proxy_status = lambda message, severity="info": statuses.append(
+        (message, severity)
+    )
+    monkeypatch.setattr("ui.tabs.ssh_tab.is_active_tab", lambda _tab: True)
+    monkeypatch.setattr(
+        remote_proxy,
+        "load_proxy_subscription_state",
+        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+    )
+
+    tab._load_saved_proxy_subscription_ui()
+
+    assert tab._proxy_saved_subscription_loaded is False
+    assert tab._deferred_proxy_saved_subscription_pending is True
+    assert cache_statuses[-1][1] == "error"
+    assert statuses[-1][1] == "error"
+    assert "state unavailable" in statuses[-1][0]
+
+
+def test_local_initial_state_read_failure_retries_on_next_activation(monkeypatch):
+    tab = _local_tab_stub()
+    tab._saved_subscription_after_id = None
+    tab._deferred_saved_subscription_pending = False
+    tab._saved_subscription_loaded = False
+    tab._run_on_ui_thread = lambda callback: callback()
+    tab.winfo_exists = lambda: True
+    cache_statuses = []
+    statuses = []
+    tab._set_cache_status = lambda message, severity="info": cache_statuses.append(
+        (message, severity)
+    )
+    tab._set_status = lambda message, severity="info": statuses.append(
+        (message, severity)
+    )
+    monkeypatch.setattr("ui.tabs.local_proxy_tab.is_active_tab", lambda _tab: True)
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.threading.Thread",
+        _ImmediateThread,
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "load_proxy_subscription_state",
+        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+    )
+
+    tab._load_saved_subscription_ui()
+
+    assert tab._saved_subscription_loaded is False
+    assert tab._deferred_saved_subscription_pending is True
+    assert cache_statuses[-1][1] == "error"
+    assert statuses[-1][1] == "error"
+
+
+def test_stale_local_initial_load_reschedules_instead_of_overwriting(monkeypatch, tmp_path):
+    _isolated_subscription_storage(monkeypatch, tmp_path)
+    _seed_two_profiles()
+    tab = _local_tab_stub()
+    tab._saved_subscription_after_id = None
+    tab._deferred_saved_subscription_pending = False
+    tab._saved_subscription_loaded = False
+    tab._auto_refresh_var = SimpleNamespace(set=lambda _value: None)
+    tab._periodic_update_var = SimpleNamespace(set=lambda _value: None)
+    tab._periodic_update_entry = None
+    tab.winfo_exists = lambda: True
+    callbacks = []
+    scheduled = []
+    tab._run_on_ui_thread = callbacks.append
+    tab._schedule_after_once = lambda attr, delay, callback: scheduled.append(
+        (attr, delay, callback)
+    )
+    monkeypatch.setattr("ui.tabs.local_proxy_tab.is_active_tab", lambda _tab: True)
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.threading.Thread",
+        _ImmediateThread,
+    )
+
+    tab._load_saved_subscription_ui()
+    assert len(callbacks) == 1
+    tab._saved_subscription_load_generation += 1
+    callbacks[0]()
+
+    assert tab._saved_subscription_loaded is False
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == "_saved_subscription_after_id"
+    assert scheduled[0][2] == tab._load_saved_subscription_ui

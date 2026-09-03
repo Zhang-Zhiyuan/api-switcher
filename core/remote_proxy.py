@@ -1003,8 +1003,14 @@ def load_cached_proxy_subscription(state: dict | None = None) -> ProxySubscripti
     )
 
 
-def list_proxy_subscription_profiles() -> list[dict]:
-    state = load_proxy_subscription_state()
+def list_proxy_subscription_profiles(state: dict | None = None) -> list[dict]:
+    """Return profiles from one consistent state snapshot when provided."""
+
+    state = (
+        _normalize_proxy_subscription_state(state)
+        if isinstance(state, dict)
+        else load_proxy_subscription_state()
+    )
     active_id = str(state.get("active_profile_id") or "")
     profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
     results = []
