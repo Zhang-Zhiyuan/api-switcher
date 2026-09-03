@@ -4708,6 +4708,23 @@ def test_proxy_subscription_profiles_switch_active_state(monkeypatch, tmp_path):
     assert set(remote_proxy.load_proxy_subscription_latencies()) == {"one"}
 
 
+def test_proxy_subscription_profile_list_uses_supplied_state_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
+
+    first = remote_proxy.save_proxy_subscription_profile("主力", "https://one.example/sub")
+    second = remote_proxy.save_proxy_subscription_profile("备用", "https://two.example/sub")
+    second_active_snapshot = remote_proxy.load_proxy_subscription_state()
+    remote_proxy.set_active_proxy_subscription_profile(first["id"])
+
+    profiles = remote_proxy.list_proxy_subscription_profiles(second_active_snapshot)
+
+    assert next(item for item in profiles if item["id"] == second["id"])["active"] is True
+    assert next(item for item in profiles if item["id"] == first["id"])["active"] is False
+
+
 def test_proxy_subscription_cache_reads_from_state_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     cache_dir = tmp_path / "proxy_subscriptions"

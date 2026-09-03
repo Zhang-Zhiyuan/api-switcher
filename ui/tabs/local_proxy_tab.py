@@ -68,6 +68,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_profile_loading = False
         self._subscription_profile_edit_id = ""
         self._subscription_form_snapshot = None
+        self._subscription_profile_new_mode_selected = False
         self._subscription_picker = None
         self._subscription_picker_host = None
         self._subscription_picker_after_id = None
@@ -479,6 +480,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **combo_style(),
         )
         self._subscription_profile_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._subscription_profile_combo.set(NEW_SUBSCRIPTION_PROFILE_LABEL)
         self._subscription_name_label = ctk.CTkLabel(
             controls,
             text="显示名称",
@@ -536,6 +538,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         for entry in (self._subscription_name_entry, self._subscription_entry):
             entry.bind("<KeyRelease>", self._on_subscription_profile_form_edited, add="+")
+            entry.bind("<<Paste>>", self._on_subscription_profile_clipboard_edit, add="+")
+            entry.bind("<<Cut>>", self._on_subscription_profile_clipboard_edit, add="+")
+            entry.bind("<FocusOut>", self._update_subscription_profile_form_controls, add="+")
             entry.bind("<Return>", self._submit_subscription_profile_form, add="+")
             entry.bind("<Escape>", self._reset_subscription_profile_form, add="+")
         sub_actions = ctk.CTkFrame(controls, fg_color="transparent")
@@ -1972,10 +1977,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return f"{name} · {host}"
         return name
 
-    def _refresh_subscription_profile_options(self, state: dict | None = None):
-        profiles = remote_proxy.list_proxy_subscription_profiles()
+    def _refresh_subscription_profile_options(
+        self,
+        state: dict | None = None,
+        *,
+        preserve_editor: bool = False,
+    ):
+        resolved_state = (
+            state
+            if isinstance(state, dict)
+            else remote_proxy.load_proxy_subscription_state()
+        )
+        profiles = remote_proxy.list_proxy_subscription_profiles(resolved_state)
         self._refresh_service_route_profile_options(profiles)
-        active_id = str((state or remote_proxy.load_proxy_subscription_state()).get("active_profile_id") or "")
+        active_id = str(resolved_state.get("active_profile_id") or "")
         values = [NEW_SUBSCRIPTION_PROFILE_LABEL]
         mapping = {}
         seen = {NEW_SUBSCRIPTION_PROFILE_LABEL}
@@ -1994,10 +2009,24 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 active_label = label
         self._subscription_profile_options = mapping
         if self._subscription_profile_combo:
+            selected_label = ""
+            if preserve_editor:
+                try:
+                    selected_label = str(self._subscription_profile_combo.get() or "")
+                except Exception:
+                    selected_label = ""
             self._subscription_profile_loading = True
             try:
                 self._subscription_profile_combo.configure(values=values)
-                self._subscription_profile_combo.set(active_label)
+                self._subscription_profile_combo.set(
+                    (
+                        selected_label
+                        if selected_label in values
+                        else NEW_SUBSCRIPTION_PROFILE_LABEL
+                    )
+                    if preserve_editor
+                    else active_label
+                )
             finally:
                 self._subscription_profile_loading = False
 
@@ -2012,6 +2041,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._set_entry_text(self._subscription_name_entry, name)
         self._set_entry_text(self._subscription_entry, url)
         self._subscription_profile_edit_id = active_id if profile else ""
+        self._subscription_profile_new_mode_selected = False
         self._subscription_form_snapshot = (
             self._subscription_profile_edit_id,
             name,
@@ -2032,9 +2062,25 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _subscription_profile_form_dirty(self) -> bool:
         snapshot = getattr(self, "_subscription_form_snapshot", None)
-        if not isinstance(snapshot, tuple) or len(snapshot) != 3:
-            return False
         name, url = self._subscription_profile_form_values()
+        if not isinstance(snapshot, tuple) or len(snapshot) != 3:
+            combo = getattr(self, "_subscription_profile_combo", None)
+            try:
+                is_unloaded_new_form = bool(
+                    combo and combo.get() == NEW_SUBSCRIPTION_PROFILE_LABEL
+                )
+            except Exception:
+                is_unloaded_new_form = False
+            return bool(name or url) and (
+                is_unloaded_new_form
+                or bool(
+                    getattr(
+                        self,
+                        "_subscription_profile_new_mode_selected",
+                        False,
+                    )
+                )
+            )
         current = (
             str(getattr(self, "_subscription_profile_edit_id", "") or ""),
             name,
@@ -2045,11 +2091,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _subscription_profile_is_new_draft(self) -> bool:
         if str(getattr(self, "_subscription_profile_edit_id", "") or ""):
             return False
-        combo = getattr(self, "_subscription_profile_combo", None)
-        try:
-            return bool(combo and combo.get() == NEW_SUBSCRIPTION_PROFILE_LABEL)
-        except Exception:
-            return False
+        return bool(
+            getattr(self, "_subscription_profile_new_mode_selected", False)
+        )
 
     def _subscription_profile_blocks_automatic_refresh(self) -> bool:
         return self._subscription_profile_is_new_draft() or self._subscription_profile_form_dirty()
@@ -2092,7 +2136,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pass
 
     def _on_subscription_profile_form_edited(self, _event=None):
+        if not str(getattr(self, "_subscription_profile_edit_id", "") or ""):
+            self._subscription_profile_new_mode_selected = True
         self._update_subscription_profile_form_controls()
+
+    def _on_subscription_profile_clipboard_edit(self, _event=None):
+        if not str(getattr(self, "_subscription_profile_edit_id", "") or ""):
+            self._subscription_profile_new_mode_selected = True
+        try:
+            self.after_idle(self._update_subscription_profile_form_controls)
+        except Exception:
+            self._update_subscription_profile_form_controls()
 
     def _submit_subscription_profile_form(self, _event=None):
         self._save_subscription_profile()
@@ -2119,6 +2173,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._subscription_profile_loading = False
 
     def _enter_new_subscription_profile(self, *, announce: bool = True):
+        had_loaded_form = self._subscription_form_snapshot is not None
         combo = getattr(self, "_subscription_profile_combo", None)
         if combo:
             self._subscription_profile_loading = True
@@ -2127,13 +2182,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             finally:
                 self._subscription_profile_loading = False
         self._subscription_profile_edit_id = ""
+        self._subscription_profile_new_mode_selected = True
         self._set_entry_text(self._subscription_name_entry, "")
         self._set_entry_text(self._subscription_entry, "")
         self._subscription_form_snapshot = ("", "", "")
         self._latency_results = {}
         self._quality_results = {}
         self._prefer_quality_sort = False
-        self._saved_subscription_load_generation += 1
+        if had_loaded_form:
+            self._saved_subscription_load_generation += 1
         self._set_subscription_nodes(())
         self._set_cache_status("本机缓存: 新订阅尚未保存")
         if announce:
@@ -2262,6 +2319,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if release_needed:
                 remote_proxy.release_proxy_subscription_hot_update()
         self._refresh_subscription_profile_options(state)
+        self._saved_subscription_load_generation += 1
         self._apply_subscription_profile_inputs(state)
         if show_message:
             action = "保存订阅修改" if profile_id else "新增订阅"
@@ -2294,6 +2352,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if release_needed:
                 remote_proxy.release_proxy_subscription_hot_update()
         self._refresh_subscription_profile_options(state)
+        self._saved_subscription_load_generation += 1
         self._apply_subscription_profile_inputs(state)
         if show_message:
             message = f"已保存本地 Clash 配置名称: {updated.get('name')}"
@@ -2381,6 +2440,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if release_needed:
                     remote_proxy.release_proxy_subscription_hot_update()
             self._refresh_subscription_profile_options(state)
+            self._saved_subscription_load_generation += 1
             self._apply_subscription_profile_inputs(state)
             self._latency_results = {}
             self._quality_results = {}
@@ -2390,7 +2450,6 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_status(message, "success")
             show_toast(self.winfo_toplevel(), message)
             if state.get("saved_path"):
-                self._saved_subscription_load_generation += 1
                 self._load_subscription_cache_for_state(state, self._saved_subscription_load_generation)
 
         ConfirmDialog(
@@ -2497,16 +2556,33 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 payload = {"ok": False, "state": {}, "auto_refresh": False, "error": str(e)}
 
             def finish():
-                if not self.winfo_exists() or generation != self._saved_subscription_load_generation:
+                if not self.winfo_exists():
+                    return
+                if generation != self._saved_subscription_load_generation:
+                    self._saved_subscription_loaded = False
+                    self._schedule_after_once(
+                        "_saved_subscription_after_id",
+                        80,
+                        self._load_saved_subscription_ui,
+                    )
                     return
                 if not payload["ok"]:
                     self._saved_subscription_loaded = False
+                    self._deferred_saved_subscription_pending = True
                     self._set_cache_status("本机缓存: 订阅状态读取失败", "error")
                     self._set_status(f"读取 Win11 代理订阅状态失败: {payload['error']}", "error")
                     return
                 state = payload["state"]
-                self._refresh_subscription_profile_options(state)
-                self._apply_subscription_profile_inputs(state)
+                preserve_editor = self._subscription_profile_blocks_automatic_refresh()
+                if preserve_editor:
+                    self._refresh_subscription_profile_options(
+                        state,
+                        preserve_editor=True,
+                    )
+                else:
+                    self._refresh_subscription_profile_options(state)
+                if not preserve_editor:
+                    self._apply_subscription_profile_inputs(state)
                 auto_refresh = bool(payload["auto_refresh"])
                 periodic_update = bool(state.get("local_periodic_update_enabled"))
                 interval_minutes = str(state.get("local_periodic_update_interval_minutes") or "60")
@@ -2516,6 +2592,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if self._periodic_update_entry:
                     self._periodic_update_entry.delete(0, "end")
                     self._periodic_update_entry.insert(0, interval_minutes)
+
+                if preserve_editor:
+                    self._set_cache_status("本机缓存: 已读取订阅列表，暂未切换草稿")
+                    self._set_status(
+                        "订阅状态已加载；检测到未保存输入，已保留当前草稿，未自动覆盖。",
+                        "warning",
+                    )
+                    self._schedule_periodic_update(initial=True)
+                    return
 
                 if not str(state.get("saved_path") or "").strip():
                     if str(state.get("url") or "").strip() and auto_refresh:
