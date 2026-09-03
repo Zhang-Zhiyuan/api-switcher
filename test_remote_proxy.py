@@ -8187,6 +8187,29 @@ def test_apply_local_proxy_routing_skips_unmanaged_listener(monkeypatch, tmp_pat
     assert "下次启动时生效" in message
 
 
+def test_apply_local_proxy_routing_does_not_change_active_subscription(monkeypatch):
+    node = {
+        "name": "main",
+        "type": "vless",
+        "server": "main.example.com",
+        "port": 443,
+    }
+    captured = []
+    monkeypatch.setattr(local_proxy, "_load_local_proxy_routing_preferences_strict", lambda: {})
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897})
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args: True)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(local_proxy, "_read_local_managed_proxy_node", lambda: node)
+    monkeypatch.setattr(
+        local_proxy,
+        "reload_local_ai_proxy",
+        lambda proxy_text, **kwargs: captured.append((proxy_text, kwargs)) or "已应用",
+    )
+
+    assert local_proxy.apply_local_proxy_routing_to_running() == "已应用"
+    assert captured[0][1] == {"persist_subscription_selection": False}
+
+
 def test_local_proxy_state_cache_reuses_reads_and_detects_external_write(monkeypatch, tmp_path):
     monkeypatch.setattr(local_proxy, "LOCAL_PROXY_STATE_PATH", tmp_path / "state.json")
     local_proxy.LOCAL_PROXY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -8577,6 +8600,99 @@ def test_reload_local_ai_proxy_uses_controller_and_updates_state(monkeypatch, tm
     assert "new.example.com" in config_path.read_text(encoding="utf-8")
     assert saved_states[-1]["node_name"] == "new"
     assert saved_states[-1]["applied_config_pid"] == 4321
+
+
+def test_routing_only_reload_does_not_persist_subscription_selection(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        remote_proxy.build_mihomo_config(
+            {"name": "old", "type": "vless", "server": "old.example.com", "port": 443},
+            17897,
+        ),
+        encoding="utf-8",
+    )
+    remembered = []
+
+    monkeypatch.setattr(
+        local_proxy,
+        "_load_state",
+        lambda: {"mixed_port": 17897, "config_path": str(config_path)},
+    )
+    monkeypatch.setattr(local_proxy, "_save_state", lambda _state: None)
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args: True)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 4321)
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda *_args, **_kwargs: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path=str(config_path),
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+    monkeypatch.setattr(local_proxy, "_reload_local_mihomo_config", lambda _path, _port: None)
+    monkeypatch.setattr(
+        local_proxy,
+        "_remember_selected_subscription_node",
+        lambda *_args, **_kwargs: remembered.append((_args, _kwargs)),
+    )
+
+    message = local_proxy.reload_local_ai_proxy(
+        "{ name: new, type: vless, server: new.example.com, port: 443 }",
+        persist_subscription_selection=False,
+    )
+
+    assert "已热更新" in message
+    assert remembered == []
+
+
+def test_unchanged_routing_only_reload_does_not_persist_subscription_selection(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("same config\n", encoding="utf-8")
+    remembered = []
+
+    monkeypatch.setattr(local_proxy, "_load_local_proxy_routing_preferences_strict", lambda: {})
+    monkeypatch.setattr(
+        local_proxy,
+        "_load_state",
+        lambda: {"mixed_port": 17897, "config_path": str(config_path)},
+    )
+    monkeypatch.setattr(local_proxy, "_managed_local_proxy_is_running", lambda *_args: True)
+    monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 4321)
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda *_args, **_kwargs: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path=str(config_path),
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_build_local_mihomo_config",
+        lambda *_args, **_kwargs: "same config\n",
+    )
+    monkeypatch.setattr(local_proxy, "_applied_local_config_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        local_proxy,
+        "_remember_selected_subscription_node",
+        lambda *_args, **_kwargs: remembered.append((_args, _kwargs)),
+    )
+
+    message = local_proxy.reload_local_ai_proxy(
+        "{ name: main, type: vless, server: main.example.com, port: 443 }",
+        persist_subscription_selection=False,
+    )
+
+    assert "无需热更新" in message
+    assert remembered == []
 
 
 def test_reload_local_ai_proxy_forces_old_config_after_ambiguous_controller_failure(

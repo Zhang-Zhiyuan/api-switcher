@@ -854,6 +854,141 @@ def test_ssh_delete_profile_refuses_when_win11_service_route_uses_it(monkeypatch
     assert "Win11 服务分流" in calls["status"][-1]
 
 
+def test_ssh_delete_profile_rechecks_service_binding_after_confirmation(monkeypatch):
+    calls = {"checks": 0, "deleted": 0, "release": 0, "status": []}
+
+    def bindings(_profile_id):
+        calls["checks"] += 1
+        return () if calls["checks"] == 1 else ("youtube",)
+
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        bindings,
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "try_acquire_proxy_subscription_hot_update",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "release_proxy_subscription_hot_update",
+        lambda: calls.__setitem__("release", calls["release"] + 1),
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "delete_proxy_subscription_profile",
+        lambda _profile_id: calls.__setitem__("deleted", calls["deleted"] + 1),
+    )
+    monkeypatch.setattr(
+        "ui.tabs.ssh_tab.ConfirmDialog",
+        lambda *_args, **kwargs: kwargs["on_confirm"](),
+    )
+    monkeypatch.setattr("ui.tabs.ssh_tab.show_toast", lambda *_args, **_kwargs: None)
+
+    tab = object.__new__(SSHTab)
+    tab._proxy_busy = False
+    tab._proxy_subscription_profile_combo = _ValueStub("candidate")
+    tab._proxy_subscription_profile_options = {"candidate": "profile-b"}
+    tab._set_proxy_status = lambda message, *_args: calls["status"].append(message)
+    tab.winfo_toplevel = lambda: object()
+
+    tab._delete_proxy_subscription_profile()
+
+    assert calls["checks"] == 2
+    assert calls["deleted"] == 0
+    assert calls["release"] == 1
+    assert "删除前检测到" in calls["status"][-1]
+
+
+def test_local_delete_profile_fails_closed_when_binding_state_is_unreadable(monkeypatch):
+    calls = {"deleted": 0, "dialogs": 0, "status": []}
+
+    def unreadable(_profile_id):
+        raise RuntimeError("preferences unavailable")
+
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        unreadable,
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "delete_proxy_subscription_profile",
+        lambda _profile_id: calls.__setitem__("deleted", calls["deleted"] + 1),
+    )
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.ConfirmDialog",
+        lambda *_args, **_kwargs: calls.__setitem__("dialogs", calls["dialogs"] + 1),
+    )
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.show_toast",
+        lambda *_args, **_kwargs: None,
+    )
+
+    tab = object.__new__(LocalProxyTab)
+    tab._busy = False
+    tab._subscription_profile_combo = _ValueStub("candidate")
+    tab._subscription_profile_options = {"candidate": "profile-b"}
+    tab._set_status = lambda message, *_args: calls["status"].append(message)
+    tab.winfo_toplevel = lambda: object()
+
+    tab._delete_subscription_profile()
+
+    assert calls["deleted"] == 0
+    assert calls["dialogs"] == 0
+    assert "无法确认" in calls["status"][-1]
+
+
+def test_local_delete_profile_rechecks_service_binding_after_confirmation(monkeypatch):
+    calls = {"checks": 0, "deleted": 0, "release": 0, "status": []}
+
+    def bindings(_profile_id):
+        calls["checks"] += 1
+        return () if calls["checks"] == 1 else ("youtube",)
+
+    monkeypatch.setattr(
+        local_proxy,
+        "local_proxy_service_bindings_for_profile",
+        bindings,
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "release_proxy_subscription_hot_update",
+        lambda: calls.__setitem__("release", calls["release"] + 1),
+    )
+    monkeypatch.setattr(
+        remote_proxy,
+        "delete_proxy_subscription_profile",
+        lambda _profile_id: calls.__setitem__("deleted", calls["deleted"] + 1),
+    )
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.ConfirmDialog",
+        lambda *_args, **kwargs: kwargs["on_confirm"](),
+    )
+    monkeypatch.setattr(
+        "ui.tabs.local_proxy_tab.show_toast",
+        lambda *_args, **_kwargs: None,
+    )
+
+    tab = object.__new__(LocalProxyTab)
+    tab._busy = False
+    tab._subscription_profile_combo = _ValueStub("candidate")
+    tab._subscription_profile_options = {"candidate": "profile-b"}
+    tab._begin_subscription_profile_mutation = lambda *_args, **_kwargs: (True, True)
+    tab._service_route_label = lambda _service_id: "YouTube"
+    tab._set_status = lambda message, *_args: calls["status"].append(message)
+    tab.winfo_toplevel = lambda: object()
+
+    tab._delete_subscription_profile()
+
+    assert calls["checks"] == 2
+    assert calls["deleted"] == 0
+    assert calls["release"] == 1
+    assert "删除前检测到" in calls["status"][-1]
+
+
 def test_local_manual_subscription_fetch_failure_keeps_existing_nodes(monkeypatch):
     old_node = _node(1, "美国-旧缓存")
     old_key = remote_proxy.proxy_subscription_node_key(old_node)
