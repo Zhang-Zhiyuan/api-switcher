@@ -125,6 +125,9 @@ def test_local_config_uses_silent_log_and_health_check_even_with_one_node():
         "https://doh.pub/dns-query#DIRECT",
         "https://dns.alidns.com/dns-query#DIRECT",
     ]
+    assert parsed["dns"]["nameserver"] == ["system"]
+    assert parsed["dns"]["direct-nameserver"] == ["system"]
+    assert parsed["dns"]["direct-nameserver-follow-policy"] is False
     assert parsed["dns"]["nameserver-policy"]["+.openai.com"] == [
         "https://1.1.1.1/dns-query#AI-PROXY",
         "https://8.8.8.8/dns-query#AI-PROXY",
@@ -150,6 +153,125 @@ def test_local_mainland_dns_routes_custom_proxy_domains_through_ai_proxy():
         "https://1.1.1.1/dns-query#AI-PROXY",
         "https://8.8.8.8/dns-query#AI-PROXY",
     ]
+    assert parsed["dns"]["nameserver"] == ["system"]
+    assert parsed["dns"]["direct-nameserver"] == ["system"]
+
+
+def test_youtube_builtin_rule_includes_page_media_and_embed_domains():
+    config = local_proxy._build_local_mihomo_config(
+        _node("primary", "primary.example.com"),
+        17897,
+        preferences={"builtin_sites": {"youtube": True}},
+    )
+    parsed = remote_proxy.yaml.safe_load(config)
+
+    for domain in (
+        "youtube.com",
+        "youtube-nocookie.com",
+        "youtu.be",
+        "ytimg.com",
+        "googlevideo.com",
+        "ggpht.com",
+    ):
+        assert f"DOMAIN-SUFFIX,{domain},AI-PROXY" in parsed["rules"]
+        assert parsed["dns"]["nameserver-policy"][f"+.{domain}"] == [
+            "https://1.1.1.1/dns-query#AI-PROXY",
+            "https://8.8.8.8/dns-query#AI-PROXY",
+        ]
+
+
+def test_direct_compatibility_probe_detects_proxy_regression(monkeypatch):
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="config.yaml",
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_load_local_proxy_routing_preferences_strict",
+        lambda: {},
+    )
+    calls = []
+
+    def probe(label, _url, **kwargs):
+        calls.append(kwargs.get("proxy_url", ""))
+        if kwargs.get("proxy_url"):
+            return local_proxy.LocalAIProxyProbeResult(label, False, detail="timeout")
+        return local_proxy.LocalAIProxyProbeResult(label, True, status=204)
+
+    monkeypatch.setattr(local_proxy, "_probe_https_reachability", probe)
+
+    result = local_proxy._probe_local_direct_compatibility()
+
+    assert result.checked is True
+    assert result.ok is False
+    assert "原生直连可达" in result.detail
+    assert calls == ["", "http://127.0.0.1:17897"]
+
+
+def test_direct_compatibility_probe_skips_site_intended_for_proxy(monkeypatch):
+    monkeypatch.setattr(
+        local_proxy,
+        "inspect_local_ai_proxy",
+        lambda: local_proxy.LocalAIProxyStatus(
+            installed=True,
+            running=True,
+            config_path="config.yaml",
+            proxy_url="http://127.0.0.1:17897",
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_load_local_proxy_routing_preferences_strict",
+        lambda: {"builtin_sites": {"youtube": True}},
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_https_reachability",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("proxied sites are not DIRECT compatibility baselines")
+        ),
+    )
+
+    result = local_proxy._probe_local_direct_compatibility()
+
+    assert result.checked is False
+    assert result.ok is True
+
+
+def test_new_proxy_start_rolls_back_when_direct_site_regresses(monkeypatch):
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_ai_proxy_after_failover_warmup",
+        lambda: ("AI 连通性 4/4 可达", False),
+    )
+    monkeypatch.setattr(
+        local_proxy,
+        "_probe_local_direct_compatibility",
+        lambda: local_proxy.LocalProxyCompatibilityProbeResult(
+            "普通网站兼容性",
+            checked=True,
+            ok=False,
+            detail="YouTube 原生直连可达，但经本机代理失败（timeout）",
+        ),
+    )
+    rollbacks = []
+    monkeypatch.setattr(
+        local_proxy,
+        "stop_local_ai_proxy",
+        lambda **_kwargs: rollbacks.append(True) or "本机 AI 代理已停止",
+    )
+
+    message = local_proxy._verify_new_local_proxy_start("started")
+
+    assert "普通网站兼容性验证失败" in message
+    assert "已恢复启动前设置" in message
+    assert rollbacks == [True]
 
 
 def test_startup_probe_retries_once_after_fallback_health_initializes(

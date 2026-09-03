@@ -332,7 +332,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         self._routing_status_label = ctk.CTkLabel(
             policy,
-            text="默认只代理 AI 相关域名；勾选内置站点或新增自定义目标后，会写入本机 mihomo 规则。",
+            text=(
+                "默认只代理 AI 相关域名；普通直连站点沿用系统 DNS。"
+                "勾选内置站点或新增自定义目标后，会写入本机 mihomo 规则。"
+            ),
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1313,7 +1316,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             boundary = "应用成功后请重启 Codex/Claude Code/VS Code 和新终端"
         else:
             mode = "大陆境外 IP 走代理" if preferences.get("proxy_non_cn") else "仅规则命中的站点走代理"
-            boundary = "应用层代理不保证阻止系统 DNS、WebRTC/UDP 或忽略代理的程序绕过"
+            boundary = (
+                "普通 DIRECT 站点沿用系统 DNS；应用层代理不保证阻止 WebRTC/UDP "
+                "或忽略代理的程序绕过"
+            )
         wsl_mode = "WSL 共享已开启" if preferences.get("share_to_wsl") else "WSL 共享未开启"
         self._set_routing_status(
             f"当前规则: {mode}；{wsl_mode}；内置站点 {enabled_sites} 个，"
@@ -3682,7 +3688,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 + (
                     "严格隐私已开启：已进入 mihomo 的公网流量不 DIRECT，订阅代理失败不直连回退。\n"
                     if strict_privacy
-                    else "严格隐私未开启：未命中代理规则的流量可能 DIRECT。\n"
+                    else "严格隐私未开启：未命中代理规则的流量使用系统 DNS 并可能 DIRECT。\n"
                 )
                 + "如果当前订阅有合格候选，会一并装载最多 4 个备用节点，主节点失效后由 mihomo 为新连接自动切换。\n"
                 + (
@@ -3692,6 +3698,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     else "WSL 共享未开启：本次不会修改 WSL 环境或监听边界。\n"
                 )
                 + "启动只执行有上限的快速验证；耗时的逐节点长会话深测请在节点页手动执行。\n"
+                + "启动时会并行比较普通网站的原生直连与代理后连通性；"
+                "只有确认启用代理造成退化时才自动回滚。\n"
                 + "这不是 VPN/TUN，无法阻止忽略代理的程序、WebRTC/UDP 或系统 DNS/IPv6 绕过。"
                 "启动后已打开的 Codex/Claude Code 不会自动继承新环境，"
                 "请完全退出后重开 Codex、Claude Code、VS Code 和终端。"
