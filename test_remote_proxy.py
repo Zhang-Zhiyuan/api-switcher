@@ -7319,6 +7319,13 @@ def test_new_local_proxy_start_keeps_single_reachable_codex_entry(monkeypatch):
     )
     monkeypatch.setattr(
         local_proxy,
+        "_probe_local_direct_compatibility",
+        lambda: local_proxy.LocalProxyCompatibilityProbeResult(
+            "普通网站兼容性", checked=False, ok=True
+        ),
+    )
+    monkeypatch.setattr(
+        local_proxy,
         "stop_local_ai_proxy",
         lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("one reachable Codex entry must not be rolled back")

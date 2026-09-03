@@ -87,6 +87,10 @@ LOCAL_AI_PROBE_TARGETS = (
     ("Claude/Anthropic", "https://api.anthropic.com/"),
     ("Gemini/Google AI", "https://generativelanguage.googleapis.com/"),
 )
+LOCAL_DIRECT_COMPATIBILITY_TARGETS = (
+    ("YouTube", "youtube", "www.youtube.com", "https://www.youtube.com/generate_204"),
+)
+LOCAL_DIRECT_COMPATIBILITY_TIMEOUT_SECONDS = 3
 LOCAL_PROXY_FAILOVER_WARMUP_SECONDS = 6.5
 LOCAL_AI_STABILITY_TARGETS = (
     ("OpenAI API", "https://api.openai.com/v1/models"),
@@ -313,6 +317,18 @@ class LocalAIProxyProbeResult:
         elapsed = f"{self.elapsed_ms}ms" if self.elapsed_ms else ""
         pieces = [piece for piece in (prefix, status, elapsed) if piece]
         return f"{self.label}: {' / '.join(pieces)}"
+
+
+@dataclass(frozen=True)
+class LocalProxyCompatibilityProbeResult:
+    label: str
+    checked: bool
+    ok: bool
+    detail: str = ""
+
+    def summary(self) -> str:
+        state = "通过" if self.ok else "失败"
+        return f"{self.label}: {state}" + (f" / {self.detail}" if self.detail else "")
 
 
 @dataclass(frozen=True)
@@ -1702,22 +1718,55 @@ def _verify_new_local_proxy_start(
 ) -> str:
     """Bounded verification shared by manual and login-time fresh starts."""
 
-    try:
-        probe_message, failover_retried = _probe_local_ai_proxy_after_failover_warmup()
-    except Exception as exc:
+    probe_error = None
+    compatibility_error = None
+    probe_message = ""
+    failover_retried = False
+    compatibility = None
+    # The compatibility comparison is independent from the AI probes.  Run it
+    # in parallel so a blocked direct baseline does not lengthen startup beyond
+    # the existing bounded AI/failover verification window.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        ai_future = executor.submit(_probe_local_ai_proxy_after_failover_warmup)
+        compatibility_future = executor.submit(_probe_local_direct_compatibility)
+        try:
+            probe_message, failover_retried = ai_future.result()
+        except Exception as exc:
+            probe_error = exc
+        try:
+            compatibility = compatibility_future.result()
+        except Exception as exc:
+            compatibility_error = exc
+
+    if probe_error is not None:
         return (
-            f"{install_message}；{action_label}验证执行失败: {type(exc).__name__}: {exc}"
+            f"{install_message}；{action_label}验证执行失败: "
+            f"{type(probe_error).__name__}: {probe_error}"
+            f"{_rollback_new_local_proxy_start()}"
+        )
+    if compatibility is not None and compatibility.checked and not compatibility.ok:
+        return (
+            f"{install_message}；{action_label}后普通网站兼容性验证失败: "
+            f"{compatibility.summary()}"
             f"{_rollback_new_local_proxy_start()}"
         )
     retry_detail = "；已等待内核故障切换初始化并复检" if failover_retried else ""
+    compatibility_detail = ""
+    if compatibility is not None and compatibility.checked:
+        compatibility_detail = f"；{compatibility.summary()}"
+    elif compatibility_error is not None:
+        compatibility_detail = (
+            "；普通网站兼容性检查未完成: "
+            f"{type(compatibility_error).__name__}: {_network_error_summary(compatibility_error)}"
+        )
     if remote_proxy._probe_summary_all_ok(probe_message):
         return (
-            f"{install_message}{retry_detail}；验证通过: "
+            f"{install_message}{retry_detail}{compatibility_detail}；验证通过: "
             f"{remote_proxy._compact_probe_summary(probe_message)}"
         )
     if _local_probe_summary_codex_ready(probe_message):
         return (
-            f"{install_message}{retry_detail}；Codex 核心链路已通过；"
+            f"{install_message}{retry_detail}{compatibility_detail}；Codex 核心链路已通过；"
             f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}"
         )
 
@@ -1725,7 +1774,7 @@ def _verify_new_local_proxy_start(
     if reachable_codex_routes:
         route_detail = "、".join(reachable_codex_routes)
         return (
-            f"{install_message}{retry_detail}；Codex 至少一个入口已通过"
+            f"{install_message}{retry_detail}{compatibility_detail}；Codex 至少一个入口已通过"
             f"（{route_detail}）；另一个入口或其他 AI 服务未完全可达: "
             f"{remote_proxy._compact_probe_summary(probe_message)}"
         )
@@ -1733,7 +1782,8 @@ def _verify_new_local_proxy_start(
     pool_size = 1 + len(fallback_nodes or ())
     pool_detail = f"（已快速复检 {pool_size} 节点故障切换池）" if pool_size > 1 else ""
     return (
-        f"{install_message}{retry_detail}；{action_label}验证失败{pool_detail}: "
+        f"{install_message}{retry_detail}{compatibility_detail}；"
+        f"{action_label}验证失败{pool_detail}: "
         f"{remote_proxy._compact_probe_summary(probe_message)}"
         f"{_rollback_new_local_proxy_start()}"
     )
@@ -2450,6 +2500,176 @@ def stop_local_ai_proxy(restore_settings: bool = True) -> str:
     if skipped_unmanaged:
         return f"本机 AI 代理未停止：pid 文件指向的进程不是本工具启动的代理，已跳过{restore_suffix}"
     return f"本机 AI 代理未发现运行中的受管进程{restore_suffix}"
+
+
+def _local_proxy_host_is_expected_direct(
+    preferences: dict,
+    site_id: str,
+    host: str,
+) -> bool:
+    """Return whether compatibility routing intends ``host`` to use DIRECT."""
+
+    if _coerce_bool(preferences.get("strict_privacy")) or _coerce_bool(
+        preferences.get("proxy_non_cn")
+    ):
+        return False
+    builtin_sites = (
+        preferences.get("builtin_sites")
+        if isinstance(preferences.get("builtin_sites"), dict)
+        else {}
+    )
+    if _coerce_bool(builtin_sites.get(site_id)):
+        return False
+    normalized_host = str(host or "").strip().strip(".").casefold()
+    routing = _routing_options_from_preferences(preferences)
+    for value in routing.get("extra_proxy_domains") or ():
+        domain = str(value or "").strip().strip(".").casefold()
+        while domain.startswith(("*.", "+.")):
+            domain = domain[2:]
+        if domain and (
+            normalized_host == domain or normalized_host.endswith("." + domain)
+        ):
+            return False
+    return True
+
+
+def _probe_https_reachability(
+    label: str,
+    url: str,
+    *,
+    timeout: int = LOCAL_DIRECT_COMPATIBILITY_TIMEOUT_SECONDS,
+    proxy_url: str = "",
+) -> LocalAIProxyProbeResult:
+    """Probe HTTPS directly or through one explicit local CONNECT proxy."""
+
+    started = time.monotonic()
+    connection = None
+    try:
+        target = urlparse(url)
+        if (
+            target.scheme.casefold() != "https"
+            or not target.hostname
+            or target.username is not None
+            or target.password is not None
+        ):
+            raise ValueError("兼容性探测目标必须是无凭据的 HTTPS 地址")
+        target_port = int(target.port or 443)
+        request_path = target.path or "/"
+        if target.query:
+            request_path += "?" + target.query
+        bounded_timeout = max(1, min(15, int(timeout or LOCAL_DIRECT_COMPATIBILITY_TIMEOUT_SECONDS)))
+        context = ssl.create_default_context()
+
+        if proxy_url:
+            proxy = urlparse(proxy_url)
+            if proxy.scheme.casefold() != "http" or not proxy.hostname or not proxy.port:
+                raise ValueError("本机兼容性探测代理必须是带端口的 HTTP 地址")
+            connection = http.client.HTTPSConnection(
+                proxy.hostname,
+                int(proxy.port),
+                timeout=bounded_timeout,
+                context=context,
+            )
+            connection.set_tunnel(target.hostname, target_port)
+        else:
+            connection = http.client.HTTPSConnection(
+                target.hostname,
+                target_port,
+                timeout=bounded_timeout,
+                context=context,
+            )
+
+        host_header = target.hostname if target_port == 443 else f"{target.hostname}:{target_port}"
+        connection.request(
+            "GET",
+            request_path,
+            headers={
+                "Host": host_header,
+                "Accept": "text/plain,*/*",
+                "User-Agent": "API-Switcher/compatibility-probe",
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        status = int(response.status or 0)
+        response.read(1)
+        return LocalAIProxyProbeResult(
+            label=label,
+            ok=100 <= status <= 599,
+            status=status,
+            elapsed_ms=_elapsed_ms(started),
+        )
+    except Exception as exc:
+        return LocalAIProxyProbeResult(
+            label=label,
+            ok=False,
+            detail=_network_error_summary(exc).splitlines()[0][:160],
+            elapsed_ms=_elapsed_ms(started),
+        )
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+def _probe_local_direct_compatibility(
+    timeout: int = LOCAL_DIRECT_COMPATIBILITY_TIMEOUT_SECONDS,
+) -> LocalProxyCompatibilityProbeResult:
+    """Detect a definite regression for a site that is directly reachable.
+
+    A failed host-direct baseline is inconclusive (normal on many mainland
+    networks) and never blocks startup.  Only the stronger result -- direct
+    succeeds while the same request through a route intended as DIRECT fails --
+    triggers rollback.
+    """
+
+    status = inspect_local_ai_proxy()
+    if not status.running:
+        return LocalProxyCompatibilityProbeResult(
+            "普通网站兼容性",
+            checked=False,
+            ok=True,
+            detail="本机代理未运行，已跳过",
+        )
+    preferences = _load_local_proxy_routing_preferences_strict()
+    direct_baseline_seen = False
+    for label, site_id, host, url in LOCAL_DIRECT_COMPATIBILITY_TARGETS:
+        if not _local_proxy_host_is_expected_direct(preferences, site_id, host):
+            continue
+        direct = _probe_https_reachability(label, url, timeout=timeout)
+        if not direct.ok:
+            continue
+        direct_baseline_seen = True
+        proxied = _probe_https_reachability(
+            label,
+            url,
+            timeout=timeout,
+            proxy_url=status.proxy_url,
+        )
+        if not proxied.ok:
+            failure = proxied.detail or "未收到 HTTPS 响应"
+            return LocalProxyCompatibilityProbeResult(
+                "普通网站兼容性",
+                checked=True,
+                ok=False,
+                detail=f"{label} 原生直连可达，但经本机代理失败（{failure}）",
+            )
+
+    if direct_baseline_seen:
+        return LocalProxyCompatibilityProbeResult(
+            "普通网站兼容性",
+            checked=True,
+            ok=True,
+            detail="原生直连可达的网站经本机代理后仍可达",
+        )
+    return LocalProxyCompatibilityProbeResult(
+        "普通网站兼容性",
+        checked=False,
+        ok=True,
+        detail="没有可用的原生直连基线，未纳入回滚判定",
+    )
 
 
 def probe_local_ai_proxy(timeout: int = 8) -> str:

@@ -2,7 +2,14 @@ LOCAL_PROXY_BUILTIN_SITES = (
     {
         "id": "youtube",
         "label": "YouTube",
-        "targets": ("youtube.com", "youtu.be", "ytimg.com", "googlevideo.com"),
+        "targets": (
+            "youtube.com",
+            "youtube-nocookie.com",
+            "youtu.be",
+            "ytimg.com",
+            "googlevideo.com",
+            "ggpht.com",
+        ),
     },
     {
         "id": "google",

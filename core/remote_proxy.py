@@ -237,7 +237,17 @@ def _strict_privacy_dns_config(proxy_route: str = "AI-PROXY") -> dict:
 
 
 def _mainland_compatible_dns_config(proxy_domains) -> dict:
-    """Resolve node hosts locally while sending selected AI DNS via the proxy."""
+    """Keep DIRECT names on the host resolver and proxy selected-domain DNS.
+
+    The managed HTTP proxy receives every WinINET request, including traffic
+    that later matches ``DIRECT``.  Resolving those ordinary destinations with
+    a hard-coded mainland resolver can regress an otherwise healthy host
+    network (for example, a Hong Kong host may receive poisoned YouTube
+    answers).  Mihomo's ``direct-nameserver`` is the routing-aware authority
+    for this case: DIRECT destinations use the Windows/Linux system resolver,
+    while ``nameserver-policy`` still resolves AI and user-selected domains
+    through the already bootstrapped proxy route.
+    """
 
     direct_doh = [
         "https://doh.pub/dns-query#DIRECT",
@@ -265,9 +275,9 @@ def _mainland_compatible_dns_config(proxy_domains) -> dict:
         "respect-rules": False,
         "default-nameserver": ["223.5.5.5", "119.29.29.29"],
         "proxy-server-nameserver": list(direct_doh),
-        "direct-nameserver": list(direct_doh),
+        "direct-nameserver": ["system"],
         "direct-nameserver-follow-policy": False,
-        "nameserver": list(direct_doh),
+        "nameserver": ["system"],
         "nameserver-policy": policy,
     }
 
