@@ -29,6 +29,7 @@ from urllib import request as urlrequest
 import yaml
 
 from config.paths import STORAGE_DIR
+from core import proxy_routing
 from core.lazy_imports import LazyAttribute, LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES
 
@@ -1104,8 +1105,14 @@ def rename_proxy_subscription_profile(profile_id: str, name: str) -> dict:
         return copy.deepcopy(profiles[clean_id])
 
 
+@proxy_routing.serialized_binding_change
 def delete_proxy_subscription_profile(profile_id: str) -> dict:
     clean_id = str(profile_id or "").strip()
+    ssh_bindings = proxy_routing.ssh_bindings_for_profile(clean_id)
+    if ssh_bindings:
+        raise ValueError("该订阅正被 SSH 目标分流使用，请先解除绑定: " + "、".join(ssh_bindings))
+    if proxy_routing.local_proxy.local_proxy_service_bindings_for_profile(clean_id):
+        raise ValueError("该订阅正被 Win11 目标分流使用，请先解除绑定")
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
         state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
         profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
@@ -3057,7 +3064,12 @@ def build_mihomo_config(
     )
     allowed_routes = {"AI-PROXY", *(str(group["name"]) for group in additional_groups)}
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
-    proxy_domains = _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains)
+    # The first matching rule wins. More specific custom domains must precede
+    # built-in parent domains (e.g. api.openai.com before openai.com).
+    proxy_domains = tuple(sorted(
+        _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains),
+        key=lambda domain: (-str(domain).count("."), -len(str(domain))),
+    ))
     normalized_domain_routes = _normalized_domain_route_map(proxy_domain_routes)
     normalized_ip_routes = {
         str(cidr or "").strip(): _managed_proxy_route_name(route)
@@ -3083,7 +3095,10 @@ def build_mihomo_config(
             "服务分流包含未启用的域名规则: "
             + "、".join(sorted(unused_domain_overrides))
         )
-    proxy_ip_cidrs = _unique_clean_values(extra_proxy_ip_cidrs)
+    proxy_ip_cidrs = tuple(sorted(
+        _unique_clean_values(extra_proxy_ip_cidrs),
+        key=lambda cidr: -ipaddress.ip_network(cidr, strict=False).prefixlen,
+    ))
     unused_ip_overrides = set(normalized_ip_routes) - set(proxy_ip_cidrs)
     if unused_ip_overrides:
         raise ValueError(
@@ -3320,7 +3335,7 @@ def _managed_additional_proxy_groups(
     values: tuple[dict, ...] | list[dict] | None,
 ) -> tuple[list[dict], list[dict]]:
     specs = list(values or ())
-    if len(specs) > 16:
+    if len(specs) > 64:
         raise ValueError("服务分流使用的订阅策略组过多")
     all_nodes: list[dict] = []
     groups: list[dict] = []
@@ -3788,7 +3803,7 @@ def mihomo_controller_port(mixed_port: int) -> int:
     return max(1, mixed_port - 1000)
 
 
-def _build_isolated_candidate_config(proxy_node: dict) -> str:
+def _build_isolated_candidate_config(proxy_node: dict, *, routing_preferences: dict | None = None) -> str:
     """Build a credential-safe config template whose listen ports are filled remotely."""
 
     mixed_port = _ISOLATED_CANDIDATE_CONFIG_PORT
@@ -3799,6 +3814,7 @@ def _build_isolated_candidate_config(proxy_node: dict) -> str:
         health_checked_group=True,
         resilient_transport=True,
         mainland_dns=True,
+        **(proxy_routing.config_options(routing_preferences) if routing_preferences is not None else {}),
     )
     mixed_marker = f"mixed-port: {mixed_port}"
     controller_marker = f'127.0.0.1:{controller_port}'
@@ -4026,8 +4042,12 @@ def _probe_ai_proxy_candidate_isolated(
     proxy_node: dict,
     *,
     timeout: int = 8,
+    routing_preferences: dict | None = None,
 ) -> tuple[RemoteAIProxyProbeResult, ...]:
-    config = _build_isolated_candidate_config(proxy_node)
+    config = _build_isolated_candidate_config(
+        proxy_node,
+        **({"routing_preferences": routing_preferences} if routing_preferences is not None else {}),
+    )
     try:
         timeout_value = max(1, min(60, int(timeout)))
     except (TypeError, ValueError):
@@ -4052,7 +4072,8 @@ def _probe_ai_proxy_candidate_isolated(
         raise RuntimeError(f"隔离候选验证失败: {clean_detail}")
     results = _parse_remote_probe_output(stdout)
     expected = REMOTE_AI_STABILITY_EXPECTED_PROBES
-    if any(proxy_region_is_hong_kong(item.detail) for item in results):
+    explicit_openai_route = bool((routing_preferences or {}).get("service_profile_bindings", {}).get("openai"))
+    if not explicit_openai_route and any(proxy_region_is_hong_kong(item.detail) for item in results):
         raise RuntimeError("隔离候选实际出口为香港，已拒绝自动应用")
     expected_labels = {label for label, _url in REMOTE_AI_STABILITY_TARGETS}
     label_counts = {
@@ -4082,11 +4103,14 @@ def probe_ai_proxy_candidate_isolated(
     ssh_name: str,
     proxy_text: str,
     timeout: int = 8,
+    *,
+    routing_preferences: dict | None = None,
 ) -> str:
     """Validate an automatic candidate without touching the managed proxy state."""
 
     proxy_node = parse_proxy_node(proxy_text)
-    if (
+    explicit_openai_route = bool((routing_preferences or {}).get("service_profile_bindings", {}).get("openai"))
+    if not explicit_openai_route and (
         proxy_node_region(proxy_node) == "香港"
         or proxy_region_is_hong_kong(str(proxy_node.get("name") or ""))
     ):
@@ -4097,6 +4121,7 @@ def probe_ai_proxy_candidate_isolated(
         remote_config._remote_home(client),
         proxy_node,
         timeout=timeout,
+        **({"routing_preferences": routing_preferences} if routing_preferences is not None else {}),
     )
     expected = REMOTE_AI_STABILITY_EXPECTED_PROBES
     return (
@@ -4196,16 +4221,18 @@ def _probe_ai_proxy_candidate_with_core_bootstrap(
     proxy_text: str,
     timeout: int = 8,
 ) -> str:
+    route_kwargs = proxy_routing.ssh_probe_kwargs(ssh_name)
     try:
-        return probe_ai_proxy_candidate_isolated(ssh_name, proxy_text, timeout=timeout)
+        return probe_ai_proxy_candidate_isolated(ssh_name, proxy_text, timeout=timeout, **route_kwargs)
     except RemoteMihomoCoreMissingError:
         # A clean server cannot run an isolated candidate before the promised
         # automatic core installation.  Install only the managed binary, then
         # retry without touching proxy config, environment, or login state.
         ensure_remote_mihomo_core(ssh_name)
-        return probe_ai_proxy_candidate_isolated(ssh_name, proxy_text, timeout=timeout)
+        return probe_ai_proxy_candidate_isolated(ssh_name, proxy_text, timeout=timeout, **route_kwargs)
 
 
+@proxy_routing.serialized_ssh_route_operation
 def install_ai_proxy(
     ssh_name: str,
     proxy_text: str,
@@ -4227,6 +4254,12 @@ def install_ai_proxy(
 
     old_config = ssh_manager.read_remote_file(client, config_path) or ""
     effective_strict_privacy = _resolve_managed_strict_privacy(strict_privacy, old_config)
+    route_options = proxy_routing.ssh_config_options(ssh_name, old_config)
+    new_config = build_mihomo_config(
+        proxy_node, mixed_port, fallback_proxy_nodes=fallback_nodes,
+        health_checked_group=True, resilient_transport=True, mainland_dns=True,
+        strict_privacy=effective_strict_privacy, **route_options,
+    )
     reconcile = _reconcile_dead_ai_proxy_runtime(client, home, mixed_port)
     if reconcile.get("working") == "yes":
         reload_message = reload_ai_proxy(
@@ -4251,15 +4284,7 @@ def install_ai_proxy(
     ssh_manager.write_remote_file(
         client,
         config_path,
-        build_mihomo_config(
-            proxy_node,
-            mixed_port,
-            fallback_proxy_nodes=fallback_nodes,
-            health_checked_group=True,
-            resilient_transport=True,
-            mainland_dns=True,
-            strict_privacy=effective_strict_privacy,
-        ),
+        new_config,
         file_mode=0o600,
     )
     ssh_manager.write_remote_file(client, env_path, _build_env_file(mixed_port), file_mode=0o600)
@@ -4407,6 +4432,7 @@ def install_ai_proxy_verified(
     )
 
 
+@proxy_routing.serialized_ssh_route_operation
 def reload_ai_proxy(
     ssh_name: str,
     proxy_text: str,
@@ -4416,6 +4442,7 @@ def reload_ai_proxy(
     persist_selection: bool = True,
     strict_privacy: bool | None = None,
     fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
+    routing_preferences: dict | None = None,
 ) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_node = parse_proxy_node(proxy_text)
@@ -4441,6 +4468,7 @@ def reload_ai_proxy(
         resilient_transport=True,
         mainland_dns=True,
         strict_privacy=effective_strict_privacy,
+        **proxy_routing.ssh_config_options(ssh_name, old_config, routing_preferences),
     )
     if old_config.strip() == new_config.strip():
         if persist_selection:
@@ -4448,7 +4476,7 @@ def reload_ai_proxy(
                 set_proxy_subscription_selected_node(proxy_node, profile_id=profile_id)
             else:
                 set_proxy_subscription_selected_node(proxy_node)
-        repair_suffix = _repair_remote_proxy_integrations(
+        repair_suffix = "" if routing_preferences is not None else _repair_remote_proxy_integrations(
             client,
             home,
             mixed_port,
@@ -4456,27 +4484,26 @@ def reload_ai_proxy(
         )
         return f"{ssh_name}: 运行节点已是最新配置，无需热更新{repair_suffix}"
 
-    ssh_manager.write_remote_file(client, config_path, new_config, file_mode=0o600)
     command = _build_reload_command(config_path, mixed_port)
-    status_code, stdout, stderr = ssh_manager.execute_command_with_status(
-        client,
-        command,
-        timeout=20,
-        log_command=False,
-    )
-    if status_code != 0:
+    try:
+        ssh_manager.write_remote_file(client, config_path, new_config, file_mode=0o600)
+        status_code, stdout, stderr = ssh_manager.execute_command_with_status(
+            client, command, timeout=20, log_command=False,
+        )
+        if status_code != 0:
+            raise RuntimeError((stderr or stdout or str(status_code)).strip())
+    except Exception as exc:
         restore_error = ""
         if old_config:
-            ssh_manager.write_remote_file(client, config_path, old_config, file_mode=0o600)
-            restore_status, restore_stdout, restore_stderr = ssh_manager.execute_command_with_status(
-                client,
-                command,
-                timeout=20,
-                log_command=False,
-            )
-            if restore_status != 0:
-                restore_error = (restore_stderr or restore_stdout or str(restore_status)).strip()
-        detail = (stderr or stdout or "").strip()
+            try:
+                ssh_manager.write_remote_file(client, config_path, old_config, file_mode=0o600)
+                restore_status, restore_stdout, restore_stderr = ssh_manager.execute_command_with_status(
+                    client, command, timeout=20, log_command=False,
+                )
+                if restore_status != 0:
+                    restore_error = (restore_stderr or restore_stdout or str(restore_status)).strip()
+            except Exception as rollback:
+                restore_error = str(rollback)
         if not old_config:
             restore_suffix = "；未读取到可恢复的旧配置"
         elif restore_error:
@@ -4485,14 +4512,14 @@ def reload_ai_proxy(
             restore_suffix = "；已强制重载旧配置"
         raise RuntimeError(
             f"{ssh_name}: 当前远端代理不支持无感热更新或控制口不可用: "
-            f"{detail or status_code}{restore_suffix}"
-        )
+            f"{exc}{restore_suffix}"
+        ) from exc
     if persist_selection:
         if profile_id:
             set_proxy_subscription_selected_node(proxy_node, profile_id=profile_id)
         else:
             set_proxy_subscription_selected_node(proxy_node)
-    repair_suffix = _repair_remote_proxy_integrations(
+    repair_suffix = "" if routing_preferences is not None else _repair_remote_proxy_integrations(
         client,
         home,
         mixed_port,
@@ -4539,6 +4566,7 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
             summary = probe_ai_proxy_candidate_isolated(
                 ssh_name,
                 format_proxy_node(node),
+                **proxy_routing.ssh_probe_kwargs(ssh_name),
             )
         except Exception as exc:
             tried.append(f"{label}{detail}: {exc}")
@@ -4852,6 +4880,15 @@ def refresh_running_ai_proxy_from_subscription(
     status = inspect_ai_proxy(ssh_name, mixed_port)
     if not status.running:
         return f"{ssh_name}: AI 代理未运行，已跳过订阅热更新"
+    routes = proxy_routing.load_ssh_routes(ssh_name)
+    if profile_id and profile_id in routes["service_profile_bindings"].values():
+        current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+        if not current_node:
+            raise RuntimeError(f"{ssh_name}: 无法读取默认节点，已停止分流订阅热更新")
+        return reload_ai_proxy(
+            ssh_name, format_proxy_node(current_node), mixed_port,
+            persist_selection=False, **_strict_privacy_call_kwargs(strict_privacy),
+        )
     candidates = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
     if not candidates:
         return f"{ssh_name}: 订阅里没有可用节点，已跳过热更新"

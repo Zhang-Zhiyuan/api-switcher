@@ -107,6 +107,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._builtin_site_vars = {}
         self._builtin_site_tiles = []
         self._service_route_combos = {}
+        self._service_route_buttons = {}
+        self._service_route_node_bindings = {}
+        self._service_route_catalog = []
+        self._service_routes_dialog = None
         self._service_route_bindings = {}
         self._service_route_profile_options = {SERVICE_ROUTE_DEFAULT_LABEL: ""}
         self._service_route_profile_labels = {"": SERVICE_ROUTE_DEFAULT_LABEL}
@@ -312,22 +316,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 font=font(11),
                 anchor="w",
             ).pack(anchor="w")
-            combo = ctk.CTkComboBox(
+            combo = ctk.CTkButton(
                 tile,
-                values=[SERVICE_ROUTE_DEFAULT_LABEL],
-                command=lambda label, value=service_id: self._on_service_route_selected(value, label),
-                **combo_style(),
+                text="跟随默认线路\n点击设置订阅与节点",
+                command=lambda value=service_id: self._open_service_routes(value),
+                **{**button_style("secondary"), "height": 48},
             )
             combo.pack(fill="x", pady=(3, 0))
-            combo.set(SERVICE_ROUTE_DEFAULT_LABEL)
-            self._service_route_combos[service_id] = combo
+            self._service_route_buttons[service_id] = combo
             self._ai_route_tiles.append(tile)
         route_notice = ctk.CTkLabel(
             ai_route_box,
             text=(
-                "可把每项绑定到任一已保存订阅；绑定只读取该订阅已选节点和备用池，"
-                "不会切换订阅页面，也不会改动 Codex/Claude 登录状态。"
-                "第三方 API 地址请先加入下方自定义目标，再为自定义目标选择线路。"
+                "点击线路打开目标分流：可让 Claude、GPT 走家宽订阅，YouTube 走另一订阅，"
+                "并为每个目标单独固定节点。所有修改在编辑窗口中统一保存并应用。"
             ),
             text_color=COLORS["muted_soft"],
             font=font(11),
@@ -370,15 +372,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 font=font(12),
             )
             checkbox.pack(anchor="w")
-            combo = ctk.CTkComboBox(
+            combo = ctk.CTkButton(
                 tile,
-                values=[SERVICE_ROUTE_DEFAULT_LABEL],
-                command=lambda label, value=site_id: self._on_service_route_selected(value, label),
-                **combo_style(),
+                text="跟随默认线路\n点击设置订阅与节点",
+                command=lambda value=site_id: self._open_service_routes(value),
+                **{**button_style("secondary"), "height": 48},
             )
             combo.pack(fill="x", pady=(4, 0))
-            combo.set(SERVICE_ROUTE_DEFAULT_LABEL)
-            self._service_route_combos[site_id] = combo
+            self._service_route_buttons[site_id] = combo
             self._builtin_site_checks.append(checkbox)
             self._builtin_site_tiles.append(tile)
 
@@ -418,18 +419,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(11),
             anchor="w",
         ).pack(side="left", padx=(0, 8))
-        custom_route_combo = ctk.CTkComboBox(
+        custom_route_combo = ctk.CTkButton(
             self._custom_route_row,
-            values=[SERVICE_ROUTE_DEFAULT_LABEL],
-            command=lambda label: self._on_service_route_selected(
-                LOCAL_PROXY_CUSTOM_ROUTE_ID,
-                label,
-            ),
-            **combo_style(),
+            text="编辑自定义目标的订阅与节点…",
+            command=lambda: self._open_service_routes(),
+            **button_style("secondary", compact=True),
         )
         custom_route_combo.pack(side="left", fill="x", expand=True)
-        custom_route_combo.set(SERVICE_ROUTE_DEFAULT_LABEL)
-        self._service_route_combos[LOCAL_PROXY_CUSTOM_ROUTE_ID] = custom_route_combo
 
         self._custom_target_frame = ctk.CTkFrame(policy, fg_color="transparent")
         self._custom_target_frame.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
@@ -1445,6 +1441,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 combo.configure(state=state)
             except Exception:
                 pass
+        for button in getattr(self, "_service_route_buttons", {}).values():
+            button.configure(state=state)
 
     def _load_proxy_preferences_ui(self):
         self._preferences_load_generation += 1
@@ -1456,6 +1454,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 payload = {
                     "ok": True,
                     "preferences": local_proxy.load_local_proxy_preferences(),
+                    "catalog": local_proxy.proxy_routing.load_route_catalog(),
                     "error": "",
                 }
             except Exception as e:
@@ -1467,6 +1466,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if not payload["ok"]:
                     self._set_routing_status(f"加载 Win11 代理偏好失败: {payload['error']}", "error")
                     return
+                self._service_route_catalog = payload.get("catalog", [])
                 self._apply_proxy_preferences_ui(payload["preferences"])
 
             self._run_on_ui_thread(finish)
@@ -1487,6 +1487,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if isinstance(preferences.get("service_profile_bindings"), dict)
             else {}
         )
+        self._service_route_node_bindings = dict(preferences.get("service_node_bindings") or {})
         self._refresh_service_route_profile_options()
         self._render_custom_targets(preferences.get("custom_targets") or [])
         enabled_sites = sum(1 for enabled in builtin_sites.values() if enabled)
@@ -1925,6 +1926,37 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     continue
         finally:
             self._service_route_combo_loading = False
+        for service_id, button in getattr(self, "_service_route_buttons", {}).items():
+            profile_id = str(self._service_route_bindings.get(service_id) or "")
+            node_key = getattr(self, "_service_route_node_bindings", {}).get(service_id, "")
+            profile = next((item for item in getattr(self, "_service_route_catalog", []) if item["id"] == profile_id), {})
+            node_label = "订阅首选 + 故障切换"
+            if node_key:
+                node_label = next((item["label"] for item in profile.get("nodes", []) if item["key"] == node_key), "固定节点失效，请重选")
+            profile_label = labels_by_id.get(profile_id, SERVICE_ROUTE_MISSING_LABEL) if profile_id else "跟随默认线路"
+            if not profile_id:
+                node_label = "点击设置订阅与节点"
+            button.configure(text=f"{profile_label[:28]}\n{node_label[:32]}")
+
+    def _open_service_routes(self, service_id=""):
+        if self._busy:
+            self._set_routing_status("当前代理操作正在进行，请稍后编辑目标分流。", "warning")
+            return
+        existing = getattr(self, "_service_routes_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus()
+            return
+        from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
+
+        self._service_routes_dialog = ServiceRoutesDialog(
+            self.winfo_toplevel(), scopes=["Win11 本机（含共享 WSL）"],
+            load_preferences=lambda _scope: local_proxy._load_local_proxy_routing_preferences_strict(),
+            apply_preferences=lambda _scope, preferences, expected: local_proxy.set_local_proxy_service_routes_and_apply(
+                preferences, expected=expected,
+            ),
+            on_saved=self._load_proxy_preferences_ui, initial_service=service_id,
+        )
 
     def _on_service_route_selected(self, service_id: str, label: str):
         if self._service_route_combo_loading:
@@ -2377,6 +2409,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             bound_service_ids = local_proxy.local_proxy_service_bindings_for_profile(
                 profile_id
             )
+            ssh_bindings = remote_proxy.proxy_routing.ssh_bindings_for_profile(profile_id)
         except Exception as exc:
             message = (
                 "无法确认该订阅是否正被服务分流使用，已取消删除: "
@@ -2389,6 +2422,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._service_route_label(service_id)
             for service_id in bound_service_ids
         ]
+        bound_services.extend(f"SSH {binding}" for binding in ssh_bindings)
         if bound_services:
             message = (
                 f"该订阅正被 {'、'.join(bound_services)} 使用；"

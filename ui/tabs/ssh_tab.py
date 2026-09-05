@@ -914,6 +914,23 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_target_label.pack(side="right")
 
+        routes_card = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
+        routes_card.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(routes_card, text="目标分流 · 每台服务器独立保存", font=font(13, "bold"),
+                     text_color=COLORS["text"]).pack(anchor="w", padx=14, pady=(10, 2))
+        route_hint = ctk.CTkLabel(
+            routes_card, text="为 Claude、GPT、YouTube 和自定义域名分别选择订阅与节点。"
+                              "规则应用到已选服务器；部署和热更新会沿用该服务器的分流设置。",
+            font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
+        )
+        route_hint.pack(fill="x", padx=14)
+        bind_wraplength(routes_card, route_hint, padding=32)
+        self._proxy_service_routes_button = ctk.CTkButton(
+            routes_card, text="编辑已选服务器的目标分流…", command=self._open_proxy_service_routes,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_service_routes_button.pack(anchor="w", padx=14, pady=(8, 12))
+
         proxy_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
         self._proxy_controls = ctk.CTkFrame(proxy_frame, fg_color="transparent")
@@ -2412,6 +2429,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_deploy_button,
             self._proxy_inspect_button,
             getattr(self, "_proxy_remote_core_button", None),
+            getattr(self, "_proxy_service_routes_button", None),
             self._proxy_remote_test_button,
             getattr(self, "_proxy_remote_stale_cleanup_button", None),
             self._proxy_remote_cleanup_button,
@@ -2918,6 +2936,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             local_bindings = local_proxy.local_proxy_service_bindings_for_profile(
                 profile_id
             )
+            ssh_bindings = remote_proxy.proxy_routing.ssh_bindings_for_profile(profile_id)
+            if ssh_bindings:
+                message = "该订阅正被 SSH 目标分流使用，请先在目标分流中解除绑定: " + "、".join(ssh_bindings)
+                self._set_proxy_status(message, "warning")
+                show_toast(self.winfo_toplevel(), message, is_error=True)
+                return
         except Exception as exc:
             message = f"无法确认该订阅是否正被 Win11 服务分流使用，已取消删除: {exc}"
             self._set_proxy_status(message, "warning")
@@ -4673,6 +4697,30 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "部署后会立即做真实连通验证；如果当前节点不可用，会从订阅节点里按远端测速自动尝试可用节点。确定继续吗？"
             ),
             on_confirm=do_deploy,
+        )
+
+    def _open_proxy_service_routes(self):
+        if self._proxy_busy or self._ssh_busy:
+            self._set_proxy_status("当前 SSH 操作正在进行，请稍后编辑目标分流。", "warning")
+            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
+        existing = getattr(self, "_proxy_service_routes_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus()
+            return
+        from core import proxy_routing
+        from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
+
+        self._proxy_service_routes_dialog = ServiceRoutesDialog(
+            self.winfo_toplevel(), scopes=server_names,
+            load_preferences=proxy_routing.load_ssh_routes,
+            apply_preferences=lambda scope, preferences, expected: proxy_routing.apply_ssh_routes(
+                scope, preferences, expected=expected,
+            ),
+            on_saved=lambda: self._set_proxy_status("SSH 目标分流处理完成，各服务器结果请查看编辑窗口。", "success"),
         )
 
     def _inspect_ai_proxy(self):
