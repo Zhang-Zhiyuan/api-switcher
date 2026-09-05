@@ -104,6 +104,56 @@ def test_custom_target_has_independent_route_and_precedes_parent_domain(monkeypa
     assert parsed["dns"]["nameserver-policy"]["+.api.openai.com"] != parsed["dns"]["nameserver-policy"]["+.openai.com"]
 
 
+@pytest.mark.parametrize("service", ["custom:override", "custom"])
+def test_custom_exact_domain_wins_even_when_its_pool_was_created_earlier(monkeypatch, service):
+    _patch_profiles(monkeypatch, {"home": (_node("家宽", "home.example.com"),),
+                                 "dc": (_node("机房", "dc.example.com"),)})
+    preferences = {
+        "builtin_sites": {"google": True, "github": True},
+        "custom_targets": [{"id": "override", "kind": "domain", "value": "github.com", "enabled": True}],
+        "service_profile_bindings": {"google": "dc", "github": "home", service: "dc"},
+    }
+    parsed = remote_proxy.yaml.safe_load(local_proxy._build_local_mihomo_config(
+        _node("默认", "default.example.com"), 17897, preferences=preferences,
+    ))
+    expected = local_proxy._subscription_route_group_name("dc", service)
+    assert f"DOMAIN-SUFFIX,github.com,{expected}" in parsed["rules"]
+    assert parsed["dns"]["nameserver-policy"]["+.github.com"] == [
+        f"https://1.1.1.1/dns-query#{expected}", f"https://8.8.8.8/dns-query#{expected}",
+    ]
+
+
+def test_custom_exact_domain_can_explicitly_follow_default_instead_of_builtin_binding(monkeypatch):
+    _patch_profiles(monkeypatch, {"dc": (_node("机房", "dc.example.com"),)})
+    options = proxy_routing.config_options({
+        "builtin_sites": {"youtube": True},
+        "custom_targets": [{"id": "override", "kind": "domain", "value": "youtube.com", "enabled": True}],
+        "service_profile_bindings": {"youtube": "dc"},
+    })
+    parsed = remote_proxy.yaml.safe_load(remote_proxy.build_mihomo_config(
+        _node("默认", "default.example.com"), mainland_dns=True, **options,
+    ))
+    assert "DOMAIN-SUFFIX,youtube.com,AI-PROXY" in parsed["rules"]
+    assert f"DOMAIN-SUFFIX,googlevideo.com,{local_proxy._subscription_route_group_name('dc', 'youtube')}" in parsed["rules"]
+    assert all(url.endswith("#AI-PROXY") for url in parsed["dns"]["nameserver-policy"]["+.youtube.com"])
+
+
+def test_fully_overridden_service_does_not_leave_an_unreferenced_group(monkeypatch):
+    _patch_profiles(monkeypatch, {"home": (_node("家宽", "home.example.com"),),
+                                 "dc": (_node("机房", "dc.example.com"),)})
+    preferences = {
+        "builtin_sites": {"huggingface": True},
+        "custom_targets": [{"id": domain, "kind": "domain", "value": domain, "enabled": True}
+                           for domain in ("huggingface.co", "hf.co")],
+        "service_profile_bindings": {"huggingface": "home", "custom": "dc"},
+    }
+    parsed = remote_proxy.yaml.safe_load(local_proxy._build_local_mihomo_config(
+        _node("默认", "default.example.com"), 17897, preferences=preferences,
+    ))
+    assert len(parsed["proxy-groups"]) == 2
+    assert [node["server"] for node in parsed["proxies"]] == ["default.example.com", "dc.example.com"]
+
+
 def test_specific_ip_route_precedes_broader_network():
     config = remote_proxy.build_mihomo_config(
         _node("默认", "default.example.com"),

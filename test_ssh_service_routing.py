@@ -1,5 +1,7 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -56,13 +58,88 @@ def test_normal_ssh_reload_preserves_persisted_routes(routed_ssh):
     assert f"DOMAIN-SUFFIX,anthropic.com,{local_proxy._subscription_route_group_name('home', 'claude')}" in parsed["rules"]
 
 
-def test_bound_subscription_refresh_never_promotes_it_to_ssh_default(routed_ssh):
+def test_bound_subscription_refresh_never_promotes_it_to_ssh_default(monkeypatch, routed_ssh):
     configs, _calls, first, _second = routed_ssh
     proxy_routing.apply_ssh_routes("ssh-a", {"service_profile_bindings": {"claude": "home"}})
+    def unexpected_integration_repair(*_args):
+        pytest.fail("route-only refresh must not rewrite shell or VS Code settings")
+    monkeypatch.setattr(remote_proxy, "_repair_remote_proxy_integrations", unexpected_integration_repair)
     remote_proxy.refresh_running_ai_proxy_from_subscription(
         "ssh-a", [remote_proxy.ProxySubscriptionNode(index=1, node=first)], profile_id="home",
     )
     assert remote_proxy.yaml.safe_load(configs["ssh-a"])["proxies"][0]["server"] == "main.example.com"
+
+
+def test_subscription_refresh_with_missing_pin_leaves_existing_ssh_config(monkeypatch, routed_ssh):
+    configs, calls, first, _second = routed_ssh
+    proxy_routing.apply_ssh_routes("ssh-a", {
+        "service_profile_bindings": {"claude": "home"},
+        "service_node_bindings": {"claude": remote_proxy.proxy_node_key(first)},
+    })
+    original_config, original_calls = dict(configs), list(calls)
+    replacement = _node("替换节点", "replacement.example.com")
+    _patch_profiles(monkeypatch, {"home": (replacement,)})
+    with pytest.raises(RuntimeError, match="固定节点已失效"):
+        remote_proxy.refresh_running_ai_proxy_from_subscription(
+            "ssh-a", [remote_proxy.ProxySubscriptionNode(index=1, node=replacement)], profile_id="home",
+        )
+    assert configs == original_config
+    assert calls == original_calls
+
+
+def test_bound_subscription_refresh_cannot_overwrite_a_concurrent_default_change(monkeypatch, routed_ssh):
+    configs, _calls, first, _second = routed_ssh
+    proxy_routing.apply_ssh_routes("ssh-a", {"service_profile_bindings": {"claude": "home"}})
+    original_read = remote_proxy._read_remote_managed_proxy_node
+    snapshot_ready, continue_refresh, manual_done = threading.Event(), threading.Event(), threading.Event()
+
+    def read(name, port):
+        node = original_read(name, port)
+        snapshot_ready.set()
+        assert continue_refresh.wait(5), "test did not release the route refresh"
+        return node
+
+    def manual_change():
+        try:
+            return remote_proxy.reload_ai_proxy(
+                "ssh-a", remote_proxy.format_proxy_node(_node("新默认", "new-main.example.com")),
+            )
+        finally:
+            manual_done.set()
+
+    monkeypatch.setattr(remote_proxy, "_read_remote_managed_proxy_node", read)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refresh = executor.submit(remote_proxy.refresh_running_ai_proxy_from_subscription,
+                                  "ssh-a", [remote_proxy.ProxySubscriptionNode(index=1, node=first)],
+                                  profile_id="home")
+        try:
+            assert snapshot_ready.wait(5)
+            manual = executor.submit(manual_change)
+            manual_done.wait(0.3)
+        finally:
+            continue_refresh.set()
+        refresh.result(timeout=5)
+        manual.result(timeout=5)
+    assert remote_proxy.yaml.safe_load(configs["ssh-a"])["proxies"][0]["server"] == "new-main.example.com"
+
+
+def test_ssh_rollback_write_failure_is_not_reported_as_config_restored(monkeypatch, routed_ssh):
+    _configs, _calls, _first, _second = routed_ssh
+    write = remote_proxy.ssh_manager.write_remote_file
+    attempts = []
+
+    def fail_second_write(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 2:
+            raise OSError("rollback disk error")
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(remote_proxy.ssh_manager, "write_remote_file", fail_second_write)
+    monkeypatch.setattr(remote_proxy.ssh_manager, "execute_command_with_status", lambda *_args, **_kwargs: (1, "", "reload error"))
+    with pytest.raises(RuntimeError, match="旧配置写回失败") as error:
+        proxy_routing.apply_ssh_routes("ssh-a", {"service_profile_bindings": {"claude": "home"}})
+    assert "旧配置已写回" not in str(error.value)
+    assert "已强制重载旧配置" not in str(error.value)
 
 
 def test_failed_ssh_reload_restores_config_and_does_not_save_bindings(monkeypatch, routed_ssh):

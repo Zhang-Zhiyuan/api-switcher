@@ -6,7 +6,7 @@ import customtkinter as ctk
 import pytest
 
 from core import proxy_routing
-from ui.dialogs.service_routes_dialog import DEFAULT_PROFILE, MISSING_NODE, ServiceRoutesDialog
+from ui.dialogs.service_routes_dialog import DEFAULT_CUSTOM_PROFILE, DEFAULT_PROFILE, MISSING_NODE, ServiceRoutesDialog
 
 
 def _catalog():
@@ -148,6 +148,25 @@ def test_custom_target_add_remove_and_invalid_input_feedback(editor):
     dialog._add_custom()
     assert "每次只能添加" in dialog._status.cget("text")
     assert not saved
+
+
+def test_custom_default_label_and_reset_preserve_inherited_subscription(editor):
+    _root, dialog, _saved = editor
+    dialog._select_profile("custom", "家宽订阅 A")
+    dialog._custom_entry.insert(0, "api.example.com")
+    dialog._add_custom()
+    target = dialog._drafts[dialog._scope]["custom_targets"][0]
+    service = f"custom:{target['id']}"
+    assert dialog._rows[service]["profile"].get() == DEFAULT_CUSTOM_PROFILE
+    assert dialog._rows[service]["node"].get() == DEFAULT_CUSTOM_PROFILE
+    dialog._select_profile(service, "机房订阅 B")
+    dialog._select_node(service, "香港 · 流媒体 01")
+    dialog._select_profile(service, DEFAULT_CUSTOM_PROFILE)
+    draft = dialog._drafts[dialog._scope]
+    assert draft["service_profile_bindings"]["custom"] == "home"
+    assert service not in draft["service_profile_bindings"]
+    assert service not in draft["service_node_bindings"]
+    assert dialog._rows[service]["profile"].get() == DEFAULT_CUSTOM_PROFILE
 
 
 def capture_preview(directory):

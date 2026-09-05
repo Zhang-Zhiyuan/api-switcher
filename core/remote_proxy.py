@@ -4494,9 +4494,11 @@ def reload_ai_proxy(
             raise RuntimeError((stderr or stdout or str(status_code)).strip())
     except Exception as exc:
         restore_error = ""
+        restored_file = False
         if old_config:
             try:
                 ssh_manager.write_remote_file(client, config_path, old_config, file_mode=0o600)
+                restored_file = True
                 restore_status, restore_stdout, restore_stderr = ssh_manager.execute_command_with_status(
                     client, command, timeout=20, log_command=False,
                 )
@@ -4506,6 +4508,8 @@ def reload_ai_proxy(
                 restore_error = str(rollback)
         if not old_config:
             restore_suffix = "；未读取到可恢复的旧配置"
+        elif not restored_file:
+            restore_suffix = f"；旧配置写回失败，运行状态待复核: {restore_error}"
         elif restore_error:
             restore_suffix = f"；旧配置已写回，但强制重载失败: {restore_error}"
         else:
@@ -4877,18 +4881,24 @@ def refresh_running_ai_proxy_from_subscription(
     persist_selection: bool = True,
     strict_privacy: bool | None = None,
 ) -> str:
-    status = inspect_ai_proxy(ssh_name, mixed_port)
-    if not status.running:
-        return f"{ssh_name}: AI 代理未运行，已跳过订阅热更新"
-    routes = proxy_routing.load_ssh_routes(ssh_name)
-    if profile_id and profile_id in routes["service_profile_bindings"].values():
-        current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
-        if not current_node:
-            raise RuntimeError(f"{ssh_name}: 无法读取默认节点，已停止分流订阅热更新")
-        return reload_ai_proxy(
-            ssh_name, format_proxy_node(current_node), mixed_port,
-            persist_selection=False, **_strict_privacy_call_kwargs(strict_privacy),
-        )
+    # Reading the default and reloading its bound service pools is one host
+    # operation. Otherwise a concurrent manual node change can be overwritten
+    # by the stale default snapshot. Long isolated candidate probes below stay
+    # outside this lock and retain their existing stale-snapshot checks.
+    with proxy_routing.host_lock(ssh_name):
+        status = inspect_ai_proxy(ssh_name, mixed_port)
+        if not status.running:
+            return f"{ssh_name}: AI 代理未运行，已跳过订阅热更新"
+        routes = proxy_routing.load_ssh_routes(ssh_name)
+        if profile_id and profile_id in routes["service_profile_bindings"].values():
+            current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+            if not current_node:
+                raise RuntimeError(f"{ssh_name}: 无法读取默认节点，已停止分流订阅热更新")
+            return reload_ai_proxy(
+                ssh_name, format_proxy_node(current_node), mixed_port,
+                persist_selection=False, routing_preferences=routes,
+                **_strict_privacy_call_kwargs(strict_privacy),
+            )
     candidates = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
     if not candidates:
         return f"{ssh_name}: 订阅里没有可用节点，已跳过热更新"
