@@ -68,20 +68,29 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         first, second, datacenter = [_upstream(label, stack) for label in ("home-one", "home-two", "datacenter")]
         _patch_profiles(monkeypatch, {"home": (first, second), "dc": (datacenter,)})
         preferences = {
-            "builtin_sites": {"youtube": True},
+            "builtin_sites": {"youtube": True, "google": True, "github": True, "huggingface": True},
             "custom_targets": [
                 {"id": "api", "kind": "domain", "value": "api.openai.com", "enabled": True},
                 {"id": "network", "kind": "ip-cidr", "value": "203.0.113.0/24", "enabled": True},
                 {"id": "host", "kind": "ip-cidr", "value": "203.0.113.9/32", "enabled": True},
+                {"id": "github", "kind": "domain", "value": "github.com", "enabled": True},
+                {"id": "hf", "kind": "domain", "value": "huggingface.co", "enabled": True},
+                {"id": "hfshort", "kind": "domain", "value": "hf.co", "enabled": True},
+                {"id": "default", "kind": "domain", "value": "ytimg.com", "enabled": True},
             ],
             "service_profile_bindings": {
                 "openai": "home", "claude": "home", "youtube": "dc",
                 "custom:api": "dc", "custom:network": "home", "custom:host": "dc",
+                "google": "dc", "github": "home", "huggingface": "home",
+                "custom:github": "dc", "custom:hf": "dc", "custom:hfshort": "dc",
             },
             "service_node_bindings": {
                 "openai": remote_proxy.proxy_node_key(first), "claude": remote_proxy.proxy_node_key(second),
                 "youtube": remote_proxy.proxy_node_key(datacenter), "custom:api": remote_proxy.proxy_node_key(datacenter),
                 "custom:network": remote_proxy.proxy_node_key(first), "custom:host": remote_proxy.proxy_node_key(datacenter),
+                "google": remote_proxy.proxy_node_key(datacenter), "github": remote_proxy.proxy_node_key(first),
+                "huggingface": remote_proxy.proxy_node_key(second), "custom:github": remote_proxy.proxy_node_key(datacenter),
+                "custom:hf": remote_proxy.proxy_node_key(datacenter), "custom:hfshort": remote_proxy.proxy_node_key(datacenter),
             },
         }
         port = _port_pair()
@@ -89,7 +98,7 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         options = proxy_routing.config_options(preferences)
         for group in options["additional_proxy_groups"]:
             group["health_checked"] = False
-        config = remote_proxy.build_mihomo_config(datacenter, port, log_level="silent", **options)
+        config = remote_proxy.build_mihomo_config(second, port, log_level="silent", **options)
         config_path = tmp_path / "config.yaml"
         config_path.write_text(config, encoding="utf-8")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -112,6 +121,8 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 ("chatgpt.com", "home-one"), ("api.anthropic.com", "home-two"),
                 ("www.youtube.com", "datacenter"), ("api.openai.com", "datacenter"),
                 ("203.0.113.8", "home-one"), ("203.0.113.9", "datacenter"),
+                ("github.com", "datacenter"), ("raw.githubusercontent.com", "home-one"),
+                ("huggingface.co", "datacenter"), ("hf.co", "datacenter"), ("i.ytimg.com", "home-two"),
             ):
                 with opener.open(f"http://{host}/routing-test", timeout=5) as response:
                     assert response.read().decode("ascii") == expected

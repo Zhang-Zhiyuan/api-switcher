@@ -14,6 +14,7 @@ from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style, textbox_style
 
 DEFAULT_PROFILE = "跟随默认线路"
+DEFAULT_CUSTOM_PROFILE = "跟随自定义默认线路"
 DEFAULT_NODE = "订阅首选 + 故障切换"
 MISSING_PROFILE = "订阅已失效，请重新选择"
 MISSING_NODE = "固定节点已失效，请重新选择"
@@ -97,8 +98,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                        command=self._add_custom, **button_style("secondary", compact=True))
         self._add_button.pack(side="right")
         note = ctk.CTkLabel(
-            self, text="自动模式仅在所选订阅内切换。固定节点不自动换出口；节点失效时保留原运行配置并提示。\n"
-                       "未勾选目标不新增专属规则，仍遵循默认代理范围。第三方 API 请按域名单独添加。",
+            self, text="自动模式仅在所选订阅内切换；固定节点不自动换出口，缓存中找不到该节点时停止应用。\n"
+                       "更具体的域名 / IP 规则优先；同一目标以自定义设置为准。第三方 API 请按域名单独添加。\n"
+                       "未勾选目标不新增专属规则，仍遵循默认代理范围。",
             font=font(11), text_color=COLORS["muted"], justify="left", anchor="w",
         )
         note.pack(fill="x", padx=20, pady=(8, 4))
@@ -173,8 +175,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._busy = False
             self._status.configure(text=f"读取失败：{payload}。请关闭后重试。", text_color=COLORS["danger"])
 
-    def _profile_values(self):
-        mapping = {DEFAULT_PROFILE: ""}
+    def _profile_values(self, service=""):
+        mapping = {DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE: ""}
         for profile in self._catalog:
             label = str(profile["name"])
             if not profile["nodes"]:
@@ -203,9 +205,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             child.destroy()
         self._rows = {}
         draft = self._drafts[self._scope]
-        profiles = self._profile_values()
         for row in proxy_routing.route_rows(draft):
             service = row["id"]
+            profiles = self._profile_values(service)
             tile = ctk.CTkFrame(self._table, fg_color="transparent")
             enabled = ctk.BooleanVar(value=row["enabled"])
             check = ctk.CTkCheckBox(
@@ -238,7 +240,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         row = self._rows[service]
         draft = self._drafts[self._scope]
         profile_id = draft["service_profile_bindings"].get(service, "")
-        profiles = self._profile_values()
+        profiles = self._profile_values(service)
         label = next((label for label, value in profiles.items() if value == profile_id), MISSING_PROFILE)
         row["profile"].configure(state="readonly", values=[*profiles, *([MISSING_PROFILE] if label == MISSING_PROFILE else [])])
         row["profile"].set(label)
@@ -249,7 +251,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         row["nodes"] = nodes
         row["node"].configure(values=[*nodes, *([MISSING_NODE] if node_label == MISSING_NODE else [])],
                               state="readonly", text_color_disabled=COLORS["muted"])
-        row["node"].set(node_label if profile_id else ("跟随自定义默认线路" if service.startswith("custom:") else DEFAULT_PROFILE))
+        row["node"].set(node_label if profile_id else (DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE))
         row["node"].configure(state="readonly" if profile_id and not self._busy else "disabled")
 
     def _layout_rows(self):
@@ -284,10 +286,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 row["tile"].pack(fill="x", pady=(2, 12), padx=8)
 
     def _select_profile(self, service, label):
-        if self._busy or label not in self._profile_values():
+        profiles = self._profile_values(service)
+        if self._busy or label not in profiles:
             return
         draft = self._drafts[self._scope]
-        profile_id = self._profile_values()[label]
+        profile_id = profiles[label]
         if draft["service_profile_bindings"].get(service, "") == profile_id:
             return
         if profile_id:

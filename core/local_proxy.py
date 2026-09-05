@@ -4153,7 +4153,8 @@ def _resolve_service_subscription_routes(
     active_targets = _active_service_route_targets(preferences)
     pinned_nodes = proxy_routing.node_bindings(preferences)
     requested: dict[str, dict] = {}
-    for service_id, target in active_targets.items():
+    service_routes: dict[str, str] = {}
+    for service_id in active_targets:
         profile_id = str(bindings.get(service_id) or "").strip()
         if not profile_id:
             continue
@@ -4162,11 +4163,10 @@ def _resolve_service_subscription_routes(
         pool_id = json.dumps([profile_id, node_key, health_url, expected_status])
         entry = requested.setdefault(
             pool_id,
-            {"profile_id": profile_id, "node_key": node_key, "service_ids": [], "domains": [], "ip_cidrs": []},
+            {"profile_id": profile_id, "node_key": node_key, "service_ids": []},
         )
         entry["service_ids"].append(service_id)
-        entry["domains"].extend(target.get("domains") or ())
-        entry["ip_cidrs"].extend(target.get("ip_cidrs") or ())
+        service_routes[service_id] = _subscription_route_group_name(profile_id, service_id, node_key)
     if not requested:
         return {
             "additional_proxy_groups": (),
@@ -4174,14 +4174,31 @@ def _resolve_service_subscription_routes(
             "proxy_ip_cidr_routes": {},
         }
 
+    # Resolve target ownership before deduplicating pools. Pool insertion order
+    # must not let an earlier shared pool lose a later explicit custom override.
+    # Exact custom targets win over built-ins, including "follow default";
+    # different (parent/child) targets keep the builder's most-specific rule order.
+    domain_routes: dict[str, str] = {}
+    ip_cidr_routes: dict[str, str] = {}
+    for service_id in sorted(active_targets, key=lambda service: (
+        2 if service.startswith("custom:") else 1 if service == LOCAL_PROXY_CUSTOM_ROUTE_ID else 0
+    )):
+        target = active_targets[service_id]
+        route = service_routes.get(service_id, "AI-PROXY")
+        domain_routes.update((str(domain), route) for domain in target.get("domains") or ())
+        ip_cidr_routes.update((str(cidr), route) for cidr in target.get("ip_cidrs") or ())
+    used_groups = set(domain_routes.values()) | set(ip_cidr_routes.values())
     state = remote_proxy.load_proxy_subscription_state()
     profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
     additional_groups = []
-    domain_routes: dict[str, str] = {}
-    ip_cidr_routes: dict[str, str] = {}
     seen_group_names: dict[str, str] = {}
     resolved_pools = {}
     for pool_id, request in requested.items():
+        group_name = service_routes[request["service_ids"][0]]
+        if group_name not in used_groups:
+            # Every target of this group was explicitly overridden. Do not emit
+            # unused outbounds or start unnecessary health checks for them.
+            continue
         profile_id = request["profile_id"]
         profile = profiles.get(profile_id)
         if not isinstance(profile, dict):
@@ -4201,7 +4218,6 @@ def _resolve_service_subscription_routes(
         # selected node currently matches AI-PROXY.  This keeps subsequent
         # subscription refreshes and fallback changes independent from the
         # global main-node lifecycle.
-        group_name = _subscription_route_group_name(profile_id, request["service_ids"][0], request["node_key"])
         collision_profile = seen_group_names.get(group_name)
         if collision_profile and collision_profile != pool_id:
             raise RuntimeError("服务订阅分流标识发生冲突，请重新保存其中一个订阅")
@@ -4219,10 +4235,6 @@ def _resolve_service_subscription_routes(
                 "health_check_expected_status": expected_status,
             }
         )
-        for domain in request["domains"]:
-            domain_routes[str(domain)] = group_name
-        for cidr in request["ip_cidrs"]:
-            ip_cidr_routes[str(cidr)] = group_name
     return {
         "additional_proxy_groups": tuple(additional_groups),
         "proxy_domain_routes": domain_routes,
