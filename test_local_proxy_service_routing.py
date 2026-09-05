@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core import local_proxy, remote_proxy
+from core import local_proxy, proxy_routing, remote_proxy
 
 
 def _node(name: str, server: str) -> dict:
@@ -56,6 +56,107 @@ def _patch_profiles(monkeypatch, profiles: dict[str, tuple[dict, ...]]) -> dict:
     return state_profiles
 
 
+def test_services_can_pin_different_nodes_inside_the_same_subscription(monkeypatch):
+    first = _node("家宽节点 1", "one.example.com")
+    second = _node("家宽节点 2", "two.example.com")
+    _patch_profiles(monkeypatch, {"home": (first, second)})
+    preferences = {
+        "service_profile_bindings": {"openai": "home", "claude": "home"},
+        "service_node_bindings": {
+            "openai": remote_proxy.proxy_node_key(first),
+            "claude": remote_proxy.proxy_node_key(second),
+        },
+    }
+    parsed = remote_proxy.yaml.safe_load(local_proxy._build_local_mihomo_config(
+        _node("默认节点", "default.example.com"), 17897, preferences=preferences,
+    ))
+    routes = {rule.split(",")[1]: rule.split(",")[2] for rule in parsed["rules"] if rule.startswith("DOMAIN-SUFFIX,")}
+    assert routes["openai.com"] != routes["anthropic.com"]
+    assert len(parsed["proxy-groups"]) == 3
+    for group in parsed["proxy-groups"][1:]:
+        assert len(group["proxies"]) == 1
+    assert [node["server"] for node in parsed["proxies"]] == ["default.example.com", "one.example.com", "two.example.com"]
+
+
+def test_missing_fixed_node_blocks_update_instead_of_falling_back(monkeypatch):
+    _patch_profiles(monkeypatch, {"home": (_node("剩余节点", "other.example.com"),)})
+    with pytest.raises(RuntimeError, match="固定节点已失效"):
+        local_proxy._build_local_mihomo_config(
+            _node("默认节点", "default.example.com"), 17897,
+            preferences={"service_profile_bindings": {"claude": "home"},
+                         "service_node_bindings": {"claude": "a" * 64}},
+        )
+
+
+def test_custom_target_has_independent_route_and_precedes_parent_domain(monkeypatch):
+    _patch_profiles(monkeypatch, {"home": (_node("家宽", "home.example.com"),),
+                                 "dc": (_node("机房", "dc.example.com"),)})
+    preferences = {
+        "custom_targets": [{"id": "api", "kind": "domain", "value": "api.openai.com", "enabled": True}],
+        "service_profile_bindings": {"openai": "dc", "custom:api": "home"},
+    }
+    parsed = remote_proxy.yaml.safe_load(local_proxy._build_local_mihomo_config(
+        _node("默认", "default.example.com"), 17897, preferences=preferences,
+    ))
+    specific = f"DOMAIN-SUFFIX,api.openai.com,{local_proxy._subscription_route_group_name('home', 'custom:api')}"
+    parent = f"DOMAIN-SUFFIX,openai.com,{local_proxy._subscription_route_group_name('dc')}"
+    assert parsed["rules"].index(specific) < parsed["rules"].index(parent)
+    assert parsed["dns"]["nameserver-policy"]["+.api.openai.com"] != parsed["dns"]["nameserver-policy"]["+.openai.com"]
+
+
+def test_specific_ip_route_precedes_broader_network():
+    config = remote_proxy.build_mihomo_config(
+        _node("默认", "default.example.com"),
+        extra_proxy_ip_cidrs=("203.0.113.0/24", "203.0.113.9/32"),
+    )
+    rules = remote_proxy.yaml.safe_load(config)["rules"]
+    assert rules.index("IP-CIDR,203.0.113.9/32,AI-PROXY,no-resolve") < rules.index("IP-CIDR,203.0.113.0/24,AI-PROXY,no-resolve")
+
+
+def test_batch_route_apply_rolls_back_profiles_nodes_and_sites(monkeypatch, tmp_path):
+    nodes = (_node("first", "first.example.com"), _node("second", "second.example.com"))
+    _patch_profiles(monkeypatch, {"home": nodes})
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_DIR", tmp_path)
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    local_proxy.clear_local_proxy_preferences_cache()
+    original = {"service_profile_bindings": {"openai": "home"},
+                "service_node_bindings": {"openai": remote_proxy.proxy_node_key(nodes[0])}}
+    local_proxy.save_local_proxy_preferences(**original)
+    snapshot = proxy_routing.route_snapshot(local_proxy.load_local_proxy_preferences())
+    monkeypatch.setattr(local_proxy, "apply_local_proxy_routing_to_running",
+                        lambda: (_ for _ in ()).throw(RuntimeError("controller failed")))
+    with pytest.raises(RuntimeError, match="已恢复原绑定"):
+        local_proxy.set_local_proxy_service_routes_and_apply(
+            {"service_profile_bindings": {"youtube": "home"}, "builtin_sites": {"youtube": True},
+             "service_node_bindings": {"youtube": remote_proxy.proxy_node_key(nodes[1])}}, expected=snapshot,
+        )
+    assert proxy_routing.route_snapshot(local_proxy.load_local_proxy_preferences()) == snapshot
+
+
+def test_route_editor_detects_stale_draft_before_applying(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_DIR", tmp_path)
+    monkeypatch.setattr(local_proxy, "LOCAL_PROXY_PREFS_PATH", tmp_path / "preferences.json")
+    local_proxy.clear_local_proxy_preferences_cache()
+    local_proxy.save_local_proxy_preferences(builtin_sites={"youtube": True})
+    with pytest.raises(RuntimeError, match="已被其他操作修改"):
+        local_proxy.set_local_proxy_service_routes_and_apply({}, expected={})
+    assert local_proxy.load_local_proxy_preferences()["builtin_sites"]["youtube"] is True
+
+
+@pytest.mark.parametrize("value", [[], {"claude": 123}, {"claude": "a" * 64}])
+def test_corrupt_or_orphan_node_binding_is_not_silently_downgraded(value):
+    with pytest.raises(ValueError, match="节点"):
+        proxy_routing.normalize_routes({"service_node_bindings": value})
+
+
+def test_invalid_custom_target_binding_cannot_silently_disappear():
+    with pytest.raises(ValueError, match="无效的自定义目标"):
+        proxy_routing.normalize_routes({
+            "custom_targets": [{"id": "api", "value": "not,a,domain"}],
+            "service_profile_bindings": {"custom:api": "home"},
+        })
+
+
 def test_service_routing_uses_residential_for_ai_and_datacenter_for_youtube(monkeypatch):
     residential = _node("residential", "home.example.com")
     residential_backup = _node("residential backup", "home-backup.example.com")
@@ -85,10 +186,11 @@ def test_service_routing_uses_residential_for_ai_and_datacenter_for_youtube(monk
     )
     parsed = remote_proxy.yaml.safe_load(config)
     residential_group = local_proxy._subscription_route_group_name("profile-a")
-    youtube_group = local_proxy._subscription_route_group_name("profile-b")
+    claude_group = local_proxy._subscription_route_group_name("profile-a", "claude")
+    youtube_group = local_proxy._subscription_route_group_name("profile-b", "youtube")
 
     assert f"DOMAIN-SUFFIX,openai.com,{residential_group}" in parsed["rules"]
-    assert f"DOMAIN-SUFFIX,anthropic.com,{residential_group}" in parsed["rules"]
+    assert f"DOMAIN-SUFFIX,anthropic.com,{claude_group}" in parsed["rules"]
     assert f"DOMAIN-SUFFIX,youtube.com,{youtube_group}" in parsed["rules"]
     assert f"DOMAIN-SUFFIX,googlevideo.com,{youtube_group}" in parsed["rules"]
     assert f"DOMAIN-SUFFIX,youtubei.googleapis.com,{youtube_group}" in parsed["rules"]
@@ -96,10 +198,13 @@ def test_service_routing_uses_residential_for_ai_and_datacenter_for_youtube(monk
         f"https://1.1.1.1/dns-query#{youtube_group}",
         f"https://8.8.8.8/dns-query#{youtube_group}",
     ]
-    assert len(parsed["proxy-groups"]) == 3
+    assert len(parsed["proxy-groups"]) == 4
     assert parsed["proxy-groups"][1]["url"] == remote_proxy.AI_PROXY_HEALTH_CHECK_URL
-    assert parsed["proxy-groups"][2]["url"] == "https://www.youtube.com/generate_204"
+    assert parsed["proxy-groups"][2]["url"] == "https://api.anthropic.com/v1/models"
+    assert parsed["proxy-groups"][3]["url"] == "https://www.youtube.com/generate_204"
     assert [node["server"] for node in parsed["proxies"]] == [
+        "home.example.com",
+        "home-backup.example.com",
         "home.example.com",
         "home-backup.example.com",
         "home.example.com",
@@ -129,9 +234,10 @@ def test_service_routing_can_bind_openai_and_claude_to_non_primary_profile(monke
     route_group = local_proxy._subscription_route_group_name("profile-a")
 
     assert f"DOMAIN-SUFFIX,openai.com,{route_group}" in parsed["rules"]
-    assert f"DOMAIN-SUFFIX,anthropic.com,{route_group}" in parsed["rules"]
+    claude_group = local_proxy._subscription_route_group_name("profile-a", "claude")
+    assert f"DOMAIN-SUFFIX,anthropic.com,{claude_group}" in parsed["rules"]
     assert "DOMAIN-SUFFIX,generativelanguage.googleapis.com,AI-PROXY" in parsed["rules"]
-    assert len(parsed["proxy-groups"]) == 2
+    assert len(parsed["proxy-groups"]) == 3
     assert parsed["proxy-groups"][1]["url"] == remote_proxy.AI_PROXY_HEALTH_CHECK_URL
 
 
