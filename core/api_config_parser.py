@@ -87,10 +87,10 @@ _URL_KEYS = {
     "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_BASE_URL", "CODEX_API_BASE",
     "API_BASE_URL", "BASE_URL", "BASEURL", "ENDPOINT", "API_ENDPOINT",
 }
-_MODEL_KEYS = (
-    "ANTHROPIC_MODEL", "CLAUDE_CODE_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL",
-    "CODEX_MODEL", "DEFAULT_MODEL", "MODEL",
-)
+_CLAUDE_MODEL_KEYS = ("ANTHROPIC_MODEL", "CLAUDE_CODE_MODEL", "CLAUDE_MODEL")
+_CODEX_MODEL_KEYS = ("OPENAI_MODEL", "CODEX_MODEL")
+_GENERIC_MODEL_KEYS = ("DEFAULT_MODEL", "MODEL")
+_MODEL_KEYS = _CLAUDE_MODEL_KEYS + _CODEX_MODEL_KEYS + _GENERIC_MODEL_KEYS
 _CLAUDE_TOKEN_KEYS = (
     "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_AUTH_TOKEN", "ANTHROPIC_API_KEY",
     "CLAUDE_API_KEY", "API_KEY", "APIKEY", "API_TOKEN", "AUTH_TOKEN",
@@ -474,14 +474,20 @@ def _extract_values(text: str) -> dict[str, str]:
             values.setdefault(key, value)
 
     known_suffixes = _URL_KEYS | set(_MODEL_KEYS) | set(_CLAUDE_TOKEN_KEYS) | set(_CODEX_TOKEN_KEYS)
+    ordered_suffixes = sorted(known_suffixes, key=lambda suffix: (-len(suffix), suffix))
     for key, value in list(values.items()):
         env_marker = key.rfind("_ENV_")
         env_name = key[env_marker + 5:] if env_marker >= 0 else (key[4:] if key.startswith("ENV_") else "")
         if re.fullmatch(r"[A-Z_][A-Z0-9_]*", env_name or ""):
             values.setdefault(env_name, value)
-        for suffix in known_suffixes:
+        # A product-qualified field must not also become a generic alias:
+        # ANTHROPIC_MODEL -> MODEL would leak Claude's model into Codex.
+        if key in known_suffixes:
+            continue
+        for suffix in ordered_suffixes:
             if key.endswith("_" + suffix):
                 values.setdefault(suffix, value)
+                break
         # OpenCode/AI SDK uses camelCase option names, which become
         # PROVIDER_ANTHROPIC_OPTIONS_BASEURL/APIKEY after flattening JSON.
         if key.endswith("_BASEURL"):
@@ -854,7 +860,8 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
 
-    model, model_key = _pick_value(values, _MODEL_KEYS)
+    model_keys = _CLAUDE_MODEL_KEYS if target_type == "claude" else _CODEX_MODEL_KEYS
+    model, model_key = _pick_value(values, model_keys + _GENERIC_MODEL_KEYS)
     provider_id = _provider_for_url(normalized_candidate)
     if provider_id == "custom":
         provider_id = _provider_for_keys(upper_keys)

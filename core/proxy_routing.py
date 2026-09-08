@@ -6,12 +6,13 @@ stay in the existing subscription cache; each deployment resolves a fresh snapsh
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 import hashlib
 import json
 import threading
 
-from core.atomic_io import atomic_write_text
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 from core.lazy_imports import LazyModule
 from core.local_proxy_constants import (
     LOCAL_PROXY_AI_SERVICES,
@@ -180,6 +181,53 @@ def serialized_ssh_route_operation(function):
         with host_lock(ssh_name):
             return function(ssh_name, *args, **kwargs)
     return wrapped
+
+
+@contextmanager
+def ssh_profile_route_transaction(previous_name: str | None, new_name: str | None):
+    """Move/remove local route authority together with SSH profile metadata.
+
+    Lock order is bindings -> sorted hosts -> profile store, matching route
+    application. No SSH connection or live server configuration is changed.
+    """
+    names = sorted({name for name in (previous_name, new_name) if name})
+    with _BINDINGS_LOCK, ExitStack() as locks:
+        for name in names:
+            locks.enter_context(host_lock(name))
+        if not previous_name or previous_name == new_name:
+            yield
+            return
+        source = _host_path(previous_name)
+        destination = _host_path(new_name) if new_name else None
+        if destination is not None and destination.exists():
+            raise ValueError("新 SSH 名称已有分流配置，请换一个名称或先处理原绑定")
+        try:
+            original = source.read_bytes()
+        except FileNotFoundError:
+            yield
+            return
+        try:
+            if destination is not None:
+                load_ssh_routes(previous_name)  # Fail closed on corrupt authority.
+                data = json.loads(original)
+                data["ssh_name"] = new_name
+                atomic_write_text(destination, json.dumps(data, ensure_ascii=False, indent=2))
+            source.unlink()
+            yield
+        except Exception as original_error:
+            errors = []
+            try:
+                atomic_write_bytes(source, original)
+            except Exception as error:
+                errors.append(f"恢复旧绑定失败: {error}")
+            if destination is not None:
+                try:
+                    destination.unlink(missing_ok=True)
+                except Exception as error:
+                    errors.append(f"清理新绑定失败: {error}")
+            if errors:
+                raise RuntimeError("SSH Profile 操作失败，分流回滚不完整: " + "；".join(errors)) from original_error
+            raise
 
 
 def load_ssh_routes(ssh_name: str) -> dict:

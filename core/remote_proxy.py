@@ -714,6 +714,16 @@ def parse_proxy_subscription_content(text: str) -> tuple[ProxySubscriptionNode, 
     )
 
 
+def _subscription_download_identity(profile: dict | None) -> tuple | None:
+    if not profile:
+        return None
+    # Renames, latency checks and manual node selections may safely proceed
+    # during a download; source changes and a newer cache commit may not.
+    return tuple(profile.get(key, "") for key in (
+        "url", "source_path", "source_revision", "cache_revision", "saved_path", "last_fetched_at",
+    ))
+
+
 def fetch_proxy_subscription(
     url: str,
     timeout: int = 45,
@@ -730,6 +740,21 @@ def fetch_proxy_subscription(
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError("订阅链接必须是 http 或 https 地址")
     normalized_url = urlparse.urlunparse(parsed_url)
+    if persist:
+        with _PROXY_SUBSCRIPTION_STATE_LOCK:
+            initial_state = load_proxy_subscription_state()
+            initial_profiles = initial_state.get("profiles") or {}
+            target_id = str(profile_id or "").strip() or next((
+                candidate_id for candidate_id, candidate in initial_profiles.items()
+                if candidate.get("url") == normalized_url
+            ), _proxy_subscription_profile_id(normalized_url))
+            initial_profile = initial_profiles.get(target_id)
+            if profile_id and not initial_profile:
+                raise RuntimeError("订阅配置已删除或不存在，已取消下载，请重新选择订阅")
+            if initial_profile and initial_profile.get("url") != normalized_url:
+                raise RuntimeError("订阅链接已变更，已取消旧链接下载，请重新拉取")
+            initial_identity = _subscription_download_identity(initial_profile)
+            initial_active_id = initial_state.get("active_profile_id", "")
     proxy_diagnostic = _subscription_proxy_environment_diagnostic(normalized_url)
     proxy_diagnostic = _reconcile_subscription_proxy_environment(
         normalized_url,
@@ -773,18 +798,8 @@ def fetch_proxy_subscription(
         with _PROXY_SUBSCRIPTION_STATE_LOCK:
             state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
             profiles = state.setdefault("profiles", {})
-            clean_id = str(profile_id or "").strip()
-            if clean_id:
-                target_id = clean_id
-            else:
-                target_id = _proxy_subscription_profile_id(normalized_url)
-                for candidate_id, candidate in profiles.items():
-                    if (
-                        isinstance(candidate, dict)
-                        and str(candidate.get("url") or "").strip() == normalized_url
-                    ):
-                        target_id = str(candidate_id)
-                        break
+            if _subscription_download_identity(profiles.get(target_id)) != initial_identity:
+                raise RuntimeError("订阅已修改、删除或被更新，本次下载结果已丢弃，请重新拉取")
             profile = dict(profiles.get(target_id) or {})
             profile.update(
                 {
@@ -793,6 +808,7 @@ def fetch_proxy_subscription(
                     "url": normalized_url,
                     "saved_path": str(saved_path),
                     "last_fetched_at": fetched_at,
+                    "cache_revision": uuid.uuid4().hex,
                     "node_count": len(nodes),
                     "content_type": content_type,
                     "charset": charset,
@@ -800,7 +816,7 @@ def fetch_proxy_subscription(
                 }
             )
             profiles[target_id] = _normalize_proxy_subscription_profile(profile, target_id)
-            if activate:
+            if activate and state.get("active_profile_id", "") == initial_active_id:
                 state["active_profile_id"] = target_id
             _commit_proxy_subscription_cache_and_state(
                 saved_path,
@@ -941,6 +957,7 @@ def _save_local_proxy_subscription_profile(
                 "source_path": source_text,
                 "saved_path": str(saved_path),
                 "last_fetched_at": imported_at,
+                "cache_revision": uuid.uuid4().hex,
                 "node_count": max(0, int(node_count)),
                 "content_type": "application/yaml",
                 "charset": "auto",
@@ -1202,6 +1219,17 @@ def _persist_proxy_subscription_state(state: dict) -> dict:
     directory = _proxy_subscription_dir()
     directory.mkdir(parents=True, exist_ok=True)
     state = _normalize_proxy_subscription_state(state)
+    previous_profiles = load_proxy_subscription_state().get("profiles") or {}
+    for profile_id, profile in state["profiles"].items():
+        previous = previous_profiles.get(profile_id) or {}
+        if not previous or any(
+            profile.get(key, "") != previous.get(key, "") for key in ("url", "source_path")
+        ):
+            # A unique revision also detects delete/recreate and A -> B -> A
+            # edits without invalidating downloads on unrelated UI changes.
+            profile["source_revision"] = uuid.uuid4().hex
+        elif previous.get("source_revision"):
+            profile["source_revision"] = previous["source_revision"]
     state["updated_at"] = _now_iso()
     path = _proxy_subscription_state_path()
     temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")

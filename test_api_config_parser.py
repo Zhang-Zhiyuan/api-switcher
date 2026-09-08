@@ -199,11 +199,13 @@ def test_parse_generic_nested_api_key_never_uses_json_path_as_codex_env_key():
 def test_parse_rejects_strong_type_mismatch_but_selects_from_mixed_text():
     claude = (
         "export ANTHROPIC_BASE_URL=https://claude.example.test\n"
-        "export ANTHROPIC_AUTH_TOKEN=sk-claude-mixed"
+        "export ANTHROPIC_AUTH_TOKEN=sk-claude-mixed\n"
+        "export ANTHROPIC_MODEL=claude-demo"
     )
     codex = (
         "export OPENAI_BASE_URL=https://codex.example.test/v1\n"
-        "export OPENAI_API_KEY=sk-codex-mixed"
+        "export OPENAI_API_KEY=sk-codex-mixed\n"
+        "export OPENAI_MODEL=codex-demo"
     )
 
     with pytest.raises(ValueError, match="Claude API 配置"):
@@ -217,6 +219,35 @@ def test_parse_rejects_strong_type_mismatch_but_selects_from_mixed_text():
     assert parsed_claude.base_url == "https://claude.example.test"
     assert parsed_codex.token == "sk-codex-mixed"
     assert parsed_codex.base_url == "https://codex.example.test/v1"
+    assert parsed_claude.model == "claude-demo"
+    assert parsed_codex.model == "codex-demo"
+
+
+@pytest.mark.parametrize("kind,wrong_model", [
+    ("codex", "ANTHROPIC_MODEL"), ("claude", "OPENAI_MODEL"),
+    ("codex", "CLAUDE_CODE_MODEL"), ("claude", "CODEX_MODEL"),
+])
+@pytest.mark.parametrize("generic", ["", "MODEL=generic-demo", "DEFAULT_MODEL=generic-demo"])
+def test_mixed_config_never_borrows_other_client_model(kind, wrong_model, generic):
+    text = (
+        "ANTHROPIC_BASE_URL=https://claude.example.test\n"
+        "ANTHROPIC_AUTH_TOKEN=test-claude\n"
+        "OPENAI_BASE_URL=https://codex.example.test/v1\n"
+        "OPENAI_API_KEY=test-codex\n"
+        f"{wrong_model}=wrong-model\n{generic}"
+    )
+    assert parse_api_config_text(text, kind).model == ("generic-demo" if generic else "")
+
+
+@pytest.mark.parametrize("kind,expected", [("claude", "claude-demo"), ("codex", "codex-demo")])
+def test_mixed_json_env_selects_matching_model(kind, expected):
+    parsed = parse_api_config_text('''{"env": {
+        "ANTHROPIC_BASE_URL": "https://claude.example.test",
+        "ANTHROPIC_AUTH_TOKEN": "test-claude", "CLAUDE_CODE_MODEL": "claude-demo",
+        "OPENAI_BASE_URL": "https://codex.example.test/v1",
+        "OPENAI_API_KEY": "test-codex", "CODEX_MODEL": "codex-demo"
+    }}''', kind)
+    assert parsed.model == expected
 
 
 @pytest.mark.parametrize(

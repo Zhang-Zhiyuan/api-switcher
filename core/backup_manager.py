@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import os
 import shutil
 import threading
 import uuid
@@ -13,6 +14,7 @@ from config.paths import (
     CLAUDE_CREDENTIALS,
     CODEX_CONFIG,
     CODEX_AUTH,
+    CODEX_ENV,
     VSCODE_SETTINGS,
     BACKUPS_DIR,
 )
@@ -30,6 +32,7 @@ BACKUP_FILES = {
     "claude_credentials.json": CLAUDE_CREDENTIALS,
     "codex_config.toml": CODEX_CONFIG,
     "codex_auth.json": CODEX_AUTH,
+    "codex_env": CODEX_ENV,
     "vscode_settings.json": VSCODE_SETTINGS,
 }
 
@@ -277,23 +280,86 @@ def _capture_target_state() -> dict[str, tuple[bool, bytes]]:
     return state
 
 
-def _restore_target_state(state: dict[str, tuple[bool, bytes]]) -> list[str]:
-    errors: list[str] = []
-    for name, path in BACKUP_FILES.items():
-        existed, content = state[name]
+def _codex_env_restore_plan(target_state, backup_dir, managed, existing) -> dict:
+    """Only reconcile credentials actually represented by a dotenv snapshot.
+
+    Older backups do not own .env. Also, arbitrary dotenv variables (especially
+    proxies/PATH) must never be promoted into persistent Windows settings.
+    """
+    if "codex_env" not in BACKUP_FILES or "codex_env" not in (managed or existing or ()):
+        return {}
+    from core.codex_env import parse_codex_env_text
+    from core.env_validation import validate_codex_env_key
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+
+    def snapshot_bytes(name):
+        if name in (existing or ()):
+            return (backup_dir / name).read_bytes()
+        if name in (managed or ()):
+            return b""
+        return target_state.get(name, (False, b""))[1]
+
+    names = {"OPENAI_API_KEY"}
+    for content in (target_state.get("codex_config.toml", (False, b""))[1], snapshot_bytes("codex_config.toml")):
         try:
-            if existed:
-                atomic_write_bytes(path, content)
-            elif path.exists():
-                if not path.is_file():
-                    raise ValueError(f"目标不是文件: {path}")
-                path.unlink()
-        except Exception as exc:
-            errors.append(f"{name}: {exc}")
-    return errors
+            config = tomllib.loads(content.decode("utf-8-sig"))
+            providers = config.get("model_providers") or {}
+            provider = providers.get(config.get("model_provider")) or {}
+            key = provider.get("env_key")
+            if key:
+                names.add(validate_codex_env_key(key))
+        except (ValueError, AttributeError, TypeError):
+            # A broken current config must not prevent restoring a good backup.
+            pass
+    # Restoring a valid snapshot must also repair an already damaged current
+    # dotenv. Replacement characters cannot turn it into an unrelated env key;
+    # only values still matching the actual credential scope are reconciled.
+    before = parse_codex_env_text(target_state.get("codex_env", (False, b""))[1].decode("utf-8-sig", errors="replace"))
+    after = parse_codex_env_text(snapshot_bytes("codex_env").decode("utf-8-sig"))
+    return {name: (before[name], after.get(name)) for name in names
+            if name in before and before[name] != after.get(name)}
+
+
+def _restore_codex_credential_env(plan: dict) -> None:
+    if not plan:
+        return
+    from core import persistent_env, switcher
+
+    process_after = {name: os.environ.get(name) for name in plan}
+    for name, (previous, restored) in plan.items():
+        if process_after[name] == previous:
+            process_after[name] = restored
+    if switcher._is_windows():
+        # Compare-and-set ownership: leave external overrides alone. Persistent
+        # helpers also modify this process, so restore its independent scope last.
+        owned = {name: restored for name, (previous, restored) in plan.items()
+                 if persistent_env._local_user_env_value_strict(name) == previous}
+        deletes = [name for name, value in owned.items() if value is None]
+        updates = {name: value for name, value in owned.items() if value is not None}
+        if deletes:
+            persistent_env.delete_local_user_env(deletes)
+        if updates:
+            persistent_env.set_local_user_env(updates)
+    for name, value in process_after.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def restore_backup(entry: BackupEntry) -> list[str]:
+    from core.switcher import _SWITCH_LOCK
+
+    # Same ordering as API/account switches; backup creation itself intentionally
+    # does not acquire this lock (ZIP import may already hold the profile lock).
+    with _SWITCH_LOCK:
+        return _restore_backup(entry)
+
+
+def _restore_backup(entry: BackupEntry) -> list[str]:
     """Restore the exact managed-file state captured by a backup."""
     backup_dir = _resolve_managed_backup_dir(entry.directory)
     snapshot_managed_files, snapshot_existing_files = _snapshot_file_state(backup_dir)
@@ -308,36 +374,44 @@ def restore_backup(entry: BackupEntry) -> list[str]:
         raise ValueError(f"备份文件缺失或损坏: {', '.join(missing_files)}")
 
     target_state = _capture_target_state()
+    env_plan = _codex_env_restore_plan(
+        target_state, backup_dir, snapshot_managed_files, declared_files,
+    )
 
     # Create a safety backup first
     create_backup("回滚前自动备份")
 
+    from core.switcher import _local_switch_transaction, _restore_switch_caches
+
+    # File bytes and the narrow, owned credential scopes share one rollback.
+    # Existing terminals are external processes and still need reopening.
+    with _local_switch_transaction(BACKUP_FILES.values(), env_names=env_plan):
+        restored = _restore_backup_files(backup_dir, snapshot_managed_files, snapshot_existing_files)
+        _restore_codex_credential_env(env_plan)
+        _restore_switch_caches()
+    return restored
+
+
+def _restore_backup_files(backup_dir, snapshot_managed_files, snapshot_existing_files):
     restored = []
-    try:
-        for name, dst in BACKUP_FILES.items():
-            src = backup_dir / name
-            should_restore = (
-                name in snapshot_existing_files
-                if snapshot_existing_files is not None
-                else src.is_file()
-            )
-            if should_restore:
-                atomic_write_bytes(dst, src.read_bytes())
-                restored.append(name)
-                logger.info(f"Restored {src} -> {dst}")
-            elif snapshot_managed_files is not None and name in snapshot_managed_files and dst.exists():
-                # Absence is part of a v2 snapshot. Files introduced by newer
-                # app versions are preserved because they are not in the old
-                # snapshot's explicit managed set.
-                dst.unlink()
-                restored.append(name)
-                logger.info(f"Removed {dst}; it was absent from the backup")
-    except Exception as restore_error:
-        rollback_errors = _restore_target_state(target_state)
-        if rollback_errors:
-            details = "；".join(rollback_errors)
-            raise RuntimeError(f"备份回滚失败，且自动恢复当前配置不完整: {details}") from restore_error
-        raise
+    for name, dst in BACKUP_FILES.items():
+        src = backup_dir / name
+        should_restore = (
+            name in snapshot_existing_files
+            if snapshot_existing_files is not None
+            else src.is_file()
+        )
+        if should_restore:
+            atomic_write_bytes(dst, src.read_bytes())
+            restored.append(name)
+            logger.info(f"Restored {src} -> {dst}")
+        elif snapshot_managed_files is not None and name in snapshot_managed_files and dst.exists():
+            # Absence is part of a v2 snapshot. Files introduced by newer
+            # app versions are preserved because they are not in the old
+            # snapshot's explicit managed set.
+            dst.unlink()
+            restored.append(name)
+            logger.info(f"Removed {dst}; it was absent from the backup")
 
     return restored
 

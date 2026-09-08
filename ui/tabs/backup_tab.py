@@ -385,7 +385,10 @@ class BackupTab(ctk.CTkScrollableFrame):
         def do_restore():
             try:
                 restored = backup_manager.restore_backup(entry)
-                show_toast(self.winfo_toplevel(), f"已回滚 {len(restored)} 个文件")
+                message = f"已回滚 {len(restored)} 个文件"
+                if "codex_env" in restored:
+                    message += "；请重启 Codex 和旧终端以加载还原配置"
+                show_toast(self.winfo_toplevel(), message)
                 top = self.winfo_toplevel()
                 if hasattr(top, "refresh_all"):
                     top.refresh_all()
@@ -395,7 +398,9 @@ class BackupTab(ctk.CTkScrollableFrame):
                 show_toast(self.winfo_toplevel(), f"回滚失败: {e}", is_error=True)
 
         ConfirmDialog(self.winfo_toplevel(), title="确认回滚",
-                      message=f"确定要回滚到 {entry.timestamp} 吗？\n当前配置会被先自动备份。",
+                      message=(f"确定要回滚到 {entry.timestamp} 吗？\n当前配置会被先自动备份。\n"
+                               "新备份会同时还原 Codex .env，并同步与当前文件一致的 API 密钥环境变量。\n"
+                               "不会改动系统代理；已打开的 Codex 和终端需重启后生效。"),
                       on_confirm=do_restore)
 
     def _restore_latest(self):

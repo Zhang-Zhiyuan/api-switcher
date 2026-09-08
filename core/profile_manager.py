@@ -2843,6 +2843,13 @@ def _delete_profile_with_secrets(
 
 
 def save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> None:
+    from core.proxy_routing import ssh_profile_route_transaction
+
+    with ssh_profile_route_transaction(previous_name, profile.name):
+        _save_ssh_profile(profile, previous_name)
+
+
+def _save_ssh_profile(profile: SSHProfile, previous_name: str | None = None) -> None:
     with _STORE_CACHE_LOCK:
         store = _load_store()
         profiles = store.get("ssh_profiles", [])
@@ -2891,25 +2898,31 @@ def save_ssh_profile_with_secrets(
     previous_name: str | None = None,
 ) -> None:
     """Save SSH metadata and edited secrets as one in-process transaction."""
-    _save_profile_with_secret_updates(
-        profile,
-        list_key="ssh_profiles",
-        secret_updates=secret_updates,
-        operation="SSH Profile",
-        previous_name=previous_name,
-        save_callback=lambda: save_ssh_profile(profile, previous_name=previous_name),
-    )
+    from core.proxy_routing import ssh_profile_route_transaction
+
+    with ssh_profile_route_transaction(previous_name, profile.name):
+        _save_profile_with_secret_updates(
+            profile,
+            list_key="ssh_profiles",
+            secret_updates=secret_updates,
+            operation="SSH Profile",
+            previous_name=previous_name,
+            save_callback=lambda: _save_ssh_profile(profile, previous_name=previous_name),
+        )
 
 
 def delete_ssh_profile(name: str) -> None:
-    deleted = _delete_profile_with_secrets(
-        name,
-        list_key="ssh_profiles",
-        active_key="active_ssh_profile",
-        conventional_refs={
-            f"ssh:{name}:password",
-            f"ssh:{name}:key_passphrase",
-        },
-    )
-    if deleted:
-        _disconnect_ssh_profiles({name})
+    from core.proxy_routing import ssh_profile_route_transaction
+
+    with ssh_profile_route_transaction(name, None):
+        deleted = _delete_profile_with_secrets(
+            name,
+            list_key="ssh_profiles",
+            active_key="active_ssh_profile",
+            conventional_refs={
+                f"ssh:{name}:password",
+                f"ssh:{name}:key_passphrase",
+            },
+        )
+        if deleted:
+            _disconnect_ssh_profiles({name})

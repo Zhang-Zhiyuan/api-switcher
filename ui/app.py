@@ -1967,7 +1967,10 @@ class App(ctk.CTk):
             try:
                 restored = backup_manager.restore_backup(entry)
                 self.refresh_all()
-                show_toast(self, f"已回滚 {len(restored)} 个配置文件")
+                message = f"已回滚 {len(restored)} 个配置文件"
+                if "codex_env" in restored:
+                    message += "；请重启 Codex 和旧终端以加载还原配置"
+                show_toast(self, message)
                 self._set_app_status(f"已回滚到备份: {entry.timestamp}")
             except Exception as e:
                 logger.error(f"Failed to restore latest backup: {e}", exc_info=True)
@@ -1980,7 +1983,9 @@ class App(ctk.CTk):
                 f"确定要回滚到最近备份吗？\n\n"
                 f"时间: {entry.timestamp}\n"
                 f"说明: {entry.description or '-'}\n\n"
-                "当前配置会先自动备份，然后再执行回滚。"
+                "当前配置会先自动备份，然后再执行回滚。\n"
+                "新备份会同时还原 Codex .env，并同步与当前文件一致的 API 密钥环境变量。\n"
+                "不会改动系统代理；已打开的 Codex 和终端需重启后生效。"
             ),
             on_confirm=do_restore,
         )
