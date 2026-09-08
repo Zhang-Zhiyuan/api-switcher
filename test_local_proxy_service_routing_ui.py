@@ -1,65 +1,37 @@
 import inspect
 
-from ui.tabs.local_proxy_tab import (
-    SERVICE_ROUTE_DEFAULT_LABEL,
-    SERVICE_ROUTE_MISSING_LABEL,
-    LocalProxyTab,
-)
+from ui.tabs.local_proxy_tab import LocalProxyTab
 
 
-class _ComboStub:
+class _OverviewStub:
     def __init__(self):
-        self.values = []
-        self.value = ""
+        self.calls = []
 
-    def configure(self, **kwargs):
-        if "values" in kwargs:
-            self.values = list(kwargs["values"])
-
-    def set(self, value):
-        self.value = value
+    def set_routes(self, preferences, catalog):
+        self.calls.append((preferences, catalog))
 
 
-def test_service_route_combos_restore_profile_bindings_without_activating_profile():
+def test_route_overview_refreshes_names_without_losing_nodes_or_activating_profile():
     tab = object.__new__(LocalProxyTab)
-    tab._subscription_profiles_snapshot = []
-    tab._service_route_combos = {
-        "openai": _ComboStub(),
-        "claude": _ComboStub(),
-        "youtube": _ComboStub(),
-    }
-    tab._service_route_bindings = {
-        "openai": "profile-a",
-        "claude": "profile-a",
-        "youtube": "profile-b",
-    }
-    tab._service_route_combo_loading = False
-
-    tab._refresh_service_route_profile_options(
-        [
-            {"id": "profile-a", "name": "香港家宽 A", "saved_path": "a.yaml"},
-            {"id": "profile-b", "name": "机房线路 B", "saved_path": "b.yaml"},
-        ]
-    )
-
-    assert tab._service_route_combos["openai"].value == "香港家宽 A"
-    assert tab._service_route_combos["claude"].value == "香港家宽 A"
-    assert tab._service_route_combos["youtube"].value == "机房线路 B"
-    assert tab._service_route_profile_options[SERVICE_ROUTE_DEFAULT_LABEL] == ""
+    tab._route_overview = _OverviewStub()
+    tab._routing_preferences_snapshot = {"service_profile_bindings": {"openai": "a"}}
+    nodes = [{"key": "node-a", "label": "家宽 01"}]
+    tab._service_route_catalog = [{"id": "a", "name": "旧名字", "nodes": nodes}]
+    tab._refresh_service_route_profile_options([{"id": "a", "name": "家宽订阅 A"}])
+    prefs, catalog = tab._route_overview.calls[-1]
+    assert prefs == {"service_profile_bindings": {"openai": "a"}}
+    assert catalog == [{"id": "a", "name": "家宽订阅 A", "nodes": nodes}]
 
 
-def test_service_route_combo_surfaces_deleted_binding_instead_of_silent_fallback():
+def test_deleted_subscription_is_removed_from_catalog_without_dropping_binding():
     tab = object.__new__(LocalProxyTab)
-    combo = _ComboStub()
-    tab._subscription_profiles_snapshot = []
-    tab._service_route_combos = {"openai": combo}
-    tab._service_route_bindings = {"openai": "deleted-profile"}
-    tab._service_route_combo_loading = False
-
+    tab._route_overview = _OverviewStub()
+    tab._routing_preferences_snapshot = {"service_profile_bindings": {"openai": "deleted-profile"}}
+    tab._service_route_catalog = [{"id": "deleted-profile", "name": "旧名字", "nodes": []}]
     tab._refresh_service_route_profile_options([])
-
-    assert combo.value == SERVICE_ROUTE_MISSING_LABEL
-    assert SERVICE_ROUTE_MISSING_LABEL in combo.values
+    prefs, catalog = tab._route_overview.calls[-1]
+    assert catalog == []
+    assert prefs["service_profile_bindings"]["openai"] == "deleted-profile"
 
 
 def test_subscription_refresh_keeps_bound_profiles_out_of_main_node_promotion():

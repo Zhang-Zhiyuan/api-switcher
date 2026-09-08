@@ -169,6 +169,97 @@ def test_custom_default_label_and_reset_preserve_inherited_subscription(editor):
     assert dialog._rows[service]["profile"].get() == DEFAULT_CUSTOM_PROFILE
 
 
+def test_filters_match_subscription_node_and_category_and_can_be_cleared(editor):
+    _root, dialog, saved = editor
+    dialog._search.set("家宽订阅 A")
+    dialog._filter_rows()
+    assert dialog._rows["claude"]["tile"].winfo_manager() == "pack"
+    assert dialog._rows["youtube"]["tile"].winfo_manager() == ""
+    dialog._search.set("香港 · 流媒体")
+    dialog._filter_rows()
+    assert dialog._rows["youtube"]["tile"].winfo_manager() == "pack"
+    dialog._set_category("AI 服务")
+    assert dialog._empty.winfo_manager() == "pack"
+    dialog._clear_filters()
+    assert all(row["tile"].winfo_manager() == "pack" for row in dialog._rows.values())
+    assert dialog._empty.winfo_manager() == ""
+    assert not saved
+
+
+def test_dirty_and_disabled_badges_update_and_reset_without_applying(editor):
+    _root, dialog, saved = editor
+    assert dialog._reset_button.cget("state") == "disabled"
+    dialog._toggle("youtube", False)
+    assert "未启用" in dialog._rows["youtube"]["state_label"].cget("text")
+    assert "未保存" in dialog._rows["youtube"]["state_label"].cget("text")
+    assert dialog._rows["youtube"]["description"]["enabled"] is False
+    assert dialog._reset_button.cget("state") == "normal"
+    dialog._reset()
+    assert "未保存" not in dialog._rows["youtube"]["state_label"].cget("text")
+    assert dialog._rows["youtube"]["enabled"].get()
+    assert dialog._reset_button.cget("state") == "disabled"
+    assert not saved
+
+
+def test_reloading_catalog_preserves_drafts_and_surfaces_missing_fixed_node(editor):
+    root, dialog, saved = editor
+    dialog._select_node("claude", "日本 · 家宽 01")
+    draft = copy.deepcopy(dialog._drafts)
+    catalog = _catalog()
+    catalog[0]["nodes"] = [{"key": "two", "label": "美国 · 家宽 02"}]
+    dialog._catalog_loader = lambda: catalog
+    dialog._reload_catalog()
+    assert dialog._rows["claude"]["profile"].cget("state") == "disabled"
+    _wait(root, lambda: not dialog._busy)
+    assert dialog._drafts == draft
+    assert dialog._rows["claude"]["node"].get() == MISSING_NODE
+    dialog._set_category("待修复")
+    assert dialog._rows["claude"]["tile"].winfo_manager() == "pack"
+    assert dialog._rows["youtube"]["tile"].winfo_manager() == ""
+    assert not saved
+
+
+def test_catalog_reload_failure_keeps_editor_usable_and_drafts_intact(editor):
+    root, dialog, saved = editor
+    dialog._select_profile("claude", "机房订阅 B")
+    draft = copy.deepcopy(dialog._drafts)
+    def fail():
+        raise OSError("缓存读取异常")
+    dialog._catalog_loader = fail
+    dialog._reload_catalog()
+    _wait(root, lambda: not dialog._busy)
+    assert dialog._drafts == draft
+    assert "已保留草稿" in dialog._status.cget("text")
+    assert dialog._save_button.cget("state") == "normal"
+    assert not saved
+
+
+def test_duplicate_custom_target_is_located_even_when_other_category_selected(editor):
+    _root, dialog, _saved = editor
+    dialog._custom_entry.insert(0, "api.example.com")
+    dialog._add_custom()
+    dialog._set_category("AI 服务")
+    dialog._custom_entry.insert(0, "https://api.example.com/v1")
+    dialog._add_custom()
+    assert len(dialog._drafts[dialog._scope]["custom_targets"]) == 1
+    assert dialog._category == "自定义"
+    assert "已为你定位" in dialog._status.cget("text")
+
+
+def test_footer_reserves_space_and_actions_wrap_using_widget_scaling(editor):
+    from types import SimpleNamespace
+    _root, dialog, _saved = editor
+    scale = dialog._actions._get_widget_scaling()
+    assert dialog.pack_slaves()[0] is dialog._actions.master
+    assert dialog._actions.master.pack_info()["side"] == "bottom"
+    dialog._layout_actions(SimpleNamespace(width=560 * scale))
+    assert dialog._save_button.grid_info()["row"] == 1
+    assert dialog._save_button.grid_info()["column"] == 1
+    dialog._layout_actions(SimpleNamespace(width=900 * scale))
+    assert dialog._save_button.grid_info()["row"] == 0
+    assert dialog._save_button.grid_info()["column"] == 3
+
+
 def capture_preview(directory):
     """Isolated visual verification; no real preferences or SSH connections."""
     from PIL import ImageGrab

@@ -920,14 +920,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                      text_color=COLORS["text"]).pack(anchor="w", padx=14, pady=(10, 2))
         route_hint = ctk.CTkLabel(
             routes_card, text="为 Claude、GPT、YouTube 和自定义域名分别选择订阅与节点。"
-                              "规则应用到已选服务器；部署和热更新会沿用该服务器的分流设置。",
+                              "在编辑窗口按服务器查看和筛选，修改后统一保存并应用；部署和热更新沿用各自的设置。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         route_hint.pack(fill="x", padx=14)
         bind_wraplength(routes_card, route_hint, padding=32)
         self._proxy_service_routes_button = ctk.CTkButton(
-            routes_card, text="编辑已选服务器的目标分流…", command=self._open_proxy_service_routes,
-            **button_style("secondary", compact=True),
+            routes_card, text="管理已选服务器分流", command=self._open_proxy_service_routes,
+            **button_style("primary", compact=True),
         )
         self._proxy_service_routes_button.pack(anchor="w", padx=14, pady=(8, 12))
 
