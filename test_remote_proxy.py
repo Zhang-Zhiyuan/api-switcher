@@ -8785,6 +8785,10 @@ def test_reload_local_proxy_skips_unmanaged_listener(monkeypatch, tmp_path):
 
 def test_read_url_with_retries_retries_transient_failure(monkeypatch):
     calls = []
+    # Windows urllib also reads the real user's registry proxy even when the
+    # test process has no HTTP_PROXY. Keep this retry-only test on its mocked
+    # urlopen route instead of launching an unmocked direct-network fallback.
+    monkeypatch.setattr(local_proxy, "_environment_has_http_proxy", lambda: False)
 
     class Response:
         def __enter__(self):

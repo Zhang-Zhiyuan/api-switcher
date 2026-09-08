@@ -1,4 +1,5 @@
 import ctypes
+import functools
 import math
 import re
 import sys
@@ -249,6 +250,62 @@ def _patch_nested_scrollable_frame_mousewheel() -> None:
 
 
 _patch_nested_scrollable_frame_mousewheel()
+
+
+def _patch_scrollbar_idle_redraw() -> None:
+    """Let Tk's main loop paint scrollbars instead of nesting idle processing.
+
+    CustomTkinter 5.2.2 flushes all idle callbacks inside every scrollbar draw.
+    A scrollregion/layout change can therefore recursively lay out entire tabs.
+    Suppress only that canvas's flush during _draw; keep geometry, colours and
+    scroll commands unchanged, and restore explicit update_idletasks afterwards.
+    """
+    scrollbar_cls = ctk.CTkScrollbar
+    if getattr(scrollbar_cls, "_api_switcher_idle_redraw_guard", False):
+        return
+    original_draw = scrollbar_cls._draw
+    missing = object()
+
+    @functools.wraps(original_draw)
+    def draw_without_idle_reentry(self, *args, **kwargs):
+        canvas = self._canvas
+        previous = canvas.__dict__.get("update_idletasks", missing)
+        canvas.update_idletasks = lambda: None
+        try:
+            return original_draw(self, *args, **kwargs)
+        finally:
+            if previous is missing:
+                del canvas.update_idletasks
+            else:
+                canvas.update_idletasks = previous
+
+    scrollbar_cls._draw = draw_without_idle_reentry
+    scrollbar_cls._api_switcher_idle_redraw_guard = True
+
+
+_patch_scrollbar_idle_redraw()
+
+
+def _patch_appearance_idle_redraw() -> None:
+    from customtkinter.windows.widgets.appearance_mode import CTkAppearanceModeBaseClass
+    from customtkinter.windows.widgets.core_widget_classes import CTkBaseClass
+
+    if getattr(CTkBaseClass, "_api_switcher_appearance_redraw_guard", False):
+        return
+
+    @functools.wraps(CTkBaseClass._set_appearance_mode)
+    def set_appearance_without_idle_reentry(self, mode_string):
+        # The pinned 5.2.2 implementation flushes the *entire* idle queue for
+        # every widget after these two operations. Let the main loop repaint
+        # once all widgets have received the new appearance instead.
+        CTkAppearanceModeBaseClass._set_appearance_mode(self, mode_string)
+        self._draw()
+
+    CTkBaseClass._set_appearance_mode = set_appearance_without_idle_reentry
+    CTkBaseClass._api_switcher_appearance_redraw_guard = True
+
+
+_patch_appearance_idle_redraw()
 
 
 def font(size: int, weight: Optional[str] = None, family: Optional[str] = None) -> ctk.CTkFont:

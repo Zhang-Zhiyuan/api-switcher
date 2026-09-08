@@ -1,4 +1,5 @@
 import threading
+import time
 from pathlib import Path
 
 import customtkinter as ctk
@@ -44,6 +45,7 @@ class BackupTab(ctk.CTkScrollableFrame):
 
     RENDER_BATCH_SIZE = 4
     RENDER_BATCH_DELAY_MS = 8
+    UI_BATCH_BUDGET_SECONDS = 0.008
 
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -51,6 +53,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         self._list_frame = None
         self._refresh_generation = 0
         self._render_after_id = None
+        self._rendered_backups_signature = None
         self._deferred_render_pending = False
         self._responsive_after_id = None
         self._responsive_state = None
@@ -68,6 +71,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         self._build_ui()
 
     def destroy(self):
+        self._refresh_generation += 1
         self._cancel_render()
         if self._responsive_after_id is not None:
             try:
@@ -124,15 +128,15 @@ class BackupTab(ctk.CTkScrollableFrame):
         self._refresh_generation += 1
         generation = self._refresh_generation
         self._cancel_render()
-        self._backup_action_buttons = []
-        for w in self._list_frame.winfo_children():
-            w.destroy()
-        ctk.CTkLabel(
-            self._list_frame,
-            text="正在读取备份记录...",
-            text_color=COLORS["muted"],
-            font=font(13),
-        ).pack(fill="x", pady=(22, 6))
+        # Keep the last complete view while reading. Clearing it here blocks
+        # the UI before the worker even starts, and destroys unchanged cards.
+        if not self._list_frame.winfo_children():
+            ctk.CTkLabel(
+                self._list_frame,
+                text="正在读取备份记录...",
+                text_color=COLORS["muted"],
+                font=font(13),
+            ).pack(fill="x", pady=(22, 6))
 
         def worker():
             try:
@@ -173,12 +177,53 @@ class BackupTab(ctk.CTkScrollableFrame):
         self.refresh()
 
     def _render_backups(self, payload: dict, generation: int):
-        if not self._list_frame:
+        if generation != self._refresh_generation or not self._list_frame:
             return
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            return
+        backups = list(payload.get("backups") or [])
+        signature = self._backups_signature(backups) if payload.get("ok") else None
+        if signature is not None and signature == self._rendered_backups_signature:
+            return
+        # A signature is only valid after every card has finished rendering.
+        self._rendered_backups_signature = None
         self._backup_action_buttons = []
-        for w in self._list_frame.winfo_children():
-            w.destroy()
+        roots = tuple(self._list_frame.winfo_children())
+        self._clear_backup_batch(roots, payload, generation, 0)
 
+    @staticmethod
+    def _backups_signature(backups) -> tuple:
+        return tuple(
+            (str(entry.directory), entry.timestamp, entry.description, tuple(entry.files))
+            for entry in backups
+        )
+
+    def _clear_backup_batch(self, roots, payload, generation: int, start: int):
+        if generation != self._refresh_generation or not self._list_frame:
+            return
+        self._render_after_id = None
+        if not is_active_tab(self):
+            self._deferred_render_pending = True
+            return
+        deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
+        end = start
+        while end < len(roots) and end - start < self.RENDER_BATCH_SIZE:
+            roots[end].destroy()
+            end += 1
+            if time.perf_counter() >= deadline:
+                break
+        if end < len(roots):
+            self._render_after_id = self.after(
+                self.RENDER_BATCH_DELAY_MS,
+                lambda: self._clear_backup_batch(roots, payload, generation, end),
+            )
+            return
+        self._begin_backup_render(payload, generation)
+
+    def _begin_backup_render(self, payload: dict, generation: int):
+        if generation != self._refresh_generation or not self._list_frame:
+            return
         if not payload.get("ok"):
             EmptyState(
                 self._list_frame,
@@ -198,6 +243,7 @@ class BackupTab(ctk.CTkScrollableFrame):
                 "立即备份",
                 self._create_backup,
             ).pack(fill="x", pady=(12, 4))
+            self._rendered_backups_signature = ()
             return
 
         self._render_backup_batch(backups, generation, 0)
@@ -209,11 +255,17 @@ class BackupTab(ctk.CTkScrollableFrame):
             self._deferred_render_pending = True
             self._render_after_id = None
             return
-        end = min(start + self.RENDER_BATCH_SIZE, len(backups))
-        for entry in backups[start:end]:
-            self._render_backup_card(entry)
+        self._render_after_id = None
+        deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
+        end = start
+        while end < len(backups) and end - start < self.RENDER_BATCH_SIZE:
+            self._render_backup_card(backups[end])
+            end += 1
+            if time.perf_counter() >= deadline:
+                break
         if end >= len(backups):
             self._render_after_id = None
+            self._rendered_backups_signature = self._backups_signature(backups)
             return
         self._render_after_id = self.after(
             self.RENDER_BATCH_DELAY_MS,

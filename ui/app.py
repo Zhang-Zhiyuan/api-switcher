@@ -401,7 +401,8 @@ class App(ctk.CTk):
     def _logical_main_width(self) -> int:
         width = self.winfo_width()
         try:
-            scaling = float(self._get_window_scaling())
+            # Breakpoints describe widget sizes, not window geometry sizes.
+            scaling = float(self._shell._get_widget_scaling())
         except (AttributeError, TypeError, ValueError):
             scaling = 1.0
         if scaling > 0:
@@ -420,6 +421,7 @@ class App(ctk.CTk):
 
     def _apply_main_layout(self) -> None:
         self._main_layout_after_id = None
+        self._hide_native_tab_header()
         mode = main_layout_mode(self._logical_main_width())
         if mode == self._main_layout_mode:
             return
@@ -473,7 +475,10 @@ class App(ctk.CTk):
     def _hide_native_tab_header(self) -> None:
         segmented_button = getattr(self._tabview, "_segmented_button", None)
         if segmented_button is not None:
-            segmented_button.grid_remove()
+            # CTk's scaling callback replays its last grid() call. grid_remove
+            # is inherited from Tk and leaves that record intact; grid_forget
+            # clears it, so changing DPI cannot resurrect the stock tab bar.
+            segmented_button.grid_forget()
         # Collapse the three rows reserved by CTkTabview for its stock header.
         for row in range(3):
             self._tabview.grid_rowconfigure(row, minsize=0, weight=0)

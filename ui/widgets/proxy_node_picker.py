@@ -1,3 +1,5 @@
+import time
+
 import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
@@ -22,7 +24,8 @@ class ProxyNodePicker(ctk.CTkFrame):
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     RENDER_BATCH_SIZE = 3
-    RENDER_BATCH_DELAY_MS = 20
+    RENDER_BATCH_DELAY_MS = 8
+    UI_BATCH_BUDGET_SECONDS = 0.008
     TEARDOWN_BATCH_SIZE = 16
     TEARDOWN_BATCH_DELAY_MS = 8
     SCROLL_IDLE_RENDER_MS = 520
@@ -52,6 +55,11 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_generation = 0
         self._render_plan_pending = False
         self._render_deferred = False
+        self._rendered_signature = None
+        self._pending_render_signature = None
+        self._row_cache = {}
+        self._header_cache = {}
+        self._empty_label = None
         self._last_match_count = 0
         self._last_visible_count = 0
         self._metadata_version = 0
@@ -266,6 +274,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             clear_button.grid(row=0, column=2, sticky="e", pady=0)
 
     def set_nodes(self, nodes, latency_results=None, selected_key: str = "", quality_results=None):
+        previous_key = self._selected_key
         self._nodes = list(nodes or [])
         self._latency_results = latency_results if isinstance(latency_results, dict) else {}
         self._quality_results = quality_results if isinstance(quality_results, dict) else {}
@@ -293,6 +302,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not self._nodes:
             self._selected_key = ""
         self._checked_keys.intersection_update(available_keys)
+        if previous_key != self._selected_key:
+            self._update_visible_selection(previous_key, self._selected_key)
         self._render_nodes()
 
     def destroy(self):
@@ -471,6 +482,20 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._update_scope_label()
 
         empty_message = None if visible else self._empty_message(total, quality_count)
+        signature = self._view_signature(visible, empty_message)
+        if signature is not None and signature == getattr(self, "_rendered_signature", None):
+            # Only completed generations can be reused. Keep scroll position
+            # and row controls when repeated refreshes produce the same view.
+            self._render_plan_pending = False
+            self._update_summary_label(match_count=len(matches), visible_count=len(visible))
+            self._emit_scope_change()
+            return
+        previous_signature = getattr(self, "_rendered_signature", None)
+        self._rendered_signature = None
+        self._pending_render_signature = signature
+        if self._reuse_rendered_rows(previous_signature, signature, visible, generation):
+            self._emit_scope_change()
+            return
         render_plan = self._build_render_plan(visible) if visible else []
         self._emit_scope_change()
         if old_roots:
@@ -510,6 +535,49 @@ class ProxyNodePicker(ctk.CTkFrame):
                     pass
             self._begin_render_plan(generation, render_plan, empty_message)
 
+    def _reuse_rendered_rows(self, previous, current, visible, generation: int) -> bool:
+        """Reuse existing controls across filters and latency/quality updates.
+
+        The cache is bounded by the current subscription, never by search
+        history. A changed node scope, failed or interrupted generation takes
+        the normal teardown path so no stale commands or half-built rows live
+        on as a supposedly complete view.
+        """
+        if previous is None or current is None:
+            return False
+        old_scope = tuple(item[:2] for item in previous[1])
+        new_scope = tuple(item[:2] for item in current[1])
+        if old_scope != new_scope or len({item[0] for item in new_scope}) != len(new_scope):
+            return False
+        rows = getattr(self, "_row_cache", {})
+        headers = getattr(self, "_header_cache", {})
+        if any(self._node_key(item) not in rows or self._node_region(item) not in headers for item in visible):
+            return False
+        if not rows:
+            return False
+
+        old_visible = tuple(item[0] for item in previous[2])
+        new_visible = tuple(item[0] for item in current[2])
+        layout_changed = old_visible != new_visible
+        plan = []
+        if layout_changed:
+            for root in self._list_frame.winfo_children():
+                root.pack_forget()
+            self._visible_group_headers = []
+            self._visible_checkboxes = {}
+            self._visible_node_rows = {}
+        for region, items in self._group_visible_nodes(visible):
+            plan.append(("reuse_header", region, layout_changed))
+            for item in items:
+                key = self._node_key(item)
+                presentation = self._row_presentation(item)
+                if layout_changed or rows[key]["presentation"] != presentation:
+                    plan.append(("reuse_row", presentation, layout_changed))
+        if not visible:
+            plan.append(("reuse_empty", current[0], None))
+        self._render_plan_batch(generation, plan, 0)
+        return True
+
     def _teardown_roots_batch(
         self,
         generation: int,
@@ -530,14 +598,18 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
             return
 
-        end_index = min(len(old_roots), start_index + self.TEARDOWN_BATCH_SIZE)
-        for root in old_roots[start_index:end_index]:
+        deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
+        end_index = start_index
+        while end_index < len(old_roots) and end_index - start_index < self.TEARDOWN_BATCH_SIZE:
             if generation != self._render_generation:
                 return
             try:
-                root.destroy()
+                old_roots[end_index].destroy()
             except Exception:
                 pass
+            end_index += 1
+            if time.perf_counter() >= deadline:
+                break
         if generation != self._render_generation:
             return
         if end_index < len(old_roots):
@@ -586,6 +658,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._visible_group_headers = []
         self._visible_checkboxes = {}
         self._visible_node_rows = {}
+        self._row_cache = {}
+        self._header_cache = {}
+        self._empty_label = None
         if empty_message is not None:
             try:
                 ctk.CTkLabel(
@@ -595,11 +670,13 @@ class ProxyNodePicker(ctk.CTkFrame):
                     font=font(12),
                 ).pack(fill="x", padx=12, pady=16)
             except Exception:
-                pass
+                self._pending_render_signature = None
+            self._rendered_signature = getattr(self, "_pending_render_signature", None)
             self._render_plan_pending = False
             self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
             return
         if not render_plan:
+            self._rendered_signature = getattr(self, "_pending_render_signature", None)
             self._render_plan_pending = False
             self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
             return
@@ -627,16 +704,21 @@ class ProxyNodePicker(ctk.CTkFrame):
                 self._render_batch_after_id = None
             else:
                 return
-        batch_size = self.RENDER_BATCH_SIZE
-        end_index = min(len(render_plan), start_index + batch_size)
-        for kind, payload, extra in render_plan[start_index:end_index]:
+        deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
+        end_index = start_index
+        while end_index < len(render_plan) and end_index - start_index < self.RENDER_BATCH_SIZE:
             if generation != self._render_generation:
                 return
+            kind, payload, extra = render_plan[end_index]
             try:
                 self._render_plan_item(kind, payload, extra)
             except Exception:
-                continue
+                self._pending_render_signature = None
+            end_index += 1
+            if time.perf_counter() >= deadline:
+                break
         if end_index >= len(render_plan):
+            self._rendered_signature = getattr(self, "_pending_render_signature", None)
             self._render_batch_after_id = None
             self._render_plan_pending = False
             self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
@@ -655,6 +737,18 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._render_group_header(payload, extra)
         elif kind == "row":
             self._render_row(payload)
+        elif kind == "reuse_row":
+            self._reuse_row(payload, relayout=extra)
+        elif kind == "reuse_header":
+            self._reuse_header(payload, relayout=extra)
+        elif kind == "reuse_empty":
+            if self._empty_label is None:
+                self._empty_label = ctk.CTkLabel(
+                    self._list_frame, text=payload, text_color=COLORS["muted"], font=font(12),
+                )
+            else:
+                self._empty_label.configure(text=payload)
+            self._empty_label.pack(fill="x", padx=12, pady=16)
 
     def _finish_render_plan_synchronously(self, generation: int, render_plan: list, start_index: int) -> None:
         """Finish a generation if Tk can no longer schedule its next small batch."""
@@ -667,11 +761,12 @@ class ProxyNodePicker(ctk.CTkFrame):
             try:
                 self._render_plan_item(kind, payload, extra)
             except Exception:
-                continue
+                self._pending_render_signature = None
         if generation != self._render_generation:
             return
         self._render_batch_after_id = None
         self._render_plan_pending = False
+        self._rendered_signature = getattr(self, "_pending_render_signature", None)
         self._update_summary_label(match_count=self._last_match_count, visible_count=self._last_visible_count)
 
     def _group_visible_nodes(self, items):
@@ -707,6 +802,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         )
         label.grid(row=0, column=0, sticky="ew", padx=(9, 8), pady=4)
         header_entry = {
+            "frame": header,
             "label": label,
             "keys": tuple(keys),
             "region": region,
@@ -739,22 +835,56 @@ class ProxyNodePicker(ctk.CTkFrame):
         )
         toggle_button.grid(row=0, column=action_column, sticky="e", padx=(0, 6), pady=5)
         header_entry["toggle"] = toggle_button
+        self._header_cache[region] = header_entry
 
-    def _render_row(self, item):
+    def _row_presentation(self, item) -> tuple:
+        """Immutable display values: compare output, never mutable result maps."""
         meta = self._metadata_for(item)
-        node_key = str(meta.get("key") or "")
         node = item.node
-        selected = node_key == self._selected_key
-        latency = meta.get("latency")
-        latency_label = str(meta.get("latency_label") or "")
         latency_detail = str(meta.get("latency_detail") or "")
-        latency_color = self._latency_color(latency)
         quality = meta.get("quality")
         quality_label = str(meta.get("quality_label") or "")
         region = str(meta.get("region") or "其他")
         node_type = str(node.get("type") or "").upper()
         server = str(node.get("server") or "")
         port = str(node.get("port") or "")
+        meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
+        if remote_proxy.proxy_node_quality_measured(quality):
+            meta_parts.append(self._quality_summary_text(meta))
+        elif quality:
+            meta_parts.append(quality_label)
+        if latency_detail:
+            meta_parts.append(latency_detail)
+        return (
+            str(meta.get("key") or ""),
+            str(node.get("name") or item.display_name()),
+            " · ".join(part for part in meta_parts if part),
+            str(meta.get("latency_label") or ""),
+            self._latency_color(meta.get("latency")),
+            self._quality_badge_text(meta),
+            self._quality_color(quality),
+        )
+
+    def _view_signature(self, visible, empty_message) -> tuple | None:
+        # Group buttons act on ALL region members, not just matching rows.
+        # Include hidden members/counts so their callbacks never retain an old
+        # subscription scope. Selection and checkboxes are updated in place.
+        try:
+            groups = tuple(
+                (self._node_key(item), self._node_region(item),
+                 bool(self._metadata_for(item).get("latency_ok")),
+                 bool(self._metadata_for(item).get("quality_ai_ok")))
+                for item in self._nodes
+            )
+            return (empty_message, groups, tuple(self._row_presentation(item) for item in visible))
+        except Exception:
+            # Retain the renderer's existing per-row failure isolation. A bad
+            # display value must not prevent all the other rows from loading.
+            return None
+
+    def _render_row(self, item):
+        node_key, title, meta_text, latency_label, latency_color, quality_badge, quality_color = self._row_presentation(item)
+        selected = node_key == self._selected_key
 
         row = ctk.CTkFrame(
             self._list_frame,
@@ -791,7 +921,6 @@ class ProxyNodePicker(ctk.CTkFrame):
         select_button.grid(row=0, column=1, rowspan=2, sticky="w", padx=(3, 7), pady=6)
         self._visible_node_rows[node_key] = (row, select_button)
 
-        title = str(node.get("name") or item.display_name())
         title_label = ctk.CTkLabel(
             row,
             text=title,
@@ -803,16 +932,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         )
         title_label.grid(row=0, column=2, sticky="ew", pady=(6, 0))
 
-        meta_parts = [f"【{region}】", node_type, f"{server}:{port}" if port else server]
-        if remote_proxy.proxy_node_quality_measured(quality):
-            meta_parts.append(self._quality_summary_text(meta))
-        elif quality:
-            meta_parts.append(quality_label)
-        if latency_detail:
-            meta_parts.append(latency_detail)
         meta_label = ctk.CTkLabel(
             row,
-            text=" · ".join(part for part in meta_parts if part),
+            text=meta_text,
             text_color=COLORS["muted"],
             font=font(11),
             anchor="w",
@@ -821,23 +943,84 @@ class ProxyNodePicker(ctk.CTkFrame):
         )
         meta_label.grid(row=1, column=2, sticky="ew", pady=(0, 6))
 
-        ctk.CTkLabel(
+        latency_widget = ctk.CTkLabel(
             row,
             text=latency_label,
             text_color=latency_color,
             font=font(12, "bold"),
             width=58,
             anchor="e",
-        ).grid(row=0, column=3, rowspan=2, sticky="e", padx=(7, 8))
+        )
+        latency_widget.grid(row=0, column=3, rowspan=2, sticky="e", padx=(7, 8))
 
-        ctk.CTkLabel(
+        quality_widget = ctk.CTkLabel(
             row,
-            text=self._quality_badge_text(meta),
-            text_color=self._quality_color(quality),
+            text=quality_badge,
+            text_color=quality_color,
             font=font(11, "bold"),
             width=92,
             anchor="e",
-        ).grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 8))
+        )
+        quality_widget.grid(row=0, column=4, rowspan=2, sticky="e", padx=(0, 8))
+        self._row_cache[node_key] = {
+            "row": row, "button": select_button, "checkbox": checkbox, "variable": checked_var,
+            "labels": (title_label, meta_label, latency_widget, quality_widget),
+            "presentation": (node_key, title, meta_text, latency_label, latency_color, quality_badge, quality_color),
+            "selected": selected, "enabled": self._enabled,
+        }
+
+    def _reuse_row(self, presentation, *, relayout: bool):
+        key, title, detail, latency, latency_color, quality, quality_color = presentation
+        cached = self._row_cache[key]
+        previous = cached["presentation"]
+        title_label, detail_label, latency_label, quality_label = cached["labels"]
+        if previous[1] != title:
+            title_label.configure(text=title)
+        if previous[2] != detail:
+            detail_label.configure(text=detail)
+        if previous[3:5] != (latency, latency_color):
+            latency_label.configure(text=latency, text_color=latency_color)
+        if previous[5:7] != (quality, quality_color):
+            quality_label.configure(text=quality, text_color=quality_color)
+        selected = key == self._selected_key
+        if cached["selected"] != selected:
+            cached["row"].configure(fg_color=COLORS["surface_alt"] if selected else COLORS["field_bg"])
+            cached["button"].configure(
+                text="当前" if selected else "使用",
+                **button_style("primary" if selected else "secondary", compact=True),
+            )
+        if cached["enabled"] != self._enabled:
+            state = "normal" if self._enabled else "disabled"
+            cached["button"].configure(state=state)
+            cached["checkbox"].configure(state=state)
+        checked = key in self._checked_keys
+        if bool(cached["variable"].get()) != checked:
+            cached["variable"].set(checked)
+        cached.update(presentation=presentation, selected=selected, enabled=self._enabled)
+        if relayout:
+            cached["row"].pack(fill="x", padx=5, pady=(4, 0))
+            self._visible_node_rows[key] = (cached["row"], cached["button"])
+            self._visible_checkboxes[key] = (cached["checkbox"], cached["variable"])
+
+    def _reuse_header(self, region: str, *, relayout: bool):
+        header = self._header_cache[region]
+        metas = [self._metadata_for(item) for item in self.group_items(region)]
+        checked = sum(key in self._checked_keys for key in header["keys"])
+        header["ok"] = sum(bool(meta.get("latency_ok")) for meta in metas)
+        header["high"] = sum(bool(meta.get("quality_ai_ok")) for meta in metas)
+        header["label"].configure(text=self._group_header_text(
+            region, header["total"], header["ok"], header["high"], checked,
+        ))
+        state = "normal" if self._enabled else "disabled"
+        header["toggle"].configure(
+            text="取消全选" if header["keys"] and checked == len(header["keys"]) else "全选本组",
+            state=state,
+        )
+        if header.get("quality"):
+            header["quality"].configure(state=state)
+        if relayout:
+            header["frame"].pack(fill="x", padx=5, pady=(6, 0))
+            self._visible_group_headers.append(header)
 
     def _select(self, node_key: str):
         previous_key = self._selected_key
@@ -849,7 +1032,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
     def _update_visible_selection(self, previous_key: str, selected_key: str) -> None:
         for key in {str(previous_key or ""), str(selected_key or "")}:
-            entry = self._visible_node_rows.get(key)
+            entry = getattr(self, "_visible_node_rows", {}).get(key)
             if not entry:
                 continue
             row, button = entry
@@ -860,6 +1043,9 @@ class ProxyNodePicker(ctk.CTkFrame):
                     text="当前" if selected else "使用",
                     **button_style("primary" if selected else "secondary", compact=True),
                 )
+                cached = getattr(self, "_row_cache", {}).get(key)
+                if cached is not None:
+                    cached["selected"] = selected
             except Exception:
                 pass
 
@@ -1116,6 +1302,10 @@ class ProxyNodePicker(ctk.CTkFrame):
                 control.configure(state=state)
             except Exception:
                 pass
+        for key in getattr(self, "_visible_node_rows", {}):
+            cached = getattr(self, "_row_cache", {}).get(key)
+            if cached is not None:
+                cached["enabled"] = enabled
 
     def _metadata_for(self, item) -> dict:
         meta = self._node_meta.get(id(item))

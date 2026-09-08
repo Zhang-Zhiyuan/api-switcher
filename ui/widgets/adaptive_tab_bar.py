@@ -60,7 +60,7 @@ class AdaptiveTabBar(ctk.CTkFrame):
             **combo_style(),
         )
         self._selector.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
-        self._selector.grid_remove()
+        self._selector.grid_forget()
 
         for value in self._values:
             button = ctk.CTkButton(
@@ -184,12 +184,12 @@ class AdaptiveTabBar(ctk.CTkFrame):
 
         if mode == "dropdown":
             for button in self._buttons.values():
-                button.grid_remove()
+                button.grid_forget()
             self.grid_columnconfigure(0, weight=1)
-            self._selector.grid()
+            self._selector.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
             return
 
-        self._selector.grid_remove()
+        self._selector.grid_forget()
         for column in range(columns):
             self.grid_columnconfigure(column, weight=1, uniform="adaptive-tabs")
 
