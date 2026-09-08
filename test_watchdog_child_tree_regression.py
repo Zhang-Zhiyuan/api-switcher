@@ -51,6 +51,7 @@ def test_hard_watchdog_terminates_redirected_child_tree(tmp_path, powershell):
     """
 
     child_pid_path = tmp_path / "redirected-child.pid"
+    armed_path = tmp_path / "watchdog-armed"
     child_code = (
         "import os,time;"
         f"open({str(child_pid_path)!r},'w').write(str(os.getpid()));"
@@ -59,10 +60,20 @@ def test_hard_watchdog_terminates_redirected_child_tree(tmp_path, powershell):
     script = f"""function Write-Log {{ param([string]$Message, [string]$Level = 'INFO') }}
 {POWERSHELL_HARD_WATCHDOG_HELPER}
 {POWERSHELL_REDIRECTED_PROCESS_HELPER}
-$script:watchdog = Start-ApiSwitcherHookWatchdog -TimeoutMilliseconds 500
 $invocation = Start-ApiSwitcherRedirectedProcess `
     -FilePath {_powershell_literal(str(Path(sys.executable)))} `
     -Arguments @('-c', {_powershell_literal(child_code)})
+$readyDeadline = [Diagnostics.Stopwatch]::StartNew()
+while (-not [IO.File]::Exists({_powershell_literal(str(child_pid_path))})) {{
+    if ($readyDeadline.ElapsedMilliseconds -gt 4000) {{
+        Close-ApiSwitcherRedirectedProcess -Invocation $invocation
+        throw 'Child did not become ready'
+    }}
+    Start-Sleep -Milliseconds 10
+}}
+# Test killing an active child, not racing the interpreter's cold startup.
+$script:watchdog = Start-ApiSwitcherHookWatchdog -TimeoutMilliseconds 500
+[IO.File]::WriteAllText({_powershell_literal(str(armed_path))}, 'armed')
 $invocation.Process.WaitForExit(10000) | Out-Null
 Write-Output 'watchdog failed'
 """
@@ -73,10 +84,11 @@ Write-Output 'watchdog failed'
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=8,
+        timeout=15,
         check=False,
     )
     elapsed = time.monotonic() - started
+    armed_elapsed = time.time() - armed_path.stat().st_mtime if armed_path.exists() else float("inf")
 
     deadline = time.monotonic() + 3
     while not child_pid_path.exists() and time.monotonic() < deadline:
@@ -115,8 +127,8 @@ Write-Output 'watchdog failed'
             kernel32.CloseHandle(child_handle)
 
     assert hook.returncode != 0
-    assert elapsed < 5
+    assert elapsed < 15
+    assert 0 <= armed_elapsed < 3, "watchdog exceeded its armed deadline"
     assert child_exit == wait_object_0, (
         f"redirected child PID {child_pid} survived the hook watchdog"
     )
-

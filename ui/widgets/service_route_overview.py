@@ -41,7 +41,39 @@ def route_description(row, preferences, catalog):
         "profile": profile_text, "node": node_text, "hint": warning or strategy,
         "warning": bool(warning), "bound": bool(bindings.get(service)),
         "enabled": bool(row["enabled"]), "inherited": inherited,
+        "source_hint": ("继承“自定义目标默认线路”；其未指定订阅时，再跟随此设备的默认代理。" if inherited else
+                        "跟随此设备部署的默认代理；不是订阅页面当前浏览的节点，实际出口以运行态检查为准。") if not bindings.get(service) else "",
     }
+
+
+def route_changes(originals, drafts, catalog):
+    """Preview changed intent, including effects inherited from custom defaults."""
+    changes = []
+    for scope, draft in drafts.items():
+        original = originals[scope]
+        if original == draft:
+            continue
+        before = {row["id"]: row for row in proxy_routing.route_rows(original)}
+        after = {row["id"]: row for row in proxy_routing.route_rows(draft)}
+        for service in dict.fromkeys([*after, *before]):
+            old_row, new_row = before.get(service), after.get(service)
+            old = route_description(old_row, original, catalog) if old_row else None
+            new = route_description(new_row, draft, catalog) if new_row else None
+            def identity(preferences, row):
+                profiles, nodes = preferences["service_profile_bindings"], preferences["service_node_bindings"]
+                source = "custom" if service.startswith("custom:") and not profiles.get(service) else service
+                return (row, profiles.get(service), nodes.get(service), profiles.get(source), nodes.get(source))
+            if identity(original, old_row) == identity(draft, new_row) and old == new:
+                continue
+            def describe(row, description):
+                if row is None:
+                    return "未添加"
+                enabled = "启用" if row["enabled"] else "未启用（不新增专属规则）"
+                return f'{enabled} · {description["profile"]} → {description["node"]}'
+            changes.append({"scope": scope, "service": service, "label": (new_row or old_row)["label"],
+                            "before": describe(old_row, old), "after": describe(new_row, new),
+                            "removed": new_row is None})
+    return changes
 
 
 class ServiceRouteOverview(ctk.CTkFrame):
@@ -103,7 +135,6 @@ class ServiceRouteOverview(ctk.CTkFrame):
         signature = repr(descriptions)
         if signature == self._signature:
             return
-        self._signature = signature
         keys = {row["id"] for row, _ in descriptions}
         for key in self._rows.keys() - keys:
             self._rows.pop(key)["tile"].destroy()
@@ -128,6 +159,7 @@ class ServiceRouteOverview(ctk.CTkFrame):
                                 + (f" · {warnings} 项需修复" if warnings else ""),
                                 text_color=COLORS["warning"] if warnings else COLORS["muted"])
         self._layout(self._narrow, force=True)
+        self._signature = signature
 
     def _build_row(self, key):
         tile = ctk.CTkFrame(self._body, fg_color=COLORS["surface_alt"], corner_radius=6)

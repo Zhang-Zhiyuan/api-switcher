@@ -404,7 +404,10 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
                 return
             width = container.winfo_width()
             try:
-                scaling = float(container._get_widget_scaling())
+                # CTkToplevel exposes window scaling, not widget scaling. Text
+                # wraplength is always in the label's widget-logical units.
+                scaler = label if hasattr(label, "_get_widget_scaling") else container
+                scaling = float(scaler._get_widget_scaling())
             except (AttributeError, TypeError, ValueError):
                 scaling = 1.0
             if scaling > 0:
@@ -676,10 +679,14 @@ def fit_window_to_screen(
 
 
 def center_window(window, master=None) -> None:
+    # Initial mapping can temporarily report 200x200 and overwrite CTk's
+    # requested dimensions. Preserve the requested size before flushing layout.
+    preferred = _configured_window_size(window, window.geometry())
     window.update_idletasks()
     fit_window_to_screen(
         window,
         master,
+        preferred_size=preferred,
         activate=True,
         make_transient=True,
     )

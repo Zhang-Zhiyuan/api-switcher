@@ -35,20 +35,6 @@ def _wait(root, predicate):
     assert predicate(), "editor worker did not finish"
 
 
-@pytest.fixture(scope="module")
-def tk_root():
-    appearance = ctk.get_appearance_mode()
-    ctk.set_appearance_mode("dark")
-    try:
-        root = ctk.CTk()
-    except Exception as exc:
-        pytest.skip(f"Tk display unavailable: {exc}")
-    root.withdraw()
-    yield root
-    root.destroy()
-    ctk.set_appearance_mode(appearance)
-
-
 @pytest.fixture
 def editor(tk_root):
     root = tk_root
@@ -65,6 +51,9 @@ def editor(tk_root):
     finally:
         if dialog.winfo_exists():
             dialog.destroy()
+        # Let native Windows focus/grab teardown finish before the next
+        # Toplevel is constructed (a real mainloop also processes these events).
+        root.update()
 
 
 def test_editor_changes_are_drafts_until_explicit_apply(editor):
@@ -96,7 +85,7 @@ def test_server_switch_preserves_drafts_and_copy_is_independent(editor):
     dialog._switch_scope(second)
     assert dialog._drafts[second]["service_profile_bindings"]["claude"] == "home"
     dialog._switch_scope(first)
-    dialog._copy_to_scopes()
+    dialog._copy_to_scopes(dialog._scopes)
     assert "claude" not in dialog._drafts[second]["service_profile_bindings"]
     dialog._drafts[first]["service_profile_bindings"]["claude"] = "dc"
     assert "claude" not in dialog._drafts[second]["service_profile_bindings"]
@@ -114,7 +103,7 @@ def test_failed_apply_preserves_draft_and_successful_servers_are_not_reapplied(e
     root, dialog, saved = editor
     first, second = dialog._scopes
     dialog._select_profile("claude", "机房订阅 B")
-    dialog._copy_to_scopes()
+    dialog._copy_to_scopes(dialog._scopes)
     def apply(scope, preferences, _expected):
         if scope == second:
             raise RuntimeError("服务器暂时无法连接")
@@ -258,6 +247,98 @@ def test_footer_reserves_space_and_actions_wrap_using_widget_scaling(editor):
     dialog._layout_actions(SimpleNamespace(width=900 * scale))
     assert dialog._save_button.grid_info()["row"] == 0
     assert dialog._save_button.grid_info()["column"] == 3
+    dialog._layout_scope_toolbar(SimpleNamespace(width=560 * scale))
+    assert dialog._copy_button.grid_info()["row"] == 1
+    dialog._layout_scope_toolbar(SimpleNamespace(width=900 * scale))
+    assert dialog._copy_button.grid_info()["row"] == 0
+    assert dialog._copy_button.grid_info()["column"] == 2
+
+
+def test_catalog_reload_and_scope_switch_reuse_existing_rows(editor):
+    root, dialog, _saved = editor
+    rows = {key: row["tile"] for key, row in dialog._rows.items()}
+    dialog._reload_catalog()
+    _wait(root, lambda: not dialog._busy)
+    assert rows == {key: row["tile"] for key, row in dialog._rows.items()}
+    dialog._switch_scope(dialog._scopes[1])
+    assert rows == {key: row["tile"] for key, row in dialog._rows.items()}
+
+
+def test_node_search_choice_only_changes_draft_and_restores_editor_grab(editor):
+    from ui.dialogs.route_selection_dialogs import FIXED_MODE
+    root, dialog, saved = editor
+    dialog._open_node_picker("claude")
+    picker = dialog._node_dialog
+    assert root.grab_current() is picker
+    picker._search.insert(0, "日本 家宽")
+    picker._filter()
+    assert [node["key"] for node in picker._visible] == ["one"]
+    picker._list.selection_set(0)
+    picker._select_visible()
+    assert picker._mode == FIXED_MODE
+    assert dialog._drafts[dialog._scope]["service_node_bindings"]["claude"] == "two"
+    picker._commit()
+    assert root.grab_current() is dialog
+    assert dialog._drafts[dialog._scope]["service_node_bindings"]["claude"] == "one"
+    assert not saved
+
+
+def test_node_picker_cannot_overwrite_changed_subscription(editor):
+    _root, dialog, saved = editor
+    dialog._select_profile("claude", "机房订阅 B")
+    before = copy.deepcopy(dialog._drafts)
+    dialog._accept_node_choice(dialog._scope, "claude", "home", "one")
+    assert dialog._drafts == before
+    assert "已经变化" in dialog._status.cget("text")
+    assert not saved
+
+
+def test_scope_copy_requires_explicit_targets_and_preserves_other_drafts(editor):
+    _root, dialog, saved = editor
+    first, second = dialog._scopes
+    third = "SSH 暂不修改"
+    dialog._scopes.append(third)
+    dialog._drafts[third] = copy.deepcopy(dialog._drafts[first])
+    dialog._originals[third] = copy.deepcopy(dialog._originals[first])
+    unchanged = copy.deepcopy(dialog._drafts[third])
+    dialog._select_profile("claude", "机房订阅 B")
+    dialog._open_copy_dialog()
+    selector = dialog._scope_copy_dialog
+    assert not any(var.get() for var in selector._vars.values())
+    selector._commit()
+    assert dialog._drafts[second] == unchanged
+    selector._vars[second].set(True)
+    selector._changed()
+    selector._commit()
+    assert dialog._drafts[second]["service_profile_bindings"]["claude"] == "dc"
+    assert dialog._drafts[third] == unchanged
+    assert dialog._preview_open
+    preview = dialog._preview.get("1.0", "end")
+    assert first in preview and second in preview and third not in preview
+    assert not saved
+
+
+def test_change_preview_shows_removed_target_and_subscription_strategy_reset(editor):
+    _root, dialog, saved = editor
+    dialog._select_profile("claude", "机房订阅 B")
+    assert "原固定节点" in dialog._status.cget("text")
+    dialog._toggle_preview()
+    text = dialog._preview.get("1.0", "end")
+    assert "家宽订阅 A" in text and "机房订阅 B" in text
+    assert "美国 · 家宽 02" in text and "订阅首选 + 故障切换" in text
+    dialog._reset()
+    assert not dialog._changes
+    assert not saved
+
+
+def test_custom_form_is_collapsed_until_opened_without_losing_input(editor):
+    _root, dialog, _saved = editor
+    assert dialog._custom_form.winfo_manager() == ""
+    dialog._toggle_custom_form()
+    dialog._custom_entry.insert(0, "api.example.com")
+    dialog._toggle_custom_form()
+    dialog._toggle_custom_form()
+    assert dialog._custom_entry.get() == "api.example.com"
 
 
 def capture_preview(directory):

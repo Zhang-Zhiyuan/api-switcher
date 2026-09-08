@@ -108,6 +108,16 @@ def test_bind_wraplength_never_forces_a_narrow_container_wider():
     assert label.configures == [{"wraplength": 140}]
 
 
+def test_window_wraplength_uses_label_widget_scale_not_window_scale():
+    container = _WrapContainer(width=900)
+    container._get_window_scaling = lambda: 2.0
+    label = _WrapLabel()
+    label._get_widget_scaling = lambda: 1.5
+    theme.bind_wraplength(container, label, padding=40)
+    container.idle_callbacks.pop(0)()
+    assert label.configures == [{"wraplength": 560}]
+
+
 def test_wheel_delta_handles_touchpad_and_malformed_events():
     assert theme._wheel_direction(SimpleNamespace(delta=0.5, num=0)) == 1
     assert theme._wheel_direction(SimpleNamespace(delta=-0.5, num=0)) == -1

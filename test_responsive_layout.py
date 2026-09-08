@@ -165,6 +165,17 @@ def test_fit_window_uses_ctk_requested_logical_size(monkeypatch):
     assert window.geometry_calls == ["620x520+495+150"]
 
 
+def test_center_window_preserves_size_before_initial_mapping(monkeypatch):
+    window = _FakeWindow()
+    def map_window():
+        window._current_width = window._current_height = 200
+    window.update_idletasks = map_window
+    window.lift = window.focus_force = lambda: None
+    monkeypatch.setattr(theme, "_screen_bounds", lambda _window: (0, 0, 1920, 1080))
+    theme.center_window(window)
+    assert window.geometry_calls == ["620x520+495+150"]
+
+
 def test_main_layout_breakpoints_are_stable():
     assert main_layout_mode(MAIN_LAYOUT_COMPACT_MIN_WIDTH - 1) == "narrow"
     assert main_layout_mode(MAIN_LAYOUT_COMPACT_MIN_WIDTH) == "compact"

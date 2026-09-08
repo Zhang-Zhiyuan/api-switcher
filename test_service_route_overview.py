@@ -4,7 +4,7 @@ import customtkinter as ctk
 import pytest
 
 from core import proxy_routing
-from test_service_routes_dialog import _catalog, _preferences, tk_root as tk_root
+from test_service_routes_dialog import _catalog, _preferences
 from ui.widgets.service_route_overview import ServiceRouteOverview, route_description
 
 
@@ -62,6 +62,7 @@ def overview(tk_root):
         yield widget, selected
     finally:
         host.destroy()
+        tk_root.update()
 
 
 def test_overview_browsing_is_read_only_and_disabled_targets_fold(overview):

@@ -12,13 +12,25 @@ from core import proxy_routing
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style, textbox_style
-from ui.widgets.service_route_overview import route_description
+from ui.widgets.service_route_overview import route_changes, route_description
 
 DEFAULT_PROFILE = "跟随默认线路"
 DEFAULT_CUSTOM_PROFILE = "跟随自定义默认线路"
 DEFAULT_NODE = "订阅首选 + 故障切换"
 MISSING_PROFILE = "订阅已失效，请重新选择"
 MISSING_NODE = "固定节点已失效，请重新选择"
+
+
+class NodeChoiceButton(ctk.CTkButton):
+    """Keep the selected label separate from the compact button presentation."""
+
+    def set(self, value):
+        self._value = value
+        short = value if len(value) <= 28 else value[:27] + "…"
+        self.configure(text=short + "  ›")
+
+    def get(self):
+        return getattr(self, "_value", "")
 
 
 class ServiceRoutesDialog(ctk.CTkToplevel):
@@ -47,6 +59,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._initial_service = initial_service
         self._filter_after_id = None
         self._category = "全部"
+        self._node_dialog = None
+        self._scope_copy_dialog = None
+        self._preview_open = False
+        self._custom_open = False
+        self._changes = []
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -54,8 +71,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         ctk.CTkLabel(header, text="按访问目标选择线路", font=font(20, "bold"),
                      text_color=COLORS["text"]).pack(anchor="w")
         notice = ctk.CTkLabel(
-            header, text="1 选择访问目标    →    2 选择订阅与节点    →    3 保存并应用\n"
-                         "例如：Claude / GPT 用家宽订阅，YouTube 用机房订阅。编辑期间不改变现有线路。",
+            header, text="选择订阅 → 搜索节点或使用自动切换 → 查看修改并应用。编辑期间不改变现有线路。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(4, 10))
@@ -79,10 +95,13 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._copy_button = None
         if len(self._scopes) > 1:
             self._copy_button = ctk.CTkButton(
-                toolbar, text="将本页配置复制到其他服务器", state="disabled",
-                command=self._copy_to_scopes, **button_style("secondary", compact=True),
+                toolbar, text="复制到指定服务器…", state="disabled",
+                command=self._open_copy_dialog, **button_style("secondary", compact=True),
             )
             self._copy_button.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        self._scope_inline = None
+        toolbar.bind("<Configure>", self._layout_scope_toolbar, add="+")
+        self._layout_scope_toolbar()
 
         filters = ctk.CTkFrame(self, fg_color="transparent")
         filters.pack(fill="x", padx=20, pady=(0, 8))
@@ -96,7 +115,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         search_bar = ctk.CTkFrame(self, fg_color="transparent")
         search_bar.pack(fill="x", padx=20, pady=(0, 8))
         self._search = ctk.StringVar(value="")
-        ctk.CTkLabel(search_bar, text="筛选目标", font=font(12), text_color=COLORS["text"]).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(search_bar, text="搜索目标 / 已选线路", font=font(12), text_color=COLORS["text"]).pack(side="left", padx=(0, 8))
         search = ctk.CTkEntry(search_bar, textvariable=self._search,
                             placeholder_text="目标 / 订阅 / 节点名称", **input_style())
         search.pack(side="left", fill="x", expand=True)
@@ -104,8 +123,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                                  **button_style("secondary", compact=True))
         self._clear_filter_button.pack(side="left", padx=(8, 0))
         self._search.trace_add("write", lambda *_args: self._schedule_filter())
-        self._count_label = ctk.CTkLabel(self, text="", font=font(11), text_color=COLORS["muted"], anchor="w")
+        self._count_label = ctk.CTkLabel(self, text="", font=font(11), text_color=COLORS["muted"], anchor="w", height=20)
         self._count_label.pack(fill="x", padx=22, pady=(0, 4))
+        bind_wraplength(self, self._count_label, padding=44)
 
         self._table = ctk.CTkScrollableFrame(self, fg_color=COLORS["surface"])
         self._table.pack(fill="both", expand=True, padx=20)
@@ -117,8 +137,16 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         # clip Save/Close below the table's requested height.
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", before=header)
+        tools_row = ctk.CTkFrame(footer, fg_color="transparent")
+        tools_row.pack(fill="x", padx=20, pady=(6, 2))
+        self._custom_toggle = ctk.CTkButton(tools_row, text="＋ 自定义目标", width=112, command=self._toggle_custom_form,
+                                           **button_style("secondary", compact=True))
+        self._custom_toggle.pack(side="left")
+        self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单（0）", width=140, command=self._toggle_preview,
+                                            **button_style("secondary", compact=True))
+        self._preview_toggle.pack(side="right")
         add_row = ctk.CTkFrame(footer, fg_color="transparent")
-        add_row.pack(fill="x", padx=20, pady=(10, 0))
+        self._custom_form = add_row
         self._custom_entry = ctk.CTkEntry(add_row, placeholder_text="新增自定义域名、网址或 IP / CIDR", **input_style())
         self._custom_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._custom_entry.bind("<Return>", lambda _event: self._add_custom())
@@ -127,14 +155,15 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._add_button.pack(side="right")
         note = ctk.CTkLabel(
             footer, text="未启用的目标仍遵循默认代理范围，并不等于直连。第三方 API 请添加实际域名；自定义规则优先。",
-            font=font(11), text_color=COLORS["muted"], justify="left", anchor="w",
+            font=font(11), text_color=COLORS["muted"], justify="left", anchor="w", height=20,
         )
         note.pack(fill="x", padx=20, pady=(8, 4))
         bind_wraplength(self, note, padding=44)
-        self._status = ctk.CTkLabel(footer, text="正在加载…", font=font(12), anchor="w", justify="left")
+        self._status = ctk.CTkLabel(footer, text="正在加载…", font=font(12), anchor="w", justify="left", height=22)
         self._status.pack(fill="x", padx=20)
         bind_wraplength(self, self._status, padding=44)
         self._details = ctk.CTkTextbox(footer, height=84, **textbox_style())
+        self._preview = ctk.CTkTextbox(footer, height=110, **textbox_style())
         actions = ctk.CTkFrame(footer, fg_color="transparent")
         self._actions = actions
         actions.pack(fill="x", padx=20, pady=(8, 16))
@@ -153,6 +182,36 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self.grab_set()
         self._start_load()
 
+    def _toggle_custom_form(self):
+        self._custom_open = not self._custom_open
+        if self._custom_open:
+            self._custom_form.pack(fill="x", padx=20, pady=(6, 0), before=self._status)
+            self._custom_entry.focus_set()
+        else:
+            self._custom_form.pack_forget()
+        self._custom_toggle.configure(text="收起自定义输入" if self._custom_open else "＋ 自定义目标")
+
+    def _toggle_preview(self):
+        self._preview_open = not self._preview_open
+        self._update_preview()
+
+    def _update_preview(self):
+        count = len(self._changes)
+        self._preview_toggle.configure(text=f"{'收起' if self._preview_open else '查看'}修改清单（{count}）")
+        if not self._preview_open:
+            self._preview.pack_forget()
+            return
+        lines = []
+        for item in self._changes:
+            lines.extend([f"[{item['scope']}] {item['label']}", f"  原：{item['before']}",
+                          f"  新：{'移除目标及其独立绑定' if item['removed'] else item['after']}", ""])
+        text = "\n".join(lines) if lines else f"没有未保存修改。再次应用只处理当前位置：{self._scope}。"
+        self._preview.configure(state="normal")
+        self._preview.delete("1.0", "end")
+        self._preview.insert("1.0", safe_feedback_text(text))
+        self._preview.configure(state="disabled")
+        self._preview.pack(fill="x", padx=20, pady=(4, 0), before=self._actions)
+
     def _layout_actions(self, event=None):
         width = (event.width if event else self._actions.winfo_width()) / self._actions._get_widget_scaling()
         columns = 4 if width >= 620 else 2
@@ -164,6 +223,18 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         for index, button in enumerate((self._reset_button, self._reload_button, self._close_button, self._save_button)):
             button.grid(row=index // columns, column=index % columns, sticky="ew",
                         padx=(0, 8) if index % columns < columns - 1 else 0, pady=(4, 0))
+
+    def _layout_scope_toolbar(self, event=None):
+        if self._copy_button is None:
+            return
+        width = (event.width if event else self._scope_toolbar.winfo_width()) / self._scope_toolbar._get_widget_scaling()
+        inline = width >= 600
+        if inline == self._scope_inline:
+            return
+        self._scope_inline = inline
+        self._copy_button.grid_forget()
+        self._copy_button.grid(row=0 if inline else 1, column=2 if inline else 1, sticky="w",
+                               padx=(8, 0) if inline else 0, pady=0 if inline else (6, 0))
 
     def _reload_catalog(self):
         if self._busy:
@@ -222,6 +293,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._originals[scope] = preferences
             self._busy = False
             self._set_editable(True)
+            self._preview_open = False
             self._changed()
             lines = [f"{scope}: {message}" for scope, _prefs, message in succeeded]
             lines.extend(f"{scope}: {error}" for scope, error in errors)
@@ -265,17 +337,28 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         return mapping
 
     def _render(self):
-        for child in self._table.winfo_children():
-            child.destroy()
-        self._rows = {}
+        if self._loading.winfo_exists():
+            self._loading.destroy()
         draft = self._drafts[self._scope]
-        self._empty = ctk.CTkLabel(
-            self._table, text="没有匹配的目标。试试清除筛选，或在下方添加自定义目标。",
-            text_color=COLORS["muted"], font=font(12), anchor="w", justify="left",
-        )
-        bind_wraplength(self._table, self._empty, padding=30)
-        for info in proxy_routing.route_rows(draft):
+        infos = proxy_routing.route_rows(draft)
+        keys = {info["id"] for info in infos}
+        for key in self._rows.keys() - keys:
+            self._rows.pop(key)["tile"].destroy()
+        if not hasattr(self, "_empty"):
+            self._empty = ctk.CTkLabel(
+                self._table, text="没有匹配的目标。试试清除筛选，或在下方添加自定义目标。",
+                text_color=COLORS["muted"], font=font(12), anchor="w", justify="left",
+            )
+            bind_wraplength(self._table, self._empty, padding=30)
+        for info in infos:
             service = info["id"]
+            if service in self._rows:
+                row = self._rows[service]
+                row["info"], row["label"] = info, info["label"]
+                row["enabled"].set(info["enabled"])
+                row["name"].configure(text=safe_feedback_text(info["label"]))
+                self._refresh_row(service)
+                continue
             profiles = self._profile_values(service)
             tile = ctk.CTkFrame(self._table, fg_color=COLORS["surface_alt"], corner_radius=8)
             target = ctk.CTkFrame(tile, fg_color="transparent")
@@ -302,10 +385,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 tile, values=list(profiles), state="readonly", width=160,
                 command=lambda label, key=service: self._select_profile(key, label), **combo_style(),
             )
-            node_caption = ctk.CTkLabel(tile, text="节点 · 自动切换或固定出口", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
-            node_combo = ctk.CTkComboBox(
-                tile, values=[DEFAULT_NODE], state="readonly", width=170,
-                command=lambda label, key=service: self._select_node(key, label), **combo_style(),
+            node_caption = ctk.CTkLabel(tile, text="节点策略 · 点击搜索 / 设置", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
+            node_combo = NodeChoiceButton(
+                tile, text="", width=170, anchor="w", command=lambda key=service: self._open_node_picker(key),
+                **{**button_style("secondary"), "font": font(12)},
             )
             detail = ctk.CTkLabel(tile, text="", font=font(11), text_color=COLORS["muted_soft"],
                                   anchor="w", justify="left", width=1, height=18)
@@ -321,6 +404,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 "profile_caption": profile_caption, "node_caption": node_caption, "delete": delete,
             }
             self._refresh_row(service)
+        self._rows = {info["id"]: self._rows[info["id"]] for info in infos}
         self._layout_rows()
         self._filter_rows()
 
@@ -337,24 +421,24 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         key = draft["service_node_bindings"].get(service, "")
         node_label = next((label for label, value in nodes.items() if value == key), MISSING_NODE)
         row["nodes"] = nodes
-        row["node"].configure(values=[*nodes, *([MISSING_NODE] if node_label == MISSING_NODE else [])],
-                              state="readonly", text_color_disabled=COLORS["muted"])
         row["node"].set(node_label if profile_id else (DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE))
-        row["node"].configure(state="readonly" if profile_id and not self._busy else "disabled")
+        row["node"].configure(state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
         row["info"]["enabled"] = bool(row["enabled"].get())
         description = route_description(row["info"], draft, self._catalog)
         row["description"] = description
         dirty = self._row_changed(service)
         state = "继承基准" if service == "custom" else ("默认启用" if row["always"] else ("已启用" if row["enabled"].get() else "未启用"))
         row["state_label"].configure(text=state + (" · 未保存" if dirty else ""),
-                                      text_color=COLORS["warning"] if dirty else COLORS["muted"])
+                                      text_color=COLORS["accent"] if dirty else COLORS["muted"])
         # Full names stay visible here when the dropdown entry is too narrow.
         detail = description["hint"]
         if profile_id or description["inherited"]:
             detail = f'{description["profile"]} → {description["node"]} · {detail}'
+        elif description["source_hint"] and not description["warning"]:
+            detail = description["source_hint"]
         row["detail"].configure(text=detail, text_color=COLORS["warning"] if description["warning"] else COLORS["muted_soft"])
         row["tile"].configure(border_width=1 if dirty or description["warning"] else 0,
-                               border_color=COLORS["warning"] if dirty or description["warning"] else COLORS["border_soft"])
+                               border_color=COLORS["warning"] if description["warning"] else COLORS["accent"] if dirty else COLORS["border_soft"])
 
     def _row_changed(self, service):
         def value(preferences):
@@ -404,6 +488,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _set_category(self, category):
         self._category = category
+        self._categories.set(category)
         self._filter_rows()
 
     def _clear_filters(self):
@@ -446,6 +531,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         profile_id = profiles[label]
         if draft["service_profile_bindings"].get(service, "") == profile_id:
             return
+        had_fixed_node = bool(draft["service_node_bindings"].get(service))
         if profile_id:
             draft["service_profile_bindings"][service] = profile_id
         else:
@@ -455,6 +541,42 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._toggle(service, True)
         else:
             self._changed(service)
+        if had_fixed_node:
+            self._status.configure(text="订阅已更改，原固定节点已从草稿解除。请确认新的节点策略后再保存。",
+                                   text_color=COLORS["warning"])
+
+    def _open_node_picker(self, service):
+        if self._busy or self._closed:
+            return
+        if self._node_dialog and self._node_dialog.winfo_exists():
+            self._node_dialog.lift()
+            return
+        scope = self._scope
+        profile_id = self._drafts[scope]["service_profile_bindings"].get(service, "")
+        profile = next((item for item in self._catalog if item["id"] == profile_id), None)
+        if profile is None:
+            self._status.configure(text="请先为该目标选择一个有效订阅；默认线路不单独指定节点。", text_color=COLORS["warning"])
+            return
+        from ui.dialogs.route_selection_dialogs import RouteNodeDialog
+
+        # Use the same collision-safe labels as the row; apply by stable key.
+        nodes = [{"key": key, "label": label} for label, key in self._node_values(profile_id).items() if key]
+        self._node_dialog = RouteNodeDialog(
+            self, service_label=self._rows[service]["label"], profile_name=profile["name"], nodes=nodes,
+            selected_key=self._drafts[scope]["service_node_bindings"].get(service, ""),
+            on_select=lambda key: self._accept_node_choice(scope, service, profile_id, key),
+        )
+
+    def _accept_node_choice(self, scope, service, profile_id, key):
+        if self._busy or self._closed or scope != self._scope or service not in self._rows:
+            return
+        current_profile = self._drafts[scope]["service_profile_bindings"].get(service, "")
+        nodes = self._node_values(current_profile)
+        if current_profile != profile_id or key not in nodes.values():
+            self._status.configure(text="订阅或节点列表已经变化，请重新选择；原草稿未被覆盖。", text_color=COLORS["warning"])
+            return
+        label = next(label for label, value in nodes.items() if value == key)
+        self._select_node(service, label)
 
     def _select_node(self, service, label):
         if self._busy or label not in self._rows[service]["nodes"]:
@@ -484,6 +606,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _changed(self, service=""):
         count = sum(self._drafts[scope] != self._originals[scope] for scope in self._scopes)
+        self._changes = route_changes(self._originals, self._drafts, self._catalog)
         keys = ([service] + [key for key in self._rows if key.startswith("custom:") and service == "custom"]) if service else self._rows
         for key in keys:
             self._refresh_row(key)
@@ -492,21 +615,38 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._save_button.configure(text=f"保存并应用（{count}）" if count > 1 else "保存并应用")
         if count:
             self._details.pack_forget()
-        self._status.configure(text=f"{count} 个应用位置有未保存修改；将统一保存并应用，未修改的位置不受影响。" if count else "当前没有未保存修改。可重新应用当前位置的配置。",
-                               text_color=COLORS["warning"] if count else COLORS["muted"])
+        self._update_preview()
+        self._status.configure(text=f"待保存：{count} 个位置、{len(self._changes)} 项目标变化（含继承影响）。可展开修改清单核对。" if count else "无未保存修改；可重新应用当前位置。连通状态需单独检查。",
+                               text_color=COLORS["accent"] if count else COLORS["muted"])
 
     def _switch_scope(self, scope):
         if not self._busy and scope in self._drafts:
             self._scope = scope
+            self._scope_combo.set(scope)
             self._render()
             self._changed()
 
-    def _copy_to_scopes(self):
+    def _open_copy_dialog(self):
+        if self._busy or len(self._scopes) < 2:
+            return
+        if self._scope_copy_dialog and self._scope_copy_dialog.winfo_exists():
+            self._scope_copy_dialog.lift()
+            return
+        from ui.dialogs.route_selection_dialogs import RouteScopeCopyDialog
+
+        self._scope_copy_dialog = RouteScopeCopyDialog(
+            self, source=self._scope, scopes=[scope for scope in self._scopes if scope != self._scope],
+            dirty_scopes={scope for scope in self._scopes if self._drafts[scope] != self._originals[scope]},
+            on_copy=self._copy_to_scopes,
+        )
+
+    def _copy_to_scopes(self, targets):
         if self._busy:
             return
-        for scope in self._scopes:
-            if scope != self._scope:
+        for scope in dict.fromkeys(targets):
+            if scope in self._drafts and scope != self._scope:
                 self._drafts[scope] = copy.deepcopy(self._drafts[self._scope])
+        self._preview_open = True
         self._changed()
 
     def _add_custom(self):
@@ -557,6 +697,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 button.configure(state=state)
         self._scope_combo.configure(state="readonly" if enabled and len(self._scopes) > 1 else "disabled")
         self._custom_entry.configure(state=state)
+        self._custom_toggle.configure(state=state)
         for service, row in self._rows.items():
             row["check"].configure(state="disabled" if row["always"] else state)
             row["profile"].configure(state="readonly" if enabled else "disabled")
@@ -599,6 +740,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._closed = True
+        for dialog in (self._node_dialog, self._scope_copy_dialog):
+            if dialog and dialog.winfo_exists():
+                dialog.destroy()
         if self._filter_after_id:
             try:
                 self.after_cancel(self._filter_after_id)

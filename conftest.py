@@ -8,6 +8,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 _ORIGINAL_DATA_DIR = os.environ.get("API_SWITCHER_DATA_DIR")
 _PYTEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="api-switcher-pytest-data-"))
@@ -39,3 +41,29 @@ def _cleanup_pytest_data_dir() -> None:
 
 
 atexit.register(_cleanup_pytest_data_dir)
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """One Tk interpreter for routing UI tests; use Toplevels per test.
+
+    Repeatedly destroying/recreating CTk roots while global font/scaling caches
+    remain alive can leave Tcl initialization unusable on Windows.
+    """
+    import customtkinter as ctk
+    import tkinter
+    import sys
+
+    appearance = ctk.get_appearance_mode()
+    ctk.set_appearance_mode("dark")
+    try:
+        root = ctk.CTk()
+    except tkinter.TclError as exc:
+        ctk.set_appearance_mode(appearance)
+        if sys.platform == "win32":
+            raise  # A broken Tcl interpreter must not silently skip release coverage.
+        pytest.skip(f"Tk display unavailable: {exc}")
+    root.withdraw()
+    yield root
+    root.destroy()
+    ctk.set_appearance_mode(appearance)
