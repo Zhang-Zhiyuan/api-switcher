@@ -930,6 +930,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("primary", compact=True),
         )
         self._proxy_service_routes_button.pack(anchor="w", padx=14, pady=(8, 12))
+        self._proxy_route_diagnostics_button = ctk.CTkButton(
+            routes_card, text="检查已选服务器的分流 / 网址去向", command=self._open_route_diagnostics,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_route_diagnostics_button.pack(anchor="w", padx=14, pady=(0, 12))
 
         proxy_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -4697,6 +4702,24 @@ class SSHTab(ctk.CTkScrollableFrame):
                 "部署后会立即做真实连通验证；如果当前节点不可用，会从订阅节点里按远端测速自动尝试可用节点。确定继续吗？"
             ),
             on_confirm=do_deploy,
+        )
+
+    def _open_route_diagnostics(self):
+        if self._proxy_busy or self._ssh_busy:
+            self._set_proxy_status("SSH 操作正在进行，请完成后再检查分流。", "warning")
+            return
+        server_names = self._require_selected_servers(self._set_proxy_status)
+        if not server_names:
+            return
+        existing = getattr(self, "_proxy_route_diagnostics_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus()
+            return
+        from ui.dialogs.route_diagnostics_dialog import RouteDiagnosticsDialog
+
+        self._proxy_route_diagnostics_dialog = RouteDiagnosticsDialog(
+            self.winfo_toplevel(), scopes={name: name for name in server_names},
         )
 
     def _open_proxy_service_routes(self):

@@ -11,7 +11,7 @@ from urllib import request
 
 import pytest
 
-from core import local_proxy, proxy_routing, remote_proxy
+from core import local_proxy, proxy_route_diagnostics, proxy_routing, remote_proxy
 from test_local_proxy_service_routing import _patch_profiles
 
 
@@ -117,6 +117,8 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 except OSError:
                     time.sleep(0.05)
             opener = request.build_opener(remote_proxy._NoBypassProxyHandler({"http": f"http://127.0.0.1:{port}"}))
+            runtime = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port))
+            saved = proxy_route_diagnostics.saved_rules(preferences)
             for host, expected in (
                 ("chatgpt.com", "home-one"), ("api.anthropic.com", "home-two"),
                 ("www.youtube.com", "datacenter"), ("api.openai.com", "datacenter"),
@@ -124,8 +126,19 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 ("github.com", "datacenter"), ("raw.githubusercontent.com", "home-one"),
                 ("huggingface.co", "datacenter"), ("hf.co", "datacenter"), ("i.ytimg.com", "home-two"),
             ):
+                actual_rule = proxy_route_diagnostics.match_rules(host, runtime["rules"], runtime["mode"])
+                saved_rule = proxy_route_diagnostics.match_rules(host, saved)
+                assert actual_rule.certain and saved_rule.certain
+                assert actual_rule.route == saved_rule.route
                 with opener.open(f"http://{host}/routing-test", timeout=5) as response:
                     assert response.read().decode("ascii") == expected
+            # Inspection must not alter mode, rules or selected nodes.
+            after = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port))
+            assert after["mode"] == runtime["mode"]
+            assert after["rules"] == runtime["rules"]
+            assert {key: value.get("now") for key, value in after["proxies"].items()} == {
+                key: value.get("now") for key, value in runtime["proxies"].items()
+            }
         finally:
             process.terminate()
             try:

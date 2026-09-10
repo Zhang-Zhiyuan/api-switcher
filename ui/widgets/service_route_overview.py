@@ -79,7 +79,7 @@ def route_changes(originals, drafts, catalog):
 class ServiceRouteOverview(ctk.CTkFrame):
     """Compact overview; all edits live in the shared draft editor."""
 
-    def __init__(self, master, *, command, **kwargs):
+    def __init__(self, master, *, command, inspect_command=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._command = command
         self._enabled = True
@@ -93,6 +93,9 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._title = ctk.CTkLabel(self._header, text="目标分流", font=font(15, "bold"), text_color=COLORS["text"], anchor="w")
         self._manage = ctk.CTkButton(self._header, text="管理目标分流", width=130,
                                      command=lambda: self._open(""), **button_style("primary", compact=True))
+        self._inspect = (ctk.CTkButton(self._header, text="运行状态 / 网址去向", width=158,
+                                      command=inspect_command, **button_style("secondary", compact=True))
+                         if inspect_command else None)
         self._summary = ctk.CTkLabel(self, text="正在读取已保存线路…", font=font(12),
                                     text_color=COLORS["muted"], anchor="w", justify="left")
         self._summary.pack(fill="x", pady=(4, 8))
@@ -124,6 +127,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._enabled = bool(enabled)
         state = "normal" if enabled else "disabled"
         self._manage.configure(state=state)
+        if self._inspect:
+            self._inspect.configure(state=state)
         for row in self._rows.values():
             row["edit"].configure(state=state)
 
@@ -194,6 +199,10 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._title.grid(row=0, column=0, sticky="w")
         self._manage.grid(row=1 if narrow else 0, column=0 if narrow else 1,
                           sticky="w" if narrow else "e", pady=(6, 0) if narrow else 0)
+        if self._inspect:
+            self._inspect.grid(row=2 if narrow else 0, column=0 if narrow else 2,
+                               sticky="w" if narrow else "e", padx=0 if narrow else (8, 0),
+                               pady=(6, 0) if narrow else 0)
         if narrow:
             self._heading.pack_forget()
         else:

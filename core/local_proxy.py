@@ -4142,9 +4142,10 @@ def _active_service_route_targets(preferences: dict) -> dict[str, dict[str, tupl
     return targets
 
 
-def _resolve_service_subscription_routes(
+def _service_route_blueprint(
     preferences: dict,
 ) -> dict:
+    """Resolve rule ownership without reading subscriptions or changing state."""
     bindings = (
         preferences.get("service_profile_bindings")
         if isinstance(preferences.get("service_profile_bindings"), dict)
@@ -4167,13 +4168,6 @@ def _resolve_service_subscription_routes(
         )
         entry["service_ids"].append(service_id)
         service_routes[service_id] = _subscription_route_group_name(profile_id, service_id, node_key)
-    if not requested:
-        return {
-            "additional_proxy_groups": (),
-            "proxy_domain_routes": {},
-            "proxy_ip_cidr_routes": {},
-        }
-
     # Resolve target ownership before deduplicating pools. Pool insertion order
     # must not let an earlier shared pool lose a later explicit custom override.
     # Exact custom targets win over built-ins, including "follow default";
@@ -4187,6 +4181,17 @@ def _resolve_service_subscription_routes(
         route = service_routes.get(service_id, "AI-PROXY")
         domain_routes.update((str(domain), route) for domain in target.get("domains") or ())
         ip_cidr_routes.update((str(cidr), route) for cidr in target.get("ip_cidrs") or ())
+    return {"requested": requested, "service_routes": service_routes,
+            "proxy_domain_routes": domain_routes, "proxy_ip_cidr_routes": ip_cidr_routes}
+
+
+def _resolve_service_subscription_routes(preferences: dict) -> dict:
+    blueprint = _service_route_blueprint(preferences)
+    requested, service_routes = blueprint["requested"], blueprint["service_routes"]
+    if not requested:
+        return {"additional_proxy_groups": (), "proxy_domain_routes": {}, "proxy_ip_cidr_routes": {}}
+    domain_routes = blueprint["proxy_domain_routes"]
+    ip_cidr_routes = blueprint["proxy_ip_cidr_routes"]
     used_groups = set(domain_routes.values()) | set(ip_cidr_routes.values())
     state = remote_proxy.load_proxy_subscription_state()
     profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}

@@ -293,7 +293,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         routing_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         routing_frame.pack(fill="x", padx=14, pady=(0, 12), before=policy_frame)
-        self._route_overview = ServiceRouteOverview(routing_frame, command=self._open_service_routes)
+        self._route_overview = ServiceRouteOverview(
+            routing_frame, command=self._open_service_routes, inspect_command=self._open_route_diagnostics,
+        )
         self._route_overview.pack(fill="x", padx=14, pady=14)
 
         self._routing_status_label = ctk.CTkLabel(
@@ -1574,6 +1576,19 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         preferences = getattr(self, "_routing_preferences_snapshot", None)
         if overview is not None and preferences is not None:
             overview.set_routes(preferences, self._service_route_catalog)
+
+    def _open_route_diagnostics(self):
+        if self._busy:
+            self._set_routing_status("代理操作正在进行，请完成后再检查分流。", "warning")
+            return
+        existing = getattr(self, "_route_diagnostics_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus()
+            return
+        from ui.dialogs.route_diagnostics_dialog import RouteDiagnosticsDialog
+
+        self._route_diagnostics_dialog = RouteDiagnosticsDialog(self.winfo_toplevel())
 
     def _open_service_routes(self, service_id=""):
         if self._busy:
