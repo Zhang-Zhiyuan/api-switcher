@@ -11,6 +11,10 @@ from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style, textbox_style
 
 
+def _error_text(error):
+    return safe_feedback_text(str(error).strip() or type(error).__name__)
+
+
 class RouteDiagnosticsDialog(ctk.CTkToplevel):
     def __init__(self, master, *, scopes=None, loader=None):
         super().__init__(master)
@@ -131,6 +135,8 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self.refresh()
 
     def refresh(self):
+        if self._start_id is not None:
+            self.after_cancel(self._start_id)
         self._start_id = None
         if self._closed or self._busy:
             return
@@ -146,14 +152,14 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
             try:
                 payload = (generation, loader(scope), "")
             except Exception as exc:
-                payload = (generation, None, safe_feedback_text(str(exc)))
+                payload = (generation, None, _error_text(exc))
             if not cancelled.is_set():
                 results.put(payload)
 
         try:
             threading.Thread(target=worker, name="read-only-route-diagnostics", daemon=True).start()
         except Exception as exc:
-            results.put((generation, None, safe_feedback_text(str(exc))))
+            results.put((generation, None, _error_text(exc)))
         if self._poll_id is not None:
             self.after_cancel(self._poll_id)
         self._poll_id = self.after(80, self._poll)
@@ -170,20 +176,33 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
             if generation == self._generation:
                 self._snapshot = snapshot
                 self._set_busy(False)
-                if error:
-                    self._status.configure(text="读取失败；未修改运行配置，可刷新重试。", text_color=COLORS["warning"])
-                    self._set_report(error)
+                if error or not isinstance(snapshot, diagnostics.RouteSnapshot):
+                    self._show_failure(error or "诊断结果为空或格式无效")
                 else:
-                    self._stale = snapshot.stale()
                     self._render()
-        if self._snapshot and self._snapshot.stale() != self._stale:
-            self._stale = self._snapshot.stale()
-            self._render()
+        try:
+            if self._snapshot and self._snapshot.stale() != self._stale:
+                self._render()
+        except Exception as exc:
+            self._show_failure(exc)
         self._poll_id = self.after(80 if self._busy else 1000, self._poll)
+
+    def _show_failure(self, error):
+        self._snapshot = None
+        self._set_busy(False)
+        self._status.configure(text="诊断读取失败；未修改运行配置，可刷新重试。", text_color=COLORS["warning"])
+        self._set_report(_error_text(error))
 
     def _render(self):
         if not self._snapshot:
             return
+        try:
+            self._stale = self._snapshot.stale()
+            self._render_snapshot()
+        except Exception as exc:
+            self._show_failure(exc)
+
+    def _render_snapshot(self):
         snapshot = self._snapshot
         text = snapshot.explain(self._query_host) if self._query_host else diagnostics.snapshot_report(snapshot)
         self._set_report(text)

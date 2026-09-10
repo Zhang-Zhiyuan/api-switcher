@@ -112,3 +112,44 @@ def test_copy_report_is_explicit_and_only_copies_redacted_visible_text(dialog, m
     assert len(copied) == 1 and "synthetic-private-key" not in copied[0]
     assert "[REDACTED]" in copied[0]
     assert view._report._textbox.tag_ranges("warning")
+
+
+def test_empty_exception_does_not_break_result_pump(dialog, tk_root):
+    view, _ = dialog
+    def fail(_scope):
+        raise TimeoutError()
+    view._loader = fail
+    view.refresh()
+    wait(tk_root, lambda: not view._busy)
+    assert "读取失败" in view._status.cget("text")
+    assert view._poll_id is not None
+    assert view._query.cget("state") == "disabled"
+    view._loader = lambda _scope: snapshot()
+    view.refresh()
+    wait(tk_root, lambda: view._snapshot is not None)
+    assert view._query.cget("state") == "normal"
+
+
+def test_invalid_result_does_not_crash_render_or_disable_retry(dialog, tk_root):
+    view, _ = dialog
+    data = snapshot()
+    data.runtime["mode"] = None
+    view._loader = lambda _scope: data
+    view.refresh()
+    wait(tk_root, lambda: not view._busy)
+    assert view._snapshot is None
+    assert "失败" in view._status.cget("text")
+    assert view._poll_id is not None
+    assert view._refresh.cget("state") == "normal"
+
+
+def test_manual_refresh_before_startup_cancels_pending_initial_read(tk_root, monkeypatch):
+    errors = []
+    monkeypatch.setattr(tk_root, "report_callback_exception", lambda *args: errors.append(args))
+    view = RouteDiagnosticsDialog(tk_root, loader=lambda _: snapshot())
+    initial = view._start_id
+    view.refresh()
+    assert initial not in tk_root.tk.call("after", "info")
+    view.destroy()
+    tk_root.update()
+    assert errors == []

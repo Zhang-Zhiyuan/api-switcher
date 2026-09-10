@@ -48,6 +48,10 @@ def read(path):
     with opener.open(request, timeout=min(2, remaining)) as response:
         if response.status != 200:
             raise RuntimeError("controller status")
+        declared = response.headers.get("Content-Length")
+        declared = int(declared) if declared is not None else None
+        if declared is not None and not 0 <= declared <= 4194304:
+            raise ValueError("controller response too large or invalid length")
         chunks, size = [], 0
         while True:
             if time.monotonic() >= deadline:
@@ -59,12 +63,19 @@ def read(path):
             if not chunk:
                 break
             chunks.append(chunk)
+        if declared is not None and size != declared:
+            raise ValueError("incomplete controller response")
+    if time.monotonic() >= deadline:
+        raise TimeoutError("controller deadline")
     value = json.loads(b"".join(chunks))
     if not isinstance(value, dict):
         raise ValueError("invalid controller response")
     return value
 
 config = read("/configs")
+expected = globals().get("expected_mixed_port")
+if expected is not None and (type(config.get("mixed-port")) is not int or config["mixed-port"] != expected):
+    raise ValueError("controller mixed-port mismatch")
 rules = read("/rules")
 proxies = read("/proxies")
 def rule_signature(value):
@@ -94,9 +105,13 @@ def target_host(value: str) -> str:
     if not text or len(text) > 8192 or any(ord(c) < 32 for c in text) or "\\" in text:
         raise ValueError("请输入一个有效的 HTTP(S) 网址、域名或 IP")
     try:
-        return str(ipaddress.ip_address(text))
+        address = ipaddress.ip_address(text)
     except ValueError:
         pass
+    else:
+        if "%" in text:
+            raise ValueError("不支持带接口作用域的 IPv6 地址；请填写不含 % 的地址")
+        return str(address)
     try:
         parsed = urlsplit(text if "://" in text else "https://" + text)
         if parsed.scheme.lower() not in {"http", "https"} or parsed.username is not None or parsed.password is not None:
@@ -157,11 +172,9 @@ def match_rules(host: str, rules: list[dict], mode: str = "rule") -> RuleMatch:
                 if not payload:
                     uncertain.append(label)
                     continue
-                try:
-                    domain = payload.rstrip(".").lstrip(".").encode("idna").decode("ascii").lower()
-                except UnicodeError:
-                    uncertain.append(label)
-                    continue
+                # Controller payloads are already the kernel's canonical values.
+                # Trimming dots or IDNA-encoding a keyword changes its meaning.
+                domain = payload.lower()
                 if kind == "DOMAIN":
                     hit = host == domain
                 elif kind == "DOMAINSUFFIX":
@@ -231,8 +244,13 @@ def health_summary(group: dict, node: dict, now: datetime) -> str:
     if age < -5 or age > HEALTH_TTL:
         return f"{prefix}结果已过期 / 时钟不同步 · {when}"
     delay = last.get("delay")
-    if (not isinstance(delay, (int, float)) or isinstance(delay, bool) or not math.isfinite(delay)
-            or delay <= 0 or health.get("alive") is False):
+    try:
+        valid_delay = isinstance(delay, (int, float)) and not isinstance(delay, bool) and math.isfinite(delay)
+    except (ValueError, OverflowError):
+        valid_delay = False
+    if not valid_delay:
+        return f"{prefix}延迟数据无效 · {when}"
+    if delay <= 0 or health.get("alive") is False:
         return f"{prefix}失败 · {when}"
     return f"{prefix}通过 · {int(delay)} ms · {when}（不代表账号或长会话可用）"
 
@@ -366,15 +384,19 @@ def _validate_runtime(data: dict) -> dict:
     return data
 
 
-def _read_controller(port: int) -> dict:
-    namespace = {"port": remote_proxy._normalize_port(port, "控制器端口")}
+def _read_controller(port: int, *, expected_mixed_port: int | None = None) -> dict:
+    namespace = {"port": remote_proxy._normalize_port(port, "控制器端口"),
+                 "expected_mixed_port": (remote_proxy._normalize_port(expected_mixed_port, "代理端口")
+                                         if expected_mixed_port is not None else None)}
     exec(compile(_CONTROLLER_READER, "<read-only-controller>", "exec"), namespace)
     return _validate_runtime(namespace["result"])
 
 
-def _read_remote_controller(client, port: int) -> dict:
+def _read_remote_controller(client, port: int, *, expected_mixed_port: int | None = None) -> dict:
     port = remote_proxy._normalize_port(port, "控制器端口")
-    command = "python3 - <<'API_SWITCHER_READ_ONLY_ROUTES'\nport = " + str(port) + "\n" + _CONTROLLER_READER
+    expected = remote_proxy._normalize_port(expected_mixed_port, "代理端口") if expected_mixed_port is not None else None
+    command = ("python3 - <<'API_SWITCHER_READ_ONLY_ROUTES'\nport = " + str(port)
+               + "\nexpected_mixed_port = " + repr(expected) + "\n" + _CONTROLLER_READER)
     command += "\nprint(json.dumps(result, ensure_ascii=True))\nAPI_SWITCHER_READ_ONLY_ROUTES"
     code, stdout, _stderr = remote_proxy.ssh_manager.execute_command_with_status(
         client, command, timeout=12, log_command=False, max_output_bytes=MAX_BYTES,
@@ -398,12 +420,18 @@ def _node_labels(config_text: str) -> dict[str, str]:
         if isinstance(node, dict):
             deployed.setdefault(remote_proxy._proxy_node_connection_key(node), []).append(str(node.get("name") or ""))
     labels = {}
+    if not deployed:
+        return labels
     for profile in remote_proxy.list_proxy_subscription_profiles():
         try:
             cached = remote_proxy.load_cached_proxy_subscription(profile)
             for entry in cached.nodes if cached else ():
-                for alias in deployed.get(remote_proxy._proxy_node_connection_key(entry.node), ()):
-                    labels.setdefault(alias, clean(entry.node.get("name")))
+                key = remote_proxy._proxy_node_connection_key(entry.node)
+                if key in deployed and (label := clean(entry.node.get("name"))):
+                    for alias in deployed.pop(key):
+                        labels[alias] = label
+                    if not deployed:
+                        return labels
         except Exception:
             continue  # An unavailable cache cannot block read-only runtime diagnostics.
     return labels
@@ -436,7 +464,7 @@ def load_snapshot(ssh_name: str | None = None) -> RouteSnapshot:
                 snapshot.error = "远端受管代理未运行或无法确认归属；未读取其他代理。"
                 return snapshot
             _profile, client = remote_proxy._connect_ssh(ssh_name)
-            snapshot.runtime = _read_remote_controller(client, remote_proxy.mihomo_controller_port(7890))
+            snapshot.runtime = _read_remote_controller(client, remote_proxy.mihomo_controller_port(7890), expected_mixed_port=7890)
             snapshot.captured_at = datetime.now(timezone.utc)
             try:
                 config_text = remote_proxy.ssh_manager.read_remote_file(client, status.config_path, timeout=3, max_bytes=MAX_BYTES) or ""
@@ -449,7 +477,7 @@ def load_snapshot(ssh_name: str | None = None) -> RouteSnapshot:
                 return snapshot
             mixed_port = state.get("mixed_port") or local_proxy.DEFAULT_LOCAL_MIXED_PORT
             port = remote_proxy.mihomo_controller_port(mixed_port)
-            snapshot.runtime = _read_controller(port)
+            snapshot.runtime = _read_controller(port, expected_mixed_port=mixed_port)
             snapshot.captured_at = datetime.now(timezone.utc)
             after_state = local_proxy._load_state()
             if any(state.get(key) != after_state.get(key) for key in local_proxy.LOCAL_PROXY_APPLIED_CONFIG_STATE_KEYS):

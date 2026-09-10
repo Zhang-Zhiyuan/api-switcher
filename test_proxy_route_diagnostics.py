@@ -124,7 +124,7 @@ def test_explanation_does_not_leak_url_tokens_or_claim_unobserved_health():
 def controller():
     data = snapshot().runtime
     paths = []
-    behavior = {"redirect": False, "bad": False, "change": False}
+    behavior = {"redirect": False, "bad": False, "change": False, "mixed_port": 17897, "truncated": False}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -135,7 +135,7 @@ def controller():
                 self.end_headers()
                 return
             if self.path == "/configs":
-                payload = {"mode": data["mode"]}
+                payload = {"mode": data["mode"], "mixed-port": behavior["mixed_port"]}
             elif self.path == "/rules":
                 payload = {"rules": copy.deepcopy(data["rules"])}
                 # Normal traffic updates rule counters between reads, not routing.
@@ -147,7 +147,7 @@ def controller():
                 payload["proxies"]["node"]["password"] = "synthetic-secret"
             body = b"[]" if behavior["bad"] else json.dumps(payload).encode()
             self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(body) + (10 if behavior["truncated"] else 0)))
             self.end_headers()
             self.wfile.write(body)
 
@@ -222,3 +222,94 @@ def test_alias_mapping_preserves_same_connection_used_in_multiple_groups(monkeyp
     import yaml
     text = remote_proxy.AI_PROXY_CONFIG_MARKER + "\n" + yaml.safe_dump({"proxies": [dict(node, name="one"), dict(node, name="two")]})
     assert diagnostics._node_labels(text) == {"one": "家宽 01", "two": "家宽 01"}
+
+
+@pytest.mark.parametrize("kind,payload,host,expected", [
+    ("DomainKeyword", ".openai.com", "openai.com", "DIRECT"),
+    ("DomainKeyword", ".openai.com", "api.openai.com", "AI-PROXY"),
+    ("DomainKeyword", "api.", "rapid.example.com", "DIRECT"),
+    ("DomainSuffix", ".openai.com", "openai.com", "DIRECT"),
+    ("Domain", ".openai.com", "openai.com", "DIRECT"),
+])
+def test_controller_domain_payload_is_not_rewritten(kind, payload, host, expected):
+    result = diagnostics.match_rules(host, [rule(kind, payload), rule("MATCH", "", "DIRECT")])
+    assert result.certain and result.route == expected
+
+
+def test_scoped_bare_ipv6_is_rejected_like_scoped_url():
+    with pytest.raises(ValueError):
+        diagnostics.target_host("fe80::1%eth0")
+
+
+def test_controller_port_must_belong_to_expected_proxy(controller):
+    port, paths, behavior = controller
+    assert diagnostics._read_controller(port, expected_mixed_port=17897)["mode"] == "rule"
+    paths.clear()
+    behavior["mixed_port"] = 7890
+    with pytest.raises(ValueError, match="port"):
+        diagnostics._read_controller(port, expected_mixed_port=17897)
+    assert paths == ["/configs"]
+
+
+def test_controller_rejects_incomplete_content_length_even_when_json_looks_valid(controller):
+    port, _, behavior = controller
+    behavior["truncated"] = True
+    with pytest.raises(ValueError, match="incomplete"):
+        diagnostics._read_controller(port)
+
+
+def test_oversized_delay_cannot_crash_rendering():
+    now = datetime.now(timezone.utc)
+    node = {"history": [{"time": now.isoformat(), "delay": 10 ** 500}]}
+    assert "无效" in diagnostics.health_summary({}, node, now)
+
+
+def test_alias_lookup_stops_after_all_deployed_nodes_are_resolved(monkeypatch):
+    node = {"name": "家宽 01", "type": "http", "server": "example.test", "port": 1234}
+    calls = []
+    monkeypatch.setattr(remote_proxy, "list_proxy_subscription_profiles", lambda: [{"id": "a"}, {"id": "unrelated"}])
+    def cached(profile):
+        calls.append(profile["id"])
+        return SimpleNamespace(nodes=[SimpleNamespace(node=node)])
+    monkeypatch.setattr(remote_proxy, "load_cached_proxy_subscription", cached)
+    import yaml
+    text = remote_proxy.AI_PROXY_CONFIG_MARKER + "\n" + yaml.safe_dump({"proxies": [dict(node, name="one")]})
+    assert diagnostics._node_labels(text) == {"one": "家宽 01"}
+    assert calls == ["a"]
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_snapshot_reader_always_verifies_managed_mixed_port(monkeypatch, tmp_path, remote):
+    calls = []
+    def read(*args, **kwargs):
+        calls.append(kwargs)
+        return snapshot().runtime
+    monkeypatch.setattr(diagnostics, "_read_controller", read)
+    monkeypatch.setattr(diagnostics, "_read_remote_controller", read)
+    monkeypatch.setattr(local_proxy, "_load_local_proxy_routing_preferences_strict", lambda: {})
+    monkeypatch.setattr(diagnostics.proxy_routing, "load_ssh_routes", lambda _: {})
+    monkeypatch.setattr(remote_proxy, "list_proxy_subscription_profiles", lambda: [])
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17903})
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 12345)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _: True)
+    monkeypatch.setattr(local_proxy, "_is_managed_mihomo_pid", lambda *a, **kw: True)
+    monkeypatch.setattr(local_proxy, "_managed_local_config_path", lambda *_: tmp_path / "missing.yaml")
+    monkeypatch.setattr(remote_proxy, "inspect_ai_proxy", lambda _: SimpleNamespace(running=True, config_path="/synthetic/config.yaml"))
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _: (None, object()))
+    monkeypatch.setattr(remote_proxy, "ssh_manager", SimpleNamespace(read_remote_file=lambda *a, **kw: ""))
+    result = diagnostics.load_snapshot("synthetic-ssh" if remote else None)
+    assert result.runtime and not result.error
+    assert calls == [{"expected_mixed_port": 7890 if remote else 17903}]
+
+
+def test_applied_state_change_during_inspection_invalidates_snapshot(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_load_local_proxy_routing_preferences_strict", lambda: {})
+    monkeypatch.setattr(remote_proxy, "list_proxy_subscription_profiles", lambda: [])
+    states = iter([{"applied_config_sha256": "a" * 64}, {"applied_config_sha256": "b" * 64}])
+    monkeypatch.setattr(local_proxy, "_load_state", lambda: next(states))
+    monkeypatch.setattr(local_proxy, "_read_pid", lambda: 12345)
+    monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _: True)
+    monkeypatch.setattr(local_proxy, "_is_managed_mihomo_pid", lambda *a, **kw: True)
+    monkeypatch.setattr(diagnostics, "_read_controller", lambda *a, **kw: snapshot().runtime)
+    result = diagnostics.load_snapshot()
+    assert not result.runtime and "发生变化" in result.error

@@ -10,6 +10,7 @@ import time
 from urllib import request
 
 import pytest
+import yaml
 
 from core import local_proxy, proxy_route_diagnostics, proxy_routing, remote_proxy
 from test_local_proxy_service_routing import _patch_profiles
@@ -99,6 +100,18 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         for group in options["additional_proxy_groups"]:
             group["health_checked"] = False
         config = remote_proxy.build_mihomo_config(second, port, log_level="silent", **options)
+        # Exercise literal controller payloads too. Both outcomes remain on
+        # loopback-only upstreams; a negative match must never contact the web.
+        home_route = local_proxy._subscription_route_group_name("home", "openai", remote_proxy.proxy_node_key(first))
+        dc_route = local_proxy._subscription_route_group_name("dc", "youtube", remote_proxy.proxy_node_key(datacenter))
+        parsed = yaml.safe_load(config)
+        parsed["rules"][:0] = [
+            f"DOMAIN-KEYWORD,.keyword-only.test,{home_route}",
+            f"DOMAIN-SUFFIX,keyword-only.test,{dc_route}",
+            f"DOMAIN-SUFFIX,.dot-suffix.test,{home_route}",
+            f"DOMAIN-SUFFIX,dot-suffix.test,{dc_route}",
+        ]
+        config = yaml.safe_dump(parsed)
         config_path = tmp_path / "config.yaml"
         config_path.write_text(config, encoding="utf-8")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -117,7 +130,7 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 except OSError:
                     time.sleep(0.05)
             opener = request.build_opener(remote_proxy._NoBypassProxyHandler({"http": f"http://127.0.0.1:{port}"}))
-            runtime = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port))
+            runtime = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port), expected_mixed_port=port)
             saved = proxy_route_diagnostics.saved_rules(preferences)
             for host, expected in (
                 ("chatgpt.com", "home-one"), ("api.anthropic.com", "home-two"),
@@ -132,8 +145,21 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 assert actual_rule.route == saved_rule.route
                 with opener.open(f"http://{host}/routing-test", timeout=5) as response:
                     assert response.read().decode("ascii") == expected
+            for host, expected_route, expected_upstream in (
+                ("keyword-only.test", dc_route, "datacenter"),
+                ("sub.keyword-only.test", home_route, "home-one"),
+                ("dot-suffix.test", dc_route, "datacenter"),
+            ):
+                result = proxy_route_diagnostics.match_rules(host, runtime["rules"], runtime["mode"])
+                assert result.certain and result.route == expected_route
+                with opener.open(f"http://{host}/literal-rule-test", timeout=5) as response:
+                    assert response.read().decode("ascii") == expected_upstream
+            with pytest.raises(ValueError, match="port"):
+                proxy_route_diagnostics._read_controller(
+                    remote_proxy.mihomo_controller_port(port), expected_mixed_port=port % 65535 + 1,
+                )
             # Inspection must not alter mode, rules or selected nodes.
-            after = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port))
+            after = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port), expected_mixed_port=port)
             assert after["mode"] == runtime["mode"]
             assert after["rules"] == runtime["rules"]
             assert {key: value.get("now") for key, value in after["proxies"].items()} == {
