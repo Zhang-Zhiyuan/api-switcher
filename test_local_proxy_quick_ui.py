@@ -274,3 +274,23 @@ def test_resource_cleanup_error_is_visible_even_after_all_results_returned(quick
     assert "synthetic temporary resource cleanup failure" in calls.status[-1][0]
     assert calls.status[-1][1] == "warning"
     assert "可连 2，失败 0，取消 0" in calls.status[-1][0]
+
+
+@pytest.mark.parametrize("count,interval", [(12, 0.25), (255, 0.25), (256, 1.0), (1000, 1.0)])
+def test_large_batches_throttle_repaints_without_truncating_final_coverage(quick_tab, monkeypatch, count, interval):
+    tab, calls = quick_tab
+    tab._subscription_nodes = [node(index) for index in range(count)]
+    intervals = []
+    original = module.CoalescedProgress
+
+    def progress(*args, **kwargs):
+        intervals.append(kwargs["interval"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "CoalescedProgress", progress)
+    tab._measure_subscription_latencies(all_nodes=True)
+    flush(calls)
+    assert intervals == [interval]
+    assert len(tab._latency_results) == count + 1
+    assert f"结果 {count}/{count}" in calls.status[-1][0]
+    assert not tab._busy

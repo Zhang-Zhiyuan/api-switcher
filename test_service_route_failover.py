@@ -54,6 +54,7 @@ def test_late_known_connected_node_is_not_lost_to_unknown_prefix():
     _latency(False, age_seconds=remote_proxy.PROXY_LATENCY_CACHE_TTL_SECONDS + 1),
     {"ok": True, "latency_ms": float("inf"), "measured_at": datetime.now(timezone.utc).isoformat()},
     {"ok": True, "latency_ms": -1, "measured_at": datetime.now(timezone.utc).isoformat()},
+    {"ok": False, "latency_ms": None, "cancelled": True, "measured_at": datetime.now(timezone.utc).isoformat()},
 ])
 def test_expired_or_malformed_latency_is_only_unknown(result):
     items = _items(3)

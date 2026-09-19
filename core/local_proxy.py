@@ -3248,10 +3248,30 @@ def _probe_isolated_mihomo_batch_delay(session, route_name: str, timeout: int, *
         raise ValueError("检测节点不属于本次临时内核")
     path = ("/proxies/" + url_quote(route_name, safe="") + "/delay?timeout=" + str(timeout * 1000)
             + "&expected=204&url=" + url_quote(probe_url, safe=""))
+    started_at = datetime.now(timezone.utc)
     payload = _isolated_batch_controller_request(session, path, timeout=timeout + 1.0)
     delay = payload.get("delay")
     if isinstance(delay, bool) or not isinstance(delay, int) or not 0 < delay <= 65535:
         raise RuntimeError("临时内核返回无效延迟")
+    # URLTest can return a positive delay even when expected=204 did not match:
+    # mihomo records that failure in extra[url], not in the delay API status.
+    # Verify this alias's new observation, never its generic alive/history or
+    # an older successful attempt (including one from another target).
+    state = _isolated_batch_controller_request(
+        session, "/proxies/" + url_quote(route_name, safe=""), timeout=1.0,
+    )
+    extra = state.get("extra")
+    specific = extra.get(probe_url) if isinstance(extra, dict) else None
+    if state.get("name") != route_name or not isinstance(specific, dict):
+        raise RuntimeError("临时内核缺少本节点的目标专用记录，无法确认预期 HTTP 204")
+    observed_at = datetime.now(timezone.utc)
+    health = parse_proxy_health({"testUrl": probe_url}, state, observed_at)
+    if health.checked_at is None or not started_at <= health.checked_at <= observed_at:
+        raise RuntimeError("临时内核探针记录不是本次检测结果，请重试")
+    if specific.get("alive") is not True or health.target_healthy is not True:
+        raise RuntimeError("目标专用探针未通过预期 HTTP 204 验证：" + proxy_health_summary(health))
+    if health.delay_ms != delay:
+        raise RuntimeError("临时内核延迟与目标专用记录不一致，请重试")
     return delay
 
 
@@ -4428,7 +4448,9 @@ def _explicit_subscription_fallback_nodes(
     def candidate_priority(item):
         try:
             result = latencies.get(remote_proxy.proxy_subscription_node_key(item))
-            if not remote_proxy.proxy_node_latency_fresh(result):
+            if (not remote_proxy.proxy_node_latency_fresh(result)
+                    or remote_proxy.proxy_node_latency_cancelled(result)
+                    or remote_proxy.proxy_node_latency_invalid(result)):
                 return (1, 0)
             if remote_proxy.proxy_node_latency_ok(result):
                 latency = remote_proxy.proxy_node_latency_ms(result)

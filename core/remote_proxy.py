@@ -177,6 +177,7 @@ PROXY_QUALITY_HTTP_CONCURRENCY_BUDGET = 12
 PROXY_LATENCY_DEFAULT_MAX_WORKERS = 32
 PROXY_LATENCY_MAX_WORKERS = 64
 PROXY_LATENCY_DNS_MAX_WORKERS = 16
+PROXY_LATENCY_MAX_ACTIVE_ADDRESSES = 4
 _PROXY_LATENCY_DNS_SLOTS = threading.BoundedSemaphore(PROXY_LATENCY_DNS_MAX_WORKERS)
 PROXY_QUALITY_ASSESSMENT_SCOPE_SERVER = "server_entry"
 PROXY_LATENCY_CACHE_TTL_SECONDS = 30 * 60
@@ -513,10 +514,12 @@ class ProxyNodeLatencyResult:
     cancelled: bool = False
 
     def label(self) -> str:
+        if proxy_node_latency_invalid(self):
+            return "结果无效"
         if self.cancelled:
             return "已取消"
-        if self.ok and self.latency_ms is not None:
-            return f"{self.latency_ms}ms"
+        if proxy_node_latency_ok(self):
+            return f"{proxy_node_latency_ms(self)}ms"
         return "不可连"
 
 
@@ -1556,7 +1559,7 @@ def save_proxy_subscription_latencies(
     payload = {}
     for key, result in (latencies or {}).items():
         node_key = str(key or "").strip()
-        if not node_key:
+        if not node_key or result is None or proxy_node_latency_invalid(result):
             continue
         payload[node_key] = {
             "ok": proxy_node_latency_ok(result),
@@ -1685,19 +1688,14 @@ def load_proxy_subscription_latencies(state: dict | None = None) -> dict[str, di
         if not isinstance(value, dict):
             continue
         node_key = str(key or "").strip()
-        if not node_key:
+        if not node_key or proxy_node_latency_invalid(value):
             continue
-        latency_ms = value.get("latency_ms")
-        try:
-            latency_value = int(latency_ms) if latency_ms is not None else None
-        except (TypeError, ValueError):
-            latency_value = None
         results[node_key] = {
-            "ok": bool(value.get("ok") and latency_value is not None and not proxy_node_latency_cancelled(value)),
+            "ok": proxy_node_latency_ok(value),
             "cancelled": proxy_node_latency_cancelled(value),
-            "latency_ms": latency_value,
+            "latency_ms": proxy_node_latency_ms(value),
             "detail": str(value.get("detail") or "")[:160],
-            "attempts": _int_or_default(value.get("attempts"), 0),
+            "attempts": proxy_node_latency_attempts(value),
             "measured_at": str(value.get("measured_at") or ""),
         }
     return results
@@ -1902,7 +1900,7 @@ def sort_proxy_subscription_nodes(
         latency = proxy_node_latency_ms(latency_result) if latency_fresh else None
         if latency_fresh and proxy_node_latency_ok(latency_result):
             status_sort = 0
-        elif latency_fresh:
+        elif proxy_node_latency_explicitly_unreachable(latency_result):
             status_sort = 2
         else:
             status_sort = 1
@@ -2106,8 +2104,8 @@ class _QuickTCPResolver:
                     return future.result()
 
 
-def _quick_tcp_connect(addresses, port, deadline, cancel_event=None):
-    """Try numeric addresses within one budget, without re-entering DNS."""
+def _quick_tcp_addresses(addresses, port):
+    """Deduplicate and interleave address families, retaining the OS preference."""
     unique = []
     seen = set()
     for family, socktype, proto, _canon, address in addresses:
@@ -2117,36 +2115,104 @@ def _quick_tcp_connect(addresses, port, deadline, cancel_event=None):
             seen.add(identity)
             unique.append(identity)
     if not unique:
+        return unique
+    preferred_family = unique[0][0]
+    preferred = [item for item in unique if item[0] == preferred_family]
+    alternate = [item for item in unique if item[0] != preferred_family]
+    ordered = []
+    for index in range(max(len(preferred), len(alternate))):
+        if index < len(preferred):
+            ordered.append(preferred[index])
+        if index < len(alternate):
+            ordered.append(alternate[index])
+    return ordered
+
+
+def _quick_tcp_connect(addresses, port, deadline, cancel_event=None):
+    """Race a bounded address window without dividing a valid connect's budget."""
+    unique = _quick_tcp_addresses(addresses, port)
+    if not unique:
         raise OSError("DNS 未返回可用 TCP 地址")
     last_error = None
     pending_errors = {errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, 10035, 10036, 10037}
-    for index, (family, socktype, proto, target) in enumerate(unique):
-        remaining = _quick_tcp_remaining(deadline, cancel_event)
-        # A blackholed IPv6 address must leave a share of the budget for IPv4.
-        address_deadline = time.monotonic() + remaining / (len(unique) - index)
+    next_index = 0
+    active = {}
+
+    def close(connection):
         try:
-            with socket.socket(family, socktype, proto) as connection:
-                connection.setblocking(False)
-                error = connection.connect_ex(target)
-                if error in (0, errno.EISCONN, 10056):
-                    return
-                if error not in pending_errors:
-                    raise OSError(error, "TCP 连接失败")
-                while True:
-                    remaining = min(_quick_tcp_remaining(deadline, cancel_event), address_deadline - time.monotonic())
-                    if remaining <= 0:
-                        raise TimeoutError("该地址连接超时")
-                    _readable, writable, exceptional = select.select([], [connection], [connection], min(0.05, remaining))
-                    if not writable and not exceptional:
-                        continue
-                    error = connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                    if error:
+            connection.close()
+        except Exception:
+            pass
+
+    try:
+        while active or next_index < len(unique):
+            _quick_tcp_remaining(deadline, cancel_event)
+            # Keep the first interleaved pair alive for the entire budget.
+            # Only the extra probing slots rotate, so blackholed front entries
+            # cannot prevent all later DNS addresses from being attempted.
+            if next_index < len(unique) and len(active) == PROXY_LATENCY_MAX_ACTIVE_ADDRESSES:
+                now = time.monotonic()
+                expired = sorted(
+                    ((expires, connection) for connection, expires in active.items()
+                     if expires is not None and expires <= now), key=lambda item: item[0],
+                )
+                for _expires, connection in expired[:len(unique) - next_index]:
+                    active.pop(connection)
+                    close(connection)
+            while next_index < len(unique) and len(active) < PROXY_LATENCY_MAX_ACTIVE_ADDRESSES:
+                address_index = next_index
+                address = unique[next_index]
+                next_index += 1
+                _quick_tcp_remaining(deadline, cancel_event)
+                family, socktype, proto, target = address
+                connection = None
+                try:
+                    connection = socket.socket(family, socktype, proto)
+                    connection.setblocking(False)
+                    error = connection.connect_ex(target)
+                    if error in (0, errno.EISCONN, 10056):
+                        return
+                    if error not in pending_errors:
                         raise OSError(error, "TCP 连接失败")
-                    return
-        except InterruptedError:
-            raise
-        except Exception as exc:
-            last_error = exc
+                    if len(unique) <= PROXY_LATENCY_MAX_ACTIVE_ADDRESSES or address_index < 2:
+                        active[connection] = None
+                    else:
+                        primary_count = sum(expires is None for expires in active.values())
+                        rotating_count = len(active) - primary_count
+                        rotating_slots = PROXY_LATENCY_MAX_ACTIVE_ADDRESSES - primary_count
+                        outstanding = len(unique) - next_index + rotating_count + 1
+                        waves = max(1, (outstanding + rotating_slots - 1) // rotating_slots)
+                        active[connection] = time.monotonic() + _quick_tcp_remaining(deadline, cancel_event) / waves
+                except InterruptedError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                finally:
+                    if connection is not None and connection not in active:
+                        close(connection)
+            if not active:
+                continue
+            remaining = _quick_tcp_remaining(deadline, cancel_event)
+            if next_index < len(unique):
+                expirations = [expires for expires in active.values() if expires is not None]
+                if expirations:
+                    remaining = min(remaining, min(expirations) - time.monotonic())
+                    if remaining <= 0:
+                        continue
+            _readable, writable, exceptional = select.select([], list(active), list(active), min(0.05, remaining))
+            for connection in set(writable) | set(exceptional):
+                try:
+                    error = connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if not error:
+                        return
+                    last_error = OSError(error, "TCP 连接失败")
+                except Exception as exc:
+                    last_error = exc
+                active.pop(connection, None)
+                close(connection)
+    finally:
+        for connection in active:
+            close(connection)
     if last_error is not None:
         raise last_error
 
@@ -3129,33 +3195,60 @@ def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_e
 
 
 def proxy_node_latency_ok(result: ProxyNodeLatencyResult | dict | None) -> bool:
-    if proxy_node_latency_cancelled(result):
+    if proxy_node_latency_cancelled(result) or proxy_node_latency_invalid(result):
         return False
     if isinstance(result, ProxyNodeLatencyResult):
-        return bool(result.ok and result.latency_ms is not None)
+        return result.ok is True and proxy_node_latency_ms(result) is not None
     if isinstance(result, dict):
-        return bool(result.get("ok") and proxy_node_latency_ms(result) is not None)
+        return result.get("ok") is True and proxy_node_latency_ms(result) is not None
     return False
 
 
 def proxy_node_latency_cancelled(result: ProxyNodeLatencyResult | dict | None) -> bool:
     if isinstance(result, ProxyNodeLatencyResult):
-        return bool(result.cancelled)
+        return result.cancelled is True
     if isinstance(result, dict):
         return result.get("cancelled") is True
     return False
 
 
-def proxy_node_latency_ms(result: ProxyNodeLatencyResult | dict | None) -> int | None:
+def _proxy_latency_integer(value, *, minimum: int = 0) -> int | None:
+    """Accept legacy integer strings within a portable signed-32-bit range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not minimum <= number <= 2**31 - 1 or (isinstance(value, float) and value != number):
+        return None
+    return number
+
+
+def proxy_node_latency_invalid(result: ProxyNodeLatencyResult | dict | None) -> bool:
+    if result is None:
+        return False
     if isinstance(result, ProxyNodeLatencyResult):
-        return int(result.latency_ms) if result.latency_ms is not None else None
-    if isinstance(result, dict):
+        ok, cancelled = result.ok, result.cancelled
+    elif isinstance(result, dict):
+        ok, cancelled = result.get("ok"), result.get("cancelled", False)
+    else:
+        return True
+    if not isinstance(ok, bool) or not isinstance(cancelled, bool):
+        return True
+    return bool(ok and not cancelled and proxy_node_latency_ms(result) is None)
+
+
+def proxy_node_latency_ms(result: ProxyNodeLatencyResult | dict | None) -> int | None:
+    if proxy_node_latency_cancelled(result):
+        return None
+    if isinstance(result, ProxyNodeLatencyResult):
+        value = result.latency_ms
+    elif isinstance(result, dict):
         value = result.get("latency_ms")
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
-    return None
+    else:
+        return None
+    return _proxy_latency_integer(value, minimum=1)
 
 
 def proxy_node_latency_detail(result: ProxyNodeLatencyResult | dict | None) -> str:
@@ -3168,13 +3261,17 @@ def proxy_node_latency_detail(result: ProxyNodeLatencyResult | dict | None) -> s
 
 def proxy_node_latency_attempts(result: ProxyNodeLatencyResult | dict | None) -> int:
     if isinstance(result, ProxyNodeLatencyResult):
-        return int(result.attempts or 0)
-    if isinstance(result, dict):
-        return _int_or_default(result.get("attempts"), 0)
-    return 0
+        value = result.attempts
+    elif isinstance(result, dict):
+        value = result.get("attempts")
+    else:
+        return 0
+    return _proxy_latency_integer(value) or 0
 
 
 def proxy_node_latency_label(result: ProxyNodeLatencyResult | dict | None) -> str:
+    if proxy_node_latency_invalid(result):
+        return "结果无效"
     if proxy_node_latency_cancelled(result):
         return "已取消"
     if result is not None and not proxy_node_latency_fresh(result):
@@ -3212,6 +3309,7 @@ def proxy_node_latency_explicitly_unreachable(
 ) -> bool:
     return bool(
         not proxy_node_latency_cancelled(result)
+        and not proxy_node_latency_invalid(result)
         and proxy_node_latency_fresh(result)
         and not proxy_node_latency_ok(result)
     )
@@ -9281,6 +9379,7 @@ ATTEMPTS = {attempts}
 MAX_WORKERS = {max_workers}
 QUICK = {bool(quick)!r}
 DNS_SLOTS = threading.BoundedSemaphore({PROXY_LATENCY_DNS_MAX_WORKERS})
+MAX_ACTIVE_ADDRESSES = {PROXY_LATENCY_MAX_ACTIVE_ADDRESSES}
 DNS_LOCK = threading.Lock()
 DNS_FUTURES = {{}}
 
@@ -9325,45 +9424,114 @@ def quick_resolve(host, deadline):
             future.set_exception(exc)
     return future.result(timeout=remaining(deadline))
 
+def quick_addresses(addresses, port):
+    unique, seen = [], set()
+    for family, kind, proto, _canon, address in addresses:
+        target = (address[0], port, *address[2:])
+        identity = (family, kind, proto, target)
+        if identity not in seen:
+            seen.add(identity)
+            unique.append(identity)
+    if not unique:
+        return unique
+    preferred_family = unique[0][0]
+    preferred = [item for item in unique if item[0] == preferred_family]
+    alternate = [item for item in unique if item[0] != preferred_family]
+    ordered = []
+    for index in range(max(len(preferred), len(alternate))):
+        if index < len(preferred):
+            ordered.append(preferred[index])
+        if index < len(alternate):
+            ordered.append(alternate[index])
+    return ordered
+
+def quick_connect(addresses, port, deadline):
+    unique = quick_addresses(addresses, port)
+    if not unique:
+        raise OSError("DNS 未返回可用 TCP 地址")
+    last_error = None
+    pending_errors = {{errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, 10035, 10036, 10037}}
+    next_index, active = 0, {{}}
+    def close(connection):
+        try:
+            connection.close()
+        except Exception:
+            pass
+    try:
+        while active or next_index < len(unique):
+            remaining(deadline)
+            if next_index < len(unique) and len(active) == MAX_ACTIVE_ADDRESSES:
+                now = time.monotonic()
+                expired = sorted(
+                    ((expires, connection) for connection, expires in active.items()
+                     if expires is not None and expires <= now), key=lambda item: item[0],
+                )
+                for _expires, connection in expired[:len(unique) - next_index]:
+                    active.pop(connection)
+                    close(connection)
+            while next_index < len(unique) and len(active) < MAX_ACTIVE_ADDRESSES:
+                address_index = next_index
+                address = unique[next_index]
+                next_index += 1
+                remaining(deadline)
+                family, kind, proto, target = address
+                connection = None
+                try:
+                    connection = socket.socket(family, kind, proto)
+                    connection.setblocking(False)
+                    error = connection.connect_ex(target)
+                    if error in (0, errno.EISCONN, 10056):
+                        return
+                    if error not in pending_errors:
+                        raise OSError(error, "TCP 连接失败")
+                    if len(unique) <= MAX_ACTIVE_ADDRESSES or address_index < 2:
+                        active[connection] = None
+                    else:
+                        primary_count = sum(expires is None for expires in active.values())
+                        rotating_count = len(active) - primary_count
+                        rotating_slots = MAX_ACTIVE_ADDRESSES - primary_count
+                        outstanding = len(unique) - next_index + rotating_count + 1
+                        waves = max(1, (outstanding + rotating_slots - 1) // rotating_slots)
+                        active[connection] = time.monotonic() + remaining(deadline) / waves
+                except InterruptedError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                finally:
+                    if connection is not None and connection not in active:
+                        close(connection)
+            if not active:
+                continue
+            budget = remaining(deadline)
+            if next_index < len(unique):
+                expirations = [expires for expires in active.values() if expires is not None]
+                if expirations:
+                    budget = min(budget, min(expirations) - time.monotonic())
+                    if budget <= 0:
+                        continue
+            _readable, writable, exceptional = select.select([], list(active), list(active), min(0.05, budget))
+            for connection in set(writable) | set(exceptional):
+                try:
+                    error = connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if not error:
+                        return
+                    last_error = OSError(error, "TCP 连接失败")
+                except Exception as exc:
+                    last_error = exc
+                active.pop(connection, None)
+                close(connection)
+    finally:
+        for connection in active:
+            close(connection)
+    if last_error is not None:
+        raise last_error
+
 def measure_quick(key, server, port):
     started = time.monotonic()
     deadline = started + TIMEOUT
     try:
-        addresses, seen = [], set()
-        for family, kind, proto, _canon, address in quick_resolve(server, deadline):
-            target = (address[0], port, *address[2:])
-            identity = (family, kind, proto, target)
-            if identity not in seen:
-                addresses.append(identity)
-                seen.add(identity)
-        if not addresses:
-            raise OSError("DNS 未返回可用 TCP 地址")
-        last_error = None
-        pending = {{errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, 10035, 10036, 10037}}
-        for index, (family, kind, proto, target) in enumerate(addresses):
-            address_deadline = time.monotonic() + remaining(deadline) / (len(addresses) - index)
-            try:
-                with socket.socket(family, kind, proto) as connection:
-                    connection.setblocking(False)
-                    error = connection.connect_ex(target)
-                    if error not in (0, errno.EISCONN, 10056):
-                        if error not in pending:
-                            raise OSError(error, "TCP 连接失败")
-                        while True:
-                            budget = min(remaining(deadline), address_deadline - time.monotonic())
-                            if budget <= 0:
-                                raise TimeoutError("该地址连接超时")
-                            _readable, writable, exceptional = select.select([], [connection], [connection], min(0.05, budget))
-                            if not writable and not exceptional:
-                                continue
-                            error = connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                            if error:
-                                raise OSError(error, "TCP 连接失败")
-                            break
-                return key, 1, str(max(1, int((time.monotonic() - started) * 1000))), "TCP 快速检查：单次连接，仅验证端口连通"
-            except Exception as exc:
-                last_error = exc
-        raise last_error
+        quick_connect(quick_resolve(server, deadline), port, deadline)
+        return key, 1, str(max(1, int((time.monotonic() - started) * 1000))), "TCP 快速检查：单次连接，仅验证端口连通"
     except Exception as exc:
         return key, 0, "", clean(exc) or type(exc).__name__
 

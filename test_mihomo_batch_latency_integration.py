@@ -20,7 +20,7 @@ from core import local_proxy, remote_proxy
 
 
 class LoopbackProxy:
-    def __init__(self, stack, *, delay=0.015):
+    def __init__(self, stack, *, delay=0.015, status=204):
         self.hits = Counter()
         owner = self
 
@@ -31,10 +31,17 @@ class LoopbackProxy:
             def do_GET(self):
                 owner.hits[self.path] += 1
                 time.sleep(delay)
-                self.send_response(204)
-                self.send_header("Content-Length", "0")
+                body = b"<html>synthetic intercepted error page</html>" if status == 200 else b""
+                self.send_response(status)
+                if status == 302:
+                    self.send_header("Location", "http://127.0.0.1:1/must-not-follow")
+                self.send_header("Content-Length", str(len(body)))
+                if body:
+                    self.send_header("Content-Type", "text/html")
                 self.send_header("Connection", "close")
                 self.end_headers()
+                if body and self.command != "HEAD":
+                    self.wfile.write(body)
                 self.close_connection = True
 
             def do_CONNECT(self):
@@ -98,6 +105,30 @@ def test_real_batch_alias_probes_are_authenticated_and_never_select_direct(monke
             assert not sentinel.hits
     assert local_proxy._ISOLATED_MIHOMO_PROCESSES == before_processes
     assert local_proxy._ISOLATED_MIHOMO_DIRECTORIES == before_directories
+
+
+@pytest.mark.parametrize("status", [503, 403, 302, 200, 204])
+def test_real_batch_rejects_wrong_target_status_despite_successful_delay_api(monkeypatch, status):
+    binary = binary_path()
+    monkeypatch.setattr(local_proxy, "_ISOLATED_MIHOMO_SHUTTING_DOWN", threading.Event())
+    with ExitStack() as stack:
+        upstream = LoopbackProxy(stack, status=status)
+        sentinel = LoopbackProxy(stack)
+        url = f"http://127.0.0.1:{sentinel.server.server_port}/health"
+        with local_proxy._isolated_mihomo_batch_session(binary, [upstream.node]) as session:
+            name = session.route_names[0]
+            if status == 204:
+                assert local_proxy._probe_isolated_mihomo_batch_delay(session, name, 2, probe_url=url) > 0
+            else:
+                with pytest.raises(RuntimeError, match="预期 HTTP 204 验证"):
+                    local_proxy._probe_isolated_mihomo_batch_delay(session, name, 2, probe_url=url)
+                # The core's generic successful latency is not authoritative:
+                # only its per-URL history records expected-status rejection.
+                state = local_proxy._isolated_batch_controller_request(session, "/proxies/" + name)
+                assert state["alive"] is True
+                assert state["extra"][url]["alive"] is False
+            assert upstream.hits
+            assert not sentinel.hits
 
 
 def test_real_batch_reduces_core_startups_for_full_node_list(monkeypatch):

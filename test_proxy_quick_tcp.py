@@ -166,6 +166,9 @@ class _PendingSocket:
         return self
 
     def __exit__(self, *_args):
+        self.close()
+
+    def close(self):
         self.closed = True
 
     def setblocking(self, _value):
@@ -179,7 +182,7 @@ class _PendingSocket:
         return 0
 
 
-def test_multiple_addresses_share_budget_and_second_address_can_succeed(monkeypatch):
+def test_multiple_addresses_race_and_second_address_can_succeed(monkeypatch):
     clock = [10.0]
     sockets = []
 
@@ -190,13 +193,13 @@ def test_multiple_addresses_share_budget_and_second_address_can_succeed(monkeypa
 
     def ready(_reads, writes, _errors, timeout):
         clock[0] += timeout
-        return ([], writes, []) if writes[0].target[0].endswith("2") else ([], [], [])
+        return [], [sock for sock in writes if sock.target[0].endswith("2")], []
 
     monkeypatch.setattr(remote_proxy.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(remote_proxy.socket, "socket", make_socket)
     monkeypatch.setattr(remote_proxy.select, "select", ready)
     remote_proxy._quick_tcp_connect(_addresses("192.0.2.1", "192.0.2.2"), 443, 10.4)
-    assert 10.2 <= clock[0] < 10.4
+    assert 10.0 < clock[0] < 10.2
     assert len(sockets) == 2 and all(sock.closed for sock in sockets)
 
 

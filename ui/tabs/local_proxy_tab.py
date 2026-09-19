@@ -3358,7 +3358,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 + ("正在取消并回收临时资源…" if cancel.is_set() else "其余节点仍在检测。")
             )
 
-        progress = CoalescedProgress(self._run_on_ui_thread, show_progress)
+        progress = CoalescedProgress(
+            self._run_on_ui_thread, show_progress,
+            interval=1.0 if len(scope_keys) >= 256 else 0.25,
+        )
 
         def report(_completed, _total, result):
             if result.node_key in scope_keys:
@@ -3533,7 +3536,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 f"失败 {len(partial) - passed}；其余节点仍在测试，尚未进行 AI 稳定性验证。"
             )
 
-        progress = CoalescedProgress(self._run_on_ui_thread, show_progress)
+        progress = CoalescedProgress(
+            self._run_on_ui_thread, show_progress,
+            interval=1.0 if len(scope_keys) >= 256 else 0.25,
+        )
 
         def report(_completed, _total, result):
             if result.node_key in scope_keys:

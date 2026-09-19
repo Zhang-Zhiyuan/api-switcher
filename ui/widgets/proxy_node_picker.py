@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 
 import customtkinter as ctk
 
@@ -17,10 +18,31 @@ def _proxy_node_picker_layout(width: int) -> tuple[int, bool]:
     return (4 if available >= 560 else (2 if available >= 360 else 1)), available < 420
 
 
+def _latency_transition_at(result, now):
+    """Next freshness boundary; no timers or per-row clock reads."""
+    if (result is None or remote_proxy.proxy_node_latency_cancelled(result)
+            or remote_proxy.proxy_node_latency_invalid(result)):
+        return None
+    try:
+        stamp = datetime.fromisoformat(remote_proxy.proxy_node_latency_measured_at(result).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        measured = stamp.timestamp()
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return None
+    # Match the core's five-minute tolerance for future timestamps. A clock
+    # adjustment can make such a result usable later without reloading nodes.
+    future_boundary = measured - 300
+    if future_boundary > now:
+        return future_boundary
+    expires = measured + remote_proxy.PROXY_LATENCY_CACHE_TTL_SECONDS + 0.001
+    return expires if expires > now else None
+
+
 class ProxyNodePicker(ctk.CTkFrame):
     """Searchable, scrollable picker for large proxy subscriptions."""
 
-    FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速", "已取消")
+    FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速", "已取消", "已过期")
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     RENDER_BATCH_SIZE = 3
@@ -63,6 +85,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._last_match_count = 0
         self._last_visible_count = 0
         self._metadata_version = 0
+        self._metadata_checked_at = None
+        self._metadata_next_expiry = None
         self._filter_cache_key = None
         self._filter_cache_nodes = ()
         self._search_entry = None
@@ -327,7 +351,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._update_summary_label()
 
     def _resume_background_work(self):
-        if not self._render_deferred:
+        expired = self._ensure_temporal_metadata()
+        if not self._render_deferred and not expired:
             return
         self._render_deferred = False
         self._request_render_nodes(20)
@@ -860,7 +885,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             str(node.get("name") or item.display_name()),
             " · ".join(part for part in meta_parts if part),
             str(meta.get("latency_label") or ""),
-            self._latency_color(meta.get("latency")),
+            self._latency_color(meta.get("latency"), fresh=meta.get("latency_fresh")),
             self._quality_badge_text(meta),
             self._quality_color(quality),
         )
@@ -1145,6 +1170,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         ok_count = int(self._summary_counts.get("ok") or 0)
         measured_count = int(self._summary_counts.get("measured") or 0)
         cancelled_count = int(self._summary_counts.get("cancelled") or 0)
+        expired_count = int(self._summary_counts.get("expired") or 0)
         quality_count = int(self._summary_counts.get("quality") or 0)
         high_quality_count = int(self._summary_counts.get("high_quality") or 0)
         cached_quality_count = int(self._summary_counts.get("cached_quality") or 0)
@@ -1152,6 +1178,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         suffix = ""
         if cancelled_count:
             suffix += f"；已取消 {cancelled_count}"
+        if expired_count:
+            suffix += f"；已过期 {expired_count}"
         if self._render_plan_pending:
             suffix += "；正在分批渲染"
         self._summary_label.configure(
@@ -1212,6 +1240,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             pass
 
     def _filtered_nodes(self):
+        self._ensure_temporal_metadata()
         query = self._search_text()
         mode = self._filter_combo.get() if self._filter_combo else "全部"
         if mode not in self.FILTER_OPTIONS:
@@ -1233,13 +1262,16 @@ class ProxyNodePicker(ctk.CTkFrame):
             latency_ok = bool(meta.get("latency_ok"))
             latency_measured = bool(meta.get("latency_measured"))
             latency_cancelled = bool(meta.get("latency_cancelled"))
+            latency_expired = bool(meta.get("latency_expired"))
             if mode == "可连" and not latency_ok:
                 continue
-            if mode == "不可连" and (not latency_measured or latency_ok or latency_cancelled):
+            if mode == "不可连" and not meta.get("latency_unreachable"):
                 continue
             if mode == "未测速" and latency_measured:
                 continue
             if mode == "已取消" and not latency_cancelled:
+                continue
+            if mode == "已过期" and not latency_expired:
                 continue
             if not self._quality_matches(quality_filter, meta):
                 continue
@@ -1320,11 +1352,14 @@ class ProxyNodePicker(ctk.CTkFrame):
         return self._build_item_metadata(item)
 
     def _build_node_metadata(self):
+        now = time.time()
+        next_expiry = None
         self._node_meta = {}
         counts = {
             "ok": 0,
             "measured": 0,
             "cancelled": 0,
+            "expired": 0,
             "quality": 0,
             "high_quality": 0,
             "cached_quality": 0,
@@ -1338,6 +1373,11 @@ class ProxyNodePicker(ctk.CTkFrame):
                 counts["measured"] += 1
             if meta.get("latency_cancelled"):
                 counts["cancelled"] += 1
+            if meta.get("latency_expired"):
+                counts["expired"] += 1
+            transition = _latency_transition_at(meta.get("latency"), now)
+            if transition is not None and (next_expiry is None or transition < next_expiry):
+                next_expiry = transition
             if meta.get("quality_measured"):
                 counts["quality"] += 1
             if meta.get("quality_ai_ok"):
@@ -1345,8 +1385,22 @@ class ProxyNodePicker(ctk.CTkFrame):
             if meta.get("quality_cached"):
                 counts["cached_quality"] += 1
         self._summary_counts = counts
+        self._metadata_checked_at = now
+        self._metadata_next_expiry = next_expiry
         self._metadata_version += 1
         self._invalidate_filter_cache()
+
+    def _ensure_temporal_metadata(self):
+        """Refresh on display/filter/activation, never poll a hidden tab."""
+        checked = getattr(self, "_metadata_checked_at", None)
+        if checked is None:
+            return False
+        now = time.time()
+        deadline = getattr(self, "_metadata_next_expiry", None)
+        if (deadline is not None and now >= deadline) or now < checked - 1:
+            self._build_node_metadata()
+            return True
+        return False
 
     def _invalidate_filter_cache(self):
         self._filter_cache_key = None
@@ -1364,6 +1418,9 @@ class ProxyNodePicker(ctk.CTkFrame):
             region = "其他"
         latency = self._latency_results.get(node_key)
         quality = self._quality_results.get(node_key)
+        latency_invalid = remote_proxy.proxy_node_latency_invalid(latency)
+        latency_fresh = not latency_invalid and remote_proxy.proxy_node_latency_fresh(latency)
+        latency_cancelled = remote_proxy.proxy_node_latency_cancelled(latency)
         latency_label = remote_proxy.proxy_node_latency_label(latency)
         latency_detail = remote_proxy.proxy_node_latency_detail(latency)
         quality_label = remote_proxy.proxy_node_quality_label(quality)
@@ -1407,11 +1464,14 @@ class ProxyNodePicker(ctk.CTkFrame):
             "latency_label": latency_label,
             "latency_detail": latency_detail,
             "latency_ok": (
-                remote_proxy.proxy_node_latency_fresh(latency)
+                latency_fresh
                 and remote_proxy.proxy_node_latency_ok(latency)
             ),
-            "latency_measured": latency is not None,
-            "latency_cancelled": remote_proxy.proxy_node_latency_cancelled(latency),
+            "latency_fresh": latency_fresh,
+            "latency_unreachable": remote_proxy.proxy_node_latency_explicitly_unreachable(latency),
+            "latency_measured": latency is not None and not latency_invalid,
+            "latency_cancelled": latency_cancelled,
+            "latency_expired": latency is not None and not latency_cancelled and not latency_invalid and not latency_fresh,
             "quality": quality,
             "quality_label": quality_label,
             "quality_confidence": quality_confidence,
@@ -1480,8 +1540,11 @@ class ProxyNodePicker(ctk.CTkFrame):
             text = text.replace("缓存命中，跳过重复评测", "").strip()
         return text[:70] + ("..." if len(text) > 70 else "")
 
-    def _latency_color(self, result) -> str:
-        if remote_proxy.proxy_node_latency_cancelled(result):
+    def _latency_color(self, result, *, fresh=None) -> str:
+        if fresh is None:
+            fresh = remote_proxy.proxy_node_latency_fresh(result)
+        if (remote_proxy.proxy_node_latency_cancelled(result) or remote_proxy.proxy_node_latency_invalid(result)
+                or not fresh):
             return COLORS["muted_soft"]
         if remote_proxy.proxy_node_latency_ok(result):
             return COLORS["success"]

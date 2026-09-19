@@ -1,6 +1,7 @@
 """Batch quick probes keep complete results without touching the managed proxy."""
 from contextlib import contextmanager
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import http.client
 import json
 from pathlib import Path
@@ -272,13 +273,18 @@ def test_batch_controller_is_loopback_authenticated_bounded_and_never_redirected
 
     class Connection:
         def __init__(self, host, port, timeout):
-            assert host == "127.0.0.1" and port == 1234 and timeout == 6
+            assert host == "127.0.0.1" and port == 1234 and timeout in (1, 6)
 
         def request(self, method, path, headers):
             requests.append((method, path, headers))
 
         def getresponse(self):
-            return SimpleNamespace(status=response_status[0], read=lambda _size: json.dumps({"delay": 17}).encode(),
+            payload = {"delay": 17} if "/delay?" in requests[-1][1] else {
+                "name": "node", "extra": {"https://www.gstatic.com/generate_204": {
+                    "alive": True, "history": [{"time": datetime.now(timezone.utc).isoformat(), "delay": 17}],
+                }},
+            }
+            return SimpleNamespace(status=response_status[0], read=lambda _size: json.dumps(payload).encode(),
                                    headers={})
 
         def close(self):
@@ -296,10 +302,60 @@ def test_batch_controller_is_loopback_authenticated_bounded_and_never_redirected
     response_status[0] = 302
     with pytest.raises(RuntimeError, match="HTTP 302"):
         local_proxy._probe_isolated_mihomo_batch_delay(session, "node", 5)
-    assert len(requests) == len(closed) == 2
+    assert len(requests) == len(closed) == 3
     with pytest.raises(ValueError, match="不属于"):
         local_proxy._probe_isolated_mihomo_batch_delay(session, "DIRECT", 5)
-    assert len(requests) == 2
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize("problem", [
+    "wrong_status", "wrong_url", "wrong_alias", "missing_extra", "missing_history", "missing_time",
+    "old_success", "old_last_record", "future_time", "near_future_time", "different_delay", "malformed_delay", "missing_alive",
+])
+def test_batch_checks_this_alias_this_url_and_this_attempt_not_generic_success(monkeypatch, problem):
+    session = local_proxy._IsolatedMihomoBatchSession(1234, "synthetic-secret", ("node",))
+    target = "https://www.gstatic.com/generate_204"
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    def controller(_session, path, **_):
+        if "/delay?" in path:
+            return {"delay": 17}
+        assert path == "/proxies/node"
+        record = {"time": datetime.now(timezone.utc).isoformat(), "delay": 17}
+        specific = {"alive": True, "history": [record]}
+        state = {"name": "node", "alive": True, "history": [dict(record)], "extra": {target: specific}}
+        if problem == "wrong_status":
+            specific["alive"] = False
+            record["delay"] = 0
+        elif problem == "wrong_url":
+            state["extra"] = {"https://another.example.test/health": specific}
+        elif problem == "wrong_alias":
+            state["name"] = "other-node"
+        elif problem == "missing_extra":
+            state.pop("extra")
+        elif problem == "missing_history":
+            specific["history"] = []
+        elif problem == "missing_time":
+            record.pop("time")
+        elif problem == "old_success":
+            record["time"] = before.isoformat()
+        elif problem == "old_last_record":
+            specific["history"].append({"time": before.isoformat(), "delay": 17})
+        elif problem == "future_time":
+            record["time"] = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        elif problem == "near_future_time":
+            record["time"] = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        elif problem == "different_delay":
+            record["delay"] = 18
+        elif problem == "malformed_delay":
+            record["delay"] = True
+        elif problem == "missing_alive":
+            specific.pop("alive")
+        return state
+
+    monkeypatch.setattr(local_proxy, "_isolated_batch_controller_request", controller)
+    with pytest.raises(RuntimeError):
+        local_proxy._probe_isolated_mihomo_batch_delay(session, "node", 5)
 
 
 @pytest.mark.parametrize("stage", ["body", "startup", "cancel"])
