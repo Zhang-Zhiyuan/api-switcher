@@ -18,7 +18,7 @@ def test_overview_distinguishes_fixed_automatic_default_and_disabled_routes():
     assert _describe("claude", prefs)["hint"] == "固定节点 · 不自动换出口"
     assert _describe("google_ai", prefs)["node"] == "沿用默认节点策略"
     prefs["service_node_bindings"].pop("claude")
-    assert _describe("claude", prefs)["hint"] == "自动切换 · 仅限此订阅"
+    assert _describe("claude", prefs)["hint"] == "自动切换 · 仅限此订阅，备用按服务策略筛选"
     prefs["builtin_sites"]["youtube"] = False
     description = _describe("youtube", prefs)
     assert description["profile"] == "机房订阅 B"
@@ -62,6 +62,50 @@ def test_overview_displays_manual_network_tag_and_preserves_google_home_route():
     assert "建议非家宽" in desc["hint"]
     assert not desc["warning"]  # A user-selected route is not a broken profile.
     assert prefs == before
+
+
+@pytest.mark.parametrize("service,tag,label", [
+    ("github", "residential", "非家宽"),
+    ("huggingface", "residential", "非家宽"),
+    ("discord", "residential", "非家宽"),
+    ("telegram", "residential", "非家宽"),
+    ("claude", "datacenter", "家宽"),
+    ("reddit", "datacenter", "家宽"),
+    ("x_twitter", "datacenter", "家宽"),
+])
+def test_default_type_hint_never_overrides_a_fixed_route(service, tag, label):
+    prefs = _preferences()
+    prefs["service_profile_bindings"][service] = "home"
+    prefs["service_node_bindings"][service] = "one"
+    prefs["builtin_sites"][service] = True
+    catalog = _catalog()
+    catalog[0]["network_type"] = tag
+    before = copy.deepcopy(prefs)
+    row = next(item for item in proxy_routing.route_rows(prefs) if item["id"] == service)
+    desc = route_description(row, prefs, catalog)
+    assert f"建议{label}" in desc["hint"] and "固定节点" in desc["hint"]
+    assert not desc["warning"]
+    assert prefs == before
+
+
+def test_automatic_subscription_with_one_node_does_not_claim_available_failover():
+    prefs = _preferences()
+    prefs["service_node_bindings"].pop("youtube")
+    desc = _describe("youtube", prefs)
+    assert "暂无备用" in desc["node"] and "暂无备用" in desc["hint"]
+    assert not desc["warning"]  # Valid to deploy one node, but cannot fail over.
+    prefs["builtin_sites"]["youtube"] = False
+    assert "不新增专属规则" in _describe("youtube", prefs)["hint"]
+
+
+def test_renamed_duplicate_candidates_do_not_count_as_a_backup():
+    prefs = _preferences()
+    prefs["service_node_bindings"].pop("claude")
+    catalog = _catalog()
+    catalog[0]["auto_route_candidate_count"] = 1
+    row = next(item for item in proxy_routing.route_rows(prefs) if item["id"] == "claude")
+    desc = route_description(row, prefs, catalog)
+    assert "暂无备用" in desc["node"] and "暂无备用" in desc["hint"]
 
 
 @pytest.fixture

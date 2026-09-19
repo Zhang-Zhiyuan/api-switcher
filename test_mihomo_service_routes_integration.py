@@ -19,6 +19,11 @@ from test_local_proxy_service_routing import _patch_profiles
 
 def _upstream(label, stack):
     class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_GET(self):
             content = label.encode("ascii")
             self.send_response(200)
@@ -121,6 +126,23 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         home_route = local_proxy._subscription_route_group_name("home", "openai")
         dc_route = local_proxy._subscription_route_group_name("dc", "youtube")
         parsed = yaml.safe_load(config)
+        # Multi-node groups remain health-checked even when a caller requests
+        # health_checked=False. Sanitize the *generated* groups, not merely the
+        # input options, so no AI/public background probes escape this test.
+        for group in parsed["proxy-groups"]:
+            if "url" in group:
+                group["url"] = f"http://127.0.0.1:{first['port']}/health"
+                group["expected-status"] = "200"
+        parsed["dns"] = {"enable": False}
+        parsed["ipv6"] = False
+        parsed["allow-lan"] = False
+        parsed["bind-address"] = "127.0.0.1"
+        # Fail closed on any unexpected test destination. All asserted rules
+        # below must still match their generated managed subscription group.
+        parsed["rules"] = ["MATCH,REJECT" if rule.startswith("MATCH,") else rule
+                           for rule in parsed["rules"]]
+        assert all(node["server"] == "127.0.0.1" for node in parsed["proxies"])
+        assert not parsed.get("proxy-providers") and not parsed.get("rule-providers")
         parsed["rules"][:0] = [
             f"DOMAIN-KEYWORD,.keyword-only.test,{home_route}",
             f"DOMAIN-SUFFIX,keyword-only.test,{dc_route}",
@@ -156,6 +178,8 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 ("203.0.113.8", "home-one"), ("203.0.113.9", "datacenter"),
                 ("github.com", "datacenter"), ("raw.githubusercontent.com", "home-one"),
                 ("huggingface.co", "datacenter"), ("hf.co", "datacenter"), ("i.ytimg.com", "home-two"),
+                ("x.com", "home-one"), ("reddit.com", "home-one"),
+                ("discord.com", "datacenter"), ("telegram.org", "datacenter"),
             ):
                 actual_rule = proxy_route_diagnostics.match_rules(host, runtime["rules"], runtime["mode"])
                 saved_rule = proxy_route_diagnostics.match_rules(host, saved)

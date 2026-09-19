@@ -148,7 +148,7 @@ def load_route_catalog() -> list[dict]:
     for profile in remote_proxy.list_proxy_subscription_profiles(state):
         entry = {"id": profile["id"], "name": profile.get("name") or "未命名订阅", "nodes": [],
                  "network_type": remote_proxy.normalize_proxy_subscription_network_type(profile.get("network_type")),
-                 "auto_route_usable": False}
+                 "auto_route_usable": False, "auto_route_candidate_count": 0}
         try:
             cached = remote_proxy.load_cached_proxy_subscription(profile)
             if cached:
@@ -158,6 +158,18 @@ def load_route_catalog() -> list[dict]:
                     for index, item in enumerate(cached.nodes, 1)
                     if not str(item.node.get("dialer-proxy") or "").strip()
                 ]
+                # Node keys include display names; aliases of one connection
+                # are not separate fallback exits. Count only independent,
+                # normalized connections using the already loaded cache.
+                connection_keys = set()
+                for item in cached.nodes:
+                    if str(item.node.get("dialer-proxy") or "").strip():
+                        continue
+                    try:
+                        connection_keys.add(remote_proxy._proxy_node_connection_key(item.node))
+                    except (TypeError, ValueError):
+                        continue
+                entry["auto_route_candidate_count"] = len(connection_keys)
                 # Deployment uses the saved primary, or the first original
                 # node when it disappeared; never the first filtered node.
                 if cached.nodes:

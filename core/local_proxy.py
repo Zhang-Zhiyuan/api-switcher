@@ -4116,20 +4116,42 @@ def _service_route_health_contract(service_ids) -> tuple[str, str]:
 def _explicit_subscription_fallback_nodes(
     primary_node: dict,
     candidate_nodes,
+    latency_results: dict | None = None,
 ) -> tuple[dict, ...]:
-    """Keep an explicitly bound profile inside its own bounded node pool."""
+    """Keep a website's automatic failover inside its own bounded node pool.
+
+    Fresh connectivity results only prioritize candidates; a TCP success is not
+    evidence that the service works. Unknown/failed nodes remain eligible for
+    the kernel's live HTTPS checks, and stale observations have no preference.
+    """
 
     try:
         primary_connection_key = remote_proxy._proxy_node_connection_key(primary_node)
     except (TypeError, ValueError):
         return ()
+    latencies = latency_results if isinstance(latency_results, dict) else {}
+
+    def candidate_priority(item):
+        try:
+            result = latencies.get(remote_proxy.proxy_subscription_node_key(item))
+            if not remote_proxy.proxy_node_latency_fresh(result):
+                return (1, 0)
+            if remote_proxy.proxy_node_latency_ok(result):
+                latency = remote_proxy.proxy_node_latency_ms(result)
+                return (0, latency) if latency is not None and latency >= 0 else (1, 0)
+            return (2, 0)
+        except (TypeError, ValueError, OverflowError):
+            return (1, 0)
+
+    candidates = sorted(
+        (item for item in candidate_nodes or () if isinstance(item, remote_proxy.ProxySubscriptionNode)),
+        key=candidate_priority,
+    )
     selected = []
     seen = {primary_connection_key}
-    for item in candidate_nodes or ():
-        if len(selected) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES - 1:
+    for item in candidates:
+        if len(selected) >= remote_proxy.SERVICE_PROXY_FALLBACK_MAX_NODES - 1:
             break
-        if not isinstance(item, remote_proxy.ProxySubscriptionNode):
-            continue
         try:
             normalized = remote_proxy._normalize_proxy_node(item.node)
             connection_key = remote_proxy._proxy_node_connection_key(normalized)
@@ -4190,6 +4212,7 @@ def _selected_subscription_route_pool(
         fallback_nodes = _explicit_subscription_fallback_nodes(
             primary_node,
             cached.nodes,
+            profile.get("node_latencies"),
         )
     return primary_node, fallback_nodes
 

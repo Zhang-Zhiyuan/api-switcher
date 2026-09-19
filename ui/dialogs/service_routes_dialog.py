@@ -292,8 +292,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._changed()
         self._details.pack_forget()
         self._status.configure(
-            text=f"已为当前位置补齐 {added} 项草稿：AI 优先家宽，YouTube/Google 搜索优先非家宽。"
-                 "已有绑定和手动修改不覆盖；保存并应用后才生效。",
+            text=f"已补齐 {added} 项草稿：AI、X/Reddit 优先家宽，视频/搜索/下载/通信优先非家宽。"
+                 "保留已有绑定、已关闭目标和手动修改；保存并应用后生效。",
             text_color=COLORS["accent"] if added else COLORS["warning"],
         )
         if notices:

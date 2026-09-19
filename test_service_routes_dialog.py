@@ -81,11 +81,35 @@ def test_tagged_routes_only_fill_current_scope_and_preserve_pinned_bindings(edit
     assert draft["service_profile_bindings"]["google_ai"] == "home"
     assert draft["service_profile_bindings"]["google"] == "dc"
     assert draft["builtin_sites"]["google"] is True
+    for service in ("github", "huggingface", "discord", "telegram"):
+        assert draft["service_profile_bindings"][service] == "dc"
+        assert draft["builtin_sites"][service] is True
+    for service in ("x_twitter", "reddit"):
+        assert draft["service_profile_bindings"][service] == "home"
+        assert draft["builtin_sites"][service] is True
     assert draft["service_node_bindings"] == before[first]["service_node_bindings"]
     assert dialog._drafts[second] == before[second]
     assert dialog._originals == before and not saved
     assert dialog._preview_open
     assert "非家宽" in dialog._rows["google"]["profile"].get()
+
+
+def test_tagged_routes_keep_previously_saved_disabled_unbound_sites(editor):
+    _root, dialog, saved = editor
+    dialog._catalog[0]["network_type"] = "residential"
+    dialog._catalog[1]["network_type"] = "datacenter"
+    for prefs in (dialog._drafts[dialog._scope], dialog._originals[dialog._scope]):
+        prefs["builtin_sites"].update(google=False, reddit=False)
+    dialog._render()
+    assert not dialog._manually_edited[dialog._scope]
+    dialog._suggest_tagged_routes()
+    draft = dialog._drafts[dialog._scope]
+    for service in ("google", "reddit"):
+        assert service not in draft["service_profile_bindings"]
+        assert draft["builtin_sites"][service] is False
+        assert not dialog._rows[service]["enabled"].get()
+    assert draft["service_profile_bindings"]["github"] == "dc"
+    assert not saved
 
 
 def test_tagged_routes_do_not_undo_explicit_default_choice_even_if_unchanged(editor):
@@ -399,7 +423,7 @@ def test_change_preview_shows_removed_target_and_subscription_strategy_reset(edi
     dialog._toggle_preview()
     text = dialog._preview.get("1.0", "end")
     assert "家宽订阅 A" in text and "机房订阅 B" in text
-    assert "美国 · 家宽 02" in text and "订阅首选 + 故障切换" in text
+    assert "美国 · 家宽 02" in text and "订阅首选（暂无备用）" in text
     dialog._reset()
     assert not dialog._changes
     assert not saved

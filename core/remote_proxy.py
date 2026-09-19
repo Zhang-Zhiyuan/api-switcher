@@ -97,6 +97,10 @@ AI_PROXY_WSL_SHARE_MARKER = "# API-Switcher-WSL-Share: restricted"
 AI_PROXY_INTERNAL_NODE_NAME = "API-SWITCHER-NODE"
 AI_PROXY_FALLBACK_NODE_PREFIX = "API-SWITCHER-FALLBACK-"
 AI_PROXY_FALLBACK_MAX_NODES = 5
+# Website traffic can use a wider same-subscription pool. Keep it bounded so
+# each target's periodic checks do not fan out over a large subscription.
+SERVICE_PROXY_FALLBACK_MAX_NODES = 16
+SERVICE_PROXY_MAX_GROUPS = 64
 # Use the unauthenticated OpenAI API response as the live-route authority.  A
 # generic 200 page can stay reachable while the actual Codex/OpenAI path is
 # blocked.  Mihomo accepts multiple expected statuses separated by ``/``;
@@ -3396,7 +3400,11 @@ def _managed_mihomo_proxy_nodes(
     *,
     primary_name: str = AI_PROXY_INTERNAL_NODE_NAME,
     fallback_name_prefix: str = AI_PROXY_FALLBACK_NODE_PREFIX,
+    max_nodes: int | None = None,
 ) -> list[dict]:
+    limit = AI_PROXY_FALLBACK_MAX_NODES if max_nodes is None else max_nodes
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SERVICE_PROXY_FALLBACK_MAX_NODES:
+        raise ValueError("mihomo 受管节点池大小无效")
     primary = _normalize_proxy_node(primary_node)
     normalized_primary_name = _managed_proxy_route_name(
         primary_name,
@@ -3409,7 +3417,7 @@ def _managed_mihomo_proxy_nodes(
     nodes = [primary]
     seen = {_proxy_node_connection_key(primary_node)}
     for candidate in fallback_proxy_nodes or ():
-        if len(nodes) >= AI_PROXY_FALLBACK_MAX_NODES:
+        if len(nodes) >= limit:
             break
         try:
             normalized = _normalize_proxy_node(candidate)
@@ -3439,11 +3447,19 @@ def _managed_additional_node_names(group_name: str) -> tuple[str, str]:
     )
 
 
+def _additional_proxy_group_max_nodes(health_url: str, expected_status: str) -> int:
+    """Choose a pool limit from the stable health contract, never mutable tags."""
+    for service in LOCAL_PROXY_AI_SERVICES:
+        if (health_url, expected_status) == (service["health_check_url"], service["health_check_expected_status"]):
+            return AI_PROXY_FALLBACK_MAX_NODES
+    return SERVICE_PROXY_FALLBACK_MAX_NODES
+
+
 def _managed_additional_proxy_groups(
     values: tuple[dict, ...] | list[dict] | None,
 ) -> tuple[list[dict], list[dict]]:
     specs = list(values or ())
-    if len(specs) > 64:
+    if len(specs) > SERVICE_PROXY_MAX_GROUPS:
         raise ValueError("服务分流使用的订阅策略组过多")
     all_nodes: list[dict] = []
     groups: list[dict] = []
@@ -3462,16 +3478,6 @@ def _managed_additional_proxy_groups(
         primary_node = raw_spec.get("proxy_node")
         if not isinstance(primary_node, dict):
             raise ValueError(f"订阅策略组 {group_name} 缺少主节点")
-        primary_name, fallback_prefix = _managed_additional_node_names(group_name)
-        nodes = _managed_mihomo_proxy_nodes(
-            primary_node,
-            raw_spec.get("fallback_proxy_nodes"),
-            primary_name=primary_name,
-            fallback_name_prefix=fallback_prefix,
-        )
-        node_names = [str(node["name"]) for node in nodes]
-        if any(name in seen_node_names for name in node_names):
-            raise ValueError("订阅策略组生成了重复的受管节点名称")
         health_url = str(
             raw_spec.get("health_check_url")
             or "https://www.gstatic.com/generate_204"
@@ -3481,6 +3487,17 @@ def _managed_additional_proxy_groups(
         ).strip()
         if (health_url, expected_status) not in AI_PROXY_ADDITIONAL_HEALTH_CHECKS:
             raise ValueError(f"订阅策略组 {group_name} 的健康检查契约不受支持")
+        primary_name, fallback_prefix = _managed_additional_node_names(group_name)
+        nodes = _managed_mihomo_proxy_nodes(
+            primary_node,
+            raw_spec.get("fallback_proxy_nodes"),
+            primary_name=primary_name,
+            fallback_name_prefix=fallback_prefix,
+            max_nodes=_additional_proxy_group_max_nodes(health_url, expected_status),
+        )
+        node_names = [str(node["name"]) for node in nodes]
+        if any(name in seen_node_names for name in node_names):
+            raise ValueError("订阅策略组生成了重复的受管节点名称")
         health_checked = bool(raw_spec.get("health_checked", True) or len(nodes) > 1)
         groups.append(
             _managed_proxy_group(
@@ -3672,8 +3689,8 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     if (
         not isinstance(proxy_nodes, list)
         or not isinstance(proxy_groups, list)
-        or not 1 <= len(proxy_groups) <= 17
-        or not 1 <= len(proxy_nodes) <= 17 * AI_PROXY_FALLBACK_MAX_NODES
+        or not 1 <= len(proxy_groups) <= 1 + SERVICE_PROXY_MAX_GROUPS
+        or not 1 <= len(proxy_nodes) <= AI_PROXY_FALLBACK_MAX_NODES + SERVICE_PROXY_MAX_GROUPS * SERVICE_PROXY_FALLBACK_MAX_NODES
         or any(not isinstance(node, dict) for node in proxy_nodes)
         or any(not isinstance(group, dict) for group in proxy_groups)
     ):
@@ -3689,11 +3706,13 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     for group in proxy_groups:
         group_name = str(group.get("name") or "").strip()
         members = group.get("proxies")
+        pool_limit = (AI_PROXY_FALLBACK_MAX_NODES if group_name == "AI-PROXY" else
+                      _additional_proxy_group_max_nodes(group.get("url"), group.get("expected-status")))
         if (
             not group_name
             or group_name in seen_group_names
             or not isinstance(members, list)
-            or not 1 <= len(members) <= AI_PROXY_FALLBACK_MAX_NODES
+            or not 1 <= len(members) <= pool_limit
             or any(not isinstance(member, str) or not member.strip() for member in members)
         ):
             return False

@@ -2,7 +2,12 @@ import copy
 
 import pytest
 
-from core.subscription_routing_policy import suggest_tagged_routes
+from core.subscription_routing_policy import preferred_network_type, suggest_tagged_routes
+
+
+HOME_SERVICES = {"openai", "claude", "google_ai", "x_twitter", "reddit"}
+DC_SERVICES = {"youtube", "google", "github", "huggingface", "discord", "telegram"}
+EXPECTED_BINDINGS = {**dict.fromkeys(HOME_SERVICES, "home"), **dict.fromkeys(DC_SERVICES, "dc")}
 
 
 def _catalog():
@@ -14,20 +19,19 @@ def _catalog():
     ]
 
 
-def test_unique_labels_fill_ai_and_media_only_without_mutating_inputs():
+def test_unique_labels_fill_defaults_without_mutating_inputs_or_enabling_disabled_site():
     preferences = {"custom_targets": [{"id": "own", "value": "api.example.test"}],
                    "builtin_sites": {"github": False}, "other_setting": ["retained"]}
     catalog = _catalog()
     before = copy.deepcopy((preferences, catalog))
     draft, notices = suggest_tagged_routes(preferences, catalog)
     assert (preferences, catalog) == before
-    assert draft["service_profile_bindings"] == {
-        "openai": "home", "claude": "home", "google_ai": "home", "youtube": "dc", "google": "dc",
-    }
-    assert draft["builtin_sites"] == {"github": False, "youtube": True, "google": True}
+    assert draft["service_profile_bindings"] == {key: value for key, value in EXPECTED_BINDINGS.items() if key != "github"}
+    assert draft["builtin_sites"] == {**dict.fromkeys(DC_SERVICES | {"x_twitter", "reddit"}, True), "github": False}
     assert "service_node_bindings" not in draft
-    assert len(notices) == 2
-    assert all("草稿" in notice for notice in notices)
+    assert len(notices) == 3
+    assert all("草稿" in notice for notice in notices[:2])
+    assert "已保留GitHub" in notices[-1]
     draft["custom_targets"][0]["value"] = "changed"
     draft["other_setting"].append("changed")
     assert preferences == before[0]
@@ -40,16 +44,19 @@ def test_existing_invalid_disabled_and_empty_bindings_are_never_replaced():
         "builtin_sites": {"youtube": False},
     }
     draft, notices = suggest_tagged_routes(preferences, _catalog())
-    assert draft["service_profile_bindings"] == {**preferences["service_profile_bindings"], "google": "dc"}
+    expected = {key: value for key, value in EXPECTED_BINDINGS.items() if key != "google_ai"}
+    assert draft["service_profile_bindings"] == {**expected, **preferences["service_profile_bindings"]}
     assert draft["service_node_bindings"] == preferences["service_node_bindings"]
-    assert draft["builtin_sites"] == {"youtube": False, "google": True}
+    assert draft["builtin_sites"] == {**dict.fromkeys(DC_SERVICES | {"x_twitter", "reddit"}, True), "youtube": False}
     assert "已保留" in notices[-1]
 
 
 def test_manual_follow_default_and_disabled_edits_are_protected():
     preferences = {"builtin_sites": {"youtube": False}}
     draft, _ = suggest_tagged_routes(preferences, _catalog(), protected_services=("claude", "youtube"))
-    assert draft["service_profile_bindings"] == {"openai": "home", "google_ai": "home", "google": "dc"}
+    assert draft["service_profile_bindings"] == {
+        key: value for key, value in EXPECTED_BINDINGS.items() if key not in {"claude", "youtube"}
+    }
     assert draft["builtin_sites"]["youtube"] is False
 
 
@@ -62,7 +69,7 @@ def test_multiple_eligible_sources_do_not_guess_or_fall_back_across_labels():
     catalog = _catalog()
     catalog.append({**catalog[0], "id": "another-home"})
     draft, notices = suggest_tagged_routes({}, catalog)
-    assert draft["service_profile_bindings"] == {"youtube": "dc", "google": "dc"}
+    assert draft["service_profile_bindings"] == dict.fromkeys(DC_SERVICES, "dc")
     assert "2 个可用家宽订阅" in notices[0]
 
 
@@ -89,7 +96,7 @@ def test_unusable_source_leaves_targets_unchanged_and_explains_reason(updates, r
     catalog = _catalog()
     catalog[0].update(updates)
     draft, notices = suggest_tagged_routes({}, catalog)
-    assert draft["service_profile_bindings"] == {"youtube": "dc", "google": "dc"}
+    assert draft["service_profile_bindings"] == dict.fromkeys(DC_SERVICES, "dc")
     assert reason in notices[0]
 
 
@@ -141,3 +148,61 @@ def test_malformed_authority_is_preserved_instead_of_repaired(key):
 def test_non_object_preferences_raise_clear_error():
     with pytest.raises(ValueError, match="草稿必须是对象"):
         suggest_tagged_routes([], _catalog())
+
+
+def test_default_policy_covers_known_services_but_never_guesses_custom_targets():
+    from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICE_IDS, LOCAL_PROXY_BUILTIN_SITE_IDS
+
+    assert HOME_SERVICES | DC_SERVICES == LOCAL_PROXY_AI_SERVICE_IDS | LOCAL_PROXY_BUILTIN_SITE_IDS
+    for service in HOME_SERVICES:
+        assert preferred_network_type(service) == "residential"
+    for service in DC_SERVICES:
+        assert preferred_network_type(service) == "datacenter"
+    for service in ("custom", "custom:youtube", "youtube.example.test", "future_service", ""):
+        assert preferred_network_type(service) == ""
+
+
+@pytest.mark.parametrize("service", sorted(DC_SERVICES | {"x_twitter", "reddit"}))
+@pytest.mark.parametrize("value", [False, 0, None, "false"])
+def test_explicitly_disabled_or_malformed_site_is_preserved_without_existing_binding(service, value):
+    draft, notices = suggest_tagged_routes({"builtin_sites": {service: value}}, _catalog())
+    assert service not in draft["service_profile_bindings"]
+    assert draft["builtin_sites"][service] is value
+    assert "已保留" in notices[-1]
+
+
+def test_normalized_saved_disabled_sites_are_distinct_from_unconfigured_sites():
+    from core import proxy_routing
+
+    prefs = proxy_routing.normalize_routes({"builtin_sites": {"youtube": False, "x_twitter": False}})
+    draft, _ = suggest_tagged_routes(prefs, _catalog())
+    assert "youtube" not in draft["service_profile_bindings"]
+    assert "x_twitter" not in draft["service_profile_bindings"]
+    assert draft["service_profile_bindings"]["google"] == "dc"
+    assert draft["builtin_sites"]["google"] is True
+    assert draft["builtin_sites"]["reddit"] is True
+
+
+def test_automatic_route_explains_when_subscription_has_no_backup():
+    catalog = _catalog()
+    catalog[0]["nodes"].append(copy.deepcopy(catalog[0]["nodes"][0]))
+    catalog[1]["nodes"].append({"key": "dc-two", "label": "备用节点"})
+    _draft, notices = suggest_tagged_routes({}, catalog)
+    assert "暂无备用" in notices[0]
+    assert "同订阅故障切换" in notices[1]
+
+
+def test_candidate_count_uses_connection_deduplication_from_catalog():
+    catalog = _catalog()
+    catalog[1]["nodes"].append({"key": "renamed-dc-one", "label": "同一连接另一个名称"})
+    catalog[1]["auto_route_candidate_count"] = 1
+    _draft, notices = suggest_tagged_routes({}, catalog)
+    assert "暂无备用" in notices[1]
+
+
+@pytest.mark.parametrize("count", [None, True, "1", -1])
+def test_malformed_candidate_count_falls_back_to_legacy_node_metadata(count):
+    catalog = _catalog()
+    catalog[1]["auto_route_candidate_count"] = count
+    _draft, notices = suggest_tagged_routes({}, catalog)
+    assert "暂无备用" in notices[1]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from core import proxy_routing
+from core.subscription_routing_policy import preferred_network_type, route_candidate_count
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, font
 
@@ -35,13 +36,20 @@ def route_description(row, preferences, catalog):
     node_text = clean(node["label"]) if node else ("固定节点已失效" if node_key else "订阅首选 + 故障切换")
     if not profile_id and not node_key:
         node_text = "沿用默认节点策略"
-    strategy = "固定节点 · 不自动换出口" if node_key else ("自动切换 · 仅限此订阅" if profile_id else "跟随默认线路")
+    strategy = "固定节点 · 不自动换出口" if node_key else ("自动切换 · 仅限此订阅，备用按服务策略筛选" if profile_id else "跟随默认线路")
+    if profile_id and not node_key and profile and not warning:
+        if route_candidate_count(profile) == 1:
+            node_text = "订阅首选（暂无备用）"
+            strategy = "缓存仅 1 个可用节点，暂无备用可切换"
     if inherited:
         strategy = "继承自定义默认 · " + strategy
     if not row["enabled"]:
         strategy = "未启用 · 保留线路选择，不新增专属规则"
-    elif service in {"youtube", "google"} and network_type == "residential":
-        strategy += " · 此目标建议非家宽，可手动改选；已保留当前绑定"
+    elif network_type in {"residential", "datacenter"}:
+        preferred = preferred_network_type(service)
+        if preferred and preferred != network_type:
+            label = "家宽" if preferred == "residential" else "非家宽"
+            strategy += f" · 此目标建议{label}，可手动改选；已保留当前绑定"
     return {
         "profile": profile_text, "node": node_text, "hint": warning or strategy,
         "warning": bool(warning), "bound": bool(bindings.get(service)),
