@@ -141,7 +141,9 @@ def test_progress_survives_group_exception_and_missing_nodes_have_terminal_resul
     assert remote_proxy.proxy_node_latency_ok(tab._latency_results[remote_proxy.proxy_subscription_node_key(tab._subscription_nodes[0])])
     last = tab._latency_results[remote_proxy.proxy_subscription_node_key(tab._subscription_nodes[2])]
     assert not last.ok and "TimeoutError" in last.detail
-    assert "可连 2，失败 1，取消 0" in calls.status[-1][0]
+    assert remote_proxy.proxy_node_latency_incomplete(last)
+    assert not remote_proxy.proxy_node_latency_explicitly_unreachable(last)
+    assert "可连 2，失败 0，取消 0，未完成 1" in calls.status[-1][0]
 
 
 def test_cancel_preserves_completed_results_and_does_not_cache_remaining_as_unreachable(quick_tab, monkeypatch):

@@ -2867,7 +2867,9 @@ def test_measure_proxy_node_latencies_isolates_one_worker_failure(monkeypatch):
     failed = results[remote_proxy.proxy_node_key(bad)]
     assert failed.ok is False
     assert "unexpected worker failure" in failed.detail
-    assert failed.attempts == 2
+    assert failed.attempts == 0
+    assert failed.incomplete is True
+    assert remote_proxy.proxy_node_latency_explicitly_unreachable(failed) is False
 
 
 def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, tmp_path):
@@ -2888,6 +2890,9 @@ def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, t
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: fetched, type: vless, server: example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
@@ -2946,6 +2951,9 @@ def test_fetch_proxy_subscription_preserves_saved_profile_name(monkeypatch, tmp_
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: fetched, type: vless, server: example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
@@ -2976,6 +2984,9 @@ def test_fetch_proxy_subscription_can_update_profile_without_activating(monkeypa
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: refreshed, type: vless, server: one.example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
@@ -3095,6 +3106,9 @@ def test_fetch_proxy_subscription_retries_transient_download(monkeypatch, tmp_pa
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: retry, type: vless, server: example.com, port: 443 }\n"
 
     calls = 0
@@ -3134,6 +3148,9 @@ def test_fetch_proxy_subscription_rotates_clash_client_signature_after_403(monke
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: compatible, type: vless, server: example.com, port: 443 }\n"
 
     user_agents = []
@@ -3178,6 +3195,9 @@ def test_fetch_proxy_subscription_bypasses_failed_configured_proxy_without_chang
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3207,7 +3227,7 @@ def test_fetch_proxy_subscription_bypasses_failed_configured_proxy_without_chang
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+        lambda handler, *_extra_handlers: calls.append(type(handler).__name__) or DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3240,6 +3260,9 @@ def test_fetch_proxy_subscription_detects_stale_loopback_environment_proxy(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3273,7 +3296,7 @@ def test_fetch_proxy_subscription_detects_stale_loopback_environment_proxy(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+        lambda handler, *_extra_handlers: calls.append(type(handler).__name__) or DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3309,6 +3332,9 @@ def test_fetch_proxy_subscription_immediately_bypasses_stale_wininet_proxy(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3345,7 +3371,7 @@ def test_fetch_proxy_subscription_immediately_bypasses_stale_wininet_proxy(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+        lambda handler, *_extra_handlers: calls.append(type(handler).__name__) or DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3382,6 +3408,9 @@ def test_fetch_proxy_subscription_auto_cleans_program_owned_stale_proxy_before_d
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: recovered, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3427,7 +3456,7 @@ def test_fetch_proxy_subscription_auto_cleans_program_owned_stale_proxy_before_d
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+        lambda handler, *_extra_handlers: calls.append(type(handler).__name__) or DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3472,6 +3501,9 @@ def test_fetch_proxy_subscription_uses_real_owned_proxy_cleanup_contract(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: cleaned, type: vless, server: example.com, port: 443 }\n"
 
     class DirectOpener:
@@ -3523,7 +3555,7 @@ def test_fetch_proxy_subscription_uses_real_owned_proxy_cleanup_contract(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda _handler: DirectOpener(),
+        lambda _handler, *_extra_handlers: DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3559,6 +3591,9 @@ def test_fetch_proxy_subscription_bypasses_configured_proxy_gateway_errors(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3587,7 +3622,7 @@ def test_fetch_proxy_subscription_bypasses_configured_proxy_gateway_errors(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: calls.append(type(handler).__name__) or DirectOpener(),
+        lambda handler, *_extra_handlers: calls.append(type(handler).__name__) or DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3652,6 +3687,9 @@ def test_fetch_proxy_subscription_uses_isolated_managed_pool_after_direct_failur
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: recovered, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3670,7 +3708,7 @@ def test_fetch_proxy_subscription_uses_isolated_managed_pool_after_direct_failur
             calls.append("stop-isolated-session")
             return False
 
-    def build_opener(handler):
+    def build_opener(handler, *_extra_handlers):
         assert isinstance(handler, remote_proxy._NoBypassProxyHandler)
         calls.append(dict(handler.proxies))
         return RecoveryOpener()
@@ -3719,6 +3757,9 @@ def test_fetch_proxy_subscription_recovery_rotates_existing_nodes(monkeypatch, t
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: route-2, type: vless, server: example.com, port: 443 }\n"
 
     route = [0]
@@ -3762,7 +3803,7 @@ def test_fetch_proxy_subscription_recovery_rotates_existing_nodes(monkeypatch, t
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: RecoveryOpener()
+        lambda handler, *_extra_handlers: RecoveryOpener()
         if isinstance(handler, remote_proxy._NoBypassProxyHandler)
         else (_ for _ in ()).throw(AssertionError("unexpected direct opener")),
     )
@@ -3795,6 +3836,9 @@ def test_fetch_proxy_subscription_recovery_rotates_client_signatures_after_403(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: ua-compatible, type: vless, server: example.com, port: 443 }\n"
 
     user_agents = []
@@ -3816,7 +3860,7 @@ def test_fetch_proxy_subscription_recovery_rotates_client_signatures_after_403(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda handler: RecoveryOpener()
+        lambda handler, *_extra_handlers: RecoveryOpener()
         if isinstance(handler, remote_proxy._NoBypassProxyHandler)
         else (_ for _ in ()).throw(AssertionError("unexpected direct opener")),
     )
@@ -3848,6 +3892,9 @@ def test_fetch_proxy_subscription_retries_http_200_block_page_through_recovery(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return self.payload
 
     class RecoveryOpener:
@@ -3867,7 +3914,7 @@ def test_fetch_proxy_subscription_retries_http_200_block_page_through_recovery(
             "text/html",
         ),
     )
-    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler: RecoveryOpener())
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler, *_extra_handlers: RecoveryOpener())
 
     result = remote_proxy.fetch_proxy_subscription(
         "https://example.com/sub",
@@ -3894,6 +3941,9 @@ def test_fetch_proxy_subscription_retries_direct_recovery_with_next_signature(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct-ua-2, type: vless, server: example.com, port: 443 }\n"
 
     direct_user_agents = []
@@ -3916,7 +3966,7 @@ def test_fetch_proxy_subscription_retries_direct_recovery_with_next_signature(
         "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("proxy disconnected")),
     )
-    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler: DirectOpener())
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler, *_extra_handlers: DirectOpener())
 
     result = remote_proxy.fetch_proxy_subscription(
         "https://example.com/sub",
@@ -3942,6 +3992,9 @@ def test_fetch_proxy_subscription_does_not_inspect_recovery_proxy_when_primary_s
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
@@ -3974,6 +4027,9 @@ def test_fetch_proxy_subscription_strict_can_use_verified_managed_recovery_proxy
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: strict-recovery, type: vless, server: example.com, port: 443 }\n"
 
     calls = []
@@ -3983,7 +4039,7 @@ def test_fetch_proxy_subscription_strict_can_use_verified_managed_recovery_proxy
             calls.append("managed-proxy")
             return Response()
 
-    def build_opener(handler):
+    def build_opener(handler, *_extra_handlers):
         assert isinstance(handler, remote_proxy._NoBypassProxyHandler)
         calls.append(dict(handler.proxies))
         return RecoveryOpener()
@@ -4074,7 +4130,7 @@ def test_fetch_proxy_subscription_can_forbid_direct_fallback(monkeypatch, tmp_pa
         "getproxies",
         lambda: {"https": "http://127.0.0.1:7890"},
     )
-    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler: StrictProxyOpener())
+    monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler, *_extra_handlers: StrictProxyOpener())
 
     with pytest.raises(RuntimeError, match="已禁止绕过代理直连回退"):
         remote_proxy.fetch_proxy_subscription(
@@ -4107,6 +4163,9 @@ def test_fetch_proxy_subscription_strict_ignores_no_proxy_star(monkeypatch, tmp_
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: strict, type: vless, server: example.com, port: 443 }\n"
 
     class StrictProxyOpener:
@@ -4133,7 +4192,7 @@ def test_fetch_proxy_subscription_strict_ignores_no_proxy_star(monkeypatch, tmp_
         ),
     )
 
-    def build_opener(handler):
+    def build_opener(handler, *_extra_handlers):
         assert isinstance(handler, remote_proxy._NoBypassProxyHandler)
         calls.append(dict(handler.proxies))
         return StrictProxyOpener()
@@ -4234,6 +4293,9 @@ def test_gateway_error_direct_recovery_stays_inside_total_deadline(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     clock = [100.0]
@@ -4265,7 +4327,7 @@ def test_gateway_error_direct_recovery_stays_inside_total_deadline(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda _handler: DirectOpener(),
+        lambda _handler, *_extra_handlers: DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -4302,6 +4364,9 @@ def test_fetch_proxy_subscription_reserves_deadline_for_direct_timeout_recovery(
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: direct, type: vless, server: example.com, port: 443 }\n"
 
     clock = [100.0]
@@ -4333,7 +4398,7 @@ def test_fetch_proxy_subscription_reserves_deadline_for_direct_timeout_recovery(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda _handler: DirectOpener(),
+        lambda _handler, *_extra_handlers: DirectOpener(),
     )
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -4486,6 +4551,9 @@ def test_fetch_proxy_subscription_decodes_gzip_response(monkeypatch, tmp_path):
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return gzip.compress(
                 b"proxies:\n  - { name: zipped, type: vless, server: example.com, port: 443 }\n"
             )
@@ -4520,6 +4588,9 @@ def test_fetch_proxy_subscription_rejects_oversized_gzip_after_limited_decode(mo
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return gzip.compress(b"proxies:\n" + b"a" * 2048)
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
@@ -5173,7 +5244,7 @@ def test_local_reload_controller_explicitly_bypasses_environment_proxy(
             captured["timeout"] = timeout
             return Response()
 
-    def build_opener(handler):
+    def build_opener(handler, *_extra_handlers):
         captured["handler"] = handler
         return Opener()
 
@@ -6560,7 +6631,7 @@ def _execute_remote_strict_probe_script(
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "build_opener",
-        lambda _handler: FakeOpener(),
+        lambda _handler, *_extra_handlers: FakeOpener(),
     )
     monkeypatch.setattr(
         sys,
@@ -8873,7 +8944,7 @@ def test_read_url_with_retries_skips_refused_loopback_proxy(monkeypatch):
     monkeypatch.setattr(
         local_proxy.urllib.request,
         "build_opener",
-        lambda _handler: DirectOpener(),
+        lambda _handler, *_extra_handlers: DirectOpener(),
     )
 
     payload = local_proxy._read_url_with_retries(
@@ -9011,6 +9082,9 @@ def test_fetch_proxy_subscription_honors_retry_after_for_rate_limit(monkeypatch,
             return False
 
         def read(self, _size):
+            if getattr(self, "_read_done", False):
+                return b""
+            self._read_done = True
             return b"proxies:\n  - { name: rate-limited, type: vless, server: example.com, port: 443 }\n"
 
     calls = 0

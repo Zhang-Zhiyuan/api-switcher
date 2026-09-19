@@ -3264,7 +3264,7 @@ def measure_proxy_node_data_plane_latencies(
         was_cancelled = detail in {"检测已取消", "应用正在退出，检测已停止"}
         return remote_proxy.ProxyNodeLatencyResult(
             key, False, detail=f"实际转发检测失败: {detail.splitlines()[0][:140]}",
-            attempts=0 if was_cancelled else attempts, cancelled=was_cancelled,
+            attempts=0, cancelled=was_cancelled, incomplete=not was_cancelled,
         )
 
     try:
@@ -3352,6 +3352,10 @@ class _IsolatedMihomoBatchCleanupError(RuntimeError):
     pass
 
 
+class _IsolatedMihomoProbeFailed(RuntimeError):
+    """The controller returned current evidence of an actual failed probe."""
+
+
 def _isolated_batch_controller_request(session, path: str, *, timeout: float = 1.0):
     # http.client never inherits HTTP_PROXY, never follows redirects, and the
     # random secret also verifies that this is our disposable controller.
@@ -3360,6 +3364,8 @@ def _isolated_batch_controller_request(session, path: str, *, timeout: float = 1
         connection.request("GET", path, headers={"Authorization": "Bearer " + session.secret})
         response = connection.getresponse()
         if response.status != 200:
+            if response.status == 503 and "/delay?" in path:
+                raise _IsolatedMihomoProbeFailed("临时内核实际转发探针失败 (HTTP 503)")
             raise RuntimeError(f"临时内核检测 HTTP {response.status}")
         body = _read_bounded_response(response, max_bytes=4096, label="临时内核检测")
         payload = json.loads(body.decode("utf-8"))
@@ -3397,7 +3403,8 @@ def _probe_isolated_mihomo_batch_delay(session, route_name: str, timeout: int, *
     if health.checked_at is None or not started_at <= health.checked_at <= observed_at:
         raise RuntimeError("临时内核探针记录不是本次检测结果，请重试")
     if specific.get("alive") is not True or health.target_healthy is not True:
-        raise RuntimeError("目标专用探针未通过预期 HTTP 204 验证：" + proxy_health_summary(health))
+        error_type = _IsolatedMihomoProbeFailed if specific.get("alive") is False else RuntimeError
+        raise error_type("目标专用探针未通过预期 HTTP 204 验证：" + proxy_health_summary(health))
     if health.delay_ms != delay:
         raise RuntimeError("临时内核延迟与目标专用记录不一致，请重试")
     return delay
@@ -3481,13 +3488,14 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
     def cancelled():
         return _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set() or (cancel_event is not None and cancel_event.is_set())
 
-    def failure(key, error):
+    def failure(key, error, *, incomplete=True):
         # No controller response bodies, credentials or subscription URLs are
         # included. Connection details from normalizers are not needed here.
         detail = str(error).strip() or type(error).__name__
         was_cancelled = detail == "检测已取消"
-        return remote_proxy.ProxyNodeLatencyResult(key, False, attempts=0 if was_cancelled else attempts,
+        return remote_proxy.ProxyNodeLatencyResult(key, False, attempts=0 if was_cancelled or incomplete else attempts,
                                                    cancelled=was_cancelled,
+                                                   incomplete=incomplete and not was_cancelled,
                                                    detail="HTTPS 快测失败: " + detail.splitlines()[0][:140])
 
     def publish(key, result):
@@ -3530,7 +3538,10 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
             try:
                 delays.append(_probe_isolated_mihomo_batch_delay(session, name, timeout))
             except Exception as exc:
-                return failure(key, "检测已取消" if cancelled() else exc)
+                return failure(
+                    key, "检测已取消" if cancelled() else exc,
+                    incomplete=not isinstance(exc, _IsolatedMihomoProbeFailed),
+                )
         return remote_proxy.ProxyNodeLatencyResult(
             key, True, latency_ms=sorted(delays)[len(delays) // 2], attempts=attempts,
             detail=f"内核 HTTPS 快测 {attempts}/{attempts}；非 TCP 握手延迟，不代表 AI 服务稳定性",
@@ -4580,6 +4591,7 @@ def _explicit_subscription_fallback_nodes(
             result = latencies.get(remote_proxy.proxy_subscription_node_key(item))
             if (not remote_proxy.proxy_node_latency_fresh(result)
                     or remote_proxy.proxy_node_latency_cancelled(result)
+                    or remote_proxy.proxy_node_latency_incomplete(result)
                     or remote_proxy.proxy_node_latency_invalid(result)):
                 return (1, 0)
             if remote_proxy.proxy_node_latency_ok(result):

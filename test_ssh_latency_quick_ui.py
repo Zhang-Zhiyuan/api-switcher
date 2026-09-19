@@ -221,7 +221,8 @@ def test_executor_failure_keeps_streamed_results_and_marks_remaining_nodes(monke
     complete(obj)
     assert len(obj._proxy_latency_results) == 2
     assert sum(value.ok for value in obj._proxy_latency_results.values()) == 1
-    assert "失败 1" in obj.messages[-1] and "synthetic executor failure" in obj.messages[-1]
+    assert "失败 0，取消 0，未完成 1" in obj.messages[-1] and "synthetic executor failure" in obj.messages[-1]
+    assert sum(remote_proxy.proxy_node_latency_incomplete(value) for value in obj._proxy_latency_results.values()) == 1
 
 
 def test_busy_cancel_button_switches_between_latency_and_quality_events(monkeypatch):

@@ -33,7 +33,7 @@ def test_current_settings_replace_cached_default_opener_and_expand_all_proxy(mon
     monkeypatch.setattr(remote_proxy.urlrequest, "_opener", SimpleNamespace(
         open=lambda *_args, **_kwargs: pytest.fail("stale global opener must not be used")))
 
-    def build(handler):
+    def build(handler, *_extra_handlers):
         calls.append(dict(handler.proxies))
         return SimpleNamespace(open=lambda _request, **_kwargs: "response")
 

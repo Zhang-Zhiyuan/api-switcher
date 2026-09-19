@@ -3893,8 +3893,16 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._set_proxy_busy(True)
         self._set_proxy_cache_status("本机缓存: 正在刷新订阅..." if auto else "本机缓存: 正在拉取订阅...")
         self._set_proxy_status("正在自动刷新订阅..." if auto else "正在拉取订阅并解析节点...")
+        launch_lock = threading.Lock()
+        worker_started = False
+        startup_failed = False
 
         def run():
+            nonlocal worker_started
+            with launch_lock:
+                if startup_failed:
+                    return
+                worker_started = True
             try:
                 allow_direct_fallback = (
                     local_proxy.local_proxy_subscription_direct_fallback_allowed()
@@ -4044,7 +4052,23 @@ class SSHTab(ctk.CTkScrollableFrame):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, daemon=True).start()
+        try:
+            threading.Thread(target=run, name="ssh-proxy-subscription-fetch", daemon=True).start()
+        except Exception as exc:
+            with launch_lock:
+                # A custom thread launcher may raise after starting the worker.
+                # Let that worker own completion; otherwise prevent a late start.
+                if worker_started:
+                    return
+                startup_failed = True
+            self._set_proxy_busy(False)
+            message = safe_feedback_text(
+                f"订阅拉取任务未能启动 ({type(exc).__name__}): {exc}；已有节点及缓存未改动，可重新拉取。"
+            )
+            self._set_proxy_cache_status("本机缓存: 拉取任务未启动，已有节点未改动", "warning")
+            self._set_proxy_status(message, "warning" if auto else "error")
+            if show_message:
+                show_toast(self.winfo_toplevel(), message, is_error=True)
 
     def _open_proxy_quality_dialog(self):
         top = self.winfo_toplevel()
@@ -4128,10 +4152,11 @@ class SSHTab(ctk.CTkScrollableFrame):
                 self._set_proxy_subscription_nodes(self._proxy_subscription_nodes, preserve_key=selected_key)
             passed = sum(remote_proxy.proxy_node_latency_ok(value) for value in partial.values())
             cancelled = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in partial.values())
+            incomplete = sum(remote_proxy.proxy_node_latency_incomplete(value) for value in partial.values())
             phase = "正在停止，等待当前 SSH 建连或远端小批结束" if cancel_event.is_set() else "正在快测"
             self._set_proxy_status(
                 f"{target_label}：{scope_label} {phase}，已返回 {len(partial)}/{len(scope_keys) * len(server_names)} 项；"
-                f"可连 {passed}，失败 {len(partial) - passed - cancelled}，取消 {cancelled}。"
+                f"可连 {passed}，失败 {len(partial) - passed - cancelled - incomplete}，取消 {cancelled}，未完成 {incomplete}。"
                 "仅测 TCP 端口，不代表 UDP/AI 可用。"
             )
 
@@ -4195,17 +4220,19 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._set_proxy_subscription_nodes(self._proxy_subscription_nodes, preserve_key=selected_key)
             ok_nodes = sum(remote_proxy.proxy_node_latency_ok(value) for value in aggregate.values())
             cancelled_nodes = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in aggregate.values())
+            incomplete_nodes = sum(remote_proxy.proxy_node_latency_incomplete(value) for value in aggregate.values())
             stopped = cancel_event.is_set()
             phase = "已停止" if stopped else "完成"
             coverage_label = (
                 f"{target_label}：{scope_label} TCP 端口快测{phase}，已返回 {len(aggregate)}/{len(scope_keys)}，"
-                f"可连 {ok_nodes}，失败 {len(aggregate) - ok_nodes - cancelled_nodes}，取消 {cancelled_nodes}。"
+                f"可连 {ok_nodes}，失败 {len(aggregate) - ok_nodes - cancelled_nodes - incomplete_nodes}，"
+                f"取消 {cancelled_nodes}，未完成 {incomplete_nodes}。"
                 "TCP 端口结果不代表 UDP 协议或 AI 服务已可用。"
             )
             message = f"{coverage_label}结果保留在当前服务器范围，未自动更换或保存节点选择。"
             if failures:
                 message += " 部分服务器失败: " + "；".join(failures)
-            severity = "warning" if failures or stopped or not ok_nodes else "success"
+            severity = "warning" if failures or stopped or incomplete_nodes or not ok_nodes else "success"
             self._set_proxy_status(message, severity)
             show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
 
@@ -4582,7 +4609,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                         cancelled = cancel_event is not None and cancel_event.is_set()
                         detail = "测速已取消，未获得结果" if cancelled else errors.get(name) or "远端未返回测速结果，请重试"
                         values[key] = remote_proxy.ProxyNodeLatencyResult(
-                            key, False, detail=detail, cancelled=cancelled,
+                            key, False, detail=detail, cancelled=cancelled, incomplete=not cancelled,
                         )
                 results[name] = values
                 for completed, value in enumerate(values.values(), 1):
@@ -4601,6 +4628,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             details = []
             attempts = 0
             cancelled = 0
+            incomplete = max(0, server_count - len(server_results or {}))
             for server_name, results in (server_results or {}).items():
                 result = (results or {}).get(key)
                 latency = remote_proxy.proxy_node_latency_ms(result)
@@ -4609,13 +4637,18 @@ class SSHTab(ctk.CTkScrollableFrame):
                     latencies.append(latency)
                 elif result is not None:
                     cancelled += bool(remote_proxy.proxy_node_latency_cancelled(result))
+                    incomplete += bool(remote_proxy.proxy_node_latency_incomplete(result))
                     detail = remote_proxy.proxy_node_latency_detail(result)
                     if detail:
                         details.append(f"{server_name}: {detail}")
+                else:
+                    incomplete += 1
             if latencies:
                 label = f"{len(latencies)}/{server_count} 可用" if server_count > 1 else ""
                 if cancelled:
                     label += f"；{cancelled} 台取消，非全部测完"
+                if incomplete:
+                    label += f"；{incomplete} 台未完成，非全部测完"
                 aggregate[key] = remote_proxy.ProxyNodeLatencyResult(
                     node_key=key,
                     ok=True,
@@ -4624,6 +4657,8 @@ class SSHTab(ctk.CTkScrollableFrame):
                     attempts=attempts,
                 )
             else:
+                if incomplete:
+                    details.insert(0, f"{incomplete} 台未完成")
                 aggregate[key] = remote_proxy.ProxyNodeLatencyResult(
                     node_key=key,
                     ok=False,
@@ -4631,6 +4666,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     detail="；".join(details[:2]),
                     attempts=attempts,
                     cancelled=bool(cancelled),
+                    incomplete=bool(incomplete) and not cancelled,
                 )
         return aggregate
 

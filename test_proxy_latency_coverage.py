@@ -265,6 +265,8 @@ def test_local_batch_publishes_all_results_before_slow_ai_gate_and_saves_udp(mon
         failed = (failed_group == "tcp" and node is nodes[0]) or (failed_group == "udp" and node is not nodes[0])
         if failed:
             assert not actual[key].ok and "synthetic scheduling failure" in actual[key].detail
+            assert remote_proxy.proxy_node_latency_incomplete(actual[key])
+            assert not remote_proxy.proxy_node_latency_explicitly_unreachable(actual[key])
         else:
             assert actual[key] is results[key]
     assert calls["saved"] == [(actual, {"profile_id": "synthetic-profile"})]
@@ -272,7 +274,7 @@ def test_local_batch_publishes_all_results_before_slow_ai_gate_and_saves_udp(mon
     assert not tab._busy
     assert any("14/14" in text for text in calls["status"])
     successful = 13 if failed_group == "tcp" else 1 if failed_group == "udp" else 14
-    assert any(f"可连 {successful}，失败 {14 - successful}，取消 0" in text for text in calls["status"])
+    assert any(f"可连 {successful}，失败 0，取消 0，未完成 {14 - successful}" in text for text in calls["status"])
     if all_nodes:
         assert any("忽略筛选与勾选" in text for text in calls["status"])
 

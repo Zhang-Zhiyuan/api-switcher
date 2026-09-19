@@ -2974,8 +2974,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._set_busy(True)
         self._set_cache_status("本机缓存: 正在刷新订阅..." if auto else "本机缓存: 正在拉取订阅...")
         self._set_status("正在自动刷新订阅..." if auto else "正在拉取订阅并解析节点...")
+        launch_lock = threading.Lock()
+        worker_started = False
+        startup_failed = False
 
         def run():
+            nonlocal worker_started
+            with launch_lock:
+                if startup_failed:
+                    return
+                worker_started = True
             try:
                 allow_direct_fallback = (
                     local_proxy.local_proxy_subscription_direct_fallback_allowed()
@@ -3156,7 +3164,23 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, daemon=True).start()
+        try:
+            threading.Thread(target=run, name="local-proxy-subscription-fetch", daemon=True).start()
+        except Exception as exc:
+            with launch_lock:
+                # A custom thread launcher may raise after starting the worker.
+                # Let that worker own completion; otherwise prevent a late start.
+                if worker_started:
+                    return
+                startup_failed = True
+            self._set_busy(False)
+            message = safe_feedback_text(
+                f"订阅拉取任务未能启动 ({type(exc).__name__}): {exc}；已有节点及缓存未改动，可重新拉取。"
+            )
+            self._set_cache_status("本机缓存: 拉取任务未启动，已有节点未改动", "warning")
+            self._set_status(message, "warning" if auto else "error")
+            if show_message:
+                show_toast(self.winfo_toplevel(), message, is_error=True)
 
     def _import_subscription_yaml(self):
         if self._busy or self._periodic_update_running:
@@ -3345,7 +3369,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         def summary(values):
             passed = sum(remote_proxy.proxy_node_latency_ok(value) for value in values.values())
             cancelled = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in values.values())
-            return f"可连 {passed}，失败 {len(values) - passed - cancelled}，取消 {cancelled}"
+            incomplete = sum(remote_proxy.proxy_node_latency_incomplete(value) for value in values.values())
+            return f"可连 {passed}，失败 {len(values) - passed - cancelled - incomplete}，取消 {cancelled}，未完成 {incomplete}"
 
         def show_progress(partial):
             if not same_context():
@@ -3384,9 +3409,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     with result_lock:
                         missing = key not in results
                     if missing:
+                        cancelled = cancel.is_set()
                         report(0, 0, remote_proxy.ProxyNodeLatencyResult(
-                            key, False, detail="已取消" if cancel.is_set() else f"快测任务失败: {detail}",
-                            cancelled=cancel.is_set(),
+                            key, False, detail="已取消" if cancelled else f"快测任务失败: {detail}",
+                            cancelled=cancelled, incomplete=not cancelled,
                         ))
 
         def run():
@@ -3418,9 +3444,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             if group_errors:
                 error = "；".join([error, *group_errors]).strip("；")
             for key in scope_keys:
+                cancelled = cancel.is_set()
                 results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
-                    key, False, detail="已取消" if cancel.is_set() else f"检测未完成: {error or '任务未返回结果'}",
-                    cancelled=cancel.is_set(),
+                    key, False, detail="已取消" if cancelled else f"检测未完成: {error or '任务未返回结果'}",
+                    cancelled=cancelled, incomplete=not cancelled,
                 ))
             captured = {**previous, **results}
             save_error = ""
@@ -3531,9 +3558,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._prefer_quality_sort = False
             self._set_subscription_nodes(self._subscription_nodes, preserve_key=original_selected_key)
             passed = sum(remote_proxy.proxy_node_latency_ok(result) for result in partial.values())
+            incomplete = sum(remote_proxy.proxy_node_latency_incomplete(result) for result in partial.values())
+            cancelled = sum(remote_proxy.proxy_node_latency_cancelled(result) for result in partial.values())
             self._set_status(
                 f"{scope_label}：基础测速 {len(partial)}/{len(scope_keys)}，可连 {passed}，"
-                f"失败 {len(partial) - passed}；其余节点仍在测试，尚未进行 AI 稳定性验证。"
+                f"失败 {len(partial) - passed - incomplete - cancelled}，取消 {cancelled}，未完成 {incomplete}；"
+                "其余节点仍在测试，尚未进行 AI 稳定性验证。"
             )
 
         progress = CoalescedProgress(
@@ -3556,7 +3586,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     for item in items:
                         key = remote_proxy.proxy_subscription_node_key(item)
                         results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
-                            key, False, detail=f"{label}检测任务失败: {detail}",
+                            key, False, detail=f"{label}检测任务失败: {detail}", incomplete=True,
                         ))
 
             try:
@@ -3577,7 +3607,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 for item in scope_nodes:
                     key = remote_proxy.proxy_subscription_node_key(item)
                     results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
-                        key, False, detail="检测未返回该节点的结果，请重试",
+                        key, False, detail="检测未返回该节点的结果，请重试", incomplete=True,
                     ))
                 progress.close()
             except Exception as e:
@@ -3597,9 +3627,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     remote_proxy.proxy_node_latency_ok(results.get(remote_proxy.proxy_subscription_node_key(item)))
                     for item in scope_nodes
                 )
+                incomplete_count = sum(remote_proxy.proxy_node_latency_incomplete(value) for value in results.values())
+                cancelled_count = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in results.values())
                 coverage_label = (
                     f"{scope_label}：基础测速完成 {completed_count}/{len(scope_nodes)}，"
-                    f"可连 {passed_count}，失败 {completed_count - passed_count}，取消 0"
+                    f"可连 {passed_count}，失败 {completed_count - passed_count - incomplete_count - cancelled_count}，"
+                    f"取消 {cancelled_count}，未完成 {incomplete_count}"
                 )
                 save_error = ""
                 try:

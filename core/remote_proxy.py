@@ -32,6 +32,7 @@ import yaml
 
 from config.paths import STORAGE_DIR
 from core import proxy_routing
+from core.subscription_transport import SubscriptionRedirectHandler, subscription_error_message
 from core.lazy_imports import LazyAttribute, LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES
 
@@ -513,12 +514,15 @@ class ProxyNodeLatencyResult:
     attempts: int = 0
     measured_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     cancelled: bool = False
+    incomplete: bool = False
 
     def label(self) -> str:
         if proxy_node_latency_invalid(self):
             return "结果无效"
         if self.cancelled:
             return "已取消"
+        if self.incomplete:
+            return "未完成"
         if proxy_node_latency_ok(self):
             return f"{proxy_node_latency_ms(self)}ms"
         return "不可连"
@@ -808,17 +812,22 @@ def fetch_proxy_subscription(
     )
 
     download_trace = _ProxySubscriptionDownloadTrace()
-    payload, content_type, charset = _download_proxy_subscription(
-        request=request,
-        timeout=timeout,
-        max_bytes=max_bytes,
-        retries=retries,
-        retry_base_delay=retry_base_delay,
-        allow_direct_fallback=allow_direct_fallback,
-        proxy_diagnostic=proxy_diagnostic,
-        recovery_proxy_provider=recovery_proxy_provider,
-        download_trace=download_trace,
-    )
+    try:
+        payload, content_type, charset = _download_proxy_subscription(
+            request=request,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            retries=retries,
+            retry_base_delay=retry_base_delay,
+            allow_direct_fallback=allow_direct_fallback,
+            proxy_diagnostic=proxy_diagnostic,
+            recovery_proxy_provider=recovery_proxy_provider,
+            download_trace=download_trace,
+        )
+    except ValueError as exc:
+        raise ValueError(subscription_error_message(exc, url=normalized_url)) from None
+    except Exception as exc:
+        raise RuntimeError(subscription_error_message(exc, url=normalized_url)) from None
     text = _decode_subscription_bytes(payload, charset)
     nodes = parse_proxy_subscription_content(text)
     saved_path = (
@@ -1577,6 +1586,7 @@ def save_proxy_subscription_latencies(
         payload[node_key] = {
             "ok": proxy_node_latency_ok(result),
             "cancelled": proxy_node_latency_cancelled(result),
+            "incomplete": proxy_node_latency_incomplete(result),
             "latency_ms": proxy_node_latency_ms(result),
             "detail": proxy_node_latency_detail(result),
             "attempts": proxy_node_latency_attempts(result),
@@ -1706,6 +1716,7 @@ def load_proxy_subscription_latencies(state: dict | None = None) -> dict[str, di
         results[node_key] = {
             "ok": proxy_node_latency_ok(value),
             "cancelled": proxy_node_latency_cancelled(value),
+            "incomplete": proxy_node_latency_incomplete(value),
             "latency_ms": proxy_node_latency_ms(value),
             "detail": str(value.get("detail") or "")[:160],
             "attempts": proxy_node_latency_attempts(value),
@@ -2199,6 +2210,8 @@ def _quick_tcp_connect(addresses, port, deadline, cancel_event=None):
                 except InterruptedError:
                     raise
                 except Exception as exc:
+                    if _proxy_latency_exception_incomplete(exc):
+                        raise
                     last_error = exc
                 finally:
                     if connection is not None and connection not in active:
@@ -2245,7 +2258,20 @@ def _measure_quick_tcp_latency(node, timeout, resolver, cancel_event=None):
     except Exception as exc:
         cancelled = isinstance(exc, InterruptedError) and cancel_event is not None and cancel_event.is_set()
         detail = (str(exc).strip() or type(exc).__name__).splitlines()[0][:140]
-        return ProxyNodeLatencyResult(key, False, detail=detail, attempts=0 if cancelled else 1, cancelled=cancelled)
+        return ProxyNodeLatencyResult(
+            key, False, detail=detail, attempts=0 if cancelled else 1, cancelled=cancelled,
+            incomplete=not cancelled and _proxy_latency_exception_incomplete(exc),
+        )
+
+
+def _proxy_latency_exception_incomplete(exc: Exception) -> bool:
+    """Resource/scheduling failures are not evidence about the remote endpoint."""
+    if not isinstance(exc, OSError):
+        return True
+    return getattr(exc, "errno", None) in {
+        errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOBUFS, errno.EBADF,
+        10024, 10055,  # Winsock descriptor/buffer exhaustion.
+    }
 
 
 def _measure_quick_tcp_batch(items, timeout, max_workers, progress_callback=None, cancel_event=None):
@@ -2264,6 +2290,7 @@ def _measure_quick_tcp_batch(items, timeout, max_workers, progress_callback=None
                 key, result.ok, result.latency_ms,
                 detail=result.detail + ("；同端点复用" if len(group) > 1 else ""),
                 attempts=result.attempts, measured_at=result.measured_at, cancelled=result.cancelled,
+                incomplete=result.incomplete,
             )
             results[key] = rebound
             if progress_callback is not None:
@@ -2277,7 +2304,7 @@ def _measure_quick_tcp_batch(items, timeout, max_workers, progress_callback=None
         record(group, ProxyNodeLatencyResult(
             proxy_node_key(group[0]), False,
             detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:140],
-            attempts=0 if cancelled else 1, cancelled=cancelled,
+            attempts=0, cancelled=cancelled, incomplete=not cancelled,
         ))
 
     if cancel_event is not None and cancel_event.is_set():
@@ -2353,6 +2380,7 @@ def measure_proxy_node_latency(
     timeout = _normalize_timeout(timeout, 3.0)
     latencies = []
     last_error = ""
+    incomplete = False
     endpoint = (str(normalized["server"]), int(normalized["port"]))
 
     for _attempt in range(attempts):
@@ -2362,6 +2390,7 @@ def measure_proxy_node_latency(
                 latencies.append(max(1, int((time.perf_counter() - started) * 1000)))
         except Exception as exc:
             last_error = (str(exc).strip() or type(exc).__name__).splitlines()[0][:120]
+            incomplete = incomplete or _proxy_latency_exception_incomplete(exc)
 
     all_attempts_succeeded = len(latencies) == attempts
     if latencies and (all_attempts_succeeded or not require_all):
@@ -2394,6 +2423,7 @@ def measure_proxy_node_latency(
             detail=detail,
             attempts=attempts,
             measured_at=_now_iso(),
+            incomplete=incomplete,
         )
     return ProxyNodeLatencyResult(
         node_key=node_key,
@@ -2402,6 +2432,7 @@ def measure_proxy_node_latency(
         detail=last_error or "TCP 连接失败",
         attempts=attempts,
         measured_at=_now_iso(),
+        incomplete=incomplete,
     )
 
 
@@ -2460,8 +2491,9 @@ def measure_proxy_node_latencies(
             ok=False,
             latency_ms=None,
             detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:120],
-            attempts=max(1, _int_or_default(attempts, 2)),
+            attempts=0,
             measured_at=_now_iso(),
+            incomplete=True,
         )
 
     futures = {}
@@ -3125,7 +3157,8 @@ def measure_proxy_node_latencies_on_server(
             node_key=item["key"],
             ok=False,
             detail="远端未返回该节点的测速结果，请重试",
-            attempts=attempts_value,
+            attempts=0,
+            incomplete=True,
         )
         for item in items
     }
@@ -3149,6 +3182,7 @@ def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_e
                 key, result.ok, result.latency_ms,
                 detail=result.detail + ("；同端点复用" if len(group) > 1 else ""),
                 attempts=result.attempts, measured_at=result.measured_at, cancelled=result.cancelled,
+                incomplete=result.incomplete,
             )
             results[key] = rebound
             if progress_callback is not None:
@@ -3162,7 +3196,7 @@ def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_e
             if group[0]["key"] not in results:
                 record(group, ProxyNodeLatencyResult(
                     group[0]["key"], False, detail=detail,
-                    attempts=0 if cancelled else 1, cancelled=cancelled,
+                    attempts=0, cancelled=cancelled, incomplete=not cancelled,
                 ))
 
     if cancel_event is not None and cancel_event.is_set():
@@ -3188,7 +3222,8 @@ def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_e
                     record(group, result)
                 elif status == 0:
                     record(group, ProxyNodeLatencyResult(
-                        group[0]["key"], False, detail="远端未返回该节点的快测结果，请重试", attempts=1,
+                        group[0]["key"], False, detail="远端未返回该节点的快测结果，请重试", attempts=0,
+                        incomplete=True,
                     ))
             if status != 0:
                 detail = (str(stderr or stdout).strip() or f"退出状态 {status}").splitlines()[0][:140]
@@ -3208,7 +3243,8 @@ def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_e
 
 
 def proxy_node_latency_ok(result: ProxyNodeLatencyResult | dict | None) -> bool:
-    if proxy_node_latency_cancelled(result) or proxy_node_latency_invalid(result):
+    if (proxy_node_latency_cancelled(result) or proxy_node_latency_incomplete(result)
+            or proxy_node_latency_invalid(result)):
         return False
     if isinstance(result, ProxyNodeLatencyResult):
         return result.ok is True and proxy_node_latency_ms(result) is not None
@@ -3222,6 +3258,17 @@ def proxy_node_latency_cancelled(result: ProxyNodeLatencyResult | dict | None) -
         return result.cancelled is True
     if isinstance(result, dict):
         return result.get("cancelled") is True
+    return False
+
+
+def proxy_node_latency_incomplete(result: ProxyNodeLatencyResult | dict | None) -> bool:
+    """The detector failed to produce a verdict; this is not an unreachable node."""
+    if proxy_node_latency_cancelled(result):
+        return False
+    if isinstance(result, ProxyNodeLatencyResult):
+        return result.incomplete is True
+    if isinstance(result, dict):
+        return result.get("incomplete") is True
     return False
 
 
@@ -3242,18 +3289,18 @@ def proxy_node_latency_invalid(result: ProxyNodeLatencyResult | dict | None) -> 
     if result is None:
         return False
     if isinstance(result, ProxyNodeLatencyResult):
-        ok, cancelled = result.ok, result.cancelled
+        ok, cancelled, incomplete = result.ok, result.cancelled, result.incomplete
     elif isinstance(result, dict):
-        ok, cancelled = result.get("ok"), result.get("cancelled", False)
+        ok, cancelled, incomplete = result.get("ok"), result.get("cancelled", False), result.get("incomplete", False)
     else:
         return True
-    if not isinstance(ok, bool) or not isinstance(cancelled, bool):
+    if not all(isinstance(flag, bool) for flag in (ok, cancelled, incomplete)):
         return True
-    return bool(ok and not cancelled and proxy_node_latency_ms(result) is None)
+    return bool(ok and not cancelled and not incomplete and proxy_node_latency_ms(result) is None)
 
 
 def proxy_node_latency_ms(result: ProxyNodeLatencyResult | dict | None) -> int | None:
-    if proxy_node_latency_cancelled(result):
+    if proxy_node_latency_cancelled(result) or proxy_node_latency_incomplete(result):
         return None
     if isinstance(result, ProxyNodeLatencyResult):
         value = result.latency_ms
@@ -3287,6 +3334,8 @@ def proxy_node_latency_label(result: ProxyNodeLatencyResult | dict | None) -> st
         return "结果无效"
     if proxy_node_latency_cancelled(result):
         return "已取消"
+    if proxy_node_latency_incomplete(result):
+        return "未完成"
     if result is not None and not proxy_node_latency_fresh(result):
         return "已过期"
     latency = proxy_node_latency_ms(result)
@@ -3322,6 +3371,7 @@ def proxy_node_latency_explicitly_unreachable(
 ) -> bool:
     return bool(
         not proxy_node_latency_cancelled(result)
+        and not proxy_node_latency_incomplete(result)
         and not proxy_node_latency_invalid(result)
         and proxy_node_latency_fresh(result)
         and not proxy_node_latency_ok(result)
@@ -7201,16 +7251,34 @@ def _open_proxy_subscription_request(
 ) -> tuple[bytes, str, str]:
     if direct and proxy_map is not None:
         raise ValueError("订阅请求不能同时指定代理与直连")
+    read_deadline = (
+        float(deadline) if deadline is not None
+        else time.monotonic() + max(0.001, float(timeout))
+    )
+    # Keep the existing default-opener call contract while handing the same
+    # request-wide deadline to its fresh opener and every redirect it follows.
+    request._subscription_deadline = read_deadline
+    redirect_handler = SubscriptionRedirectHandler(read_deadline)
     opener = None
     if direct:
-        opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
+        opener = urlrequest.build_opener(urlrequest.ProxyHandler({}), redirect_handler)
     elif proxy_map is not None:
         # The standard ProxyHandler still honors proxy_bypass/NO_PROXY even
         # with an explicit mapping.  This handler intentionally skips that
         # branch, so NO_PROXY='*' cannot turn strict mode into a direct call.
-        opener = urlrequest.build_opener(_NoBypassProxyHandler(proxy_map))
+        opener = urlrequest.build_opener(_NoBypassProxyHandler(proxy_map), redirect_handler)
     open_request = opener.open if opener is not None else _open_current_proxy_subscription_request
-    with open_request(request, timeout=timeout) as response:
+    try:
+        response = open_request(request, timeout=timeout)
+    except HTTPError as exc:
+        # HTTPError owns the rejected response body/socket. Release it before
+        # any compatible retry or node switch; status and headers stay usable.
+        try:
+            exc.close()
+        except Exception:
+            pass
+        raise
+    with response:
         status = _int_or_default(getattr(response, "status", getattr(response, "code", 200)), 200)
         if status >= 400:
             # Keep the status and response headers available to the retry layer.
@@ -7232,18 +7300,13 @@ def _open_proxy_subscription_request(
         expected_length = int(length_header) if length_header.isascii() and length_header.isdigit() else None
         if expected_length is not None and expected_length > limit:
             raise ValueError(f"订阅内容超过 {_subscription_size_limit_label(limit)}，已停止读取")
-        read_deadline = (
-            float(deadline)
-            if deadline is not None
-            else time.monotonic() + max(0.25, float(timeout))
-        )
         payload = bytearray()
         chunk_reader = getattr(response, "read1", None)
         supports_chunked_read = callable(chunk_reader)
         if not supports_chunked_read:
             # Small wrappers used by some URL handlers expose only ``read``.
-            # Keep that bounded by the socket timeout and byte limit; standard
-            # HTTPResponse/addinfourl objects expose read1 for the true loop.
+            # A short read is not EOF. Use the same bounded loop so wrappers
+            # cannot silently publish only the first chunk of a subscription.
             chunk_reader = response.read
         while len(payload) <= limit:
             remaining = read_deadline - time.monotonic()
@@ -7256,8 +7319,6 @@ def _open_proxy_subscription_request(
             if not chunk:
                 break
             payload.extend(chunk)
-            if not supports_chunked_read:
-                break
         if len(payload) > limit:
             raise ValueError(f"订阅内容超过 {_subscription_size_limit_label(limit)}，已停止读取")
         if expected_length is not None and len(payload) != expected_length:
@@ -7351,7 +7412,11 @@ def _open_compatible_proxy_subscription_request(request, **kwargs):
 
 
 def _open_current_proxy_subscription_request(request, *, timeout):
-    opener = urlrequest.build_opener(urlrequest.ProxyHandler(_subscription_environment_proxy_map()))
+    deadline = getattr(request, "_subscription_deadline", None)
+    opener = urlrequest.build_opener(
+        urlrequest.ProxyHandler(_subscription_environment_proxy_map()),
+        SubscriptionRedirectHandler(deadline),
+    )
     return opener.open(request, timeout=timeout)
 
 
@@ -7942,6 +8007,8 @@ def _subscription_size_limit_label(max_bytes: int) -> str:
 
 def _decode_http_payload(payload: bytes, content_encoding: str, max_bytes: int) -> bytes:
     encodings = [part.strip().casefold() for part in (content_encoding or "").split(",") if part.strip()]
+    if len(encodings) > 8:
+        raise _ProxySubscriptionPayloadError("订阅压缩层数过多，已停止解压")
     decoded = payload
     for encoding in reversed(encodings):
         try:
@@ -7962,7 +8029,13 @@ def _decode_http_payload(payload: bytes, content_encoding: str, max_bytes: int) 
 def _decompress_limited(payload: bytes, max_bytes: int, wbits: int) -> bytes:
     decoded = bytearray()
     remaining_payload = payload
+    member_count = 0
     while True:
+        member_count += 1
+        if member_count > 1024:
+            # Empty members consume CPU/copying work even with zero output.
+            # The byte limit alone cannot bound a concatenated gzip workload.
+            raise _ProxySubscriptionPayloadError("订阅压缩分段过多，已停止解压")
         decompressor = zlib.decompressobj(wbits)
         decoded.extend(decompressor.decompress(remaining_payload, max_bytes + 1 - len(decoded)))
         if decompressor.unconsumed_tail or len(decoded) > max_bytes:
@@ -9558,6 +9631,14 @@ MAX_ACTIVE_ADDRESSES = {PROXY_LATENCY_MAX_ACTIVE_ADDRESSES}
 DNS_LOCK = threading.Lock()
 DNS_FUTURES = {{}}
 
+def exception_incomplete(exc):
+    if not isinstance(exc, OSError):
+        return True
+    return getattr(exc, "errno", None) in {{
+        errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOBUFS, errno.EBADF,
+        10024, 10055,
+    }}
+
 def remaining(deadline):
     value = deadline - time.monotonic()
     if value <= 0:
@@ -9671,6 +9752,8 @@ def quick_connect(addresses, port, deadline):
                 except InterruptedError:
                     raise
                 except Exception as exc:
+                    if exception_incomplete(exc):
+                        raise
                     last_error = exc
                 finally:
                     if connection is not None and connection not in active:
@@ -9706,9 +9789,9 @@ def measure_quick(key, server, port):
     deadline = started + TIMEOUT
     try:
         quick_connect(quick_resolve(server, deadline), port, deadline)
-        return key, 1, str(max(1, int((time.monotonic() - started) * 1000))), "TCP 快速检查：单次连接，仅验证端口连通"
+        return key, 1, str(max(1, int((time.monotonic() - started) * 1000))), "TCP 快速检查：单次连接，仅验证端口连通", 0
     except Exception as exc:
-        return key, 0, "", clean(exc) or type(exc).__name__
+        return key, 0, "", clean(exc) or type(exc).__name__, int(exception_incomplete(exc))
 
 def clean(value):
     return str(value or "").replace("\\t", " ").replace("\\r", " ").replace("\\n", " ")[:180]
@@ -9726,7 +9809,7 @@ def measure(item):
     try:
         port = int(item.get("port"))
     except Exception:
-        return key, 0, "", "端口无效"
+        return key, 0, "", "端口无效", 1
     if QUICK:
         server = server.strip("[]")
         try:
@@ -9736,6 +9819,7 @@ def measure(item):
         return measure_quick(key, server, port)
     latencies = []
     detail = ""
+    incomplete = False
     for _ in range(max(1, ATTEMPTS)):
         started = time.perf_counter()
         try:
@@ -9743,9 +9827,10 @@ def measure(item):
                 latencies.append(max(1, int((time.perf_counter() - started) * 1000)))
         except Exception as exc:
             detail = clean(exc) or exc.__class__.__name__
+            incomplete = incomplete or exception_incomplete(exc)
     if latencies:
-        return key, 1, str(min(latencies)), ""
-    return key, 0, "", detail or "TCP 连接失败"
+        return key, 1, str(min(latencies)), "", 0
+    return key, 0, "", detail or "TCP 连接失败", int(incomplete)
 
 workers = max(1, min(MAX_WORKERS, len(nodes) or 1))
 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -9757,11 +9842,11 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
     for future in concurrent.futures.as_completed(futures):
         expected_key = futures[future]
         try:
-            key, ok, latency, detail = future.result()
+            key, ok, latency, detail, incomplete = future.result()
         except Exception as exc:
-            key, ok, latency, detail = expected_key, 0, "", clean(exc) or exc.__class__.__name__
+            key, ok, latency, detail, incomplete = expected_key, 0, "", clean(exc) or exc.__class__.__name__, 1
         if key:
-            print(f"latency\\t{{key}}\\t{{ok}}\\t{{latency}}\\t{{clean(detail)}}\\t{{ATTEMPTS}}", flush=True)
+            print(f"latency\\t{{key}}\\t{{ok}}\\t{{latency}}\\t{{clean(detail)}}\\t{{0 if incomplete else ATTEMPTS}}\\t{{incomplete}}", flush=True)
 PY
 """
 
@@ -10634,18 +10719,34 @@ def _parse_remote_latency_output(text: str) -> dict[str, ProxyNodeLatencyResult]
     for line in (text or "").splitlines():
         if not line.startswith("latency\t"):
             continue
-        _prefix, node_key, ok, latency, detail, attempts = (line.split("\t", 5) + ["", "", "", "", "", ""])[:6]
+        parts = line.split("\t")
+        if len(parts) not in {6, 7}:
+            continue
+        _prefix, node_key, ok, latency, detail, attempts = parts[:6]
+        incomplete = parts[6] if len(parts) == 7 else "0"
+        if ok not in {"0", "1"} or incomplete not in {"0", "1"}:
+            continue
         node_key = (node_key or "").strip()
         if not node_key:
             continue
-        latency_ms = _int_or_default((latency or "").strip(), 0) if ok == "1" else 0
+        attempt_count = _proxy_latency_integer(attempts.strip())
+        if attempt_count is None:
+            continue
+        latency_ms = _proxy_latency_integer(latency.strip(), minimum=1) if ok == "1" else None
+        if ok == "1" and latency_ms is None:
+            continue
+        if ok == "0" and latency.strip() not in {"", "0"}:
+            continue
+        # Older six-field rows remain supported. Corrupt/truncated duplicates
+        # are ignored so they cannot overwrite an earlier complete verdict.
         results[node_key] = ProxyNodeLatencyResult(
             node_key=node_key,
-            ok=ok == "1" and latency_ms > 0,
-            latency_ms=latency_ms if ok == "1" and latency_ms > 0 else None,
+            ok=ok == "1" and incomplete != "1",
+            latency_ms=latency_ms if incomplete != "1" else None,
             detail=(detail or "").strip()[:180],
-            attempts=_int_or_default((attempts or "").strip(), 0),
+            attempts=attempt_count,
             measured_at=_now_iso(),
+            incomplete=incomplete == "1",
         )
     return results
 
