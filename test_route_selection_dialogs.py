@@ -53,6 +53,31 @@ def test_missing_fixed_node_cannot_be_committed_or_silently_replaced(picker):
     assert dialog.winfo_exists()
 
 
+@pytest.mark.parametrize("candidate_count", [1, 2])
+def test_auto_strategy_explains_candidate_constraints_without_pinning(picker, candidate_count):
+    _root, dialog, selected = picker
+    dialog._candidate_count = candidate_count
+    dialog._set_mode(AUTO_MODE)
+    assert ("暂无备用" if candidate_count == 1 else "按服务策略筛选") in dialog._selection.cget("text")
+    assert dialog._choose.cget("state") == "normal"
+    dialog._commit()
+    assert selected == [""]
+
+
+def test_invalid_automatic_primary_can_still_be_replaced_with_a_fixed_node(picker):
+    _root, dialog, selected = picker
+    dialog._auto_route_usable = False
+    dialog._set_mode(AUTO_MODE)
+    assert "无法独立运行" in dialog._selection.cget("text")
+    assert dialog._choose.cget("state") == "disabled"
+    dialog._commit()
+    assert selected == [] and dialog.winfo_exists()
+    dialog._set_mode(FIXED_MODE)
+    assert dialog._choose.cget("state") == "normal"
+    dialog._commit()
+    assert selected == ["two"]
+
+
 def test_empty_search_keeps_explicit_selection_and_cancel_does_not_commit(picker):
     _root, dialog, selected = picker
     dialog._search.insert(0, "missing")

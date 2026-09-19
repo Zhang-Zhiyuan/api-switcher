@@ -318,3 +318,157 @@ def test_ssh_all_nodes_action_ignores_picker_filter(monkeypatch):
     tab._run_proxy_ssh_task = lambda message, run, on_done: run()
     tab._measure_proxy_subscription_latencies(all_nodes=True)
     assert captured == [(["synthetic"], tuple(nodes))]
+
+
+def _ssh_scope_tab(monkeypatch):
+    nodes = [_node(1, "vless"), _node(2, "vless")]
+    tab = object.__new__(SSHTab)
+    tab._proxy_busy = False
+    tab._proxy_subscription_nodes = nodes
+    tab._proxy_latency_results = {}
+    tab._proxy_latency_target_signature = None
+    tab._proxy_latency_server_count = 0
+    tab._proxy_saved_subscription_load_generation = 1
+    tab._current_proxy_subscription_profile_id = lambda: "profile-a"
+    tab._selected_server_names = {"server-a"}
+    tab._require_selected_servers = lambda _: sorted(tab._selected_server_names)
+    tab._format_server_target = lambda names: ",".join(names)
+    tab._proxy_subscription_batch_nodes = lambda: nodes
+    tab._proxy_subscription_batch_scope_label = lambda: "全部"
+    callbacks, renders, messages = [], [], []
+    tab._set_proxy_subscription_nodes = lambda *args, **kwargs: renders.append(dict(tab._proxy_latency_results))
+    tab._fastest_proxy_subscription_node = lambda _: None
+    tab._run_proxy_ssh_task = lambda message, run, on_done: callbacks.append(on_done)
+    tab._set_proxy_status = lambda message, *args: messages.append(message)
+    tab.winfo_toplevel = lambda: object()
+    tab._target_summary_label = None
+    tab._target_hint_label = None
+    tab._sync_current_button = None
+    tab._sync_selected_button = None
+    tab._update_proxy_target_label = lambda: None
+    monkeypatch.setattr("ui.tabs.ssh_tab.show_toast", lambda *args, **kwargs: None)
+    return tab, nodes, callbacks, renders, messages
+
+
+def _complete_ssh_measurement(callback, source, nodes):
+    values = {remote_proxy.proxy_subscription_node_key(node): remote_proxy.ProxyNodeLatencyResult(
+        remote_proxy.proxy_subscription_node_key(node), True, 23,
+    ) for node in nodes}
+    callback({"ok": True, "result": {"results": {source: values}}})
+
+
+def test_ssh_target_change_immediately_clears_old_source_and_repaints(monkeypatch):
+    tab, nodes, callbacks, renders, _messages = _ssh_scope_tab(monkeypatch)
+    tab._measure_proxy_subscription_latencies()
+    _complete_ssh_measurement(callbacks.pop(), "server-a", nodes)
+    assert len(tab._proxy_latency_results) == 2
+
+    tab._selected_server_names = {"server-b"}
+    tab._update_target_context_ui(["server-b"])
+
+    assert tab._proxy_latency_results == {}
+    assert tab._proxy_latency_server_count == 0
+    assert renders[-1] == {}
+    assert tab._proxy_latency_target_signature == (("server-b", "", "", ""),)
+
+
+def test_ssh_old_source_completion_cannot_repopulate_new_target(monkeypatch):
+    tab, nodes, callbacks, renders, messages = _ssh_scope_tab(monkeypatch)
+    tab._measure_proxy_subscription_latencies()
+    tab._selected_server_names = {"server-b"}
+    tab._update_target_context_ui(["server-b"])
+    _complete_ssh_measurement(callbacks.pop(), "server-a", nodes)
+
+    assert tab._proxy_latency_results == {}
+    assert renders == []
+    assert "目标服务器已变化" in messages[-1]
+
+
+def test_ssh_partial_batch_cannot_merge_other_source_measurements(monkeypatch):
+    tab, nodes, callbacks, _renders, _messages = _ssh_scope_tab(monkeypatch)
+    tab._measure_proxy_subscription_latencies()
+    _complete_ssh_measurement(callbacks.pop(), "server-a", nodes)
+    tab._selected_server_names = {"server-b"}
+    # Also defend programmatic source changes that skipped the UI toggle hook.
+    tab._proxy_subscription_batch_nodes = lambda: nodes[:1]
+    tab._measure_proxy_subscription_latencies()
+    _complete_ssh_measurement(callbacks.pop(), "server-b", nodes[:1])
+
+    assert set(tab._proxy_latency_results) == {remote_proxy.proxy_subscription_node_key(nodes[0])}
+
+
+def test_ssh_partial_batches_keep_same_source_results(monkeypatch):
+    tab, nodes, callbacks, _renders, _messages = _ssh_scope_tab(monkeypatch)
+    for node in nodes:
+        tab._proxy_subscription_batch_nodes = lambda selected=node: [selected]
+        tab._measure_proxy_subscription_latencies()
+        _complete_ssh_measurement(callbacks.pop(), "server-a", [node])
+    assert len(tab._proxy_latency_results) == 2
+
+
+def test_ssh_unattributed_win11_cache_is_not_a_remote_result(monkeypatch):
+    tab, nodes, _callbacks, renders, _messages = _ssh_scope_tab(monkeypatch)
+    tab._proxy_latency_results = {remote_proxy.proxy_subscription_node_key(nodes[0]): {"ok": True, "latency_ms": 4}}
+    tab._update_target_context_ui(["server-a"])
+    assert tab._proxy_latency_results == {}
+    assert renders == [{}]
+
+
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_ssh_renamed_endpoint_under_same_alias_invalidates_results(monkeypatch, in_flight):
+    tab, nodes, callbacks, _renders, messages = _ssh_scope_tab(monkeypatch)
+    tab._server_profile_map = {"server-a": SimpleNamespace(host="old.example.test", port=22, username="user")}
+    tab._measure_proxy_subscription_latencies()
+    if not in_flight:
+        _complete_ssh_measurement(callbacks.pop(), "server-a", nodes)
+        assert tab._proxy_latency_results
+
+    tab._server_profile_map["server-a"] = SimpleNamespace(host="new.example.test", port=22, username="user")
+    tab._update_target_context_ui(["server-a"])
+    assert tab._proxy_latency_results == {}
+    if in_flight:
+        _complete_ssh_measurement(callbacks.pop(), "server-a", nodes)
+        assert tab._proxy_latency_results == {}
+        assert "目标服务器已变化" in messages[-1]
+
+
+@pytest.mark.parametrize("failure_stage", ["create", "submit", "iterate", "shutdown"])
+def test_tcp_executor_errors_preserve_completed_results(monkeypatch, failure_stage):
+    nodes = [_node(index, "vless") for index in (1, 2, 3)]
+
+    class Executor:
+        def __init__(self, **kwargs):
+            if failure_stage == "create":
+                raise RuntimeError("executor unavailable")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            if failure_stage == "shutdown":
+                raise RuntimeError("shutdown failure")
+
+        def submit(self, action, node, *args, **kwargs):
+            if failure_stage == "submit" and node["name"] == nodes[1].node["name"]:
+                raise RuntimeError("submit failure")
+            key = remote_proxy.proxy_node_key(node)
+            result = Future()
+            result.set_result(remote_proxy.ProxyNodeLatencyResult(key, True, 35, attempts=2))
+            return result
+
+    def failed_iteration(futures):
+        yield next(iter(futures))
+        raise RuntimeError("iteration failure")
+
+    monkeypatch.setattr(remote_proxy, "ThreadPoolExecutor", Executor)
+    if failure_stage == "iterate":
+        monkeypatch.setattr(remote_proxy, "as_completed", failed_iteration)
+    results = remote_proxy.measure_proxy_node_latencies(nodes)
+    assert len(results) == 3
+    for node in nodes:
+        result = results[remote_proxy.proxy_subscription_node_key(node)]
+        failed = failure_stage == "create" or (failure_stage == "submit" and node is nodes[1])
+        assert result.ok is not failed
+        if not failed:
+            assert result.latency_ms == 35
+        assert remote_proxy.proxy_node_latency_fresh(result)

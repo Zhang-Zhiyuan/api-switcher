@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 import threading
@@ -52,19 +53,70 @@ def _upstream(label, stack):
     return {"name": label, "type": "http", "server": "127.0.0.1", "port": server.server_port}
 
 
+def _reserve_exclusively(sock):
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+
+
 def _port_pair():
+    failures = []
     for _attempt in range(30):
-        with socket.socket() as listener, socket.socket() as controller:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-            if port >= 65535:
-                continue
+        with socket.socket() as listener, socket.socket() as controller, socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM,
+        ) as mixed_udp:
+            for reserved in (listener, controller, mixed_udp):
+                _reserve_exclusively(reserved)
+            # With a narrowed Windows ephemeral range, sequential port-0
+            # choices can repeatedly collide with UDP or derived controller
+            # ports. After one failed automatic choice, sample independent
+            # legal pairs instead of exhausting adjacent candidates.
+            port = 0 if _attempt == 0 else 1024 + secrets.randbelow(64535 - 1024 + 1)
             try:
+                listener.bind(("127.0.0.1", port))
+                port = listener.getsockname()[1]
+                # A mixed mihomo listener needs both protocols. On Windows an
+                # available ephemeral TCP port can be occupied by UDP (e.g.
+                # SSDP/1900); that failure leaves the controller alive but the
+                # mixed listener unavailable after briefly opening its TCP port.
+                mixed_udp.bind(("127.0.0.1", port))
                 controller.bind(("127.0.0.1", remote_proxy.mihomo_controller_port(port)))
-            except OSError:
+            except OSError as exc:
+                failures.append(f"{port}: {type(exc).__name__}: {exc}")
                 continue
             return port
-    raise RuntimeError("No free port pair for isolated mihomo")
+    raise RuntimeError("No free mixed TCP/UDP and controller TCP ports for isolated mihomo; "
+                       + "; ".join(failures[-3:]))
+
+
+def _wait_for_mihomo_ready(process, port, *, timeout_seconds=10):
+    controller_port = remote_proxy.mihomo_controller_port(port)
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "not yet checked"
+    while time.monotonic() < deadline:
+        assert process.poll() is None, f"isolated mihomo exited before readiness: {process.returncode}"
+        try:
+            with socket.create_connection(("127.0.0.1", controller_port), timeout=0.2):
+                pass
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2) as mixed:
+                # Check the SOCKS protocol, not just a briefly bound TCP socket:
+                # serving starts only after mihomo's UDP bind has succeeded.
+                mixed.sendall(b"\x05\x01\x00")
+                greeting = b""
+                while len(greeting) < 2:
+                    part = mixed.recv(2 - len(greeting))
+                    if not part:
+                        break
+                    greeting += part
+                if greeting != b"\x05\x00":
+                    raise OSError(f"invalid SOCKS readiness greeting: {greeting!r}")
+            return
+        except OSError as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.05)
+    raise AssertionError(
+        f"isolated mihomo endpoints were not ready: mixed={port}, controller={controller_port}, "
+        f"exit_code={process.poll()}, last_error={last_error}"
+    )
 
 
 def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monkeypatch, tmp_path):
@@ -159,14 +211,7 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         process = subprocess.Popen([str(binary), "-d", str(tmp_path), "-f", str(config_path)],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
         try:
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                assert process.poll() is None, "isolated mihomo exited before listening"
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                        break
-                except OSError:
-                    time.sleep(0.05)
+            _wait_for_mihomo_ready(process, port)
             opener = request.build_opener(remote_proxy._NoBypassProxyHandler({"http": f"http://127.0.0.1:{port}"}))
             runtime = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port), expected_mixed_port=port)
             saved = proxy_route_diagnostics.saved_rules(preferences)

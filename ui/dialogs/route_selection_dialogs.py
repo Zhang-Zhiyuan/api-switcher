@@ -5,6 +5,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from core.subscription_routing_policy import route_candidate_count
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, input_style
 
@@ -52,7 +53,8 @@ class DraftChoiceDialog(ctk.CTkToplevel):
 
 
 class RouteNodeDialog(DraftChoiceDialog):
-    def __init__(self, master, *, service_label, profile_name, nodes, selected_key, on_select):
+    def __init__(self, master, *, service_label, profile_name, nodes, selected_key, on_select,
+                 auto_route_usable=True, auto_route_candidate_count=None):
         super().__init__(master)
         self.title("选择节点策略")
         self.geometry("680x600")
@@ -60,6 +62,10 @@ class RouteNodeDialog(DraftChoiceDialog):
         self.configure(fg_color=COLORS["app_bg"])
         self._nodes = [dict(item) for item in nodes]
         self._keys = {item["key"] for item in self._nodes}
+        self._candidate_count = route_candidate_count({
+            "nodes": self._nodes, "auto_route_candidate_count": auto_route_candidate_count,
+        })
+        self._auto_route_usable = auto_route_usable is True and self._candidate_count > 0
         self._selected_key = selected_key
         self._on_select = on_select
         self._filter_after_id = None
@@ -162,10 +168,14 @@ class RouteNodeDialog(DraftChoiceDialog):
     def _update_selection(self):
         item = next((item for item in self._nodes if item["key"] == self._selected_key), None)
         if self._mode == AUTO_MODE:
-            text = "将使用订阅首选节点，并在该订阅内故障切换。"
-            valid = bool(self._nodes)
-            if not valid:
+            text = "使用订阅首选；备用按服务策略筛选，仅在此订阅内故障切换。"
+            valid = bool(self._nodes) and self._auto_route_usable
+            if not self._nodes or not self._candidate_count:
                 text = "该订阅暂无可用缓存，请返回编辑器重读缓存或先拉取订阅。"
+            elif not self._auto_route_usable:
+                text = "当前订阅首选无法独立运行，请选择固定节点，或返回订阅区更换首选后重读缓存。"
+            elif self._candidate_count == 1:
+                text = "仅 1 个独立候选节点，暂无备用可切换；将使用订阅首选。"
         else:
             text = "已选固定节点：" + safe_feedback_text(str(item["label"])) if item else "请选择一个节点；原固定节点缺失时不会自动替换。"
             valid = item is not None
@@ -195,6 +205,8 @@ class RouteNodeDialog(DraftChoiceDialog):
 
     def _commit(self):
         if self._closed or not self._nodes:
+            return
+        if self._mode == AUTO_MODE and not self._auto_route_usable:
             return
         key = "" if self._mode == AUTO_MODE else self._selected_key
         if self._mode == FIXED_MODE and key not in self._keys:

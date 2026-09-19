@@ -105,6 +105,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._strict_privacy_var = ctk.BooleanVar(value=False)
         self._strict_privacy_check = None
         self._service_route_catalog = []
+        self._route_catalog_generation = 0
+        self._route_catalog_refresh_after_id = None
+        self._route_catalog_refresh_running = False
+        self._route_catalog_refresh_pending = False
         self._service_routes_dialog = None
         self._service_route_bindings = {}
         self._routing_preferences_snapshot = None
@@ -940,6 +944,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def destroy(self):
         self._destroyed = True
+        if getattr(self, "_route_catalog_refresh_after_id", None) is not None:
+            try:
+                self.after_cancel(self._route_catalog_refresh_after_id)
+            except Exception:
+                pass
+            self._route_catalog_refresh_after_id = None
         if self._quality_cancel_event is not None:
             self._quality_cancel_event.set()
         if self._responsive_after_id is not None:
@@ -1245,6 +1255,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
     def _load_proxy_preferences_ui(self):
         self._preferences_load_generation += 1
         generation = self._preferences_load_generation
+        catalog_generation = getattr(self, "_route_catalog_generation", 0)
         self._set_routing_status("正在后台加载 Win11 代理偏好...")
 
         def run():
@@ -1264,7 +1275,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if not payload["ok"]:
                     self._set_routing_status(f"加载 Win11 代理偏好失败: {payload['error']}", "error")
                     return
-                self._service_route_catalog = payload.get("catalog", [])
+                if catalog_generation == getattr(self, "_route_catalog_generation", 0):
+                    self._service_route_catalog = payload.get("catalog", [])
                 self._apply_proxy_preferences_ui(payload["preferences"])
 
             self._run_on_ui_thread(finish)
@@ -1574,6 +1586,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _refresh_service_route_profile_options(self, profiles=None):
         if profiles is not None:
+            previous_profiles = getattr(self, "_subscription_profiles_snapshot", [])
             self._subscription_profiles_snapshot = [
                 dict(profile) for profile in profiles if isinstance(profile, dict)
             ]
@@ -1585,10 +1598,70 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                  "network_type": remote_proxy.normalize_proxy_subscription_network_type(profile.get("network_type"))}
                 for profile in self._subscription_profiles_snapshot
             ]
+            if getattr(self, "_route_catalog_refresh_running", False):
+                fields = ("id", "name", "network_type", "source_revision", "cache_revision", "saved_path", "selected_node_key")
+                previous = [tuple(profile.get(key) for key in fields) for profile in previous_profiles]
+                current = [tuple(profile.get(key) for key in fields) for profile in self._subscription_profiles_snapshot]
+                if previous != current:
+                    self._request_route_catalog_refresh()
         overview = getattr(self, "_route_overview", None)
         preferences = getattr(self, "_routing_preferences_snapshot", None)
         if overview is not None and preferences is not None:
             overview.set_routes(preferences, self._service_route_catalog)
+
+    def _request_route_catalog_refresh(self):
+        """Coalesce subscription changes without touching the editable forms or live routes."""
+        if getattr(self, "_destroyed", False) or getattr(self, "_route_overview", None) is None:
+            return
+        self._route_catalog_generation = getattr(self, "_route_catalog_generation", 0) + 1
+        self._route_catalog_refresh_pending = True
+        if (getattr(self, "_route_catalog_refresh_running", False)
+                or getattr(self, "_route_catalog_refresh_after_id", None) is not None):
+            return
+        try:
+            self._route_catalog_refresh_after_id = self.after(0, self._start_route_catalog_refresh)
+        except Exception:
+            self._route_catalog_refresh_after_id = None
+            self._route_catalog_refresh_pending = False
+
+    def _start_route_catalog_refresh(self):
+        self._route_catalog_refresh_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
+        self._route_catalog_refresh_running = True
+        self._route_catalog_refresh_pending = False
+        generation = self._route_catalog_generation
+
+        def run():
+            try:
+                catalog = local_proxy.proxy_routing.load_route_catalog()
+                error = ""
+            except Exception as exc:
+                catalog = None
+                error = safe_feedback_text(str(exc).strip() or type(exc).__name__)
+
+            def finish():
+                if getattr(self, "_destroyed", False):
+                    return
+                self._route_catalog_refresh_running = False
+                if generation == self._route_catalog_generation:
+                    if error:
+                        self._set_routing_status(f"订阅已更新，但分流概览刷新失败：{error}。可点击刷新重试。", "warning")
+                    else:
+                        self._service_route_catalog = catalog
+                        self._refresh_service_route_profile_options()
+                if self._route_catalog_refresh_pending:
+                    self._request_route_catalog_refresh()
+
+            self._run_on_ui_thread(finish)
+
+        try:
+            threading.Thread(target=run, name="local-route-catalog-refresh", daemon=True).start()
+        except Exception as exc:
+            self._route_catalog_refresh_running = False
+            self._set_routing_status(
+                "分流概览刷新未启动：" + safe_feedback_text(str(exc).strip() or type(exc).__name__), "warning",
+            )
 
     def _open_route_diagnostics(self):
         if self._busy:
@@ -2595,6 +2668,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         return
                     self._periodic_update_running = False
                     self._set_busy(False)
+                    if payload["fetch_ok"]:
+                        self._request_route_catalog_refresh()
                     try:
                         if generation != self._saved_subscription_load_generation:
                             return
@@ -2924,6 +2999,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._set_busy(False)
+                if payload["ok"]:
+                    self._request_route_catalog_refresh()
                 if generation != self._saved_subscription_load_generation:
                     return
                 try:
@@ -3085,6 +3162,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 if not self.winfo_exists():
                     return
                 self._set_busy(False)
+                if payload["ok"]:
+                    self._request_route_catalog_refresh()
                 if generation != self._saved_subscription_load_generation:
                     return
                 if not payload["ok"]:

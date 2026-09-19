@@ -191,6 +191,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_options = {}
         self._proxy_latency_results = {}
         self._proxy_latency_server_count = 0
+        self._proxy_latency_target_signature = None
         self._proxy_quality_results = {}
         self._proxy_prefer_quality_sort = False
         self._proxy_busy = False
@@ -2223,6 +2224,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _update_target_context_ui(self, selected: list[str] | None = None):
         selected = selected if selected is not None else self._ordered_server_names(self._selected_server_names)
+        self._sync_proxy_latency_target_context(selected)
         if selected:
             summary = f"已选目标: {self._format_server_target(selected)}"
             hint = "所有写入/部署操作使用已选目标；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。"
@@ -2245,6 +2247,29 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._sync_selected_button:
             self._sync_selected_button.configure(text=selected_text)
         self._update_proxy_target_label()
+
+    def _proxy_latency_source_signature(self, server_names):
+        # Cached endpoint metadata is sufficient; never read secrets or perform
+        # profile/network I/O merely to compare where measurements originated.
+        profiles = getattr(self, "_server_profile_map", {}) or {}
+        return tuple(
+            (name, str(getattr(profiles.get(name), "host", "") or ""),
+             str(getattr(profiles.get(name), "port", "") or ""),
+             str(getattr(profiles.get(name), "username", "") or ""))
+            for name in sorted(set(server_names))
+        )
+
+    def _sync_proxy_latency_target_context(self, server_names):
+        """Never display/merge another machine's endpoint measurements."""
+        signature = self._proxy_latency_source_signature(server_names)
+        if signature == getattr(self, "_proxy_latency_target_signature", None):
+            return
+        had_results = bool(getattr(self, "_proxy_latency_results", {}))
+        self._proxy_latency_target_signature = signature
+        self._proxy_latency_results = {}
+        self._proxy_latency_server_count = 0
+        if had_results and getattr(self, "_proxy_subscription_nodes", ()):
+            self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
 
     def _update_batch_target_label(self, server_names: list[str] | None = None):
         all_names = server_names if server_names is not None else self._profile_server_names()
@@ -3603,7 +3628,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                     profile_snapshot = dict(
                         current_profiles.get(profile_id) or payload.get("profile") or {}
                     )
-                    self._proxy_latency_results = dict(profile_snapshot.get("node_latencies") or {})
+                    # Shared subscription latency caches originate on Win11;
+                    # without SSH source identity they are not remote results.
+                    self._proxy_latency_results = {}
                     self._proxy_latency_server_count = 0
                     self._proxy_quality_results = dict(profile_snapshot.get("node_qualities") or {})
                     self._proxy_prefer_quality_sort = bool(self._proxy_quality_results)
@@ -4010,6 +4037,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         target_label = self._format_server_target(server_names)
+        self._sync_proxy_latency_target_context(server_names)
+        target_signature = self._proxy_latency_source_signature(server_names)
         scope_nodes = tuple(self._proxy_subscription_nodes if all_nodes else self._proxy_subscription_batch_nodes())
         scope_label = (
             f"当前订阅全部 {len(scope_nodes)} 个节点（忽略筛选与勾选）"
@@ -4039,6 +4068,12 @@ class SSHTab(ctk.CTkScrollableFrame):
                 or profile_id != self._current_proxy_subscription_profile_id()
             ):
                 message = "原订阅的远端测速已完成；页面分组已变更，未覆盖当前节点与选择。"
+                self._set_proxy_status(message, "warning")
+                show_toast(self.winfo_toplevel(), message)
+                return
+            current_targets = self._proxy_latency_source_signature(getattr(self, "_selected_server_names", server_names))
+            if current_targets != target_signature:
+                message = "原服务器的测速已完成；目标服务器已变化，未覆盖当前延迟或节点选择，请重新测速。"
                 self._set_proxy_status(message, "warning")
                 show_toast(self.winfo_toplevel(), message)
                 return

@@ -362,6 +362,70 @@ def test_catalog_reload_and_scope_switch_reuse_existing_rows(editor):
     assert rows == {key: row["tile"] for key, row in dialog._rows.items()}
 
 
+@pytest.mark.parametrize("operation", ["_reload_catalog", "_apply"])
+@pytest.mark.parametrize("fail_at", ["constructor", "start"])
+def test_worker_start_failure_preserves_draft_and_allows_retry(editor, monkeypatch, operation, fail_at):
+    from ui.dialogs import service_routes_dialog
+    root, dialog, saved = editor
+    dialog._select_profile("claude", "机房订阅 B")
+    original, draft = copy.deepcopy((dialog._originals, dialog._drafts))
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("synthetic worker capacity exhausted")
+
+    with monkeypatch.context() as patch:
+        if fail_at == "constructor":
+            patch.setattr(service_routes_dialog.threading, "Thread", unavailable)
+        else:
+            patch.setattr(service_routes_dialog.threading.Thread, "start", unavailable)
+        getattr(dialog, operation)()
+    assert not dialog._busy and dialog._poll_id is None
+    assert dialog._originals == original and dialog._drafts == draft
+    assert dialog._save_button.cget("state") == "normal"
+    assert "任务未启动" in dialog._status.cget("text")
+    assert not saved
+    getattr(dialog, operation)()
+    _wait(root, lambda: not dialog._busy)
+    assert len(saved) == (1 if operation == "_apply" else 0)
+
+
+def test_initial_worker_failure_leaves_editor_closable_without_loading_or_saving(tk_root, monkeypatch):
+    from ui.dialogs import service_routes_dialog
+    calls = []
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError()
+
+    monkeypatch.setattr(service_routes_dialog.threading.Thread, "start", unavailable)
+    dialog = ServiceRoutesDialog(
+        tk_root, scopes=["隔离测试"], load_preferences=lambda *_: calls.append("load"),
+        catalog_loader=lambda: calls.append("catalog"), apply_preferences=lambda *_: calls.append("apply"),
+    )
+    try:
+        tk_root.update()
+        assert not dialog._busy and not dialog._drafts and not calls
+        assert "RuntimeError" in dialog._status.cget("text")
+        dialog._close()
+        assert not dialog.winfo_exists()
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+        tk_root.update()
+
+
+def test_node_picker_receives_catalog_auto_strategy_constraints(editor):
+    _root, dialog, saved = editor
+    dialog._catalog[0].update(auto_route_usable=False, auto_route_candidate_count=1)
+    dialog._open_node_picker("claude")
+    picker = dialog._node_dialog
+    from ui.dialogs.route_selection_dialogs import AUTO_MODE
+    picker._set_mode(AUTO_MODE)
+    assert picker._candidate_count == 1
+    assert picker._choose.cget("state") == "disabled"
+    picker._commit()
+    assert picker.winfo_exists() and not saved
+
+
 def test_node_search_choice_only_changes_draft_and_restores_editor_grab(editor):
     from ui.dialogs.route_selection_dialogs import FIXED_MODE
     root, dialog, saved = editor

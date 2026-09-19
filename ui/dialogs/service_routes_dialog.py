@@ -256,7 +256,21 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._queue.put(("catalog", self._catalog_loader()))
             except Exception as exc:
                 self._queue.put(("catalog_error", safe_feedback_text(str(exc))))
-        threading.Thread(target=run, name="service-routes-catalog", daemon=True).start()
+        self._start_worker(run, "service-routes-catalog")
+
+    def _start_worker(self, run, name):
+        """A thread allocation failure must not lock an unsaved draft forever."""
+        try:
+            threading.Thread(target=run, name=name, daemon=True).start()
+        except Exception as exc:
+            self._busy = False
+            if self._drafts:
+                self._set_editable(True)
+                self._changed()
+            detail = safe_feedback_text(str(exc)) or type(exc).__name__
+            recovery = "草稿和现有线路未改变，可重试或关闭。" if self._drafts else "请关闭窗口后重新打开。"
+            self._status.configure(text=f"后台任务未启动：{detail}。{recovery}", text_color=COLORS["danger"])
+            return
         self._poll_id = self.after(60, self._poll)
 
     def _open_subscription_tags(self):
@@ -308,8 +322,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._queue.put(("loaded", (preferences, self._catalog_loader())))
             except Exception as exc:
                 self._queue.put(("error", safe_feedback_text(str(exc))))
-        threading.Thread(target=run, name="service-routes-load", daemon=True).start()
-        self._poll_id = self.after(60, self._poll)
+        self._start_worker(run, "service-routes-load")
 
     def _poll(self):
         self._poll_id = None
@@ -620,6 +633,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self, service_label=self._rows[service]["label"], profile_name=profile["name"], nodes=nodes,
             selected_key=self._drafts[scope]["service_node_bindings"].get(service, ""),
             on_select=lambda key: self._accept_node_choice(scope, service, profile_id, key),
+            auto_route_usable=profile.get("auto_route_usable", True),
+            auto_route_candidate_count=profile.get("auto_route_candidate_count"),
         )
 
     def _accept_node_choice(self, scope, service, profile_id, key):
@@ -786,8 +801,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 except Exception as exc:
                     errors.append((scope, safe_feedback_text(str(exc))))
             self._queue.put(("applied", (succeeded, errors)))
-        threading.Thread(target=run, name="service-routes-apply", daemon=True).start()
-        self._poll_id = self.after(60, self._poll)
+        self._start_worker(run, "service-routes-apply")
 
     def _close(self):
         if self._busy and self._drafts:

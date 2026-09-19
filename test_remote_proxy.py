@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import gzip
 import io
 import json
@@ -7647,6 +7648,7 @@ def test_pick_mihomo_windows_asset_prefers_non_compatible_archive():
 
 
 def test_select_local_mixed_port_skips_busy_default(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_reserve_local_mihomo_ports", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
     monkeypatch.setattr(local_proxy, "_read_pid", lambda: None)
     monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: False)
@@ -7656,6 +7658,7 @@ def test_select_local_mixed_port_skips_busy_default(monkeypatch):
 
 
 def test_select_local_mixed_port_skips_busy_controller(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_reserve_local_mihomo_ports", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {})
     monkeypatch.setattr(local_proxy, "_read_pid", lambda: None)
     monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: False)
@@ -7665,6 +7668,7 @@ def test_select_local_mixed_port_skips_busy_controller(monkeypatch):
 
 
 def test_select_local_mixed_port_ignores_unmanaged_pid(monkeypatch):
+    monkeypatch.setattr(local_proxy, "_reserve_local_mihomo_ports", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(local_proxy, "_load_state", lambda: {"mixed_port": 17897})
     monkeypatch.setattr(local_proxy, "_read_pid", lambda: 12345)
     monkeypatch.setattr(local_proxy, "_is_pid_running", lambda _pid: True)

@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import wraps
@@ -3665,6 +3665,42 @@ def _probe_cloudflare_transfer_round(
 
 
 @contextmanager
+def _reserve_local_mihomo_ports(
+    mixed_port: int = 0, controller_port: int | None = None, *, mixed_host: str = "127.0.0.1",
+):
+    """Temporarily reserve every listener needed by a local mihomo instance.
+
+    The mixed listener needs both TCP and UDP on the same port. On Windows an
+    ordinary UDP bind can share an occupied port, so probe exclusive ownership.
+    Each socket is tracked before setup/bind so failed acquisition cannot leak.
+    """
+    with ExitStack() as sockets:
+        def reserve(kind, port, host):
+            sock = socket.socket(socket.AF_INET, kind)
+            sockets.callback(sock.close)
+            if os.name == "nt":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind((host, int(port)))
+            return int(sock.getsockname()[1])
+
+        mixed = reserve(socket.SOCK_STREAM, mixed_port, mixed_host)
+        reserve(socket.SOCK_DGRAM, mixed, mixed_host)
+        controller = reserve(socket.SOCK_STREAM, controller_port, "127.0.0.1") if controller_port is not None else None
+        yield mixed, controller
+
+
+def _select_isolated_mihomo_ports(*, with_controller: bool = False) -> tuple[int, int | None]:
+    last_error = None
+    for _attempt in range(30):
+        try:
+            with _reserve_local_mihomo_ports(controller_port=0 if with_controller else None) as ports:
+                return ports
+        except OSError as exc:
+            last_error = exc
+    raise RuntimeError("无法为临时 mihomo 找到空闲的 TCP/UDP 端口，请稍后重试") from last_error
+
+
+@contextmanager
 def _isolated_mihomo_session(
     binary_path: Path,
     proxy_node: dict,
@@ -3682,22 +3718,7 @@ def _isolated_mihomo_session(
     try:
         if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set():
             raise RuntimeError("应用正在退出，已取消节点稳定验证")
-        reserved_sockets = []
-        try:
-            port_count = 2 if subscription_recovery else 1
-            for _index in range(port_count):
-                reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                reserved.bind(("127.0.0.1", 0))
-                reserved_sockets.append(reserved)
-            mixed_port = int(reserved_sockets[0].getsockname()[1])
-            controller_port = (
-                int(reserved_sockets[1].getsockname()[1])
-                if subscription_recovery
-                else None
-            )
-        finally:
-            for reserved in reserved_sockets:
-                reserved.close()
+        mixed_port, controller_port = _select_isolated_mihomo_ports(with_controller=subscription_recovery)
 
         config = _build_isolated_mihomo_probe_config(
             proxy_node,
@@ -4164,13 +4185,20 @@ def _explicit_subscription_fallback_nodes(
     return tuple(selected)
 
 
+_UNLOADED_SUBSCRIPTION_ROUTE_CACHE = object()
+
+
 def _selected_subscription_route_pool(
     profile: dict,
     *,
     ai_sensitive: bool,
     node_key: str = "",
+    cached=_UNLOADED_SUBSCRIPTION_ROUTE_CACHE,
 ) -> tuple[dict, tuple[dict, ...]]:
-    cached = remote_proxy.load_cached_proxy_subscription(profile)
+    # None is an observed missing cache, not permission to load a newer version
+    # halfway through a multi-service configuration build.
+    if cached is _UNLOADED_SUBSCRIPTION_ROUTE_CACHE:
+        cached = remote_proxy.load_cached_proxy_subscription(profile)
     if cached is None or not cached.nodes:
         name = str(profile.get("name") or "该订阅").strip() or "该订阅"
         raise RuntimeError(f"服务分流订阅“{name}”没有可用缓存，请先拉取或导入")
@@ -4316,6 +4344,7 @@ def _resolve_service_subscription_routes(preferences: dict) -> dict:
     additional_groups = []
     seen_group_names: dict[str, str] = {}
     resolved_pools = {}
+    subscription_caches = {}
     for pool_id, request in requested.items():
         group_name = service_routes[request["service_ids"][0]]
         if group_name not in used_groups:
@@ -4333,8 +4362,14 @@ def _resolve_service_subscription_routes(preferences: dict) -> dict:
         ai_sensitive = bool(set(request["service_ids"]) & LOCAL_PROXY_AI_SERVICE_IDS)
         cache_key = (profile_id, request["node_key"], ai_sensitive)
         if cache_key not in resolved_pools:
+            if profile_id not in subscription_caches:
+                # URL imports overwrite the same cache path. Read once per
+                # subscription so AI, website and pinned groups cannot combine
+                # old/new subscription versions during a concurrent refresh.
+                subscription_caches[profile_id] = remote_proxy.load_cached_proxy_subscription(profile)
             resolved_pools[cache_key] = _selected_subscription_route_pool(
                 profile, ai_sensitive=ai_sensitive, node_key=request["node_key"],
+                cached=subscription_caches[profile_id],
             )
         route_node, route_fallbacks = resolved_pools[cache_key]
         # An explicit binding always owns an isolated group, even when its
@@ -4734,9 +4769,18 @@ def _select_local_mixed_port(preferred_port: int = DEFAULT_LOCAL_MIXED_PORT) -> 
         return preferred
 
     def ports_available(port: int) -> bool:
-        return not _is_port_listening(port) and not _is_port_listening(
-            remote_proxy.mihomo_controller_port(port)
-        )
+        controller_port = remote_proxy.mihomo_controller_port(port)
+        try:
+            # Keep listener checks for fast rejection, but no TCP listener does
+            # not establish that a port is bindable (UDP/exclusions/reservations).
+            if _is_port_listening(port) or _is_port_listening(controller_port):
+                return False
+            # WSL sharing uses a wildcard listener. A loopback-only reservation
+            # could miss another interface's UDP socket on the same port.
+            with _reserve_local_mihomo_ports(port, controller_port, mixed_host="0.0.0.0"):
+                return True
+        except OSError:
+            return False
 
     if ports_available(preferred):
         return preferred
@@ -4745,7 +4789,7 @@ def _select_local_mixed_port(preferred_port: int = DEFAULT_LOCAL_MIXED_PORT) -> 
             return port
     raise RuntimeError(
         f"本机 AI 代理候选端口 {LOCAL_PORT_CANDIDATES[0]}-{LOCAL_PORT_CANDIDATES[-1]} "
-        "或对应控制端口均被占用"
+        "的 TCP/UDP 或对应控制端口均不可用"
     )
 
 

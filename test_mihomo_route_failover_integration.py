@@ -10,7 +10,6 @@ import http.client
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import threading
 import time
@@ -22,7 +21,7 @@ import yaml
 from core import local_proxy, proxy_routing, remote_proxy
 from core.subscription_routing_policy import suggest_tagged_routes
 from test_local_proxy_service_routing import _patch_profiles
-from test_mihomo_service_routes_integration import _port_pair
+from test_mihomo_service_routes_integration import _port_pair, _wait_for_mihomo_ready
 
 
 class _LoopbackOutbound:
@@ -164,17 +163,7 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
         process = subprocess.Popen([str(binary), "-d", str(tmp_path), "-f", str(config_path)],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
         try:
-            def listening():
-                assert process.poll() is None, "isolated mihomo exited before listening"
-                try:
-                    for expected_port in (port, remote_proxy.mihomo_controller_port(port)):
-                        with socket.create_connection(("127.0.0.1", expected_port), timeout=0.2):
-                            pass
-                    return True
-                except OSError:
-                    return False
-
-            _wait_until(listening, "isolated mihomo did not start")
+            _wait_for_mihomo_ready(process, port)
             opener = request.build_opener(remote_proxy._NoBypassProxyHandler({"http": f"http://127.0.0.1:{port}"}))
             controller = remote_proxy.mihomo_controller_port(port)
 

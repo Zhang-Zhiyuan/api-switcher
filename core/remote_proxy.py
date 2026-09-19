@@ -2116,31 +2116,47 @@ def measure_proxy_node_latencies(
         len(items),
     )
     results: dict[str, ProxyNodeLatencyResult] = {}
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {
-            executor.submit(
-                measure_proxy_node_latency,
-                node,
-                timeout,
-                attempts,
-                require_all=require_all,
-            ): proxy_node_key(node)
-            for node in items
-        }
-        for future in as_completed(futures):
-            node_key = futures[future]
+
+    def failure(node_key, exc):
+        return ProxyNodeLatencyResult(
+            node_key=node_key,
+            ok=False,
+            latency_ms=None,
+            detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:120],
+            attempts=max(1, _int_or_default(attempts, 2)),
+            measured_at=_now_iso(),
+        )
+
+    futures = {}
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for node in items:
+                node_key = proxy_node_key(node)
+                try:
+                    future = executor.submit(
+                        measure_proxy_node_latency, node, timeout, attempts, require_all=require_all,
+                    )
+                    futures[future] = node_key
+                except Exception as exc:
+                    results[node_key] = failure(node_key, exc)
+            for future in as_completed(futures):
+                node_key = futures[future]
+                try:
+                    results[node_key] = future.result()
+                except Exception as exc:
+                    results[node_key] = failure(node_key, exc)
+    except Exception as exc:
+        # Preserve successful workers if scheduling or executor teardown fails.
+        for future, node_key in futures.items():
+            if node_key in results or not future.done():
+                continue
             try:
-                result = future.result()
-            except Exception as exc:
-                result = ProxyNodeLatencyResult(
-                    node_key=node_key,
-                    ok=False,
-                    latency_ms=None,
-                    detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:120],
-                    attempts=max(1, _int_or_default(attempts, 2)),
-                    measured_at=_now_iso(),
-                )
-            results[result.node_key] = result
+                results[node_key] = future.result()
+            except Exception as worker_exc:
+                results[node_key] = failure(node_key, worker_exc)
+        for node in items:
+            node_key = proxy_node_key(node)
+            results.setdefault(node_key, failure(node_key, exc))
     return results
 
 
@@ -4088,25 +4104,35 @@ chmod 700 "$TMP"
 
 PORTS="$(python3 - <<'PY'
 import socket
+import secrets
+from contextlib import ExitStack
 
-for _ in range(64):
-    first = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    second = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+for attempt in range(64):
     try:
-        first.bind(("127.0.0.1", 0))
-        port = int(first.getsockname()[1])
-        if port > 64535:
-            continue
-        second.bind(("127.0.0.1", port + 1000))
-        print(f"{{port}} {{port + 1000}}")
-        break
+        with ExitStack() as reservations:
+            first = reservations.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+            udp = reservations.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+            second = reservations.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                for reserved in (first, udp, second):
+                    reserved.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            # A custom narrow ephemeral range can repeatedly collide with
+            # UDP services or the +1000 controller. Diversify after one try.
+            candidate = 0 if attempt == 0 else 1024 + secrets.randbelow(64535 - 1024 + 1)
+            first.bind(("127.0.0.1", candidate))
+            port = int(first.getsockname()[1])
+            if port > 64535:
+                continue
+            # Mixed inbound needs UDP too; TCP-only availability can leave a
+            # running controller with no usable proxy listener.
+            udp.bind(("127.0.0.1", port))
+            second.bind(("127.0.0.1", port + 1000))
+            print(f"{{port}} {{port + 1000}}")
+            break
     except OSError:
         continue
-    finally:
-        first.close()
-        second.close()
 else:
-    raise SystemExit("没有可用的隔离 loopback 端口")
+    raise SystemExit("没有可用的隔离 loopback TCP/UDP 及控制端口")
 PY
 )"
 set -- $PORTS
