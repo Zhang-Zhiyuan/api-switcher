@@ -211,6 +211,7 @@ _PROXY_SUBSCRIPTION_PROFILE_FIELDS = {
 PROXY_SUBSCRIPTION_MAX_BYTES = 5 * 1024 * 1024
 PROXY_SUBSCRIPTION_USER_AGENTS = (
     "clash.meta",
+    "clash-verge/v2.5.2",
     "mihomo",
     "ClashforWindows/0.20.39",
     "ClashVergeRev",
@@ -616,8 +617,14 @@ class _ProxySubscriptionDownloadTrace:
     recovery_proxy_unavailable: bool = False
     recovery_routes_attempted: int = 0
     recovery_signatures_attempted: int = 0
+    direct_used: bool = False
+    system_proxy_used: bool = False
 
     def warning(self) -> str:
+        if self.system_proxy_used:
+            return "已通过 Windows 系统代理完成订阅更新；未改动系统代理或环境变量"
+        if self.direct_used:
+            return "原代理下载不可用，已临时直连完成订阅更新；未改动正在使用的代理设置"
         if not self.recovery_proxy_used:
             return ""
         route_detail = (
@@ -646,6 +653,10 @@ class _ProxySubscriptionDownloadTrace:
 
 class _ProxySubscriptionPayloadError(ValueError):
     """A successful HTTP response that is not a usable subscription document."""
+
+
+class _ProxySubscriptionProviderReferenceError(_ProxySubscriptionPayloadError):
+    """A client-format mismatch, not a reason to recursively fetch provider URLs."""
 
 
 @dataclass(frozen=True)
@@ -791,6 +802,8 @@ def fetch_proxy_subscription(
             "Accept": "text/plain, application/yaml, application/json, */*",
             "Accept-Encoding": "gzip, deflate",
             "Clash-Version": "1.18.0",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
         },
     )
 
@@ -6922,6 +6935,7 @@ def _download_proxy_subscription(
     direct_recovery_active = False
     trace = download_trace if download_trace is not None else _ProxySubscriptionDownloadTrace()
     recovery_discovery_attempted = False
+    system_proxy_discovery_attempted = False
     strict_proxy_map: dict[str, str] | None = None
     strict_proxy_error: RuntimeError | None = None
     if not allow_direct_fallback:
@@ -6972,6 +6986,7 @@ def _download_proxy_subscription(
                 proxy_map=strict_proxy_map,
                 direct=force_direct,
             )
+            trace.direct_used = bool(force_direct and direct_recovery_active)
             return result
         except HTTPError as exc:
             if exc.code in PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS:
@@ -6983,6 +6998,16 @@ def _download_proxy_subscription(
             raise
         except Exception as exc:
             last_error = exc
+
+        # A reachable server rejecting a client signature does not justify
+        # starting a disposable core yet. Try the cheap compatible signatures
+        # on this route first, without consuming the fallback time reserve.
+        if (
+            attempt < attempts
+            and _subscription_error_allows_immediate_retry(last_error)
+            and time.monotonic() < deadline - direct_recovery_reserve - recovery_proxy_reserve
+        ):
+            continue
 
         # A stopped/broken local proxy must not prevent the subscription from
         # being refreshed to recover service. This bypass is download-only and
@@ -6997,7 +7022,7 @@ def _download_proxy_subscription(
         ):
             direct_recovery_active = True
             try:
-                return _open_validated_proxy_subscription_request(
+                result = _open_compatible_proxy_subscription_request(
                     attempt_request,
                     timeout=_subscription_request_timeout(
                         deadline,
@@ -7007,6 +7032,8 @@ def _download_proxy_subscription(
                     max_bytes=max_bytes,
                     direct=True,
                 )
+                trace.direct_used = True
+                return result
             except HTTPError as exc:
                 if exc.code in PROXY_SUBSCRIPTION_PERMANENT_HTTP_ERRORS:
                     raise ValueError(
@@ -7019,6 +7046,47 @@ def _download_proxy_subscription(
                 raise
             except Exception as exc:
                 last_error = exc
+
+            if (
+                attempt < attempts
+                and _subscription_error_allows_immediate_retry(last_error)
+                and time.monotonic() < deadline - recovery_proxy_reserve
+            ):
+                # We reached the origin directly. Do not retry the same broken
+                # inherited proxy before every remaining compatible signature.
+                force_direct = primary_is_direct = True
+                direct_recovery_reserve = 0.0
+                continue
+
+        if not system_proxy_discovery_attempted:
+            system_proxy_discovery_attempted = True
+            system_proxy_map = _subscription_system_proxy_map(
+                request, strict=not allow_direct_fallback,
+            )
+            if system_proxy_map is not None:
+                # Environment proxies can mask WinINET entirely. Try the
+                # independently configured Windows route without editing it,
+                # leaving at least half the remaining time for cached nodes.
+                remaining = max(0.0, deadline - time.monotonic())
+                system_deadline = deadline - (
+                    remaining / 2.0 if callable(recovery_proxy_provider) else 0.0
+                )
+                try:
+                    result, system_error = _download_proxy_subscription_via_recovery(
+                        request=attempt_request,
+                        session=_ProxySubscriptionRecoverySession(system_proxy_map),
+                        deadline=system_deadline,
+                        max_bytes=max_bytes,
+                        trace=_ProxySubscriptionDownloadTrace(),
+                    )
+                except ValueError:
+                    raise
+                except Exception as exc:
+                    result, system_error = None, exc
+                if result is not None:
+                    trace.system_proxy_used = True
+                    return result
+                last_error = system_error or last_error
 
         if (
             not recovery_discovery_attempted
@@ -7037,6 +7105,7 @@ def _download_proxy_subscription(
                 ) as recovery_session:
                     if recovery_session is None:
                         trace.recovery_proxy_unavailable = True
+                        recovery_proxy_reserve = 0.0
                         continue
                     trace.recovery_proxy_attempted = True
                     result, recovery_error = _download_proxy_subscription_via_recovery(
@@ -7073,6 +7142,9 @@ def _download_proxy_subscription(
                     # original network or strict-privacy routing failure.
                     trace.recovery_proxy_unavailable = True
                     last_error = original_error
+            # Discovery is single-shot: once it has finished, unused reserved
+            # time belongs to the remaining ordinary download attempts again.
+            recovery_proxy_reserve = 0.0
 
         if attempt < attempts:
             if _subscription_error_is_retryable(last_error):
@@ -7137,7 +7209,7 @@ def _open_proxy_subscription_request(
         # with an explicit mapping.  This handler intentionally skips that
         # branch, so NO_PROXY='*' cannot turn strict mode into a direct call.
         opener = urlrequest.build_opener(_NoBypassProxyHandler(proxy_map))
-    open_request = opener.open if opener is not None else urlrequest.urlopen
+    open_request = opener.open if opener is not None else _open_current_proxy_subscription_request
     with open_request(request, timeout=timeout) as response:
         status = _int_or_default(getattr(response, "status", getattr(response, "code", 200)), 200)
         if status >= 400:
@@ -7151,8 +7223,15 @@ def _open_proxy_subscription_request(
                 getattr(response, "headers", None),
                 None,
             )
+        if status == 206:
+            raise _ProxySubscriptionPayloadError("订阅服务器仅返回部分内容，已拒绝覆盖完整配置")
 
         limit = _normalize_subscription_max_bytes(max_bytes)
+        headers = getattr(response, "headers", {}) or {}
+        length_header = _header_value(headers, "Content-Length").strip()
+        expected_length = int(length_header) if length_header.isascii() and length_header.isdigit() else None
+        if expected_length is not None and expected_length > limit:
+            raise ValueError(f"订阅内容超过 {_subscription_size_limit_label(limit)}，已停止读取")
         read_deadline = (
             float(deadline)
             if deadline is not None
@@ -7181,8 +7260,9 @@ def _open_proxy_subscription_request(
                 break
         if len(payload) > limit:
             raise ValueError(f"订阅内容超过 {_subscription_size_limit_label(limit)}，已停止读取")
+        if expected_length is not None and len(payload) != expected_length:
+            raise _ProxySubscriptionPayloadError("订阅响应传输不完整，已拒绝覆盖原配置")
 
-        headers = getattr(response, "headers", {}) or {}
         payload = _decode_http_payload(
             bytes(payload),
             content_encoding=_header_value(headers, "Content-Encoding"),
@@ -7217,6 +7297,16 @@ def _open_validated_proxy_subscription_request(
     except Exception as exc:
         normalized_type = str(content_type or "").casefold()
         prefix = text.lstrip()[:256].casefold()
+        if "proxy-providers" in text:
+            try:
+                document = yaml.safe_load(text)
+            except yaml.YAMLError:
+                document = None
+            if isinstance(document, dict) and document.get("proxy-providers") and not document.get("proxies"):
+                raise _ProxySubscriptionProviderReferenceError(
+                    "配置已下载，但仅含 proxy-providers 引用，没有展开的节点；"
+                    "请使用包含 proxies 节点的 Clash/mihomo 订阅链接或导入已展开配置"
+                ) from exc
         if "html" in normalized_type or prefix.startswith(("<!doctype html", "<html")):
             message = "订阅服务器返回了网页或拦截页，而不是节点配置"
         elif (
@@ -7228,6 +7318,68 @@ def _open_validated_proxy_subscription_request(
             message = str(exc).strip() or "订阅内容无法识别"
         raise _ProxySubscriptionPayloadError(message) from exc
     return result
+
+
+def _subscription_environment_proxy_map() -> dict[str, str]:
+    """Snapshot current settings; urllib's process-global opener caches old ones."""
+
+    proxies = dict(urlrequest.getproxies())
+    # urllib does not expand ALL_PROXY like most command-line HTTP clients do.
+    for scheme in ("http", "https"):
+        if not proxies.get(scheme) and proxies.get("all"):
+            proxies[scheme] = proxies["all"]
+    return proxies
+
+
+def _open_compatible_proxy_subscription_request(request, **kwargs):
+    """A new route gets its own compatible signatures, within its deadline."""
+
+    last_error = None
+    for user_agent in _proxy_subscription_user_agents_for_request(request):
+        deadline = kwargs.get("deadline")
+        if deadline is not None:
+            kwargs["timeout"] = _subscription_request_timeout(deadline)
+        try:
+            return _open_validated_proxy_subscription_request(
+                _proxy_subscription_request_with_user_agent(request, user_agent), **kwargs,
+            )
+        except Exception as exc:
+            if not _subscription_error_allows_immediate_retry(exc):
+                raise
+            last_error = exc
+    raise last_error  # Every subscription request has at least one signature.
+
+
+def _open_current_proxy_subscription_request(request, *, timeout):
+    opener = urlrequest.build_opener(urlrequest.ProxyHandler(_subscription_environment_proxy_map()))
+    return opener.open(request, timeout=timeout)
+
+
+def _subscription_system_proxy_map(request, *, strict: bool) -> dict[str, str] | None:
+    """Read WinINET independently from environment overrides, never change it."""
+
+    reader = getattr(urlrequest, "getproxies_registry", None)
+    if not callable(reader):
+        return None
+    try:
+        proxies = reader()
+        scheme = urlparse.urlsplit(request.full_url).scheme.casefold()
+        candidate = str(proxies.get(scheme) or proxies.get("all") or "").strip()
+        signature = _subscription_proxy_url_signature(candidate)
+        if signature is None or signature[0] not in {"http", "https"}:
+            return None
+        if strict and signature[1] not in _LOOPBACK_PROXY_HOSTS:
+            return None
+        current = _subscription_environment_proxy_map()
+        if candidate == str(current.get(scheme) or "").strip():
+            # Identical addresses are not identical routes when NO_PROXY sent
+            # the ordinary request directly; the explicit retry ignores bypass.
+            if strict or not urlrequest.proxy_bypass(urlparse.urlsplit(request.full_url).netloc):
+                return None
+        normalized = candidate if "://" in candidate else f"http://{candidate}"
+        return {"http": normalized, "https": normalized}
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def _tighten_subscription_response_timeout(response, remaining: float) -> None:
@@ -7389,6 +7541,12 @@ def _download_proxy_subscription_via_recovery(
 
 
 def _should_try_direct_subscription_download(error: Exception | None) -> bool:
+    if isinstance(error, _ProxySubscriptionProviderReferenceError):
+        return False
+    if isinstance(error, _ProxySubscriptionPayloadError):
+        return True
+    if isinstance(error, HTTPError) and error.code in {403, 406, 451}:
+        return True
     text = _exception_chain_text(error).casefold()
     if isinstance(error, HTTPError) and error.code == 407:
         return True
@@ -7412,13 +7570,16 @@ def _should_try_direct_subscription_download(error: Exception | None) -> bool:
         )
     ):
         return True
-    return _subscription_error_is_timeout(error) and _subscription_proxy_is_configured()
+    return (
+        (isinstance(error, OSError) and not isinstance(error, HTTPError))
+        or _subscription_error_is_timeout(error)
+    ) and _subscription_proxy_is_configured()
 
 
 def _should_try_recovery_proxy_subscription_download(error: Exception | None) -> bool:
     """Return whether a route change can plausibly recover the request."""
 
-    if error is None:
+    if error is None or isinstance(error, _ProxySubscriptionProviderReferenceError):
         return False
     if isinstance(error, _ProxySubscriptionPayloadError):
         return True
@@ -7439,7 +7600,9 @@ def _exception_chain_text(error: Exception | None) -> str:
 
 
 def _subscription_error_allows_immediate_retry(error: Exception | None) -> bool:
-    return isinstance(error, HTTPError) and error.code in {403, 406}
+    return isinstance(error, _ProxySubscriptionPayloadError) or (
+        isinstance(error, HTTPError) and error.code in {403, 406}
+    )
 
 
 def _subscription_retry_after_seconds(error: Exception | None) -> float | None:
@@ -7762,7 +7925,7 @@ def _subscription_request_timeout(
     if remaining <= 0:
         raise TimeoutError("订阅下载超过总等待时间")
     # Reserve time for direct recovery and alternate client signatures.
-    return max(0.25, min(15.0, remaining))
+    return min(15.0, remaining)
 
 
 def _normalize_subscription_max_bytes(value: int) -> int:
@@ -7778,32 +7941,44 @@ def _subscription_size_limit_label(max_bytes: int) -> str:
 
 
 def _decode_http_payload(payload: bytes, content_encoding: str, max_bytes: int) -> bytes:
-    encoding = (content_encoding or "").lower()
-    if "gzip" in encoding:
-        decoded = _decompress_limited(payload, max_bytes, 16 + zlib.MAX_WBITS)
-    elif "deflate" in encoding:
+    encodings = [part.strip().casefold() for part in (content_encoding or "").split(",") if part.strip()]
+    decoded = payload
+    for encoding in reversed(encodings):
         try:
-            decoded = _decompress_limited(payload, max_bytes, zlib.MAX_WBITS)
-        except zlib.error:
-            decoded = _decompress_limited(payload, max_bytes, -zlib.MAX_WBITS)
-    else:
-        return payload
-
-    if len(decoded) > max_bytes:
-        raise ValueError("订阅内容解压后超过 5MB，已停止读取")
+            if encoding in {"gzip", "x-gzip"}:
+                decoded = _decompress_limited(decoded, max_bytes, 16 + zlib.MAX_WBITS)
+            elif encoding == "deflate":
+                try:
+                    decoded = _decompress_limited(decoded, max_bytes, zlib.MAX_WBITS)
+                except zlib.error:
+                    decoded = _decompress_limited(decoded, max_bytes, -zlib.MAX_WBITS)
+            elif encoding != "identity":
+                raise _ProxySubscriptionPayloadError("订阅服务器返回了不支持的压缩格式")
+        except zlib.error as exc:
+            raise _ProxySubscriptionPayloadError("订阅压缩数据损坏，已拒绝覆盖原配置") from exc
     return decoded
 
 
 def _decompress_limited(payload: bytes, max_bytes: int, wbits: int) -> bytes:
-    decompressor = zlib.decompressobj(wbits)
-    decoded = decompressor.decompress(payload, max_bytes + 1)
-    if decompressor.unconsumed_tail or len(decoded) > max_bytes:
-        raise ValueError("订阅内容解压后超过 5MB，已停止读取")
-    remaining = max_bytes + 1 - len(decoded)
-    decoded += decompressor.flush(remaining)
-    if len(decoded) > max_bytes:
-        raise ValueError("订阅内容解压后超过 5MB，已停止读取")
-    return decoded
+    decoded = bytearray()
+    remaining_payload = payload
+    while True:
+        decompressor = zlib.decompressobj(wbits)
+        decoded.extend(decompressor.decompress(remaining_payload, max_bytes + 1 - len(decoded)))
+        if decompressor.unconsumed_tail or len(decoded) > max_bytes:
+            raise ValueError(f"订阅内容解压后超过 {_subscription_size_limit_label(max_bytes)}，已停止读取")
+        if not decompressor.eof:
+            raise _ProxySubscriptionPayloadError("订阅压缩数据不完整，已拒绝覆盖原配置")
+        remaining_payload = decompressor.unused_data
+        if not remaining_payload:
+            return bytes(decoded)
+        if wbits == 16 + zlib.MAX_WBITS:
+            # gzip permits concatenated members and trailing zero padding.
+            # Account for every member against one shared decompression limit.
+            if not remaining_payload.strip(b"\x00"):
+                return bytes(decoded)
+        else:
+            raise _ProxySubscriptionPayloadError("订阅压缩数据含多余内容，已拒绝覆盖原配置")
 
 
 def _header_value(headers, name: str) -> str:

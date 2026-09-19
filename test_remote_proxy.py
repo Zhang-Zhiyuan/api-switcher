@@ -15,6 +15,13 @@ import pytest
 from core import local_proxy, network_diagnostic_settings, network_diagnostics, remote_proxy
 
 
+@pytest.fixture(autouse=True)
+def isolate_subscription_system_proxy(monkeypatch):
+    # Unit tests must never use the developer's live WinINET proxy as a
+    # fallback. The independent transport tests exercise it with fake maps.
+    monkeypatch.setattr(remote_proxy, "_subscription_system_proxy_map", lambda *_args, **_kwargs: None)
+
+
 class _ConnectedProbeSocket:
     def close(self):
         return None
@@ -2884,7 +2891,7 @@ def test_fetch_proxy_subscription_saves_content_and_returns_nodes(monkeypatch, t
             return b"proxies:\n  - { name: fetched, type: vless, server: example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", lambda *_args, **_kwargs: Response())
 
     result = remote_proxy.fetch_proxy_subscription("https://example.com/sub")
 
@@ -2942,7 +2949,7 @@ def test_fetch_proxy_subscription_preserves_saved_profile_name(monkeypatch, tmp_
             return b"proxies:\n  - { name: fetched, type: vless, server: example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", lambda *_args, **_kwargs: Response())
 
     remote_proxy.save_proxy_subscription_profile("香港家宽", "https://example.com/sub")
     remote_proxy.fetch_proxy_subscription("https://example.com/sub", retry_base_delay=0)
@@ -2972,7 +2979,7 @@ def test_fetch_proxy_subscription_can_update_profile_without_activating(monkeypa
             return b"proxies:\n  - { name: refreshed, type: vless, server: one.example.com, port: 443 }\n"
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", lambda *_args, **_kwargs: Response())
 
     first = remote_proxy.save_proxy_subscription_profile("主力", "https://one.example/sub")
     second = remote_proxy.save_proxy_subscription_profile("备用", "https://two.example/sub")
@@ -3099,8 +3106,9 @@ def test_fetch_proxy_subscription_retries_transient_download(monkeypatch, tmp_pa
             raise OSError("temporary disconnect")
         return Response()
 
+    monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", fake_urlopen)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", fake_urlopen)
 
     result = remote_proxy.fetch_proxy_subscription("https://example.com/sub", retry_base_delay=0)
 
@@ -3137,7 +3145,7 @@ def test_fetch_proxy_subscription_rotates_clash_client_signature_after_403(monke
         return Response()
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", fake_urlopen)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", fake_urlopen)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
 
     result = remote_proxy.fetch_proxy_subscription(
@@ -3181,8 +3189,8 @@ def test_fetch_proxy_subscription_bypasses_failed_configured_proxy_without_chang
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: calls.append("configured-proxy")
         or (_ for _ in ()).throw(TimeoutError("timed out")),
     )
@@ -3256,8 +3264,8 @@ def test_fetch_proxy_subscription_detects_stale_loopback_environment_proxy(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionRefusedError(10061, "refused")),
     )
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("stale proxy must be bypassed before urlopen")
         ),
@@ -3328,8 +3336,8 @@ def test_fetch_proxy_subscription_immediately_bypasses_stale_wininet_proxy(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionRefusedError()),
     )
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("stale WinINET proxy must be bypassed before urlopen")
         ),
@@ -3410,8 +3418,8 @@ def test_fetch_proxy_subscription_auto_cleans_program_owned_stale_proxy_before_d
         classmethod(reconcile),
     )
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("cleaned stale proxy must remain bypassed for this request")
         ),
@@ -3506,8 +3514,8 @@ def test_fetch_proxy_subscription_uses_real_owned_proxy_cleanup_contract(
         lambda _name: None,
     )
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("owned stale proxy must be cleaned and bypassed")
         ),
@@ -3565,7 +3573,7 @@ def test_fetch_proxy_subscription_bypasses_configured_proxy_gateway_errors(
         raise remote_proxy.HTTPError(request.full_url, status, "Bad Gateway", {}, None)
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", configured_open)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", configured_open)
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "getproxies",
@@ -3603,7 +3611,7 @@ def test_fetch_proxy_subscription_does_not_bypass_origin_gateway_error_without_p
         raise remote_proxy.HTTPError(request.full_url, 502, "Bad Gateway", {}, None)
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", configured_open)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", configured_open)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
         remote_proxy.urlrequest,
@@ -3672,8 +3680,8 @@ def test_fetch_proxy_subscription_uses_isolated_managed_pool_after_direct_failur
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: calls.append("direct")
         or (_ for _ in ()).throw(TimeoutError("direct route timed out")),
     )
@@ -3747,8 +3755,8 @@ def test_fetch_proxy_subscription_recovery_rotates_existing_nodes(monkeypatch, t
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("direct timeout")),
     )
     monkeypatch.setattr(
@@ -3801,8 +3809,8 @@ def test_fetch_proxy_subscription_recovery_rotates_client_signatures_after_403(
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("direct timeout")),
     )
     monkeypatch.setattr(
@@ -3852,8 +3860,8 @@ def test_fetch_proxy_subscription_retries_http_200_block_page_through_recovery(
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: Response(
             b"<!doctype html><html><title>Access denied</title></html>",
             "text/html",
@@ -3904,8 +3912,8 @@ def test_fetch_proxy_subscription_retries_direct_recovery_with_next_signature(
         lambda: {"https": "http://127.0.0.1:7890"},
     )
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("proxy disconnected")),
     )
     monkeypatch.setattr(remote_proxy.urlrequest, "build_opener", lambda _handler: DirectOpener())
@@ -3938,7 +3946,7 @@ def test_fetch_proxy_subscription_does_not_inspect_recovery_proxy_when_primary_s
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", lambda *_args, **_kwargs: Response())
 
     result = remote_proxy.fetch_proxy_subscription(
         "https://example.com/sub",
@@ -3984,8 +3992,8 @@ def test_fetch_proxy_subscription_strict_can_use_verified_managed_recovery_proxy
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("strict mode must not connect directly")
         ),
@@ -4024,8 +4032,8 @@ def test_fetch_proxy_subscription_rejects_untrusted_recovery_proxy_urls(
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("direct failed")),
     )
     monkeypatch.setattr(
@@ -4055,8 +4063,8 @@ def test_fetch_proxy_subscription_can_forbid_direct_fallback(monkeypatch, tmp_pa
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("strict privacy must not use environment urlopen")
         ),
@@ -4118,8 +4126,8 @@ def test_fetch_proxy_subscription_strict_ignores_no_proxy_star(monkeypatch, tmp_
         },
     )
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("NO_PROXY=* must never reach environment urlopen")
         ),
@@ -4183,8 +4191,8 @@ def test_fetch_proxy_subscription_strict_without_loopback_proxy_fails_closed(
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("strict mode must not connect directly")
         ),
@@ -4243,7 +4251,7 @@ def test_gateway_error_direct_recovery_stays_inside_total_deadline(
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", configured_open)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", configured_open)
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "getproxies",
@@ -4311,7 +4319,7 @@ def test_fetch_proxy_subscription_reserves_deadline_for_direct_timeout_recovery(
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(remote_proxy.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", configured_open)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", configured_open)
     monkeypatch.setattr(
         remote_proxy.urlrequest,
         "getproxies",
@@ -4362,8 +4370,8 @@ def test_proxy_subscription_chunked_body_read_enforces_monotonic_deadline(monkey
 
     monkeypatch.setattr(remote_proxy.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
-        remote_proxy.urlrequest,
-        "urlopen",
+        remote_proxy,
+        "_open_current_proxy_subscription_request",
         lambda *_args, **_kwargs: Response(),
     )
     request = remote_proxy.urlrequest.Request("https://example.com/sub")
@@ -4483,7 +4491,7 @@ def test_fetch_proxy_subscription_decodes_gzip_response(monkeypatch, tmp_path):
             )
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", lambda *_args, **_kwargs: Response())
 
     result = remote_proxy.fetch_proxy_subscription("https://example.com/sub", retry_base_delay=0)
 
@@ -4515,7 +4523,7 @@ def test_fetch_proxy_subscription_rejects_oversized_gzip_after_limited_decode(mo
             return gzip.compress(b"proxies:\n" + b"a" * 2048)
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", lambda *_args, **_kwargs: Response())
 
     with pytest.raises(ValueError, match="解压后超过"):
         remote_proxy.fetch_proxy_subscription("https://example.com/sub", max_bytes=1024, retry_base_delay=0)
@@ -9017,7 +9025,7 @@ def test_fetch_proxy_subscription_honors_retry_after_for_rate_limit(monkeypatch,
         return Response()
 
     monkeypatch.setattr(remote_proxy, "STORAGE_DIR", tmp_path)
-    monkeypatch.setattr(remote_proxy.urlrequest, "urlopen", fake_urlopen)
+    monkeypatch.setattr(remote_proxy, "_open_current_proxy_subscription_request", fake_urlopen)
     monkeypatch.setattr(remote_proxy.urlrequest, "getproxies", lambda: {})
     monkeypatch.setattr(remote_proxy.time, "sleep", lambda delay: sleeps.append(delay))
 

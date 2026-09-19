@@ -439,6 +439,10 @@ class _IsolatedMihomoSession:
         )
 
 
+class _IsolatedMihomoStartupError(RuntimeError):
+    """A disposable pool could not load; no request body has run yet."""
+
+
 def load_local_proxy_preferences() -> dict:
     with _LOCAL_PROXY_PREFS_LOCK:
         signature = _local_proxy_preferences_signature()
@@ -670,11 +674,11 @@ def local_proxy_subscription_direct_fallback_allowed() -> bool:
 
 
 def _managed_local_subscription_recovery_nodes() -> tuple[dict, ...]:
-    """Read the bounded node pool from the app-owned mihomo configuration."""
+    """Read independent nodes from every deployed app-owned subscription group."""
 
-    state = _load_state()
-    config_path = _managed_local_config_path(state)
     try:
+        state = _load_state()
+        config_path = _managed_local_config_path(state)
         if config_path.stat().st_size > 8 * 1024 * 1024:
             return ()
         content = config_path.read_text(encoding="utf-8", errors="strict")
@@ -687,48 +691,132 @@ def _managed_local_subscription_recovery_nodes() -> tuple[dict, ...]:
     groups = parsed.get("proxy-groups")
     if not isinstance(proxy_nodes, list) or not isinstance(groups, list):
         return ()
-    group = next(
-        (
-            item
-            for item in groups
-            if isinstance(item, dict)
-            and str(item.get("name") or "").strip() == "AI-PROXY"
-        ),
-        None,
-    )
-    if not isinstance(group, dict) or str(group.get("type") or "").casefold() not in {
-        "select",
-        "fallback",
-    }:
-        return ()
-    ordered_names = group.get("proxies")
-    if not isinstance(ordered_names, list):
-        return ()
     by_name = {
         str(node.get("name") or "").strip(): node
         for node in proxy_nodes
         if isinstance(node, dict) and str(node.get("name") or "").strip()
     }
+    pools = []
+    for group in groups[: remote_proxy.SERVICE_PROXY_MAX_GROUPS + 1]:
+        if not isinstance(group, dict):
+            continue
+        name = str(group.get("name") or "").strip()
+        if name != "AI-PROXY" and not remote_proxy.AI_PROXY_ADDITIONAL_GROUP_PATTERN.fullmatch(name):
+            continue
+        if str(group.get("type") or "").casefold() not in {"select", "fallback"}:
+            continue
+        members = group.get("proxies")
+        if isinstance(members, list):
+            pools.append([
+                by_name.get(str(member or "").strip())
+                for member in members[: remote_proxy.SERVICE_PROXY_FALLBACK_MAX_NODES]
+            ])
+    return _select_subscription_recovery_nodes(pools)
+
+
+def _select_subscription_recovery_nodes(pools, scores=None) -> tuple[dict, ...]:
+    """Prefer recent successes, but reserve room for different pools/endpoints."""
+
+    scores = scores or {}
+    normalized_pools = []
+    for pool in pools:
+        candidates = []
+        seen = set()
+        for candidate in pool:
+            if not isinstance(candidate, dict):
+                continue
+            try:
+                node = remote_proxy._normalize_proxy_node(candidate)
+                key = remote_proxy._proxy_node_connection_key(node)
+            except (TypeError, ValueError):
+                continue
+            if str(node.get("dialer-proxy") or "").strip() or key in seen:
+                continue
+            candidates.append((node, key))
+            seen.add(key)
+        candidates.sort(key=lambda item: scores.get(item[1], 1))
+        normalized_pools.append(candidates)
+    interleaved = [
+        pool[index]
+        for index in range(max((len(pool) for pool in normalized_pools), default=0))
+        for pool in normalized_pools
+        if index < len(pool)
+    ]
+    interleaved.sort(key=lambda item: scores.get(item[1], 1))
     selected = []
     seen = set()
-    for raw_name in ordered_names[: remote_proxy.AI_PROXY_FALLBACK_MAX_NODES]:
-        node = by_name.get(str(raw_name or "").strip())
-        if not isinstance(node, dict):
-            continue
-        try:
-            normalized = remote_proxy._normalize_proxy_node(node)
-            connection_key = remote_proxy._proxy_node_connection_key(normalized)
-        except (TypeError, ValueError):
-            continue
-        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
-            continue
-        selected.append(normalized)
-        seen.add(connection_key)
+    endpoints = set()
+    for allow_shared_endpoint in (False, True):
+        for node, key in interleaved:
+            endpoint = (str(node.get("server") or "").casefold(), node.get("port"))
+            if key in seen or (not allow_shared_endpoint and endpoint in endpoints):
+                continue
+            selected.append(node)
+            seen.add(key)
+            endpoints.add(endpoint)
+            if len(selected) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES:
+                return tuple(selected)
     return tuple(selected)
 
 
-def _available_local_subscription_recovery_nodes() -> tuple[dict, ...]:
-    """Combine the deployed pool with its linked offline cache, without network I/O."""
+def _cached_local_subscription_recovery_pools(*, deadline: float | None = None):
+    """Read a bounded offline snapshot; AI availability is not download availability."""
+
+    try:
+        profiles = remote_proxy.list_proxy_subscription_profiles()
+    except Exception:
+        return [], {}
+    pools = []
+    scores = {}
+    bytes_read = 0
+    for profile in profiles[:32]:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        try:
+            saved_path = str(profile.get("saved_path") or "").strip()
+            if not saved_path:
+                continue
+            size = Path(saved_path).stat().st_size
+            if size > remote_proxy.PROXY_SUBSCRIPTION_MAX_BYTES:
+                continue
+            if bytes_read + size > 32 * 1024 * 1024:
+                continue
+            bytes_read += size
+            cached = remote_proxy.load_cached_proxy_subscription(profile)
+            if cached is None:
+                continue
+            latencies = remote_proxy.load_proxy_subscription_latencies(profile)
+            nodes = []
+            for item in cached.nodes[:2048]:
+                if not isinstance(item.node, dict):
+                    continue
+                try:
+                    node = remote_proxy._normalize_proxy_node(item.node)
+                    key = remote_proxy._proxy_node_connection_key(node)
+                except (TypeError, ValueError):
+                    continue
+                if str(node.get("dialer-proxy") or "").strip():
+                    continue
+                result = latencies.get(remote_proxy.proxy_subscription_node_key(item))
+                score = 1
+                if remote_proxy.proxy_node_latency_fresh(result):
+                    if remote_proxy.proxy_node_latency_ok(result):
+                        score = 0
+                    elif remote_proxy.proxy_node_latency_explicitly_unreachable(result):
+                        score = 2
+                scores[key] = min(scores.get(key, score), score)
+                nodes.append(node)
+            # This is a subscription download, not an AI request. In particular,
+            # a Hong Kong node or one rejected by an AI quality gate is usable.
+            pools.append(_select_subscription_recovery_nodes((nodes,), scores))
+        except Exception:
+            # A missing/damaged subscription must not hide the other saved pools.
+            continue
+    return pools, scores
+
+
+def _available_local_subscription_recovery_nodes(*, deadline: float | None = None) -> tuple[dict, ...]:
+    """Combine deployed and saved pools without changing live routes or settings."""
 
     selected = list(_managed_local_subscription_recovery_nodes())
     if selected:
@@ -743,27 +831,21 @@ def _available_local_subscription_recovery_nodes() -> tuple[dict, ...]:
         else:
             primary = None
 
-    if not isinstance(primary, dict):
-        return ()
+    cached_pools, scores = _cached_local_subscription_recovery_pools(deadline=deadline)
     try:
-        cached_fallbacks = _cached_subscription_fallback_nodes(primary)
+        cached_fallbacks = (
+            _cached_subscription_fallback_nodes(primary)
+            if (
+                isinstance(primary, dict) and not cached_pools
+                and (deadline is None or time.monotonic() < deadline)
+            )
+            else ()
+        )
     except Exception:
         cached_fallbacks = ()
-    seen = set()
-    normalized_nodes = []
-    for candidate in [*selected, *cached_fallbacks]:
-        if len(normalized_nodes) >= remote_proxy.AI_PROXY_FALLBACK_MAX_NODES:
-            break
-        try:
-            normalized = remote_proxy._normalize_proxy_node(candidate)
-            connection_key = remote_proxy._proxy_node_connection_key(normalized)
-        except (TypeError, ValueError):
-            continue
-        if str(normalized.get("dialer-proxy") or "").strip() or connection_key in seen:
-            continue
-        normalized_nodes.append(normalized)
-        seen.add(connection_key)
-    return tuple(normalized_nodes)
+    return _select_subscription_recovery_nodes(
+        (selected, *cached_pools, cached_fallbacks), scores,
+    )
 
 
 @contextmanager
@@ -772,19 +854,23 @@ def local_proxy_subscription_recovery_session(timeout_seconds: float = 15.0):
 
     Reusing the live mixed port is insufficient in compatibility mode because
     an arbitrary subscription domain may match ``DIRECT``. This session copies
-    the deployed app-owned pool plus its strongly linked offline cache into a
+    the deployed app-owned pools plus saved offline subscription nodes into a
     disposable mihomo process whose sole rule is to proxy all traffic. It never
     reloads the live process or changes config, selected node, state,
     environment, VS Code, or WinINET.
     """
 
-    deadline = time.monotonic() + max(0.05, float(timeout_seconds or 0.0))
-    nodes = _available_local_subscription_recovery_nodes()
+    started = time.monotonic()
+    budget = max(0.05, float(timeout_seconds or 0.0))
+    deadline = started + budget
     binary_path = LOCAL_PROXY_BIN_DIR / "mihomo.exe"
-    if not nodes:
-        raise RuntimeError("没有可用于订阅兜底的受管节点池")
     if not binary_path.is_file():
         raise RuntimeError("没有可用于订阅兜底的已安装 mihomo 内核")
+    nodes = _available_local_subscription_recovery_nodes(
+        deadline=started + min(2.0, budget / 3),
+    )
+    if not nodes:
+        raise RuntimeError("没有可用于订阅兜底的受管节点池")
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("订阅兜底节点池检查超过剩余等待时间")
@@ -795,18 +881,60 @@ def local_proxy_subscription_recovery_session(timeout_seconds: float = 15.0):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("订阅兜底节点池检查超过剩余等待时间")
-        with _isolated_mihomo_session(
-            binary_path,
-            nodes[0],
-            fallback_proxy_nodes=nodes[1:],
-            startup_timeout_seconds=remaining,
-        ) as session:
+        with _isolated_subscription_recovery_pool(binary_path, nodes, deadline=deadline) as session:
             # Yield the scoped object rather than only its URL so the download
             # layer can deterministically rotate existing nodes when one exit
             # IP is blocked by the subscription provider.
             yield session
     finally:
         _MIHOMO_BINARY_LOCK.release()
+
+
+@contextmanager
+def _isolated_subscription_recovery_pool(binary_path: Path, nodes, *, deadline: float):
+    """Filter incompatible nodes only after a failed pool startup, within budget."""
+
+    if time.monotonic() >= deadline:
+        raise TimeoutError("订阅兜底节点池检查超过剩余等待时间")
+
+    def start(candidates, timeout):
+        return _isolated_mihomo_session(
+            binary_path, candidates[0], fallback_proxy_nodes=candidates[1:],
+            startup_timeout_seconds=timeout,
+        )
+
+    with ExitStack() as session_stack:
+        try:
+            session = session_stack.enter_context(start(nodes, deadline - time.monotonic()))
+        except _IsolatedMihomoStartupError:
+            if len(nodes) <= 1:
+                raise
+        else:
+            # Do not catch exceptions from the caller's download or teardown.
+            yield session
+            return
+
+    # Keep at least half the remaining time for the rebuilt pool and download.
+    now = time.monotonic()
+    validation_deadline = now + max(0.0, deadline - now) / 2
+    usable = []
+    for index, node in enumerate(nodes):
+        remaining = validation_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        with ExitStack() as validation_stack:
+            try:
+                validation_stack.enter_context(start((node,), remaining / (len(nodes) - index)))
+            except _IsolatedMihomoStartupError:
+                continue
+            usable.append(node)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("订阅兜底节点兼容性检查超过剩余等待时间")
+    if not usable:
+        raise _IsolatedMihomoStartupError("订阅兜底节点均未能通过临时内核启动检查")
+    with start(tuple(usable), remaining) as session:
+        yield session
 
 
 def local_proxy_start_on_login_enabled() -> bool:
@@ -4004,6 +4132,7 @@ def _isolated_mihomo_session(
     """Run a bounded node pool in a disposable mihomo instance without managed state."""
 
     process = None
+    startup_deadline = time.monotonic() + max(0.05, min(3.0, float(startup_timeout_seconds or 0.0)))
     subscription_recovery = fallback_proxy_nodes is not None
     probe_dir = Path(tempfile.mkdtemp(prefix="api-switcher-node-probe-"))
     with _ISOLATED_MIHOMO_LOCK:
@@ -4013,12 +4142,15 @@ def _isolated_mihomo_session(
             raise RuntimeError("应用正在退出，已取消节点稳定验证")
         mixed_port, controller_port = _select_isolated_mihomo_ports(with_controller=subscription_recovery)
 
-        config = _build_isolated_mihomo_probe_config(
-            proxy_node,
-            mixed_port,
-            fallback_proxy_nodes=fallback_proxy_nodes,
-            controller_port=controller_port,
-        )
+        try:
+            config = _build_isolated_mihomo_probe_config(
+                proxy_node,
+                mixed_port,
+                fallback_proxy_nodes=fallback_proxy_nodes,
+                controller_port=controller_port,
+            )
+        except (TypeError, ValueError) as exc:
+            raise _IsolatedMihomoStartupError("临时 mihomo 节点配置无效") from exc
         parsed_config = remote_proxy.yaml.safe_load(config)
         groups = parsed_config.get("proxy-groups") if isinstance(parsed_config, dict) else None
         group = groups[0] if isinstance(groups, list) and groups else {}
@@ -4029,13 +4161,15 @@ def _isolated_mihomo_session(
             if str(name or "").strip()
         )
         if not route_names:
-            raise RuntimeError("临时 mihomo 配置没有可用节点")
+            raise _IsolatedMihomoStartupError("临时 mihomo 配置没有可用节点")
         config_path = probe_dir / "config.yaml"
         atomic_write_text(config_path, config)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         with _ISOLATED_MIHOMO_LOCK:
             if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set():
                 raise RuntimeError("应用正在退出，已取消节点稳定验证")
+            if time.monotonic() >= startup_deadline:
+                raise _IsolatedMihomoStartupError("临时 mihomo 配置准备超过等待时间")
             process = subprocess.Popen(
                 [str(binary_path), "-d", str(probe_dir)],
                 cwd=str(probe_dir),
@@ -4046,13 +4180,9 @@ def _isolated_mihomo_session(
             )
             _ISOLATED_MIHOMO_PROCESSES.add(process)
         try:
-            startup_deadline = time.monotonic() + max(
-                0.05,
-                min(3.0, float(startup_timeout_seconds or 0.0)),
-            )
             while time.monotonic() < startup_deadline:
                 if process.poll() is not None:
-                    raise RuntimeError("临时 mihomo 启动失败")
+                    raise _IsolatedMihomoStartupError("临时 mihomo 启动失败")
                 listening_ports = (
                     (mixed_port, controller_port)
                     if controller_port is not None
@@ -4062,7 +4192,7 @@ def _isolated_mihomo_session(
                     break
                 time.sleep(min(0.1, max(0.001, startup_deadline - time.monotonic())))
             else:
-                raise RuntimeError("临时 mihomo 启动后未监听")
+                raise _IsolatedMihomoStartupError("临时 mihomo 启动后未监听")
             yield _IsolatedMihomoSession(
                 proxy_url=_proxy_url(mixed_port),
                 config_path=config_path,
