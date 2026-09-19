@@ -20,7 +20,11 @@ def test_route_overview_refreshes_names_without_losing_nodes_or_activating_profi
     tab._refresh_service_route_profile_options([{"id": "a", "name": "家宽订阅 A"}])
     prefs, catalog = tab._route_overview.calls[-1]
     assert prefs == {"service_profile_bindings": {"openai": "a"}}
-    assert catalog == [{"id": "a", "name": "家宽订阅 A", "nodes": nodes}]
+    assert catalog == [{"id": "a", "name": "家宽订阅 A", "nodes": nodes, "network_type": "unknown"}]
+    tab._refresh_service_route_profile_options([{"id": "a", "name": "家宽订阅 A", "network_type": "residential"}])
+    _, updated = tab._route_overview.calls[-1]
+    assert updated[0]["network_type"] == "residential"
+    assert updated[0]["nodes"] is nodes
 
 
 def test_deleted_subscription_is_removed_from_catalog_without_dropping_binding():

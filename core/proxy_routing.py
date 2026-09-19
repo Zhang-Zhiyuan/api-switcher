@@ -146,7 +146,9 @@ def load_route_catalog() -> list[dict]:
     state = remote_proxy.load_proxy_subscription_state()
     result = []
     for profile in remote_proxy.list_proxy_subscription_profiles(state):
-        entry = {"id": profile["id"], "name": profile.get("name") or "未命名订阅", "nodes": []}
+        entry = {"id": profile["id"], "name": profile.get("name") or "未命名订阅", "nodes": [],
+                 "network_type": remote_proxy.normalize_proxy_subscription_network_type(profile.get("network_type")),
+                 "auto_route_usable": False}
         try:
             cached = remote_proxy.load_cached_proxy_subscription(profile)
             if cached:
@@ -156,6 +158,12 @@ def load_route_catalog() -> list[dict]:
                     for index, item in enumerate(cached.nodes, 1)
                     if not str(item.node.get("dialer-proxy") or "").strip()
                 ]
+                # Deployment uses the saved primary, or the first original
+                # node when it disappeared; never the first filtered node.
+                if cached.nodes:
+                    primary = next((item for item in cached.nodes if remote_proxy.proxy_subscription_node_key(item)
+                                    == profile.get("selected_node_key")), cached.nodes[0])
+                    entry["auto_route_usable"] = not bool(str(primary.node.get("dialer-proxy") or "").strip())
         except Exception:
             entry["error"] = "缓存读取失败，请重新拉取"
         entry["selected_node_key"] = profile.get("selected_node_key") or ""

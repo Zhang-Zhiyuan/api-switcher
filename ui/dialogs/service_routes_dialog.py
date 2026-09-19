@@ -35,7 +35,7 @@ class NodeChoiceButton(ctk.CTkButton):
 
 class ServiceRoutesDialog(ctk.CTkToplevel):
     def __init__(self, master, *, scopes, load_preferences, apply_preferences,
-                 on_saved=None, initial_service="", catalog_loader=None):
+                 on_saved=None, initial_service="", catalog_loader=None, on_tags_saved=None):
         super().__init__(master)
         self.title("目标分流 · 订阅与节点")
         self.geometry("1040x760")
@@ -46,6 +46,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._loader = load_preferences
         self._applier = apply_preferences
         self._on_saved = on_saved
+        self._on_tags_saved = on_tags_saved
         self._catalog_loader = catalog_loader or proxy_routing.load_route_catalog
         self._drafts = {}
         self._originals = {}
@@ -61,6 +62,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._category = "全部"
         self._node_dialog = None
         self._scope_copy_dialog = None
+        self._tags_dialog = None
+        self._manually_edited = {scope: set() for scope in self._scopes}
         self._preview_open = False
         self._custom_open = False
         self._changes = []
@@ -142,6 +145,12 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._custom_toggle = ctk.CTkButton(tools_row, text="＋ 自定义目标", width=112, command=self._toggle_custom_form,
                                            **button_style("secondary", compact=True))
         self._custom_toggle.pack(side="left")
+        self._tags_button = ctk.CTkButton(tools_row, text="订阅标记", width=88, state="disabled",
+                                         command=self._open_subscription_tags, **button_style("secondary", compact=True))
+        self._tags_button.pack(side="left", padx=(8, 0))
+        self._tag_routes_button = ctk.CTkButton(tools_row, text="按标记分流", width=106, state="disabled",
+                                               command=self._suggest_tagged_routes, **button_style("secondary", compact=True))
+        self._tag_routes_button.pack(side="left", padx=(8, 0))
         self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单（0）", width=140, command=self._toggle_preview,
                                             **button_style("secondary", compact=True))
         self._preview_toggle.pack(side="right")
@@ -250,6 +259,48 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         threading.Thread(target=run, name="service-routes-catalog", daemon=True).start()
         self._poll_id = self.after(60, self._poll)
 
+    def _open_subscription_tags(self):
+        if self._busy or self._closed:
+            return
+        if self._tags_dialog and self._tags_dialog.winfo_exists():
+            self._tags_dialog.lift()
+            return
+        from ui.dialogs.subscription_tags_dialog import SubscriptionTagsDialog
+
+        self._tags_dialog = SubscriptionTagsDialog(self, catalog=self._catalog, on_saved=self._subscription_tags_saved)
+
+    def _subscription_tags_saved(self):
+        if self._closed:
+            return
+        self._reload_catalog()
+        if self._on_tags_saved:
+            self._on_tags_saved()
+
+    def _suggest_tagged_routes(self):
+        if self._busy or self._closed or self._scope not in self._drafts:
+            return
+        from core.subscription_routing_policy import suggest_tagged_routes
+
+        before = self._drafts[self._scope]
+        protected = self._manually_edited[self._scope] | {key for key in self._rows if self._row_changed(key)}
+        draft, notices = suggest_tagged_routes(before, self._catalog, protected_services=protected)
+        added = sum(key not in before["service_profile_bindings"] for key in draft["service_profile_bindings"])
+        self._drafts[self._scope] = draft
+        self._preview_open = True
+        self._clear_filters()
+        self._render()
+        self._changed()
+        self._details.pack_forget()
+        self._status.configure(
+            text=f"已为当前位置补齐 {added} 项草稿：AI 优先家宽，YouTube/Google 搜索优先非家宽。"
+                 "已有绑定和手动修改不覆盖；保存并应用后才生效。",
+            text_color=COLORS["accent"] if added else COLORS["warning"],
+        )
+        if notices:
+            self._preview.configure(state="normal")
+            self._preview.insert("end", safe_feedback_text("\n\n按标记分流说明：\n" + "\n".join(notices)))
+            self._preview.configure(state="disabled")
+
     def _start_load(self):
         def run():
             try:
@@ -291,6 +342,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             succeeded, errors = payload
             for scope, preferences, _message in succeeded:
                 self._originals[scope] = preferences
+                self._manually_edited[scope].clear()
             self._busy = False
             self._set_editable(True)
             self._preview_open = False
@@ -315,6 +367,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         mapping = {DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE: ""}
         for profile in self._catalog:
             label = " ".join(safe_feedback_text(str(profile["name"])).split())
+            if profile.get("network_type") in {"residential", "datacenter"}:
+                label += " · " + ("家宽" if profile["network_type"] == "residential" else "非家宽")
             if not profile["nodes"]:
                 label += " · 请先拉取"
             base, index = label, 2
@@ -527,6 +581,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         profiles = self._profile_values(service)
         if self._busy or label not in profiles:
             return
+        self._manually_edited[self._scope].add(service)
         draft = self._drafts[self._scope]
         profile_id = profiles[label]
         if draft["service_profile_bindings"].get(service, "") == profile_id:
@@ -581,6 +636,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _select_node(self, service, label):
         if self._busy or label not in self._rows[service]["nodes"]:
             return
+        self._manually_edited[self._scope].add(service)
         key = self._rows[service]["nodes"][label]
         bindings = self._drafts[self._scope]["service_node_bindings"]
         if key:
@@ -594,6 +650,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             return
         if self._rows[service]["always"]:
             return
+        self._manually_edited[self._scope].add(service)
         self._rows[service]["enabled"].set(bool(enabled))
         draft = self._drafts[self._scope]
         if service.startswith("custom:"):
@@ -646,6 +703,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         for scope in dict.fromkeys(targets):
             if scope in self._drafts and scope != self._scope:
                 self._drafts[scope] = copy.deepcopy(self._drafts[self._scope])
+                self._manually_edited[scope] = set(self._manually_edited[self._scope])
         self._preview_open = True
         self._changed()
 
@@ -687,12 +745,14 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _reset(self):
         if not self._busy and self._scope in self._originals:
             self._drafts[self._scope] = copy.deepcopy(self._originals[self._scope])
+            self._manually_edited[self._scope].clear()
             self._render()
             self._changed()
 
     def _set_editable(self, enabled):
         state = "normal" if enabled else "disabled"
-        for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button):
+        for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button,
+                       self._tags_button, self._tag_routes_button):
             if button:
                 button.configure(state=state)
         self._scope_combo.configure(state="readonly" if enabled and len(self._scopes) > 1 else "disabled")
@@ -740,7 +800,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._closed = True
-        for dialog in (self._node_dialog, self._scope_copy_dialog):
+        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog):
             if dialog and dialog.winfo_exists():
                 dialog.destroy()
         if self._filter_after_id:

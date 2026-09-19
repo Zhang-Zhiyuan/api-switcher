@@ -172,6 +172,11 @@ PROXY_LATENCY_DEFAULT_MAX_WORKERS = 32
 PROXY_LATENCY_MAX_WORKERS = 64
 PROXY_QUALITY_ASSESSMENT_SCOPE_SERVER = "server_entry"
 PROXY_LATENCY_CACHE_TTL_SECONDS = 30 * 60
+PROXY_SUBSCRIPTION_NETWORK_TYPE_LABELS = {
+    "unknown": "未标记",
+    "residential": "家宽",
+    "datacenter": "非家宽",
+}
 PROXY_QUALITY_KEY_REQUIRED_SERVICES = frozenset({
     network_diagnostic_settings.SERVICE_PING0,
     network_diagnostic_settings.SERVICE_IPQS,
@@ -179,6 +184,7 @@ PROXY_QUALITY_KEY_REQUIRED_SERVICES = frozenset({
 })
 _PROXY_SUBSCRIPTION_PROFILE_FIELDS = {
     "url",
+    "network_type",
     "source_path",
     "saved_path",
     "last_fetched_at",
@@ -973,6 +979,8 @@ def _save_local_proxy_subscription_profile(
 
 
 def save_proxy_subscription_profile_state(profile_id: str, **updates) -> dict:
+    if "network_type" in updates:
+        updates["network_type"] = _validate_proxy_subscription_network_type(updates["network_type"])
     clean_id = str(profile_id or "").strip()
     if not clean_id:
         raise ValueError("订阅配置不存在")
@@ -1122,6 +1130,64 @@ def rename_proxy_subscription_profile(profile_id: str, name: str) -> dict:
         return copy.deepcopy(profiles[clean_id])
 
 
+def normalize_proxy_subscription_network_type(value: object) -> str:
+    """Read old or malformed metadata conservatively, without guessing from names."""
+    if isinstance(value, str) and value in PROXY_SUBSCRIPTION_NETWORK_TYPE_LABELS:
+        return value
+    return "unknown"
+
+
+def proxy_subscription_network_type_label(value: object) -> str:
+    return PROXY_SUBSCRIPTION_NETWORK_TYPE_LABELS[normalize_proxy_subscription_network_type(value)]
+
+
+def _validate_proxy_subscription_network_type(value: object) -> str:
+    if not isinstance(value, str) or value not in PROXY_SUBSCRIPTION_NETWORK_TYPE_LABELS:
+        raise ValueError("订阅类型无效，请选择未标记、家宽或非家宽")
+    return value
+
+
+def set_proxy_subscription_network_type(profile_id: str, network_type: str) -> dict:
+    """Set only the explicitly selected saved profile; never fall back to active."""
+    clean_id = str(profile_id or "").strip()
+    return set_proxy_subscription_network_types({clean_id: network_type})[clean_id]
+
+
+def set_proxy_subscription_network_types(updates: dict, *, expected: dict | None = None) -> dict:
+    """Atomically label existing subscriptions, optionally checking their original labels."""
+    if not isinstance(updates, dict) or (expected is not None and not isinstance(expected, dict)):
+        raise ValueError("订阅类型更新必须是配置 ID 与类型的映射")
+    cleaned = {}
+    for profile_id, value in updates.items():
+        if not isinstance(profile_id, str) or not profile_id or profile_id != profile_id.strip():
+            raise ValueError("订阅配置不存在，请重新选择订阅")
+        cleaned[profile_id] = _validate_proxy_subscription_network_type(value)
+    if expected is not None:
+        if set(expected) != set(cleaned):
+            raise ValueError("订阅类型校验范围与修改范围不一致")
+        expected = {key: _validate_proxy_subscription_network_type(value) for key, value in expected.items()}
+    if not cleaned:
+        return {}
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        profiles = state.get("profiles") or {}
+        for profile_id in cleaned:
+            if profile_id not in profiles:
+                raise ValueError("订阅配置不存在，请重新选择订阅")
+            if expected is not None and profiles[profile_id]["network_type"] != expected[profile_id]:
+                raise RuntimeError("订阅类型已在其他窗口修改，本次未保存，请关闭后重新打开")
+        changed = False
+        for profile_id, value in cleaned.items():
+            profile = profiles[profile_id]
+            if profile["network_type"] != value:
+                profile["network_type"] = value
+                profile["updated_at"] = _now_iso()
+                changed = True
+        if changed:
+            _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+        return {profile_id: copy.deepcopy(profiles[profile_id]) for profile_id in cleaned}
+
+
 @proxy_routing.serialized_binding_change
 def delete_proxy_subscription_profile(profile_id: str) -> dict:
     clean_id = str(profile_id or "").strip()
@@ -1185,6 +1251,8 @@ def release_proxy_subscription_hot_update() -> None:
 
 
 def save_proxy_subscription_state(**updates) -> dict:
+    if "network_type" in updates:
+        updates["network_type"] = _validate_proxy_subscription_network_type(updates["network_type"])
     with _PROXY_SUBSCRIPTION_STATE_LOCK:
         state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
         active_id = str(updates.get("active_profile_id") or state.get("active_profile_id") or "")
@@ -1284,6 +1352,7 @@ def _normalize_proxy_subscription_profile(profile: dict, fallback_id: str = "") 
         profile_id = _proxy_subscription_profile_id(url) if url else uuid.uuid4().hex[:12]
     item["id"] = profile_id[:64]
     item["name"] = str(item.get("name") or _proxy_subscription_default_name(url) or "默认订阅").strip()[:80]
+    item["network_type"] = normalize_proxy_subscription_network_type(item.get("network_type"))
     item["url"] = url
     item["source_path"] = str(item.get("source_path") or "").strip()
     item["saved_path"] = str(item.get("saved_path") or "").strip()
@@ -2063,7 +2132,7 @@ def measure_proxy_node_latencies(
                     node_key=node_key,
                     ok=False,
                     latency_ms=None,
-                    detail=str(exc).splitlines()[0][:120] or type(exc).__name__,
+                    detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:120],
                     attempts=max(1, _int_or_default(attempts, 2)),
                     measured_at=_now_iso(),
                 )
@@ -2679,7 +2748,18 @@ def measure_proxy_node_latencies_on_server(
     if status != 0:
         detail = (stderr or stdout or "").strip()
         raise RuntimeError(f"{ssh_name}: 远端节点测速失败: {detail or status}")
-    return _parse_remote_latency_output(stdout)
+    parsed = _parse_remote_latency_output(stdout)
+    # A successful SSH command can still return incomplete/truncated output.
+    # Never silently leave an expected node looking as though it was untested.
+    return {
+        item["key"]: parsed.get(item["key"]) or ProxyNodeLatencyResult(
+            node_key=item["key"],
+            ok=False,
+            detail="远端未返回该节点的测速结果，请重试",
+            attempts=attempts_value,
+        )
+        for item in items
+    }
 
 
 def proxy_node_latency_ok(result: ProxyNodeLatencyResult | dict | None) -> bool:

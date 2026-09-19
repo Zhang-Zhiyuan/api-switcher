@@ -151,6 +151,30 @@ def test_subscription_selectors_always_offer_explicit_new_mode(monkeypatch, tmp_
     assert ssh._proxy_subscription_profile_edit_id == first["id"]
 
 
+def test_tag_label_refresh_preserves_selected_profile_and_unsaved_form(monkeypatch, tmp_path):
+    _isolated_subscription_storage(monkeypatch, tmp_path)
+    first, _ = _seed_two_profiles()
+    state = remote_proxy.load_proxy_subscription_state()
+    local = _local_tab_stub()
+    local._refresh_subscription_profile_options(state)
+    local._apply_subscription_profile_inputs(state)
+    ssh = _ssh_tab_stub()
+    ssh._refresh_proxy_subscription_profile_options(state)
+    ssh._apply_proxy_subscription_profile_inputs(state)
+    local._subscription_name_entry.value = "未保存的新名称"
+    ssh._proxy_subscription_name_entry.value = "SSH 未保存的新名称"
+    remote_proxy.set_proxy_subscription_network_type(first["id"], "residential")
+    current = remote_proxy.load_proxy_subscription_state()
+    local._refresh_subscription_profile_options(current, preserve_editor=True)
+    ssh._refresh_proxy_subscription_profile_options(current, preserve_editor=True)
+    assert " · 家宽" in local._subscription_profile_combo.get()
+    assert " · 家宽" in ssh._proxy_subscription_profile_combo.get()
+    assert local._subscription_profile_options[local._subscription_profile_combo.get()] == first["id"]
+    assert ssh._proxy_subscription_profile_options[ssh._proxy_subscription_profile_combo.get()] == first["id"]
+    assert local._subscription_name_entry.get() == "未保存的新名称"
+    assert ssh._proxy_subscription_name_entry.get() == "SSH 未保存的新名称"
+
+
 def test_local_existing_profile_name_and_url_are_updated_in_place(monkeypatch, tmp_path):
     _isolated_subscription_storage(monkeypatch, tmp_path)
     first, second = _seed_two_profiles()

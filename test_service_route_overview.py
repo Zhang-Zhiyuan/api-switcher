@@ -49,6 +49,21 @@ def test_custom_target_summary_resolves_inherited_profile_and_fixed_node():
     assert prefs == before
 
 
+def test_overview_displays_manual_network_tag_and_preserves_google_home_route():
+    prefs = _preferences()
+    prefs["service_profile_bindings"]["google"] = "home"
+    prefs["builtin_sites"]["google"] = True
+    catalog = _catalog()
+    catalog[0]["network_type"] = "residential"
+    row = next(item for item in proxy_routing.route_rows(prefs) if item["id"] == "google")
+    before = copy.deepcopy(prefs)
+    desc = route_description(row, prefs, catalog)
+    assert desc["profile"].endswith(" · 家宽")
+    assert "建议非家宽" in desc["hint"]
+    assert not desc["warning"]  # A user-selected route is not a broken profile.
+    assert prefs == before
+
+
 @pytest.fixture
 def overview(tk_root):
     selected = []

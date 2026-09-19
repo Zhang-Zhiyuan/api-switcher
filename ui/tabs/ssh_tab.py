@@ -167,6 +167,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_use_node_button = None
         self._proxy_hot_update_button = None
         self._proxy_latency_button = None
+        self._proxy_latency_all_button = None
         self._proxy_quality_button = None
         self._proxy_quality_cancel_button = None
         self._proxy_quality_cancel_event = None
@@ -1141,6 +1142,15 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
+        self._proxy_latency_all_button = ctk.CTkButton(
+            proxy_node_actions,
+            text="测速全部节点",
+            width=112,
+            command=lambda: self._measure_proxy_subscription_latencies(all_nodes=True),
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_latency_all_button.pack(anchor="e", pady=(0, 6))
         self._proxy_quality_button = ctk.CTkButton(
             proxy_node_actions,
             text="检测勾选/筛选",
@@ -2425,6 +2435,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_fetch_button,
             getattr(self, "_proxy_manual_hot_update_button", None),
             self._proxy_latency_button,
+            getattr(self, "_proxy_latency_all_button", None),
             self._proxy_quality_button,
             self._proxy_use_node_button,
             self._proxy_hot_update_button,
@@ -2449,6 +2460,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._proxy_use_node_button,
                     self._proxy_hot_update_button,
                     self._proxy_latency_button,
+                    getattr(self, "_proxy_latency_all_button", None),
                     self._proxy_quality_button,
                     self._proxy_ping0_button,
                 ) and not self._proxy_subscription_options:
@@ -2515,6 +2527,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _proxy_subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()
+        if profile.get("network_type") in {"residential", "datacenter"}:
+            name += " · " + remote_proxy.proxy_subscription_network_type_label(profile["network_type"])
         url = str(profile.get("url") or "").strip()
         host = ""
         if url:
@@ -2557,6 +2571,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             mapping[label] = str(profile.get("id") or "")
             if profile.get("id") == active_id:
                 active_label = label
+        previous_options = getattr(self, "_proxy_subscription_profile_options", {}) or {}
         self._proxy_subscription_profile_options = mapping
         if self._proxy_subscription_profile_combo:
             selected_label = ""
@@ -2565,6 +2580,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                     selected_label = str(
                         self._proxy_subscription_profile_combo.get() or ""
                     )
+                    selected_id = previous_options.get(selected_label)
+                    if selected_id:
+                        selected_label = next((label for label, key in mapping.items() if key == selected_id), "")
                 except Exception:
                     selected_label = ""
             self._proxy_subscription_profile_loading = True
@@ -3727,6 +3745,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_hot_update_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_latency_button:
             self._proxy_latency_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
+        if getattr(self, "_proxy_latency_all_button", None):
+            self._proxy_latency_all_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_quality_button:
             self._proxy_quality_button.configure(state="normal" if options and not self._proxy_busy else "disabled")
         if self._proxy_ping0_button:
@@ -3976,7 +3996,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _measure_selected_proxy_subscription_quality(self):
         self._measure_proxy_subscription_qualities()
 
-    def _measure_proxy_subscription_latencies(self):
+    def _measure_proxy_subscription_latencies(self, *, all_nodes: bool = False):
         if self._proxy_busy:
             show_toast(self.winfo_toplevel(), "远端代理操作正在进行中，请稍等", is_error=True)
             return
@@ -3990,8 +4010,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
 
         target_label = self._format_server_target(server_names)
-        scope_nodes = self._proxy_subscription_batch_nodes()
-        scope_label = self._proxy_subscription_batch_scope_label()
+        scope_nodes = tuple(self._proxy_subscription_nodes if all_nodes else self._proxy_subscription_batch_nodes())
+        scope_label = (
+            f"当前订阅全部 {len(scope_nodes)} 个节点（忽略筛选与勾选）"
+            if all_nodes else self._proxy_subscription_batch_scope_label()
+        )
         node_count = len(scope_nodes)
         if not scope_nodes:
             message = "当前节点分组没有可测速的节点"
@@ -3999,6 +4022,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         profile_id = self._current_proxy_subscription_profile_id()
+        generation = self._proxy_saved_subscription_load_generation
 
         def done(payload):
             if not payload["ok"]:
@@ -4010,6 +4034,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             result = payload.get("result") or {}
             failures = result.get("failures", [])
             server_results = result.get("results", {})
+            if (
+                generation != self._proxy_saved_subscription_load_generation
+                or profile_id != self._current_proxy_subscription_profile_id()
+            ):
+                message = "原订阅的远端测速已完成；页面分组已变更，未覆盖当前节点与选择。"
+                self._set_proxy_status(message, "warning")
+                show_toast(self.winfo_toplevel(), message)
+                return
             self._proxy_latency_server_count = len(server_names)
             self._proxy_latency_results.update(
                 self._aggregate_proxy_latency_results(server_results, len(server_names), scope_nodes)
@@ -4024,9 +4056,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._proxy_latency_results.get(remote_proxy.proxy_subscription_node_key(item))
                 )
             )
+            coverage_label = (
+                f"{target_label}：{scope_label} TCP 端口测速完成 {node_count}/{node_count}，"
+                f"可连 {ok_nodes}，失败 {node_count - ok_nodes}，取消 0。"
+                "TCP 端口结果不代表 UDP 协议或 AI 服务已可用。"
+            )
             if not fastest:
                 message = (
-                    f"{target_label}: 基于 {scope_label} 测速完成，但没有可自动选择的非香港节点。"
+                    f"{coverage_label}没有可自动选择的非香港节点。"
                     "香港节点仍可手动选择。"
                 )
                 if failures:
@@ -4046,8 +4083,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             detail = remote_proxy.proxy_node_latency_detail(self._proxy_latency_results.get(fastest_key))
             target_detail = f"{detail}，" if detail and len(server_names) > 1 else ""
             message = (
-                f"{target_label}: 已基于 {scope_label} 完成 {node_count} 个节点远端测速，"
-                f"{ok_nodes} 个可连；已选择最快节点【{region}】{target_detail}{latency}。"
+                f"{coverage_label}已选择最快节点【{region}】{target_detail}{latency}。"
             )
             if failures:
                 message += " 部分服务器失败: " + "；".join(failures)
@@ -4058,7 +4094,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
 
         self._run_proxy_ssh_task(
-            f"正在从 {target_label} 测试 {scope_label} 的远端延迟，"
+            f"正在从 {target_label} 测试 {scope_label} 的远端 TCP 端口延迟（非 UDP/AI 可用性），"
             f"每台最多 {remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 个节点并行、"
             f"最多 {SSH_NETWORK_TEST_SERVER_MAX_WORKERS} 台服务器并行；"
             "完成后自动选择最低延迟的非香港节点...",
@@ -4744,6 +4780,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                 scope, preferences, expected=expected,
             ),
             on_saved=lambda: self._set_proxy_status("SSH 目标分流处理完成，各服务器结果请查看编辑窗口。", "success"),
+            on_tags_saved=lambda: self._refresh_proxy_subscription_profile_options(preserve_editor=True),
         )
 
     def _inspect_ai_proxy(self):

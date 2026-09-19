@@ -78,6 +78,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._use_node_button = None
         self._hot_update_node_button = None
         self._latency_button = None
+        self._latency_all_button = None
         self._quality_button = None
         self._quality_cancel_button = None
         self._quality_cancel_event = None
@@ -537,6 +538,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._latency_button.pack(anchor="e", pady=(0, 6))
+        self._latency_all_button = ctk.CTkButton(
+            node_actions,
+            text="测速全部节点",
+            width=118,
+            command=lambda: self._measure_subscription_latencies(all_nodes=True),
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._latency_all_button.pack(anchor="e", pady=(0, 6))
         self._quality_button = ctk.CTkButton(
             node_actions,
             text="检测勾选/筛选",
@@ -1147,6 +1157,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             getattr(self, "_import_subscription_file_button", None),
             getattr(self, "_manual_hot_update_button", None),
             self._latency_button,
+            getattr(self, "_latency_all_button", None),
             self._quality_button,
             self._use_node_button,
             self._hot_update_node_button,
@@ -1175,6 +1186,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._use_node_button,
                     self._hot_update_node_button,
                     self._latency_button,
+                    getattr(self, "_latency_all_button", None),
                     self._quality_button,
                     self._ping0_button,
                 ) and not self._subscription_options:
@@ -1569,7 +1581,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             cached = {item["id"]: item for item in getattr(self, "_service_route_catalog", [])}
             self._service_route_catalog = [
                 {**cached.get(profile["id"], {"id": profile["id"], "nodes": []}),
-                 "name": profile.get("name") or "未命名订阅"}
+                 "name": profile.get("name") or "未命名订阅",
+                 "network_type": remote_proxy.normalize_proxy_subscription_network_type(profile.get("network_type"))}
                 for profile in self._subscription_profiles_snapshot
             ]
         overview = getattr(self, "_route_overview", None)
@@ -1608,10 +1621,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 preferences, expected=expected,
             ),
             on_saved=self._load_proxy_preferences_ui, initial_service=service_id,
+            on_tags_saved=lambda: self._refresh_subscription_profile_options(preserve_editor=True),
         )
 
     def _subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()
+        if profile.get("network_type") in {"residential", "datacenter"}:
+            name += " · " + remote_proxy.proxy_subscription_network_type_label(profile["network_type"])
         url = str(profile.get("url") or "").strip()
         host = ""
         if url:
@@ -1655,12 +1671,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             mapping[label] = str(profile.get("id") or "")
             if profile.get("id") == active_id:
                 active_label = label
+        previous_options = getattr(self, "_subscription_profile_options", {}) or {}
         self._subscription_profile_options = mapping
         if self._subscription_profile_combo:
             selected_label = ""
             if preserve_editor:
                 try:
                     selected_label = str(self._subscription_profile_combo.get() or "")
+                    selected_id = previous_options.get(selected_label)
+                    if selected_id:
+                        selected_label = next((label for label, key in mapping.items() if key == selected_id), "")
                 except Exception:
                     selected_label = ""
             self._subscription_profile_loading = True
@@ -2750,6 +2770,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._hot_update_node_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._latency_button:
             self._latency_button.configure(state="normal" if options and not self._busy else "disabled")
+        if getattr(self, "_latency_all_button", None):
+            self._latency_all_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._quality_button:
             self._quality_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._ping0_button:
@@ -3150,7 +3172,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._set_status(message, "error")
             show_toast(self.winfo_toplevel(), message, is_error=True)
 
-    def _measure_subscription_latencies(self):
+    def _measure_subscription_latencies(self, *, all_nodes: bool = False):
         if self._busy:
             show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
             return
@@ -3160,8 +3182,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
 
-        scope_nodes = tuple(self._subscription_batch_nodes())
-        scope_label = self._subscription_batch_scope_label()
+        scope_nodes = tuple(self._subscription_nodes if all_nodes else self._subscription_batch_nodes())
+        scope_label = (
+            f"当前订阅全部 {len(scope_nodes)} 个节点（忽略筛选与勾选）"
+            if all_nodes else self._subscription_batch_scope_label()
+        )
         if not scope_nodes:
             message = "当前节点分组没有可测速的节点"
             self._set_status(message, "warning")
@@ -3186,7 +3211,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._set_status(
             f"正在对 {scope_label} 的 {len(tcp_scope_nodes)} 个 TCP 节点以最多 "
             f"{remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 路并发连续测试 3 次；"
-            f"{len(data_plane_scope_nodes)} 个 UDP/其他传输节点直接进入真实数据面验证。"
+            f"{len(data_plane_scope_nodes)} 个 UDP/其他传输节点全部进行 HTTPS 实际转发测速（最多 4 路）；"
             "随后用隔离临时 mihomo "
             "做 3 轮 OpenAI API/ChatGPT/Claude/Gemini 稳定验证；"
             "短探针通过后最多深测 5 个候选，每个最坏约 3.2MiB，"
@@ -3196,14 +3221,36 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
 
         def run():
+            results = {}
+
+            def measure_group(items, action, label):
+                try:
+                    results.update(action() or {})
+                except Exception as exc:
+                    detail = (str(exc).strip() or type(exc).__name__).splitlines()[0][:140]
+                    for item in items:
+                        key = remote_proxy.proxy_subscription_node_key(item)
+                        results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
+                            key, False, detail=f"{label}检测任务失败: {detail}",
+                        ))
+
             try:
-                results = remote_proxy.measure_proxy_node_latencies(
+                measure_group(tcp_scope_nodes, lambda: remote_proxy.measure_proxy_node_latencies(
                     tcp_scope_nodes,
                     timeout=3.0,
                     attempts=3,
                     max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
                     require_all=True,
-                )
+                ), "TCP")
+                if data_plane_scope_nodes:
+                    measure_group(data_plane_scope_nodes, lambda:
+                                  local_proxy.measure_proxy_node_data_plane_latencies(data_plane_scope_nodes),
+                                  "HTTPS 实际转发")
+                for item in scope_nodes:
+                    key = remote_proxy.proxy_subscription_node_key(item)
+                    results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
+                        key, False, detail="检测未返回该节点的结果，请重试",
+                    ))
             except Exception as e:
                 payload = {
                     "tcp_ok": False,
@@ -3214,12 +3261,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 }
             else:
                 captured_latency_results = dict(existing_latency_results)
-                for item in data_plane_scope_nodes:
-                    captured_latency_results.pop(
-                        remote_proxy.proxy_subscription_node_key(item),
-                        None,
-                    )
                 captured_latency_results.update(results or {})
+                completed_count = len(scope_nodes)
+                passed_count = sum(
+                    remote_proxy.proxy_node_latency_ok(results.get(remote_proxy.proxy_subscription_node_key(item)))
+                    for item in scope_nodes
+                )
+                coverage_label = (
+                    f"{scope_label}：基础测速完成 {completed_count}/{len(scope_nodes)}，"
+                    f"可连 {passed_count}，失败 {completed_count - passed_count}，取消 0"
+                )
                 save_error = ""
                 try:
                     if not profile_id:
@@ -3230,6 +3281,24 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     )
                 except Exception as e:
                     save_error = str(e)
+
+                def show_connectivity_results():
+                    if (
+                        self.winfo_exists()
+                        and generation == self._saved_subscription_load_generation
+                        and self._current_subscription_profile_id() == profile_id
+                    ):
+                        self._latency_results = dict(captured_latency_results)
+                        self._prefer_quality_sort = False
+                        self._set_subscription_nodes(
+                            self._subscription_nodes, preserve_key=original_selected_key,
+                        )
+                        self._set_status(
+                            f"{coverage_label}；"
+                            "结果已显示，正在对有限候选进行 AI 稳定性验证，不代表其余节点未测。"
+                        )
+
+                self._run_on_ui_thread(show_connectivity_results)
                 try:
                     stable_node, stability_results = local_proxy.select_stable_local_proxy_node(
                         scope_nodes,
@@ -3244,6 +3313,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         "stable_node": stable_node,
                         "stability_results": stability_results,
                         "save_error": save_error,
+                        "coverage_label": coverage_label,
                         "error": "",
                     }
                 except Exception as e:
@@ -3254,6 +3324,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         "stable_node": None,
                         "stability_results": {},
                         "save_error": save_error,
+                        "coverage_label": coverage_label,
                         "error": str(e),
                     }
 
@@ -3269,13 +3340,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
                 captured_latency_results = dict(payload.get("captured_latencies") or {})
                 save_error = str(payload.get("save_error") or "")
+                coverage_label = str(payload.get("coverage_label") or "")
 
                 current_profile_id = self._current_subscription_profile_id()
                 same_context = (
                     generation == self._saved_subscription_load_generation
                     and current_profile_id == profile_id
                 )
-                if same_context:
+                if same_context and self._latency_results != captured_latency_results:
                     self._latency_results = captured_latency_results
                     self._prefer_quality_sort = False
                     self._set_subscription_nodes(
@@ -3323,7 +3395,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
                 if not same_context:
                     message = (
-                        f"原订阅分组的测试已完成：TCP 3/3 通过 "
+                        f"{coverage_label}。原订阅分组的测试已完成：TCP 3/3 通过 "
                         f"{ok_count}/{len(tcp_scope_nodes)} 个，"
                         f"UDP/其他传输 {len(data_plane_scope_nodes)} 个改由实际转发验证；"
                         "页面分组已变更，未覆盖当前选择。"
@@ -3336,9 +3408,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
                 if not stable_verified:
                     message = (
-                        f"测试完成: {scope_label} 中 TCP 连续 3 次通过 "
+                        f"{coverage_label}。测试完成: TCP 连续 3 次通过 "
                         f"{ok_count}/{len(tcp_scope_nodes)} 个；"
-                        f"UDP/其他传输 {len(data_plane_scope_nodes)} 个跳过 TCP 预检；"
+                        f"UDP/其他传输 {len(data_plane_scope_nodes)} 个已进行 HTTPS 实际转发测速；"
                         f"已验证的 {verified_count} 个非香港候选均未同时通过 3 轮 AI 短探针"
                         "与 Codex 长会话网络近似，"
                         "已保留原选择。"
@@ -3381,7 +3453,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     else "UDP/其他传输，"
                 )
                 message = (
-                    f"测试完成: TCP 3/3 通过 {ok_count}/{len(tcp_scope_nodes)} 个；"
+                    f"{coverage_label}。测试完成: TCP 3/3 通过 {ok_count}/{len(tcp_scope_nodes)} 个；"
                     f"UDP/其他传输 {len(data_plane_scope_nodes)} 个改由实际转发验证；"
                     f"已在 {verified_count} 个已验证候选中选择应用时延最低的节点"
                     f"【{region}】{tcp_label}{application_label}，已通过 3 轮 AI 短探针与 {codex_label}。"

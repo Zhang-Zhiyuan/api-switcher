@@ -70,6 +70,80 @@ def test_editor_changes_are_drafts_until_explicit_apply(editor):
     assert dialog._originals[dialog._scope] == dialog._drafts[dialog._scope]
 
 
+def test_tagged_routes_only_fill_current_scope_and_preserve_pinned_bindings(editor):
+    _root, dialog, saved = editor
+    first, second = dialog._scopes
+    dialog._catalog[0]["network_type"] = "residential"
+    dialog._catalog[1]["network_type"] = "datacenter"
+    before = copy.deepcopy(dialog._drafts)
+    dialog._suggest_tagged_routes()
+    draft = dialog._drafts[first]
+    assert draft["service_profile_bindings"]["google_ai"] == "home"
+    assert draft["service_profile_bindings"]["google"] == "dc"
+    assert draft["builtin_sites"]["google"] is True
+    assert draft["service_node_bindings"] == before[first]["service_node_bindings"]
+    assert dialog._drafts[second] == before[second]
+    assert dialog._originals == before and not saved
+    assert dialog._preview_open
+    assert "非家宽" in dialog._rows["google"]["profile"].get()
+
+
+def test_tagged_routes_do_not_undo_explicit_default_choice_even_if_unchanged(editor):
+    _root, dialog, saved = editor
+    dialog._select_profile("claude", DEFAULT_PROFILE)
+    dialog._select_profile("google_ai", DEFAULT_PROFILE)
+    dialog._catalog[0]["network_type"] = "residential"
+    dialog._catalog[1]["network_type"] = "datacenter"
+    dialog._suggest_tagged_routes()
+    bindings = dialog._drafts[dialog._scope]["service_profile_bindings"]
+    assert "claude" not in bindings and "google_ai" not in bindings
+    assert bindings["google"] == "dc"
+    assert not saved
+    dialog._reset()
+    assert not dialog._manually_edited[dialog._scope]
+
+
+def test_scope_copy_preserves_source_default_protection_and_replaces_old_target_protection(editor):
+    _root, dialog, saved = editor
+    first, second = dialog._scopes
+    dialog._select_profile("google_ai", DEFAULT_PROFILE)
+    dialog._switch_scope(second)
+    dialog._select_profile("google", DEFAULT_PROFILE)
+    dialog._switch_scope(first)
+    dialog._copy_to_scopes([second])
+    assert dialog._manually_edited[second] == {"google_ai"}
+    assert dialog._manually_edited[second] is not dialog._manually_edited[first]
+    dialog._switch_scope(second)
+    dialog._catalog[0]["network_type"] = "residential"
+    dialog._catalog[1]["network_type"] = "datacenter"
+    dialog._suggest_tagged_routes()
+    assert "google_ai" not in dialog._drafts[second]["service_profile_bindings"]
+    assert dialog._drafts[second]["service_profile_bindings"]["google"] == "dc"
+    assert not saved
+
+
+def test_subscription_tag_editor_reload_keeps_routing_drafts(editor, monkeypatch):
+    from ui.dialogs import subscription_tags_dialog
+    root, dialog, saved = editor
+    callbacks = []
+    tag_updates = []
+    dialog._on_tags_saved = lambda: tag_updates.append(True)
+    class TagsWindow:
+        def __init__(self, master, *, catalog, on_saved):
+            assert master is dialog and catalog is dialog._catalog
+            callbacks.append(on_saved)
+        def winfo_exists(self):
+            return False
+    monkeypatch.setattr(subscription_tags_dialog, "SubscriptionTagsDialog", TagsWindow)
+    dialog._select_profile("claude", DEFAULT_PROFILE)
+    before = copy.deepcopy(dialog._drafts)
+    dialog._open_subscription_tags()
+    callbacks[0]()
+    _wait(root, lambda: not dialog._busy)
+    assert dialog._drafts == before and not saved
+    assert tag_updates == [True]
+
+
 def test_editor_reselecting_profile_preserves_pinned_node(editor):
     _root, dialog, _saved = editor
     dialog._select_profile("claude", "家宽订阅 A")

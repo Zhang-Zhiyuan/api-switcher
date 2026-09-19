@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from core import local_proxy, proxy_route_diagnostics, proxy_routing, remote_proxy
+from core.subscription_routing_policy import suggest_tagged_routes
 from test_local_proxy_service_routing import _patch_profiles
 
 
@@ -69,7 +70,7 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         first, second, datacenter = [_upstream(label, stack) for label in ("home-one", "home-two", "datacenter")]
         _patch_profiles(monkeypatch, {"home": (first, second), "dc": (datacenter,)})
         preferences = {
-            "builtin_sites": {"youtube": True, "google": True, "github": True, "huggingface": True},
+            "builtin_sites": {"github": True, "huggingface": True},
             "custom_targets": [
                 {"id": "api", "kind": "domain", "value": "api.openai.com", "enabled": True},
                 {"id": "network", "kind": "ip-cidr", "value": "203.0.113.0/24", "enabled": True},
@@ -80,20 +81,35 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 {"id": "default", "kind": "domain", "value": "ytimg.com", "enabled": True},
             ],
             "service_profile_bindings": {
-                "openai": "home", "claude": "home", "youtube": "dc",
+                "claude": "home",
                 "custom:api": "dc", "custom:network": "home", "custom:host": "dc",
-                "google": "dc", "github": "home", "huggingface": "home",
+                "github": "home", "huggingface": "home",
                 "custom:github": "dc", "custom:hf": "dc", "custom:hfshort": "dc",
             },
             "service_node_bindings": {
-                "openai": remote_proxy.proxy_node_key(first), "claude": remote_proxy.proxy_node_key(second),
-                "youtube": remote_proxy.proxy_node_key(datacenter), "custom:api": remote_proxy.proxy_node_key(datacenter),
+                "claude": remote_proxy.proxy_node_key(second), "custom:api": remote_proxy.proxy_node_key(datacenter),
                 "custom:network": remote_proxy.proxy_node_key(first), "custom:host": remote_proxy.proxy_node_key(datacenter),
-                "google": remote_proxy.proxy_node_key(datacenter), "github": remote_proxy.proxy_node_key(first),
+                "github": remote_proxy.proxy_node_key(first),
                 "huggingface": remote_proxy.proxy_node_key(second), "custom:github": remote_proxy.proxy_node_key(datacenter),
                 "custom:hf": remote_proxy.proxy_node_key(datacenter), "custom:hfshort": remote_proxy.proxy_node_key(datacenter),
             },
         }
+        catalog = [
+            {"id": profile_id, "network_type": network_type, "auto_route_usable": True,
+             "selected_node_key": remote_proxy.proxy_node_key(nodes[0]),
+             "nodes": [{"key": remote_proxy.proxy_node_key(node), "label": node["name"]} for node in nodes]}
+            for profile_id, network_type, nodes in (
+                ("home", "residential", (first, second)), ("dc", "datacenter", (datacenter,)),
+            )
+        ]
+        preferences, _notices = suggest_tagged_routes(preferences, catalog)
+        assert {service: preferences["service_profile_bindings"][service]
+                for service in ("openai", "claude", "google_ai", "youtube", "google")} == {
+                    "openai": "home", "claude": "home", "google_ai": "home", "youtube": "dc", "google": "dc",
+                }
+        assert preferences["builtin_sites"]["youtube"] and preferences["builtin_sites"]["google"]
+        # The opt-in policy must retain Claude's deliberately different exit.
+        assert preferences["service_node_bindings"]["claude"] == remote_proxy.proxy_node_key(second)
         port = _port_pair()
         # The same routing options are used by Win11 and SSH deployments.
         options = proxy_routing.config_options(preferences)
@@ -102,8 +118,8 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
         config = remote_proxy.build_mihomo_config(second, port, log_level="silent", **options)
         # Exercise literal controller payloads too. Both outcomes remain on
         # loopback-only upstreams; a negative match must never contact the web.
-        home_route = local_proxy._subscription_route_group_name("home", "openai", remote_proxy.proxy_node_key(first))
-        dc_route = local_proxy._subscription_route_group_name("dc", "youtube", remote_proxy.proxy_node_key(datacenter))
+        home_route = local_proxy._subscription_route_group_name("home", "openai")
+        dc_route = local_proxy._subscription_route_group_name("dc", "youtube")
         parsed = yaml.safe_load(config)
         parsed["rules"][:0] = [
             f"DOMAIN-KEYWORD,.keyword-only.test,{home_route}",
@@ -135,6 +151,8 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
             for host, expected in (
                 ("chatgpt.com", "home-one"), ("api.anthropic.com", "home-two"),
                 ("www.youtube.com", "datacenter"), ("api.openai.com", "datacenter"),
+                ("youtube.com", "datacenter"), ("google.com", "datacenter"), ("assets.gstatic.com", "datacenter"),
+                ("gemini.google.com", "home-one"), ("generativelanguage.googleapis.com", "home-one"),
                 ("203.0.113.8", "home-one"), ("203.0.113.9", "datacenter"),
                 ("github.com", "datacenter"), ("raw.githubusercontent.com", "home-one"),
                 ("huggingface.co", "datacenter"), ("hf.co", "datacenter"), ("i.ytimg.com", "home-two"),

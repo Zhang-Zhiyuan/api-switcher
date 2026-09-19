@@ -29,6 +29,9 @@ def route_description(row, preferences, catalog):
     elif profile_id and not profile.get("nodes"):
         warning = profile.get("error") or "订阅暂无可用缓存，请先拉取"
     profile_text = clean(profile["name"]) if profile else ("订阅已失效" if profile_id else "默认线路")
+    network_type = (profile or {}).get("network_type", "unknown")
+    if network_type in {"residential", "datacenter"}:
+        profile_text += " · " + ("家宽" if network_type == "residential" else "非家宽")
     node_text = clean(node["label"]) if node else ("固定节点已失效" if node_key else "订阅首选 + 故障切换")
     if not profile_id and not node_key:
         node_text = "沿用默认节点策略"
@@ -37,6 +40,8 @@ def route_description(row, preferences, catalog):
         strategy = "继承自定义默认 · " + strategy
     if not row["enabled"]:
         strategy = "未启用 · 保留线路选择，不新增专属规则"
+    elif service in {"youtube", "google"} and network_type == "residential":
+        strategy += " · 此目标建议非家宽，可手动改选；已保留当前绑定"
     return {
         "profile": profile_text, "node": node_text, "hint": warning or strategy,
         "warning": bool(warning), "bound": bool(bindings.get(service)),

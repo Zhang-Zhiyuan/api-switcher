@@ -3098,6 +3098,97 @@ def _probe_local_ai_proxy_after_failover_warmup(
     return probe_local_ai_proxy(timeout=timeout), True
 
 
+def measure_proxy_node_data_plane_latencies(
+    nodes,
+    *,
+    timeout: int = 5,
+    attempts: int = 2,
+    max_workers: int = 4,
+) -> dict[str, remote_proxy.ProxyNodeLatencyResult]:
+    """Measure every requested node through its own disposable proxy.
+
+    Unlike automatic AI selection, connectivity measurement never excludes a
+    region or truncates to the first few candidates. In particular UDP-based
+    protocols cannot be measured with a TCP connect to the server port.
+    """
+    items = {
+        remote_proxy.proxy_subscription_node_key(item): item
+        for item in nodes or ()
+    }
+    if not items:
+        return {}
+    attempts = max(1, min(3, int(attempts)))
+    timeout = max(1, min(15, int(timeout)))
+
+    def failure(key, error):
+        detail = str(error).strip() or type(error).__name__
+        return remote_proxy.ProxyNodeLatencyResult(
+            key, False, detail=f"实际转发检测失败: {detail.splitlines()[0][:140]}",
+            attempts=attempts,
+        )
+
+    try:
+        _ensure_local_dirs()
+        binary_path = _ensure_mihomo_binary()
+    except Exception as exc:
+        return {key: failure(key, exc) for key in items}
+
+    def measure(key, item):
+        delays = []
+        detail = ""
+        with _isolated_mihomo_session(binary_path, item.node) as session:
+            for _attempt in range(attempts):
+                if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set():
+                    raise RuntimeError("应用正在退出，检测已停止")
+                result = _probe_ai_url_through_explicit_http_proxy(
+                    session.proxy_url, "HTTPS 连通性",
+                    "https://www.gstatic.com/generate_204", timeout,
+                )
+                if result.ok:
+                    delays.append(max(1, result.elapsed_ms))
+                else:
+                    detail = result.detail or f"HTTP {result.status}"
+        ok = len(delays) == attempts
+        return remote_proxy.ProxyNodeLatencyResult(
+            key, ok,
+            latency_ms=sorted(delays)[len(delays) // 2] if ok else None,
+            detail=(
+                f"HTTPS 实际转发 {len(delays)}/{attempts}；非 TCP 握手延迟"
+                + (f"；{detail}" if detail else "")
+            ),
+            attempts=attempts,
+        )
+
+    results = {}
+    futures = {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(items), max(1, min(4, int(max_workers))))) as executor:
+            for key, item in items.items():
+                try:
+                    futures[executor.submit(measure, key, item)] = key
+                except Exception as exc:
+                    results[key] = failure(key, exc)
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception as exc:
+                    results[key] = failure(key, exc)
+    except Exception as exc:
+        # Executor construction/shutdown and iteration may fail independently
+        # of individual probes. Preserve already completed measurements.
+        for future, key in futures.items():
+            if key in results or not future.done():
+                continue
+            try:
+                results[key] = future.result()
+            except Exception as worker_exc:
+                results[key] = failure(key, worker_exc)
+        for key in items:
+            results.setdefault(key, failure(key, exc))
+    return results
+
+
 def select_stable_local_proxy_node(
     nodes,
     latency_results: dict[str, remote_proxy.ProxyNodeLatencyResult | dict] | None,
@@ -3134,10 +3225,14 @@ def select_stable_local_proxy_node(
         ):
             continue
         latency_ms = remote_proxy.proxy_node_latency_ms(latency)
-        if latency_ms is not None:
+        if tcp_prefilter_applies and latency_ms is not None:
             tcp_candidates.append((latency_ms, key, item))
         elif not tcp_prefilter_applies:
-            data_plane_candidates.append((source_index, key, item))
+            data_plane_candidates.append((
+                latency_ms if latency_ms is not None else 10**9 + source_index,
+                key,
+                item,
+            ))
 
     tcp_candidates.sort(key=lambda value: (value[0], value[1]))
     data_plane_candidates.sort(key=lambda value: (value[0], value[1]))
@@ -6039,7 +6134,7 @@ def _probe_ai_url_through_explicit_http_proxy(
         return LocalAIProxyProbeResult(
             label=label,
             ok=False,
-            detail=str(exc).splitlines()[0][:160] or type(exc).__name__,
+            detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:160],
             elapsed_ms=_elapsed_ms(started),
         )
     finally:
@@ -6421,6 +6516,11 @@ def _classify_ai_probe_response(
     text = str(body or "")[: 64 * 1024]
     lowered = text.lower()
     headers = headers or {}
+    if label == "HTTPS 连通性":
+        identified = status == 204 and not text.strip()
+        return identified, "", f"HTTP {status}，" + (
+            "HTTPS 实际转发已确认" if identified else "连通性目标响应不符合预期"
+        )
     if label in {"ChatGPT 出口", "OpenAI/ChatGPT"}:
         trace = {}
         for line in text.splitlines():
