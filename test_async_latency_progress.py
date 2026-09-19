@@ -212,6 +212,6 @@ def test_local_progress_is_visible_before_udp_finishes_but_never_changes_other_s
 
     monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies", tcp)
     monkeypatch.setattr(local_proxy, "measure_proxy_node_data_plane_latencies", udp)
-    tab._measure_subscription_latencies()
+    tab._verify_subscription_stability()
     assert not tab._busy
     assert (not rendered) if changed_context else (rendered[-1] == values)

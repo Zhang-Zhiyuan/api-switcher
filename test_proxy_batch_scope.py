@@ -3021,7 +3021,7 @@ def test_local_latency_results_use_profile_captured_before_worker(monkeypatch):
     tab.winfo_exists = lambda: True
     tab.winfo_toplevel = lambda: object()
 
-    tab._measure_subscription_latencies()
+    tab._verify_subscription_stability()
 
     assert calls["saved"] == [
         ({remote_proxy.proxy_subscription_node_key(node): result}, "captured-profile")
@@ -3091,7 +3091,7 @@ def test_local_latency_gate_skips_first_unstable_and_selects_second_stable(monke
     tab.winfo_exists = lambda: True
     tab.winfo_toplevel = lambda: object()
 
-    tab._measure_subscription_latencies()
+    tab._verify_subscription_stability()
 
     assert callable(calls["measure_kwargs"].pop("progress_callback"))
     assert calls["measure_kwargs"] == {
@@ -3160,7 +3160,7 @@ def test_local_latency_gate_all_unstable_keeps_original_selection(monkeypatch):
     tab.winfo_exists = lambda: True
     tab.winfo_toplevel = lambda: object()
 
-    tab._measure_subscription_latencies()
+    tab._verify_subscription_stability()
 
     assert calls["selected"] == []
     assert calls["used"] == []
@@ -3219,7 +3219,7 @@ def test_local_latency_gate_profile_change_saves_captured_profile_without_select
     tab.winfo_exists = lambda: True
     tab.winfo_toplevel = lambda: object()
 
-    tab._measure_subscription_latencies()
+    tab._verify_subscription_stability()
 
     assert calls["saved"][0][1] == "profile-a"
     assert calls["selected"] == []
@@ -3247,7 +3247,7 @@ def test_local_latency_gate_thread_start_failure_restores_busy(monkeypatch):
     tab._set_status = lambda message, severity="info": statuses.append((message, severity))
     tab.winfo_toplevel = lambda: object()
 
-    tab._measure_subscription_latencies()
+    tab._verify_subscription_stability()
 
     assert tab._busy is False
     assert "启动节点测速与稳定验证任务失败" in statuses[-1][0]

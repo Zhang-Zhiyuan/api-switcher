@@ -4,7 +4,9 @@ import base64
 import binascii
 import copy
 from email.utils import parsedate_to_datetime
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+import errno
+import select
 import hashlib
 import ipaddress
 import json
@@ -174,6 +176,8 @@ PROXY_QUALITY_CACHE_SCHEMA_VERSION = 6
 PROXY_QUALITY_HTTP_CONCURRENCY_BUDGET = 12
 PROXY_LATENCY_DEFAULT_MAX_WORKERS = 32
 PROXY_LATENCY_MAX_WORKERS = 64
+PROXY_LATENCY_DNS_MAX_WORKERS = 16
+_PROXY_LATENCY_DNS_SLOTS = threading.BoundedSemaphore(PROXY_LATENCY_DNS_MAX_WORKERS)
 PROXY_QUALITY_ASSESSMENT_SCOPE_SERVER = "server_entry"
 PROXY_LATENCY_CACHE_TTL_SECONDS = 30 * 60
 PROXY_SUBSCRIPTION_NETWORK_TYPE_LABELS = {
@@ -506,8 +510,11 @@ class ProxyNodeLatencyResult:
     detail: str = ""
     attempts: int = 0
     measured_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    cancelled: bool = False
 
     def label(self) -> str:
+        if self.cancelled:
+            return "已取消"
         if self.ok and self.latency_ms is not None:
             return f"{self.latency_ms}ms"
         return "不可连"
@@ -1553,6 +1560,7 @@ def save_proxy_subscription_latencies(
             continue
         payload[node_key] = {
             "ok": proxy_node_latency_ok(result),
+            "cancelled": proxy_node_latency_cancelled(result),
             "latency_ms": proxy_node_latency_ms(result),
             "detail": proxy_node_latency_detail(result),
             "attempts": proxy_node_latency_attempts(result),
@@ -1685,7 +1693,8 @@ def load_proxy_subscription_latencies(state: dict | None = None) -> dict[str, di
         except (TypeError, ValueError):
             latency_value = None
         results[node_key] = {
-            "ok": bool(value.get("ok") and latency_value is not None),
+            "ok": bool(value.get("ok") and latency_value is not None and not proxy_node_latency_cancelled(value)),
+            "cancelled": proxy_node_latency_cancelled(value),
             "latency_ms": latency_value,
             "detail": str(value.get("detail") or "")[:160],
             "attempts": _int_or_default(value.get("attempts"), 0),
@@ -2018,14 +2027,248 @@ def ranked_proxy_subscription_nodes_for_ai_probe(
     )
 
 
+def _quick_tcp_endpoint(node: dict) -> tuple[str, int]:
+    host = str(node["server"]).strip().strip("[]")
+    try:
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        host = host.lower()
+    return host, int(node["port"])
+
+
+def _quick_tcp_remaining(deadline: float, cancel_event=None) -> float:
+    if cancel_event is not None and cancel_event.is_set():
+        raise InterruptedError("已取消 TCP 快速检查")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("TCP 快速检查总预算已用尽（含 DNS/多地址连接）")
+    return remaining
+
+
+def _quick_tcp_timeout(value) -> float:
+    timeout = _normalize_timeout(value, 3.0)
+    return timeout if 0.2 <= timeout <= 15.0 else 3.0
+
+
+class _QuickTCPResolver:
+    """Batch DNS sharing with a process-wide cap on daemon resolver threads.
+
+    getaddrinfo cannot be interrupted on all platforms. Its caller can stop
+    waiting; a stuck resolver retains one slot, never an unbounded new pool.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._flights = {}
+
+    def resolve(self, host, deadline, cancel_event=None):
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            numeric = False
+        else:
+            numeric = True
+        if numeric:
+            _quick_tcp_remaining(deadline, cancel_event)
+            return socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST)
+        with self._lock:
+            future = self._flights.get(host)
+            owner = future is None
+            if owner:
+                future = Future()
+                self._flights[host] = future
+        if owner:
+            slots = _PROXY_LATENCY_DNS_SLOTS
+            acquired = False
+            try:
+                while not acquired:
+                    acquired = slots.acquire(timeout=min(0.05, _quick_tcp_remaining(deadline, cancel_event)))
+
+                def resolve_in_background():
+                    try:
+                        future.set_result(socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM))
+                    except Exception as exc:
+                        future.set_exception(exc)
+                    finally:
+                        slots.release()
+
+                threading.Thread(target=resolve_in_background, name="proxy-quick-dns", daemon=True).start()
+            except Exception as exc:
+                if acquired:
+                    slots.release()
+                future.set_exception(exc)
+        while True:
+            remaining = _quick_tcp_remaining(deadline, cancel_event)
+            try:
+                return future.result(timeout=min(0.05, remaining))
+            except TimeoutError:
+                if future.done():
+                    return future.result()
+
+
+def _quick_tcp_connect(addresses, port, deadline, cancel_event=None):
+    """Try numeric addresses within one budget, without re-entering DNS."""
+    unique = []
+    seen = set()
+    for family, socktype, proto, _canon, address in addresses:
+        target = (address[0], port, *address[2:])
+        identity = (family, socktype, proto, target)
+        if identity not in seen:
+            seen.add(identity)
+            unique.append(identity)
+    if not unique:
+        raise OSError("DNS 未返回可用 TCP 地址")
+    last_error = None
+    pending_errors = {errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, 10035, 10036, 10037}
+    for index, (family, socktype, proto, target) in enumerate(unique):
+        remaining = _quick_tcp_remaining(deadline, cancel_event)
+        # A blackholed IPv6 address must leave a share of the budget for IPv4.
+        address_deadline = time.monotonic() + remaining / (len(unique) - index)
+        try:
+            with socket.socket(family, socktype, proto) as connection:
+                connection.setblocking(False)
+                error = connection.connect_ex(target)
+                if error in (0, errno.EISCONN, 10056):
+                    return
+                if error not in pending_errors:
+                    raise OSError(error, "TCP 连接失败")
+                while True:
+                    remaining = min(_quick_tcp_remaining(deadline, cancel_event), address_deadline - time.monotonic())
+                    if remaining <= 0:
+                        raise TimeoutError("该地址连接超时")
+                    _readable, writable, exceptional = select.select([], [connection], [connection], min(0.05, remaining))
+                    if not writable and not exceptional:
+                        continue
+                    error = connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if error:
+                        raise OSError(error, "TCP 连接失败")
+                    return
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+
+
+def _measure_quick_tcp_latency(node, timeout, resolver, cancel_event=None):
+    started = time.monotonic()
+    key = proxy_node_key(node)
+    deadline = started + _quick_tcp_timeout(timeout)
+    try:
+        host, port = _quick_tcp_endpoint(node)
+        addresses = resolver.resolve(host, deadline, cancel_event)
+        _quick_tcp_connect(addresses, port, deadline, cancel_event)
+        return ProxyNodeLatencyResult(
+            key, True, max(1, int((time.monotonic() - started) * 1000)),
+            detail="TCP 快速检查：单次连接，仅验证端口连通", attempts=1,
+        )
+    except Exception as exc:
+        cancelled = isinstance(exc, InterruptedError) and cancel_event is not None and cancel_event.is_set()
+        detail = (str(exc).strip() or type(exc).__name__).splitlines()[0][:140]
+        return ProxyNodeLatencyResult(key, False, detail=detail, attempts=0 if cancelled else 1, cancelled=cancelled)
+
+
+def _measure_quick_tcp_batch(items, timeout, max_workers, progress_callback=None, cancel_event=None):
+    groups = {}
+    for node in items:
+        groups.setdefault(_quick_tcp_endpoint(node), []).append(node)
+    resolver = _QuickTCPResolver()
+    results = {}
+
+    def record(group, result):
+        for node in group:
+            key = proxy_node_key(node)
+            if key in results:
+                continue
+            rebound = ProxyNodeLatencyResult(
+                key, result.ok, result.latency_ms,
+                detail=result.detail + ("；同端点复用" if len(group) > 1 else ""),
+                attempts=result.attempts, measured_at=result.measured_at, cancelled=result.cancelled,
+            )
+            results[key] = rebound
+            if progress_callback is not None:
+                try:
+                    progress_callback(len(results), len(items), rebound)
+                except Exception:
+                    pass
+
+    def failure(group, exc):
+        cancelled = isinstance(exc, InterruptedError) and cancel_event is not None and cancel_event.is_set()
+        record(group, ProxyNodeLatencyResult(
+            proxy_node_key(group[0]), False,
+            detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:140],
+            attempts=0 if cancelled else 1, cancelled=cancelled,
+        ))
+
+    if cancel_event is not None and cancel_event.is_set():
+        for group in groups.values():
+            failure(group, InterruptedError("已取消 TCP 快速检查"))
+        return results
+
+    pending = iter(groups.values())
+    futures = {}
+    workers = min(max(1, _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS)), PROXY_LATENCY_MAX_WORKERS, len(groups))
+    if not workers:
+        return results
+
+    def submit_next(executor):
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        group = next(pending, None)
+        if group is None:
+            return False
+        try:
+            future = executor.submit(_measure_quick_tcp_latency, group[0], timeout, resolver, cancel_event)
+            futures[future] = group
+        except Exception as exc:
+            failure(group, exc)
+        return True
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for _ in range(workers):
+                submit_next(executor)
+            while futures:
+                ready, _ = wait(tuple(futures), timeout=0.05, return_when=FIRST_COMPLETED)
+                for future in ready:
+                    group = futures.pop(future)
+                    try:
+                        record(group, future.result())
+                    except Exception as exc:
+                        failure(group, exc)
+                    submit_next(executor)
+            # Submission failures may leave no future to drive the scheduler.
+            for group in pending:
+                if cancel_event is not None and cancel_event.is_set():
+                    failure(group, InterruptedError("已取消 TCP 快速检查"))
+                else:
+                    failure(group, RuntimeError("TCP 快速检查调度未完成，请重试"))
+    except Exception as exc:
+        for future, group in futures.items():
+            if future.done():
+                try:
+                    record(group, future.result())
+                except Exception as worker_exc:
+                    failure(group, worker_exc)
+        for group in groups.values():
+            if proxy_node_key(group[0]) not in results:
+                failure(group, exc)
+    return results
+
+
 def measure_proxy_node_latency(
     node: dict,
     timeout: float = 3.0,
     attempts: int = 2,
     *,
     require_all: bool = False,
+    quick: bool = False,
+    cancel_event=None,
 ) -> ProxyNodeLatencyResult:
     normalized = _normalize_proxy_node(node)
+    if quick:
+        return _measure_quick_tcp_latency(normalized, timeout, _QuickTCPResolver(), cancel_event)
     node_key = proxy_node_key(normalized)
     attempts = max(1, _int_or_default(attempts, 2))
     timeout = _normalize_timeout(timeout, 3.0)
@@ -2091,6 +2334,8 @@ def measure_proxy_node_latencies(
     *,
     require_all: bool = False,
     progress_callback=None,
+    quick: bool = False,
+    cancel_event=None,
 ) -> dict[str, ProxyNodeLatencyResult]:
     items = []
     seen = set()
@@ -2110,6 +2355,9 @@ def measure_proxy_node_latencies(
 
     if not items:
         return {}
+
+    if quick:
+        return _measure_quick_tcp_batch(items, timeout, max_workers, progress_callback, cancel_event)
 
     worker_count = min(
         max(1, _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS)),
@@ -2732,6 +2980,10 @@ def measure_proxy_node_latencies_on_server(
     timeout: float = 3.0,
     attempts: int = 2,
     max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+    *,
+    quick: bool = False,
+    cancel_event=None,
+    progress_callback=None,
 ) -> dict[str, ProxyNodeLatencyResult]:
     items = []
     seen = set()
@@ -2758,6 +3010,11 @@ def measure_proxy_node_latencies_on_server(
 
     if not items:
         return {}
+
+    if quick:
+        return _measure_quick_tcp_on_server(
+            ssh_name, items, timeout, max_workers, cancel_event, progress_callback,
+        )
 
     timeout_value = _normalize_timeout(timeout, 3.0)
     attempts_value = max(1, _int_or_default(attempts, 2))
@@ -2795,11 +3052,97 @@ def measure_proxy_node_latencies_on_server(
     }
 
 
+def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_event, progress_callback):
+    groups = {}
+    for item in items:
+        groups.setdefault(_quick_tcp_endpoint(item), []).append(item)
+    grouped = list(groups.values())
+    timeout = _quick_tcp_timeout(timeout)
+    workers = min(max(1, _int_or_default(max_workers, PROXY_LATENCY_DEFAULT_MAX_WORKERS)), PROXY_LATENCY_MAX_WORKERS)
+    results = {}
+
+    def record(group, result):
+        for item in group:
+            key = item["key"]
+            if key in results:
+                continue
+            rebound = ProxyNodeLatencyResult(
+                key, result.ok, result.latency_ms,
+                detail=result.detail + ("；同端点复用" if len(group) > 1 else ""),
+                attempts=result.attempts, measured_at=result.measured_at, cancelled=result.cancelled,
+            )
+            results[key] = rebound
+            if progress_callback is not None:
+                try:
+                    progress_callback(len(results), len(items), rebound)
+                except Exception:
+                    pass
+
+    def finish_remaining(detail, *, cancelled=False):
+        for group in grouped:
+            if group[0]["key"] not in results:
+                record(group, ProxyNodeLatencyResult(
+                    group[0]["key"], False, detail=detail,
+                    attempts=0 if cancelled else 1, cancelled=cancelled,
+                ))
+
+    if cancel_event is not None and cancel_event.is_set():
+        finish_remaining("已取消远端 TCP 快速检查", cancelled=True)
+        return results
+    try:
+        _profile, client = _connect_ssh(ssh_name, timeout=5, max_retries=1)
+        command = _build_remote_latency_command(timeout, 1, workers, quick=True)
+        for offset in range(0, len(grouped), workers):
+            if cancel_event is not None and cancel_event.is_set():
+                finish_remaining("已取消远端 TCP 快速检查（未启动后续批次）", cancelled=True)
+                break
+            batch = grouped[offset:offset + workers]
+            status, stdout, stderr = ssh_manager.execute_command_with_status(
+                client, command, timeout=max(10, int(timeout + 9)),
+                input_data=json.dumps([group[0] for group in batch], ensure_ascii=False),
+                log_command=False,
+            )
+            parsed = _parse_remote_latency_output(stdout)
+            for group in batch:
+                result = parsed.get(group[0]["key"])
+                if result is not None:
+                    record(group, result)
+                elif status == 0:
+                    record(group, ProxyNodeLatencyResult(
+                        group[0]["key"], False, detail="远端未返回该节点的快测结果，请重试", attempts=1,
+                    ))
+            if status != 0:
+                detail = (str(stderr or stdout).strip() or f"退出状态 {status}").splitlines()[0][:140]
+                raise RuntimeError(f"{ssh_name}: 远端快测失败: {detail}")
+    except Exception as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            finish_remaining("已取消远端 TCP 快速检查", cancelled=True)
+        else:
+            detail = (str(exc).strip() or type(exc).__name__).splitlines()[0][:160]
+            finish_remaining(detail)
+            # A source/SSH failure is not a verdict that every remote endpoint
+            # is unreachable. Preserve streamed results and the source error.
+            error = RuntimeError(detail)
+            error.partial_results = dict(results)
+            raise error from exc
+    return results
+
+
 def proxy_node_latency_ok(result: ProxyNodeLatencyResult | dict | None) -> bool:
+    if proxy_node_latency_cancelled(result):
+        return False
     if isinstance(result, ProxyNodeLatencyResult):
         return bool(result.ok and result.latency_ms is not None)
     if isinstance(result, dict):
         return bool(result.get("ok") and proxy_node_latency_ms(result) is not None)
+    return False
+
+
+def proxy_node_latency_cancelled(result: ProxyNodeLatencyResult | dict | None) -> bool:
+    if isinstance(result, ProxyNodeLatencyResult):
+        return bool(result.cancelled)
+    if isinstance(result, dict):
+        return result.get("cancelled") is True
     return False
 
 
@@ -2832,6 +3175,8 @@ def proxy_node_latency_attempts(result: ProxyNodeLatencyResult | dict | None) ->
 
 
 def proxy_node_latency_label(result: ProxyNodeLatencyResult | dict | None) -> str:
+    if proxy_node_latency_cancelled(result):
+        return "已取消"
     if result is not None and not proxy_node_latency_fresh(result):
         return "已过期"
     latency = proxy_node_latency_ms(result)
@@ -2866,7 +3211,8 @@ def proxy_node_latency_explicitly_unreachable(
     result: ProxyNodeLatencyResult | dict | None,
 ) -> bool:
     return bool(
-        proxy_node_latency_fresh(result)
+        not proxy_node_latency_cancelled(result)
+        and proxy_node_latency_fresh(result)
         and not proxy_node_latency_ok(result)
     )
 
@@ -5568,12 +5914,17 @@ def cleanup_ai_proxy(ssh_name: str, mixed_port: int = 7890, include_legacy_confi
     return _format_ai_proxy_cleanup_result(ssh_name, values)
 
 
-def _connect_ssh(ssh_name: str):
+def _connect_ssh(ssh_name: str, *, timeout=None, max_retries=None):
     profiles = profile_manager.list_ssh_profiles()
     profile = next((item for item in profiles if item.name == ssh_name), None)
     if not profile:
         raise ValueError(f"未找到 SSH 服务器: {ssh_name}")
-    return profile, ssh_manager.connect(profile)
+    options = {}
+    if timeout is not None:
+        options["timeout"] = timeout
+    if max_retries is not None:
+        options["max_retries"] = max_retries
+    return profile, ssh_manager.connect(profile, **options)
 
 
 def _parse_inline_map(text: str) -> dict:
@@ -8891,9 +9242,11 @@ def _build_remote_latency_command(
     timeout: float = 3.0,
     attempts: int = 2,
     max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+    *,
+    quick: bool = False,
 ) -> str:
-    timeout = _normalize_timeout(timeout, 3.0)
-    attempts = max(1, _int_or_default(attempts, 2))
+    timeout = _quick_tcp_timeout(timeout) if quick else _normalize_timeout(timeout, 3.0)
+    attempts = 1 if quick else max(1, _int_or_default(attempts, 2))
     max_workers = max(
         1,
         min(
@@ -8914,14 +9267,105 @@ trap cleanup_latency_input EXIT HUP INT TERM
 cat > "$TMP_INPUT"
 python3 - "$TMP_INPUT" <<'PY'
 import concurrent.futures
+import errno
+import ipaddress
 import json
+import select
 import socket
 import sys
+import threading
 import time
 
 TIMEOUT = {timeout!r}
 ATTEMPTS = {attempts}
 MAX_WORKERS = {max_workers}
+QUICK = {bool(quick)!r}
+DNS_SLOTS = threading.BoundedSemaphore({PROXY_LATENCY_DNS_MAX_WORKERS})
+DNS_LOCK = threading.Lock()
+DNS_FUTURES = {{}}
+
+def remaining(deadline):
+    value = deadline - time.monotonic()
+    if value <= 0:
+        raise TimeoutError("TCP 快速检查总预算已用尽（含 DNS/多地址连接）")
+    return value
+
+def quick_resolve(host, deadline):
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        numeric = False
+    else:
+        numeric = True
+    if numeric:
+        return socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST)
+    with DNS_LOCK:
+        future = DNS_FUTURES.get(host)
+        owner = future is None
+        if owner:
+            future = concurrent.futures.Future()
+            DNS_FUTURES[host] = future
+    if owner:
+        acquired = False
+        try:
+            acquired = DNS_SLOTS.acquire(timeout=remaining(deadline))
+            if not acquired:
+                raise TimeoutError("DNS 等待超出快测预算")
+            def resolve():
+                try:
+                    future.set_result(socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM))
+                except Exception as exc:
+                    future.set_exception(exc)
+                finally:
+                    DNS_SLOTS.release()
+            threading.Thread(target=resolve, name="proxy-quick-dns", daemon=True).start()
+        except Exception as exc:
+            if acquired:
+                DNS_SLOTS.release()
+            future.set_exception(exc)
+    return future.result(timeout=remaining(deadline))
+
+def measure_quick(key, server, port):
+    started = time.monotonic()
+    deadline = started + TIMEOUT
+    try:
+        addresses, seen = [], set()
+        for family, kind, proto, _canon, address in quick_resolve(server, deadline):
+            target = (address[0], port, *address[2:])
+            identity = (family, kind, proto, target)
+            if identity not in seen:
+                addresses.append(identity)
+                seen.add(identity)
+        if not addresses:
+            raise OSError("DNS 未返回可用 TCP 地址")
+        last_error = None
+        pending = {{errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, 10035, 10036, 10037}}
+        for index, (family, kind, proto, target) in enumerate(addresses):
+            address_deadline = time.monotonic() + remaining(deadline) / (len(addresses) - index)
+            try:
+                with socket.socket(family, kind, proto) as connection:
+                    connection.setblocking(False)
+                    error = connection.connect_ex(target)
+                    if error not in (0, errno.EISCONN, 10056):
+                        if error not in pending:
+                            raise OSError(error, "TCP 连接失败")
+                        while True:
+                            budget = min(remaining(deadline), address_deadline - time.monotonic())
+                            if budget <= 0:
+                                raise TimeoutError("该地址连接超时")
+                            _readable, writable, exceptional = select.select([], [connection], [connection], min(0.05, budget))
+                            if not writable and not exceptional:
+                                continue
+                            error = connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                            if error:
+                                raise OSError(error, "TCP 连接失败")
+                            break
+                return key, 1, str(max(1, int((time.monotonic() - started) * 1000))), "TCP 快速检查：单次连接，仅验证端口连通"
+            except Exception as exc:
+                last_error = exc
+        raise last_error
+    except Exception as exc:
+        return key, 0, "", clean(exc) or type(exc).__name__
 
 def clean(value):
     return str(value or "").replace("\\t", " ").replace("\\r", " ").replace("\\n", " ")[:180]
@@ -8940,6 +9384,13 @@ def measure(item):
         port = int(item.get("port"))
     except Exception:
         return key, 0, "", "端口无效"
+    if QUICK:
+        server = server.strip("[]")
+        try:
+            server = str(ipaddress.ip_address(server))
+        except ValueError:
+            server = server.lower()
+        return measure_quick(key, server, port)
     latencies = []
     detail = ""
     for _ in range(max(1, ATTEMPTS)):

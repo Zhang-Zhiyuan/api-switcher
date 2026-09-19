@@ -20,7 +20,7 @@ def _proxy_node_picker_layout(width: int) -> tuple[int, bool]:
 class ProxyNodePicker(ctk.CTkFrame):
     """Searchable, scrollable picker for large proxy subscriptions."""
 
-    FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速")
+    FILTER_OPTIONS = ("全部", "可连", "不可连", "未测速", "已取消")
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     RENDER_BATCH_SIZE = 3
@@ -1144,11 +1144,14 @@ class ProxyNodePicker(ctk.CTkFrame):
         total = len(self._nodes)
         ok_count = int(self._summary_counts.get("ok") or 0)
         measured_count = int(self._summary_counts.get("measured") or 0)
+        cancelled_count = int(self._summary_counts.get("cancelled") or 0)
         quality_count = int(self._summary_counts.get("quality") or 0)
         high_quality_count = int(self._summary_counts.get("high_quality") or 0)
         cached_quality_count = int(self._summary_counts.get("cached_quality") or 0)
         checked_count = len(self._checked_keys)
         suffix = ""
+        if cancelled_count:
+            suffix += f"；已取消 {cancelled_count}"
         if self._render_plan_pending:
             suffix += "；正在分批渲染"
         self._summary_label.configure(
@@ -1229,11 +1232,14 @@ class ProxyNodePicker(ctk.CTkFrame):
                 continue
             latency_ok = bool(meta.get("latency_ok"))
             latency_measured = bool(meta.get("latency_measured"))
+            latency_cancelled = bool(meta.get("latency_cancelled"))
             if mode == "可连" and not latency_ok:
                 continue
-            if mode == "不可连" and (not latency_measured or latency_ok):
+            if mode == "不可连" and (not latency_measured or latency_ok or latency_cancelled):
                 continue
             if mode == "未测速" and latency_measured:
+                continue
+            if mode == "已取消" and not latency_cancelled:
                 continue
             if not self._quality_matches(quality_filter, meta):
                 continue
@@ -1318,6 +1324,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         counts = {
             "ok": 0,
             "measured": 0,
+            "cancelled": 0,
             "quality": 0,
             "high_quality": 0,
             "cached_quality": 0,
@@ -1329,6 +1336,8 @@ class ProxyNodePicker(ctk.CTkFrame):
                 counts["ok"] += 1
             if meta.get("latency_measured"):
                 counts["measured"] += 1
+            if meta.get("latency_cancelled"):
+                counts["cancelled"] += 1
             if meta.get("quality_measured"):
                 counts["quality"] += 1
             if meta.get("quality_ai_ok"):
@@ -1402,6 +1411,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                 and remote_proxy.proxy_node_latency_ok(latency)
             ),
             "latency_measured": latency is not None,
+            "latency_cancelled": remote_proxy.proxy_node_latency_cancelled(latency),
             "quality": quality,
             "quality_label": quality_label,
             "quality_confidence": quality_confidence,
@@ -1471,6 +1481,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         return text[:70] + ("..." if len(text) > 70 else "")
 
     def _latency_color(self, result) -> str:
+        if remote_proxy.proxy_node_latency_cancelled(result):
+            return COLORS["muted_soft"]
         if remote_proxy.proxy_node_latency_ok(result):
             return COLORS["success"]
         if result is None:

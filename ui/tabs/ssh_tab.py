@@ -5,6 +5,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
+from ui.async_progress import CoalescedProgress
 from ui.feedback import safe_feedback_text
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
@@ -171,6 +172,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_button = None
         self._proxy_quality_cancel_button = None
         self._proxy_quality_cancel_event = None
+        self._proxy_latency_cancel_event = None
+        self._proxy_latency_progress = None
         self._proxy_quality_settings_button = None
         self._proxy_ping0_button = None
         self._proxy_subscription_action_hint_label = None
@@ -1136,7 +1139,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(anchor="e", pady=(0, 4))
         self._proxy_latency_button = ctk.CTkButton(
             proxy_node_actions,
-            text="测速勾选/筛选",
+            text="快测勾选/筛选",
             width=112,
             command=self._measure_proxy_subscription_latencies,
             state="disabled",
@@ -1145,7 +1148,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_button.pack(anchor="e", pady=(0, 6))
         self._proxy_latency_all_button = ctk.CTkButton(
             proxy_node_actions,
-            text="测速全部节点",
+            text="快测全部节点",
             width=112,
             command=lambda: self._measure_proxy_subscription_latencies(all_nodes=True),
             state="disabled",
@@ -1154,7 +1157,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_latency_all_button.pack(anchor="e", pady=(0, 6))
         self._proxy_quality_button = ctk.CTkButton(
             proxy_node_actions,
-            text="检测勾选/筛选",
+            text="IP质量检测",
             width=112,
             command=self._measure_proxy_subscription_qualities,
             state="disabled",
@@ -1665,6 +1668,12 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def destroy(self):
         self._destroyed = True
+        event = getattr(self, "_proxy_latency_cancel_event", None)
+        if event is not None:
+            event.set()
+        progress = getattr(self, "_proxy_latency_progress", None)
+        if progress is not None:
+            progress.close()
         if self._proxy_quality_cancel_event is not None:
             self._proxy_quality_cancel_event.set()
         self._server_refresh_generation += 1
@@ -2368,7 +2377,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             if ok
         ]
         failures = [
-            f"{server_name}: {value}"
+            f"{server_name}: {str(value).strip() or type(value).__name__}"
             for server_name, ok, value in outcomes
             if not ok
         ]
@@ -2496,12 +2505,17 @@ class SSHTab(ctk.CTkScrollableFrame):
                 pass
         if self._proxy_quality_cancel_button:
             try:
+                latency_event = getattr(self, "_proxy_latency_cancel_event", None)
+                cancel_event = latency_event or getattr(self, "_proxy_quality_cancel_event", None)
                 can_cancel = bool(
                     busy
-                    and self._proxy_quality_cancel_event is not None
-                    and not self._proxy_quality_cancel_event.is_set()
+                    and cancel_event is not None
+                    and not cancel_event.is_set()
                 )
-                self._proxy_quality_cancel_button.configure(state="normal" if can_cancel else "disabled")
+                self._proxy_quality_cancel_button.configure(
+                    state="normal" if can_cancel else "disabled",
+                    text="取消测速" if latency_event is not None else "取消检测",
+                )
             except Exception:
                 pass
         if self._proxy_auto_refresh_check:
@@ -4051,7 +4065,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._measure_proxy_subscription_qualities()
 
     def _measure_proxy_subscription_latencies(self, *, all_nodes: bool = False):
-        if self._proxy_busy:
+        if self._proxy_busy or getattr(self, "_ssh_busy", False):
             show_toast(self.winfo_toplevel(), "远端代理操作正在进行中，请稍等", is_error=True)
             return
         if not self._proxy_subscription_nodes:
@@ -4071,7 +4085,6 @@ class SSHTab(ctk.CTkScrollableFrame):
             f"当前订阅全部 {len(scope_nodes)} 个节点（忽略筛选与勾选）"
             if all_nodes else self._proxy_subscription_batch_scope_label()
         )
-        node_count = len(scope_nodes)
         if not scope_nodes:
             message = "当前节点分组没有可测速的节点"
             self._set_proxy_status(message, "warning")
@@ -4079,10 +4092,80 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         profile_id = self._current_proxy_subscription_profile_id()
         generation = self._proxy_saved_subscription_load_generation
+        selected_key = (self._selected_proxy_subscription_node_key()
+                        if getattr(self, "_proxy_subscription_picker", None) else "")
+        existing_results = dict(self._proxy_latency_results)
+        scope_keys = {remote_proxy.proxy_subscription_node_key(item) for item in scope_nodes}
+        cancel_event = threading.Event()
+        self._proxy_latency_cancel_event = cancel_event
+
+        def same_context():
+            return bool(
+                not getattr(self, "_destroyed", False)
+                and generation == self._proxy_saved_subscription_load_generation
+                and profile_id == self._current_proxy_subscription_profile_id()
+                and target_signature == self._proxy_latency_source_signature(
+                    getattr(self, "_selected_server_names", server_names),
+                )
+            )
+
+        def show_progress(partial):
+            if not same_context() or self._proxy_latency_cancel_event is not cancel_event:
+                return
+            by_server = {name: {} for name in server_names}
+            for (name, key), value in partial.items():
+                by_server[name][key] = value
+            # A failure on the first server is not a verdict for the other
+            # servers. Paint a node only after every selected source returned.
+            completed_nodes = [item for item in scope_nodes if all(
+                remote_proxy.proxy_subscription_node_key(item) in values for values in by_server.values()
+            )]
+            captured = dict(existing_results)
+            captured.update(self._aggregate_proxy_latency_results(by_server, len(server_names), completed_nodes))
+            if captured != self._proxy_latency_results:
+                self._proxy_latency_results = captured
+                self._proxy_prefer_quality_sort = False
+                self._set_proxy_subscription_nodes(self._proxy_subscription_nodes, preserve_key=selected_key)
+            passed = sum(remote_proxy.proxy_node_latency_ok(value) for value in partial.values())
+            cancelled = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in partial.values())
+            phase = "正在停止，等待当前 SSH 建连或远端小批结束" if cancel_event.is_set() else "正在快测"
+            self._set_proxy_status(
+                f"{target_label}：{scope_label} {phase}，已返回 {len(partial)}/{len(scope_keys) * len(server_names)} 项；"
+                f"可连 {passed}，失败 {len(partial) - passed - cancelled}，取消 {cancelled}。"
+                "仅测 TCP 端口，不代表 UDP/AI 可用。"
+            )
+
+        progress = CoalescedProgress(self._run_on_ui_thread, show_progress, interval=1.0)
+        self._proxy_latency_progress = progress
+
+        def report(server_name, _completed, _total, result):
+            if server_name in server_names and result.node_key in scope_keys:
+                progress.update((server_name, result.node_key), result)
+
+        def clear_task():
+            progress.close()
+            if getattr(self, "_proxy_latency_cancel_event", None) is cancel_event:
+                self._proxy_latency_cancel_event = None
+            if getattr(self, "_proxy_latency_progress", None) is progress:
+                self._proxy_latency_progress = None
+            button = getattr(self, "_proxy_quality_cancel_button", None)
+            if button:
+                button.configure(state="disabled", text="取消检测")
+
+        def measure():
+            try:
+                return self._measure_proxy_nodes_for_servers(
+                    server_names, scope_nodes, quick=True,
+                    cancel_event=cancel_event, progress_callback=report,
+                )
+            finally:
+                # Queued partial paints may not overwrite the final results.
+                progress.close()
 
         def done(payload):
+            clear_task()
             if not payload["ok"]:
-                message = f"远端节点测速失败: {payload['error']}"
+                message = f"远端节点测速失败: {payload.get('error') or '未返回有效结果'}"
                 self._set_proxy_status(message, "error")
                 show_toast(self.winfo_toplevel(), message, is_error=True)
                 return
@@ -4105,64 +4188,45 @@ class SSHTab(ctk.CTkScrollableFrame):
                 show_toast(self.winfo_toplevel(), message)
                 return
             self._proxy_latency_server_count = len(server_names)
-            self._proxy_latency_results.update(
-                self._aggregate_proxy_latency_results(server_results, len(server_names), scope_nodes)
-            )
+            aggregate = self._aggregate_proxy_latency_results(server_results, len(server_names), scope_nodes)
+            self._proxy_latency_results = dict(existing_results)
+            self._proxy_latency_results.update(aggregate)
             self._proxy_prefer_quality_sort = False
-            self._set_proxy_subscription_nodes(self._proxy_subscription_nodes)
-            fastest = self._fastest_proxy_subscription_node(scope_nodes)
-            ok_nodes = sum(
-                1
-                for item in scope_nodes
-                if remote_proxy.proxy_node_latency_ok(
-                    self._proxy_latency_results.get(remote_proxy.proxy_subscription_node_key(item))
-                )
-            )
+            self._set_proxy_subscription_nodes(self._proxy_subscription_nodes, preserve_key=selected_key)
+            ok_nodes = sum(remote_proxy.proxy_node_latency_ok(value) for value in aggregate.values())
+            cancelled_nodes = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in aggregate.values())
+            stopped = cancel_event.is_set()
+            phase = "已停止" if stopped else "完成"
             coverage_label = (
-                f"{target_label}：{scope_label} TCP 端口测速完成 {node_count}/{node_count}，"
-                f"可连 {ok_nodes}，失败 {node_count - ok_nodes}，取消 0。"
+                f"{target_label}：{scope_label} TCP 端口快测{phase}，已返回 {len(aggregate)}/{len(scope_keys)}，"
+                f"可连 {ok_nodes}，失败 {len(aggregate) - ok_nodes - cancelled_nodes}，取消 {cancelled_nodes}。"
                 "TCP 端口结果不代表 UDP 协议或 AI 服务已可用。"
             )
-            if not fastest:
-                message = (
-                    f"{coverage_label}没有可自动选择的非香港节点。"
-                    "香港节点仍可手动选择。"
-                )
-                if failures:
-                    message += " 失败: " + "；".join(failures)
-                self._set_proxy_status(message, "warning")
-                show_toast(self.winfo_toplevel(), message, is_error=True)
-                return
-
-            fastest_key = remote_proxy.proxy_subscription_node_key(fastest)
-            self._select_proxy_subscription_node_by_key(fastest_key)
-            self._use_selected_proxy_subscription_node(
-                show_message=False,
-                profile_id=profile_id,
-            )
-            latency = remote_proxy.proxy_node_latency_label(self._proxy_latency_results.get(fastest_key))
-            region = remote_proxy.proxy_node_region(fastest.node)
-            detail = remote_proxy.proxy_node_latency_detail(self._proxy_latency_results.get(fastest_key))
-            target_detail = f"{detail}，" if detail and len(server_names) > 1 else ""
-            message = (
-                f"{coverage_label}已选择最快节点【{region}】{target_detail}{latency}。"
-            )
+            message = f"{coverage_label}结果保留在当前服务器范围，未自动更换或保存节点选择。"
             if failures:
                 message += " 部分服务器失败: " + "；".join(failures)
-                severity = "warning"
-            else:
-                severity = "success"
+            severity = "warning" if failures or stopped or not ok_nodes else "success"
             self._set_proxy_status(message, severity)
             show_toast(self.winfo_toplevel(), message, is_error=bool(failures))
 
-        self._run_proxy_ssh_task(
-            f"正在从 {target_label} 测试 {scope_label} 的远端 TCP 端口延迟（非 UDP/AI 可用性），"
-            f"每台最多 {remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 个节点并行、"
-            f"最多 {SSH_NETWORK_TEST_SERVER_MAX_WORKERS} 台服务器并行；"
-            "完成后自动选择最低延迟的非香港节点...",
-            lambda: self._measure_proxy_nodes_for_servers(server_names, scope_nodes),
-            on_done=done,
-        )
+        try:
+            started = self._run_proxy_ssh_task(
+                f"正在从 {target_label} 快测 {scope_label} 的远端 TCP 端口延迟（单次、非 UDP/AI 可用性），"
+                f"每台最多 {remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 个节点并行、"
+                f"最多 {SSH_NETWORK_TEST_SERVER_MAX_WORKERS} 台服务器并行；"
+                "可取消，停止时等待当前 SSH 建连或远端小批结束；不会更换当前节点...",
+                measure,
+                on_done=done,
+            )
+        except Exception as exc:
+            clear_task()
+            self._set_proxy_busy(False)
+            message = f"启动远端测速失败: {str(exc).strip() or type(exc).__name__}"
+            self._set_proxy_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
+        else:
+            if started is False:
+                clear_task()
 
     def _proxy_subscription_batch_nodes(self):
         if self._proxy_subscription_picker:
@@ -4191,6 +4255,16 @@ class SSHTab(ctk.CTkScrollableFrame):
         return self._proxy_quality_candidate_nodes(), self._proxy_subscription_batch_scope_label()
 
     def _cancel_proxy_subscription_quality(self):
+        latency_event = getattr(self, "_proxy_latency_cancel_event", None)
+        if latency_event is not None:
+            if not latency_event.is_set():
+                latency_event.set()
+                if self._proxy_quality_cancel_button:
+                    self._proxy_quality_cancel_button.configure(state="disabled")
+                self._set_proxy_status(
+                    "正在停止测速，等待当前 SSH 建连或远端小批结束；已完成结果会保留，不会断开共享 SSH 连接。", "warning",
+                )
+            return
         event = self._proxy_quality_cancel_event
         if event is None or event.is_set():
             return
@@ -4436,19 +4510,54 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _measure_proxy_nodes_for_servers(self, server_names: list[str], nodes=None) -> dict:
+    def _measure_proxy_nodes_for_servers(
+        self, server_names: list[str], nodes=None, *, quick=False, cancel_event=None, progress_callback=None,
+    ) -> dict:
         measure_nodes = tuple(nodes if nodes is not None else self._proxy_subscription_nodes)
+        source_keys = {remote_proxy.proxy_subscription_node_key(item) for item in measure_nodes}
+        partial = {name: {} for name in server_names}
+        lock = threading.Lock()
+
+        def report(server_name, completed, total, value):
+            if value.node_key not in source_keys:
+                return
+            with lock:
+                partial[server_name][value.node_key] = value
+            if progress_callback is not None:
+                try:
+                    progress_callback(server_name, completed, total, value)
+                except Exception:
+                    pass
 
         def measure(server_name):
-            return remote_proxy.measure_proxy_node_latencies_on_server(
+            if cancel_event is not None and cancel_event.is_set():
+                return {}
+            extra = {}
+            if quick or cancel_event is not None or progress_callback is not None:
+                extra = {
+                    "quick": quick, "cancel_event": cancel_event,
+                    "progress_callback": lambda completed, total, result:
+                        report(server_name, completed, total, result),
+                }
+            values = remote_proxy.measure_proxy_node_latencies_on_server(
                 server_name,
                 measure_nodes,
                 timeout=3.0,
-                attempts=2,
+                attempts=1 if quick else 2,
                 max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+                **extra,
             )
+            if quick or progress_callback is not None:
+                for completed, value in enumerate((values or {}).values(), 1):
+                    report(server_name, completed, len(source_keys), value)
+            return values
 
-        outcomes = _run_parallel_server_actions(server_names, measure)
+        try:
+            outcomes = _run_parallel_server_actions(server_names, measure)
+        except Exception as exc:
+            if not quick and cancel_event is None:
+                raise
+            outcomes = [(name, False, exc) for name in server_names]
         results = {
             server_name: value
             for server_name, ok, value in outcomes
@@ -4459,6 +4568,25 @@ class SSHTab(ctk.CTkScrollableFrame):
             for server_name, ok, value in outcomes
             if not ok
         ]
+        if quick or cancel_event is not None:
+            # Complete every captured (server, node) terminal state, including
+            # cancelled sources and a failed connection after streamed results.
+            errors = {name: str(value).strip() or type(value).__name__
+                      for name, ok, value in outcomes if not ok}
+            for name in server_names:
+                with lock:
+                    values = dict(partial[name])
+                values.update(results.get(name) or {})
+                for key in source_keys:
+                    if key not in values:
+                        cancelled = cancel_event is not None and cancel_event.is_set()
+                        detail = "测速已取消，未获得结果" if cancelled else errors.get(name) or "远端未返回测速结果，请重试"
+                        values[key] = remote_proxy.ProxyNodeLatencyResult(
+                            key, False, detail=detail, cancelled=cancelled,
+                        )
+                results[name] = values
+                for completed, value in enumerate(values.values(), 1):
+                    report(name, completed, len(source_keys), value)
         return {
             "results": results,
             "failures": failures,
@@ -4472,6 +4600,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             latencies = []
             details = []
             attempts = 0
+            cancelled = 0
             for server_name, results in (server_results or {}).items():
                 result = (results or {}).get(key)
                 latency = remote_proxy.proxy_node_latency_ms(result)
@@ -4479,11 +4608,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                 if latency is not None and remote_proxy.proxy_node_latency_ok(result):
                     latencies.append(latency)
                 elif result is not None:
+                    cancelled += bool(remote_proxy.proxy_node_latency_cancelled(result))
                     detail = remote_proxy.proxy_node_latency_detail(result)
                     if detail:
                         details.append(f"{server_name}: {detail}")
             if latencies:
                 label = f"{len(latencies)}/{server_count} 可用" if server_count > 1 else ""
+                if cancelled:
+                    label += f"；{cancelled} 台取消，非全部测完"
                 aggregate[key] = remote_proxy.ProxyNodeLatencyResult(
                     node_key=key,
                     ok=True,
@@ -4498,6 +4630,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     latency_ms=None,
                     detail="；".join(details[:2]),
                     attempts=attempts,
+                    cancelled=bool(cancelled),
                 )
         return aggregate
 

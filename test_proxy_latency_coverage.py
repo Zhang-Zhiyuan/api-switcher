@@ -256,7 +256,7 @@ def test_local_batch_publishes_all_results_before_slow_ai_gate_and_saves_udp(mon
         return None, {}
 
     monkeypatch.setattr(local_proxy, "select_stable_local_proxy_node", stability)
-    tab._measure_subscription_latencies(all_nodes=all_nodes)
+    tab._verify_subscription_stability(all_nodes=all_nodes)
 
     assert calls["udp"] == nodes[1:]
     actual = calls["rendered"][0]
@@ -314,10 +314,15 @@ def test_ssh_all_nodes_action_ignores_picker_filter(monkeypatch):
     tab._proxy_subscription_batch_scope_label = lambda: "仅筛选 1 个"
     tab._set_proxy_status = lambda *args: None
     captured = []
-    tab._measure_proxy_nodes_for_servers = lambda servers, items: captured.append((servers, items))
+    tab._measure_proxy_nodes_for_servers = lambda servers, items, **kwargs: captured.append((servers, items, kwargs))
     tab._run_proxy_ssh_task = lambda message, run, on_done: run()
     tab._measure_proxy_subscription_latencies(all_nodes=True)
-    assert captured == [(["synthetic"], tuple(nodes))]
+    assert len(captured) == 1
+    servers, measured, options = captured[0]
+    assert (servers, measured) == (["synthetic"], tuple(nodes))
+    assert options["quick"] is True
+    assert isinstance(options["cancel_event"], threading.Event)
+    assert callable(options["progress_callback"])
 
 
 def _ssh_scope_tab(monkeypatch):

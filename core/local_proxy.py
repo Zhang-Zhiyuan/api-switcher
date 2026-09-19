@@ -3097,12 +3097,16 @@ def measure_proxy_node_data_plane_latencies(
     attempts: int = 2,
     max_workers: int = 4,
     progress_callback=None,
+    quick: bool = False,
+    cancel_event=None,
 ) -> dict[str, remote_proxy.ProxyNodeLatencyResult]:
     """Measure every requested node through its own disposable proxy.
 
     Unlike automatic AI selection, connectivity measurement never excludes a
     region or truncates to the first few candidates. In particular UDP-based
     protocols cannot be measured with a TCP connect to the server port.
+    quick=True explicitly opts into independent controller URL tests in one
+    bounded temporary core; the default keeps the original per-node probes.
     """
     items = {
         remote_proxy.proxy_subscription_node_key(item): item
@@ -3112,6 +3116,11 @@ def measure_proxy_node_data_plane_latencies(
         return {}
     attempts = max(1, min(3, int(attempts)))
     timeout = max(1, min(15, int(timeout)))
+    if quick:
+        return _measure_proxy_node_data_plane_batch_latencies(
+            items, timeout=timeout, attempts=attempts, max_workers=max_workers,
+            progress_callback=progress_callback, cancel_event=cancel_event,
+        )
     results = {}
 
     def publish(key, result):
@@ -3124,12 +3133,15 @@ def measure_proxy_node_data_plane_latencies(
 
     def failure(key, error):
         detail = str(error).strip() or type(error).__name__
+        was_cancelled = detail in {"检测已取消", "应用正在退出，检测已停止"}
         return remote_proxy.ProxyNodeLatencyResult(
             key, False, detail=f"实际转发检测失败: {detail.splitlines()[0][:140]}",
-            attempts=attempts,
+            attempts=0 if was_cancelled else attempts, cancelled=was_cancelled,
         )
 
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("检测已取消")
         _ensure_local_dirs()
         binary_path = _ensure_mihomo_binary()
     except Exception as exc:
@@ -3140,8 +3152,12 @@ def measure_proxy_node_data_plane_latencies(
     def measure(key, item):
         delays = []
         detail = ""
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("检测已取消")
         with _isolated_mihomo_session(binary_path, item.node) as session:
             for _attempt in range(attempts):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("检测已取消")
                 if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set():
                     raise RuntimeError("应用正在退出，检测已停止")
                 result = _probe_ai_url_through_explicit_http_proxy(
@@ -3151,6 +3167,8 @@ def measure_proxy_node_data_plane_latencies(
                 if result.ok:
                     delays.append(max(1, result.elapsed_ms))
                 else:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("检测已取消")
                     detail = result.detail or f"HTTP {result.status}"
         ok = len(delays) == attempts
         return remote_proxy.ProxyNodeLatencyResult(
@@ -3192,6 +3210,255 @@ def measure_proxy_node_data_plane_latencies(
         for key in items:
             if key not in results:
                 publish(key, failure(key, exc))
+    return results
+
+
+@dataclass(frozen=True)
+class _IsolatedMihomoBatchSession:
+    controller_port: int
+    secret: str = field(repr=False)
+    route_names: tuple[str, ...]
+
+
+class _IsolatedMihomoBatchCleanupError(RuntimeError):
+    pass
+
+
+def _isolated_batch_controller_request(session, path: str, *, timeout: float = 1.0):
+    # http.client never inherits HTTP_PROXY, never follows redirects, and the
+    # random secret also verifies that this is our disposable controller.
+    connection = http.client.HTTPConnection("127.0.0.1", session.controller_port, timeout=timeout)
+    try:
+        connection.request("GET", path, headers={"Authorization": "Bearer " + session.secret})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise RuntimeError(f"临时内核检测 HTTP {response.status}")
+        body = _read_bounded_response(response, max_bytes=4096, label="临时内核检测")
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("临时内核检测响应格式无效")
+        return payload
+    finally:
+        connection.close()
+
+
+def _probe_isolated_mihomo_batch_delay(session, route_name: str, timeout: int, *,
+                                      probe_url: str = "https://www.gstatic.com/generate_204") -> int:
+    if route_name not in session.route_names:
+        raise ValueError("检测节点不属于本次临时内核")
+    path = ("/proxies/" + url_quote(route_name, safe="") + "/delay?timeout=" + str(timeout * 1000)
+            + "&expected=204&url=" + url_quote(probe_url, safe=""))
+    payload = _isolated_batch_controller_request(session, path, timeout=timeout + 1.0)
+    delay = payload.get("delay")
+    if isinstance(delay, bool) or not isinstance(delay, int) or not 0 < delay <= 65535:
+        raise RuntimeError("临时内核返回无效延迟")
+    return delay
+
+
+@contextmanager
+def _isolated_mihomo_batch_session(binary_path: Path, proxy_nodes, *, cancel_event=None):
+    """One bounded core; independent alias tests never mutate a selector or live state."""
+    if not 1 <= len(proxy_nodes) <= 64:
+        raise ValueError("批量临时内核仅接受 1 至 64 个独立节点")
+    process = None
+    probe_dir = Path(tempfile.mkdtemp(prefix="api-switcher-batch-probe-"))
+    with _ISOLATED_MIHOMO_LOCK:
+        _ISOLATED_MIHOMO_DIRECTORIES.add(probe_dir)
+    try:
+        if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set() or (cancel_event is not None and cancel_event.is_set()):
+            raise RuntimeError("检测已取消")
+        mixed_port, controller_port = _select_isolated_mihomo_ports(with_controller=True)
+        nodes = []
+        for index, candidate in enumerate(proxy_nodes):
+            node = remote_proxy._normalize_proxy_node(candidate)
+            if str(node.get("dialer-proxy") or "").strip():
+                raise ValueError("依赖其他节点的代理不能单独检测")
+            node["name"] = f"API-SWITCHER-BATCH-{index}"
+            nodes.append(node)
+        session = _IsolatedMihomoBatchSession(controller_port, uuid.uuid4().hex,
+                                              tuple(node["name"] for node in nodes))
+        config = {"mixed-port": mixed_port, "allow-lan": False, "bind-address": "127.0.0.1",
+                  "external-controller": f"127.0.0.1:{controller_port}", "secret": session.secret,
+                  "mode": "rule", "log-level": "silent", "ipv6": True,
+                  "dns": {"enable": False}, "profile": {"store-selected": False},
+                  "proxies": nodes, "proxy-groups": [], "rules": ["MATCH,REJECT"]}
+        atomic_write_text(probe_dir / "config.yaml", remote_proxy.AI_PROXY_CONFIG_MARKER
+                          + " isolated batch\n" + remote_proxy._dump_yaml(config))
+        with _ISOLATED_MIHOMO_LOCK:
+            if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                raise RuntimeError("检测已取消")
+            process = subprocess.Popen(
+                [str(binary_path), "-d", str(probe_dir)], cwd=str(probe_dir),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            _ISOLATED_MIHOMO_PROCESSES.add(process)
+        try:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                    raise RuntimeError("检测已取消")
+                if process.poll() is not None:
+                    raise RuntimeError("批量临时 mihomo 启动失败")
+                try:
+                    if _is_port_listening(mixed_port):
+                        _isolated_batch_controller_request(session, "/version", timeout=0.3)
+                        break
+                except (OSError, ValueError, RuntimeError, http.client.HTTPException):
+                    pass
+                time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
+            else:
+                raise RuntimeError("批量临时 mihomo 未就绪")
+            yield session
+        finally:
+            if not _terminate_isolated_mihomo_process(process):
+                raise _IsolatedMihomoBatchCleanupError("临时 mihomo 无法确认已退出，凭据目录暂未删除")
+    finally:
+        with _ISOLATED_MIHOMO_LOCK:
+            if process is not None and process.poll() is not None:
+                _ISOLATED_MIHOMO_PROCESSES.discard(process)
+        if process is None or process.poll() is not None:
+            removed = _remove_isolated_mihomo_directory(probe_dir)
+            with _ISOLATED_MIHOMO_LOCK:
+                if removed:
+                    _ISOLATED_MIHOMO_DIRECTORIES.discard(probe_dir)
+            if not removed:
+                raise _IsolatedMihomoBatchCleanupError("临时 mihomo 已退出，但凭据目录清理失败；应用退出时会再次清理")
+
+
+def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, max_workers,
+                                                   progress_callback, cancel_event):
+    results = {}
+
+    def cancelled():
+        return _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set() or (cancel_event is not None and cancel_event.is_set())
+
+    def failure(key, error):
+        # No controller response bodies, credentials or subscription URLs are
+        # included. Connection details from normalizers are not needed here.
+        detail = str(error).strip() or type(error).__name__
+        was_cancelled = detail == "检测已取消"
+        return remote_proxy.ProxyNodeLatencyResult(key, False, attempts=0 if was_cancelled else attempts,
+                                                   cancelled=was_cancelled,
+                                                   detail="HTTPS 快测失败: " + detail.splitlines()[0][:140])
+
+    def publish(key, result):
+        if key in results:
+            return
+        results[key] = replace(result, node_key=key)
+        if progress_callback is not None:
+            try:
+                progress_callback(len(results), len(items), results[key])
+            except Exception:
+                pass
+
+    connections = {}
+    for key, item in items.items():
+        try:
+            node = remote_proxy._normalize_proxy_node(item.node)
+            if str(node.get("dialer-proxy") or "").strip():
+                raise ValueError("依赖其他节点的代理不能单独检测")
+            fingerprint = remote_proxy._proxy_node_connection_key(node)
+            connections.setdefault(fingerprint, {"node": node, "keys": []})["keys"].append(key)
+        except (TypeError, ValueError):
+            publish(key, failure(key, "节点格式无效或依赖其他节点，无法独立检测"))
+    try:
+        if cancelled():
+            raise RuntimeError("检测已取消")
+        if not connections:
+            return results
+        _ensure_local_dirs()
+        binary = _ensure_mihomo_binary()
+    except Exception as exc:
+        for key in items:
+            publish(key, failure(key, exc))
+        return results
+
+    def measure(session, name, key):
+        delays = []
+        for _attempt in range(attempts):
+            if cancelled():
+                return failure(key, "检测已取消")
+            try:
+                delays.append(_probe_isolated_mihomo_batch_delay(session, name, timeout))
+            except Exception as exc:
+                return failure(key, "检测已取消" if cancelled() else exc)
+        return remote_proxy.ProxyNodeLatencyResult(
+            key, True, latency_ms=sorted(delays)[len(delays) // 2], attempts=attempts,
+            detail=f"内核 HTTPS 快测 {attempts}/{attempts}；非 TCP 握手延迟，不代表 AI 服务稳定性",
+        )
+
+    unique = list(connections.values())
+    batch_supported = True
+    for start in range(0, len(unique), 64):
+        batch = unique[start:start + 64]
+        if cancelled():
+            for entry in batch:
+                for key in entry["keys"]:
+                    publish(key, failure(key, "检测已取消"))
+            continue
+        started = False
+        futures = {}
+        try:
+            if not batch_supported:
+                raise RuntimeError("批量临时内核不可用，回退逐节点检测")
+            with _isolated_mihomo_batch_session(binary, [entry["node"] for entry in batch],
+                                                cancel_event=cancel_event) as session:
+                started = True
+                with ThreadPoolExecutor(max_workers=min(len(batch), max(1, min(16, int(max_workers))))) as executor:
+                    for entry, name in zip(batch, session.route_names):
+                        try:
+                            futures[executor.submit(measure, session, name, entry["keys"][0])] = entry
+                        except Exception as exc:
+                            for key in entry["keys"]:
+                                publish(key, failure(key, exc))
+                    for future in as_completed(futures):
+                        entry = futures[future]
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            result = failure(entry["keys"][0], exc)
+                        for key in entry["keys"]:
+                            publish(key, result)
+        except Exception as exc:
+            if isinstance(exc, _IsolatedMihomoBatchCleanupError):
+                # A cleanup failure must remain visible, even when probes
+                # already published their results before teardown.
+                raise
+            if not started and not cancelled():
+                # One unsupported/bad node must not prevent every valid node
+                # in the batch from being tested. Preserve the old safe path.
+                pending = [items[entry["keys"][0]] for entry in batch]
+                batch_supported = False
+                aliases = {entry["keys"][0]: entry["keys"] for entry in batch}
+
+                def fallback_progress(_done, _total, result):
+                    for key in aliases.get(result.node_key, ()):
+                        publish(key, result)
+
+                fallback = measure_proxy_node_data_plane_latencies(
+                    pending, timeout=timeout, attempts=attempts, max_workers=min(4, max_workers),
+                    cancel_event=cancel_event, progress_callback=fallback_progress,
+                )
+                for entry in batch:
+                    first = entry["keys"][0]
+                    for key in entry["keys"]:
+                        publish(key, fallback.get(first) or failure(key, exc))
+                continue
+            for future, entry in futures.items():
+                if future.done():
+                    try:
+                        result = future.result()
+                    except Exception as worker_exc:
+                        result = failure(entry["keys"][0], worker_exc)
+                    for key in entry["keys"]:
+                        publish(key, result)
+            for entry in batch:
+                for key in entry["keys"]:
+                    publish(key, failure(key, "检测已取消" if cancelled() else exc))
+    for key in items:
+        if key not in results:
+            publish(key, failure(key, "临时内核未返回此节点结果"))
     return results
 
 

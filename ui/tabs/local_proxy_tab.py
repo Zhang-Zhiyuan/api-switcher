@@ -1,4 +1,6 @@
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog
 
@@ -80,6 +82,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._hot_update_node_button = None
         self._latency_button = None
         self._latency_all_button = None
+        self._stability_button = None
+        self._latency_cancel_event = None
         self._quality_button = None
         self._quality_cancel_button = None
         self._quality_cancel_event = None
@@ -536,7 +540,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).pack(anchor="e", pady=(0, 4))
         self._latency_button = ctk.CTkButton(
             node_actions,
-            text="测速勾选/筛选",
+            text="快测勾选/筛选",
             width=118,
             command=self._measure_subscription_latencies,
             state="disabled",
@@ -545,16 +549,25 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._latency_button.pack(anchor="e", pady=(0, 6))
         self._latency_all_button = ctk.CTkButton(
             node_actions,
-            text="测速全部节点",
+            text="快测全部节点",
             width=118,
             command=lambda: self._measure_subscription_latencies(all_nodes=True),
             state="disabled",
             **button_style("secondary", compact=True),
         )
         self._latency_all_button.pack(anchor="e", pady=(0, 6))
+        self._stability_button = ctk.CTkButton(
+            node_actions,
+            text="AI 稳定验证",
+            width=118,
+            command=self._verify_subscription_stability,
+            state="disabled",
+            **button_style("secondary", compact=True),
+        )
+        self._stability_button.pack(anchor="e", pady=(0, 6))
         self._quality_button = ctk.CTkButton(
             node_actions,
-            text="检测勾选/筛选",
+            text="IP 质量检测",
             width=118,
             command=self._measure_subscription_qualities,
             state="disabled",
@@ -565,7 +578,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             node_actions,
             text="取消检测",
             width=118,
-            command=self._cancel_subscription_quality,
+            command=self._cancel_subscription_test,
             state="disabled",
             **button_style("secondary", compact=True),
         )
@@ -615,7 +628,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             text=(
                 "检测范围: -\n"
                 "勾选优先；否则测当前筛选（无筛选即全部）\n"
-                "自动选优不选香港；香港仍可手动使用\n"
+                "快测不切节点；AI 稳定验证较慢\n"
                 "质量源: -"
             ),
             text_color=COLORS["muted_soft"],
@@ -953,6 +966,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._route_catalog_refresh_after_id = None
         if self._quality_cancel_event is not None:
             self._quality_cancel_event.set()
+        if getattr(self, "_latency_cancel_event", None) is not None:
+            self._latency_cancel_event.set()
         if self._responsive_after_id is not None:
             try:
                 self.after_cancel(self._responsive_after_id)
@@ -1169,6 +1184,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             getattr(self, "_manual_hot_update_button", None),
             self._latency_button,
             getattr(self, "_latency_all_button", None),
+            getattr(self, "_stability_button", None),
             self._quality_button,
             self._use_node_button,
             self._hot_update_node_button,
@@ -1198,6 +1214,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._hot_update_node_button,
                     self._latency_button,
                     getattr(self, "_latency_all_button", None),
+                    getattr(self, "_stability_button", None),
                     self._quality_button,
                     self._ping0_button,
                 ) and not self._subscription_options:
@@ -1208,7 +1225,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 pass
         if self._quality_cancel_button:
             try:
-                can_cancel = bool(busy and self._quality_cancel_event is not None and not self._quality_cancel_event.is_set())
+                events = (self._quality_cancel_event, getattr(self, "_latency_cancel_event", None))
+                can_cancel = bool(busy and any(event is not None and not event.is_set() for event in events))
                 self._quality_cancel_button.configure(state="normal" if can_cancel else "disabled")
             except Exception:
                 pass
@@ -2876,6 +2894,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._latency_button.configure(state="normal" if options and not self._busy else "disabled")
         if getattr(self, "_latency_all_button", None):
             self._latency_all_button.configure(state="normal" if options and not self._busy else "disabled")
+        if getattr(self, "_stability_button", None):
+            self._stability_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._quality_button:
             self._quality_button.configure(state="normal" if options and not self._busy else "disabled")
         if self._ping0_button:
@@ -2914,7 +2934,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             text=(
                 f"检测范围: {scope}\n"
                 "勾选优先；否则测当前筛选（无筛选即全部）\n"
-                "自动选优不选香港；香港仍可手动使用\n"
+                "快测不切节点；AI 稳定验证较慢\n"
                 f"{source_text}"
             ),
             text_color=color,
@@ -3281,6 +3301,174 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
 
     def _measure_subscription_latencies(self, *, all_nodes: bool = False):
+        """Quick coverage only: never silently run AI deep probes or change selection."""
+        if self._busy:
+            show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
+            return
+        nodes = tuple(self._subscription_nodes if all_nodes else self._subscription_batch_nodes())
+        if not nodes:
+            self._set_status("当前范围没有可测速的节点，请先拉取订阅", "warning")
+            return
+        scope_label = (
+            f"当前订阅全部 {len(nodes)} 个节点（忽略筛选与勾选）"
+            if all_nodes else self._subscription_batch_scope_label()
+        )
+        profile_id = self._current_subscription_profile_id()
+        generation = self._saved_subscription_load_generation
+        selected_key = self._selected_subscription_node_key()
+        previous = dict(self._latency_results)
+        scope_keys = {remote_proxy.proxy_subscription_node_key(item) for item in nodes}
+        tcp_nodes = tuple(item for item in nodes if local_proxy._proxy_node_uses_known_tcp_transport(item.node))
+        udp_nodes = tuple(item for item in nodes if not local_proxy._proxy_node_uses_known_tcp_transport(item.node))
+        cancel = threading.Event()
+        self._latency_cancel_event = cancel
+        started = time.monotonic()
+        self._set_busy(True)
+        self._set_status(
+            f"正在快测 {scope_label}：TCP 单次连接、最多 {remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS} 路；"
+            "UDP/其他传输使用隔离内核 HTTPS 转发、最多 16 路，两类同时进行。"
+            "相同连接复用检测；不会自动进入 AI 深测或更换当前节点，可随时取消。"
+        )
+        results = {}
+        result_lock = threading.Lock()
+        group_errors = []
+
+        def same_context():
+            return (
+                not getattr(self, "_destroyed", False)
+                and self.winfo_exists()
+                and self._latency_cancel_event is cancel
+                and generation == self._saved_subscription_load_generation
+                and profile_id == self._current_subscription_profile_id()
+            )
+
+        def summary(values):
+            passed = sum(remote_proxy.proxy_node_latency_ok(value) for value in values.values())
+            cancelled = sum(remote_proxy.proxy_node_latency_cancelled(value) for value in values.values())
+            return f"可连 {passed}，失败 {len(values) - passed - cancelled}，取消 {cancelled}"
+
+        def show_progress(partial):
+            if not same_context():
+                return
+            self._latency_results = {**previous, **partial}
+            self._prefer_quality_sort = False
+            self._set_subscription_nodes(self._subscription_nodes, preserve_key=selected_key)
+            self._set_status(
+                f"{scope_label}：快测 {len(partial)}/{len(scope_keys)}，{summary(partial)}；"
+                + ("正在取消并回收临时资源…" if cancel.is_set() else "其余节点仍在检测。")
+            )
+
+        progress = CoalescedProgress(self._run_on_ui_thread, show_progress)
+
+        def report(_completed, _total, result):
+            if result.node_key in scope_keys:
+                with result_lock:
+                    results[result.node_key] = result
+                progress.update(result.node_key, result)
+
+        def measure(items, action):
+            try:
+                values = action() or {}
+                for key, value in values.items():
+                    if key in scope_keys:
+                        report(0, 0, value)
+            except Exception as exc:
+                detail = (str(exc).strip() or type(exc).__name__).splitlines()[0][:140]
+                with result_lock:
+                    group_errors.append(detail)
+                for item in items:
+                    key = remote_proxy.proxy_subscription_node_key(item)
+                    with result_lock:
+                        missing = key not in results
+                    if missing:
+                        report(0, 0, remote_proxy.ProxyNodeLatencyResult(
+                            key, False, detail="已取消" if cancel.is_set() else f"快测任务失败: {detail}",
+                            cancelled=cancel.is_set(),
+                        ))
+
+        def run():
+            error = ""
+            try:
+                # Independent transport groups overlap; each owns bounded workers
+                # and never touches the running proxy or system settings.
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="proxy-quick-group") as pool:
+                    futures = []
+                    if tcp_nodes:
+                        futures.append(pool.submit(measure, tcp_nodes, lambda:
+                            remote_proxy.measure_proxy_node_latencies(
+                                tcp_nodes, timeout=3.0, attempts=1,
+                                max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
+                                quick=True, cancel_event=cancel, progress_callback=report,
+                            )))
+                    if udp_nodes:
+                        futures.append(pool.submit(measure, udp_nodes, lambda:
+                            local_proxy.measure_proxy_node_data_plane_latencies(
+                                udp_nodes, timeout=5.0, attempts=1, max_workers=16,
+                                quick=True, cancel_event=cancel, progress_callback=report,
+                            )))
+                    for future in as_completed(futures):
+                        future.result()
+            except Exception as exc:
+                error = (str(exc).strip() or type(exc).__name__).splitlines()[0][:140]
+            finally:
+                progress.close()
+            if group_errors:
+                error = "；".join([error, *group_errors]).strip("；")
+            for key in scope_keys:
+                results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
+                    key, False, detail="已取消" if cancel.is_set() else f"检测未完成: {error or '任务未返回结果'}",
+                    cancelled=cancel.is_set(),
+                ))
+            captured = {**previous, **results}
+            save_error = ""
+            try:
+                if not profile_id:
+                    raise ValueError("页面未绑定订阅分组，未写入其他分组")
+                remote_proxy.save_proxy_subscription_latencies(captured, profile_id=profile_id)
+            except Exception as exc:
+                save_error = str(exc).strip() or type(exc).__name__
+            elapsed = time.monotonic() - started
+
+            def finish():
+                if getattr(self, "_destroyed", False) or not self.winfo_exists():
+                    return
+                if self._latency_cancel_event is not cancel:
+                    return
+                context_matches = same_context()
+                self._latency_cancel_event = None
+                self._set_busy(False)
+                if context_matches:
+                    self._latency_results = captured
+                    self._prefer_quality_sort = False
+                    self._set_subscription_nodes(self._subscription_nodes, preserve_key=selected_key)
+                message = (
+                    f"{scope_label}：快测{'已取消' if cancel.is_set() else '完成'}，"
+                    f"结果 {len(results)}/{len(scope_keys)}，{summary(results)}，耗时 {elapsed:.1f} 秒。"
+                    "TCP 仅检查端口，UDP/其他传输检查 HTTPS；不代表 AI 稳定可用。"
+                    "需要多轮与长传输检测时，请点击「AI 稳定验证」（较慢）。已保留原节点。"
+                )
+                if not context_matches:
+                    message += " 页面分组已变更，未覆盖当前列表。"
+                if save_error:
+                    message += f" 结果缓存失败: {save_error}"
+                if error:
+                    message += f" 检测任务异常: {error}"
+                has_failed = any(not remote_proxy.proxy_node_latency_ok(value) for value in results.values())
+                severity = "warning" if cancel.is_set() or error or save_error or not context_matches or has_failed else "success"
+                self._set_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, is_error=bool(error or save_error))
+
+            self._run_on_ui_thread(finish)
+
+        try:
+            threading.Thread(target=run, name="local-proxy-quick-test", daemon=True).start()
+        except Exception as exc:
+            progress.close()
+            self._latency_cancel_event = None
+            self._set_busy(False)
+            self._set_status(f"启动节点快测失败: {str(exc).strip() or type(exc).__name__}", "error")
+
+    def _verify_subscription_stability(self, *, all_nodes: bool = False):
         if self._busy:
             show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
             return
@@ -3642,6 +3830,18 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             candidates = self._subscription_picker.group_items(region)
             return candidates, f"{region}组全部 {len(candidates)} 个节点"
         return self._quality_candidate_nodes(), self._subscription_batch_scope_label()
+
+    def _cancel_subscription_test(self):
+        event = getattr(self, "_latency_cancel_event", None)
+        if event is None:
+            self._cancel_subscription_quality()
+            return
+        if event.is_set():
+            return
+        event.set()
+        if self._quality_cancel_button:
+            self._quality_cancel_button.configure(state="disabled")
+        self._set_status("正在取消快测并回收临时资源；已完成结果会保留，未测节点标为已取消。", "warning")
 
     def _cancel_subscription_quality(self):
         event = self._quality_cancel_event
