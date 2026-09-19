@@ -2039,7 +2039,7 @@ def measure_proxy_node_latency(
             with socket.create_connection(endpoint, timeout=timeout):
                 latencies.append(max(1, int((time.perf_counter() - started) * 1000)))
         except Exception as exc:
-            last_error = str(exc).splitlines()[0][:120] or exc.__class__.__name__
+            last_error = (str(exc).strip() or type(exc).__name__).splitlines()[0][:120]
 
     all_attempts_succeeded = len(latencies) == attempts
     if latencies and (all_attempts_succeeded or not require_all):
@@ -2090,6 +2090,7 @@ def measure_proxy_node_latencies(
     max_workers: int = PROXY_LATENCY_DEFAULT_MAX_WORKERS,
     *,
     require_all: bool = False,
+    progress_callback=None,
 ) -> dict[str, ProxyNodeLatencyResult]:
     items = []
     seen = set()
@@ -2117,6 +2118,15 @@ def measure_proxy_node_latencies(
     )
     results: dict[str, ProxyNodeLatencyResult] = {}
 
+    def publish(node_key, result):
+        results[node_key] = result
+        if progress_callback is not None:
+            try:
+                progress_callback(len(results), len(items), result)
+            except Exception:
+                # Display failures must not invalidate completed measurements.
+                pass
+
     def failure(node_key, exc):
         return ProxyNodeLatencyResult(
             node_key=node_key,
@@ -2138,25 +2148,28 @@ def measure_proxy_node_latencies(
                     )
                     futures[future] = node_key
                 except Exception as exc:
-                    results[node_key] = failure(node_key, exc)
+                    publish(node_key, failure(node_key, exc))
             for future in as_completed(futures):
                 node_key = futures[future]
                 try:
-                    results[node_key] = future.result()
+                    result = future.result()
                 except Exception as exc:
-                    results[node_key] = failure(node_key, exc)
+                    result = failure(node_key, exc)
+                publish(node_key, result)
     except Exception as exc:
         # Preserve successful workers if scheduling or executor teardown fails.
         for future, node_key in futures.items():
             if node_key in results or not future.done():
                 continue
             try:
-                results[node_key] = future.result()
+                result = future.result()
             except Exception as worker_exc:
-                results[node_key] = failure(node_key, worker_exc)
+                result = failure(node_key, worker_exc)
+            publish(node_key, result)
         for node in items:
             node_key = proxy_node_key(node)
-            results.setdefault(node_key, failure(node_key, exc))
+            if node_key not in results:
+                publish(node_key, failure(node_key, exc))
     return results
 
 
@@ -2210,7 +2223,7 @@ def assess_proxy_node_quality(
             host=host,
             region=region,
             quality_label="解析失败",
-            detail=str(exc).splitlines()[0][:180] or "节点服务器解析失败",
+            detail=(str(exc).strip() or "节点服务器解析失败").splitlines()[0][:180],
             checked_at=_now_iso(),
         )
 
@@ -2392,7 +2405,7 @@ def assess_proxy_node_quality(
         result = _proxy_node_quality_error_result(
             normalized,
             "已取消" if cancelled else "检测失败",
-            str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
+            (str(exc).strip() or "节点服务器 IP 质量检测失败").splitlines()[0][:180],
             ip=ip,
             sources=services,
         )
@@ -2502,7 +2515,7 @@ def _proxy_quality_result_from_exception(node: dict, exc: Exception) -> ProxyNod
     return _proxy_node_quality_error_result(
         node,
         "检测失败",
-        str(exc).splitlines()[0][:180] or "节点服务器 IP 质量检测失败",
+        (str(exc).strip() or "节点服务器 IP 质量检测失败").splitlines()[0][:180],
     )
 
 
@@ -2556,7 +2569,7 @@ def _proxy_quality_resolve_groups(
                         host=str(node.get("server") or ""),
                         region=proxy_node_region(node),
                         quality_label="解析失败",
-                        detail=str(exc).splitlines()[0][:180] or "节点服务器解析失败",
+                        detail=(str(exc).strip() or "节点服务器解析失败").splitlines()[0][:180],
                         checked_at=_now_iso(),
                     )
                 )

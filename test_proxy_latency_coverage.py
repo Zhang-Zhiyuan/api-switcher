@@ -222,7 +222,7 @@ def test_local_batch_publishes_all_results_before_slow_ai_gate_and_saves_udp(mon
 
     monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies", tcp)
 
-    def udp(items):
+    def udp(items, **_kwargs):
         calls["udp"].extend(items)
         if failed_group == "udp":
             raise RuntimeError("UDP synthetic scheduling failure")

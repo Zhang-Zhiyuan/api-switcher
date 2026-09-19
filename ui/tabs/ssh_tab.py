@@ -3216,17 +3216,28 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         self._set_proxy_cache_status("本机缓存: 正在后台恢复订阅...", "info")
         self._set_proxy_status("正在后台恢复本机缓存订阅；页面可先操作。")
+        completed = False
 
-        def run():
-            cached = remote_proxy.load_cached_proxy_subscription(state)
-            payload = {
-                "cached": cached,
-                "qualities": remote_proxy.load_proxy_subscription_qualities(state) if cached and cached.nodes else {},
-            }
-
-            def finish():
-                if not self.winfo_exists() or generation != self._proxy_saved_subscription_load_generation:
+        def finish(payload=None, *, error=""):
+            nonlocal completed
+            if completed or getattr(self, "_destroyed", False):
+                return
+            try:
+                if generation != self._proxy_saved_subscription_load_generation or not self.winfo_exists():
                     return
+            except Exception:
+                return
+            completed = True
+            if error:
+                # Keep the current nodes, measurement source and connection
+                # fields together when any cache/metadata read fails.
+                self._set_proxy_cache_status("本机缓存: 恢复失败，已保留当前节点", "error")
+                self._set_proxy_status(
+                    f"恢复本机订阅缓存失败: {error}；当前节点及未保存输入未改动。"
+                    "可重新拉取订阅或在 Win11 代理页导入本地 YAML；已启用的自动刷新仍会按计划执行。",
+                    "error",
+                )
+            else:
                 cached_result = payload["cached"]
                 if cached_result and cached_result.nodes:
                     self._proxy_latency_results = {}
@@ -3250,14 +3261,30 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._set_proxy_cache_status("本机缓存: 未找到可用节点", "warning")
                     self._set_proxy_status("未找到可用本机缓存；可在 Win11 代理页重新导入本地 YAML。", "warning")
 
-                if url and auto_refresh:
-                    self._schedule_proxy_startup_refresh()
-                if schedule_periodic:
-                    self._schedule_proxy_periodic_update(initial=True)
+            # Continue the existing refresh policy once; never retry a failed
+            # disk-cache load recursively from its completion callback.
+            if url and auto_refresh:
+                self._schedule_proxy_startup_refresh()
+            if schedule_periodic:
+                self._schedule_proxy_periodic_update(initial=True)
 
-            self._run_on_ui_thread(finish)
+        def run():
+            try:
+                cached = remote_proxy.load_cached_proxy_subscription(state)
+                payload = {
+                    "cached": cached,
+                    "qualities": remote_proxy.load_proxy_subscription_qualities(state) if cached and cached.nodes else {},
+                }
+            except Exception as exc:
+                detail = safe_feedback_text(f"{type(exc).__name__}: {exc}")
+                self._run_on_ui_thread(lambda: finish(error=detail))
+                return
+            self._run_on_ui_thread(lambda: finish(payload))
 
-        threading.Thread(target=run, name="ssh-proxy-cache-load", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="ssh-proxy-cache-load", daemon=True).start()
+        except Exception as exc:
+            finish(error=safe_feedback_text(f"无法启动缓存恢复任务 ({type(exc).__name__}): {exc}"))
 
     def _select_proxy_subscription_node_by_key(self, node_key: str) -> bool:
         if not node_key or not self._proxy_subscription_picker:

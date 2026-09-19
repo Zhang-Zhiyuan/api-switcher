@@ -48,6 +48,7 @@ except ImportError:  # pragma: no cover - POSIX
 from config.paths import STORAGE_DIR
 from core import persistent_env, proxy_routing, remote_proxy, vscode_parser, wsl_proxy
 from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_text, replace_with_retry
+from core.proxy_health import parse_proxy_health, proxy_health_summary
 from core.local_proxy_constants import (
     LOCAL_PROXY_AI_SERVICE_IDS,
     LOCAL_PROXY_AI_SERVICES,
@@ -2531,36 +2532,27 @@ def _local_mihomo_failover_status(
             candidates=candidates,
         )
 
-    history = active_state.get("history") if isinstance(active_state, dict) else None
-    if not isinstance(history, list) or not history:
-        history = group_state.get("history") if isinstance(group_state, dict) else None
-    history = history if isinstance(history, list) else []
     active_index = names.index(active_name) + 1 if active_name in names else 0
     active_fallback = active_index > 1
-    if not history:
-        detail = f"内核自动故障切换已启用（{candidates} 个候选），端到端健康检查初始化中"
-        return _LocalMihomoFailoverStatus(
-            detail=detail,
-            candidates=candidates,
-            active_fallback=active_fallback,
-        )
-    last = history[-1] if isinstance(history[-1], dict) else {}
-    try:
-        delay_ms = max(0, int(last.get("delay") or 0))
-    except (TypeError, ValueError):
-        delay_ms = 0
-    alive_value = (
-        active_state.get("alive")
-        if isinstance(active_state, dict) and "alive" in active_state
-        else group_state.get("alive")
-    )
-    healthy = bool(alive_value) and delay_ms > 0
     active_label = f"当前第 {active_index} 个" if active_index else "当前候选未知"
-    if healthy:
-        suffix = f"，已切到备用节点，健康延迟 {delay_ms}ms" if active_fallback else f"，健康延迟 {delay_ms}ms"
+    if not active_index:
+        return _LocalMihomoFailoverStatus(
+            detail=f"内核自动故障切换已配置（{candidates} 个候选），当前节点未确定，请刷新检查",
+            candidates=candidates,
+        )
+    # Older controllers can omit testUrl. The saved group's URL can select its
+    # exact extra record, but a generic record remains unknown, never False.
+    health_group = {**group_state, "testUrl": group_state.get("testUrl") or group.get("url")}
+    health = parse_proxy_health(health_group, active_state)
+    healthy = health.target_healthy
+    summary = proxy_health_summary(health)
+    if healthy is True:
+        suffix = f"，已切到备用节点，健康延迟 {health.delay_ms}ms" if active_fallback else f"，健康延迟 {health.delay_ms}ms"
         detail = f"内核自动故障切换已启用（{candidates} 个候选，{active_label}）{suffix}"
+    elif healthy is False:
+        detail = f"内核自动故障切换池健康检查失败（{candidates} 个候选，{active_label}）；{summary}"
     else:
-        detail = f"内核自动故障切换池健康检查失败（{candidates} 个候选，{active_label}）"
+        detail = f"内核自动故障切换已配置（{candidates} 个候选，{active_label}）；{summary}；目标健康状态未确认"
     return _LocalMihomoFailoverStatus(
         detail=detail,
         healthy=healthy,
@@ -3034,7 +3026,7 @@ def probe_local_ai_proxy(timeout: int = 8) -> str:
                 ordered_results[index] = LocalAIProxyProbeResult(
                     label=label,
                     ok=False,
-                    detail=str(exc).splitlines()[0][:160] or type(exc).__name__,
+                    detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:160],
                 )
     results = [
         item
@@ -3104,6 +3096,7 @@ def measure_proxy_node_data_plane_latencies(
     timeout: int = 5,
     attempts: int = 2,
     max_workers: int = 4,
+    progress_callback=None,
 ) -> dict[str, remote_proxy.ProxyNodeLatencyResult]:
     """Measure every requested node through its own disposable proxy.
 
@@ -3119,6 +3112,15 @@ def measure_proxy_node_data_plane_latencies(
         return {}
     attempts = max(1, min(3, int(attempts)))
     timeout = max(1, min(15, int(timeout)))
+    results = {}
+
+    def publish(key, result):
+        results[key] = result
+        if progress_callback is not None:
+            try:
+                progress_callback(len(results), len(items), result)
+            except Exception:
+                pass  # UI failures must not erase a probe's terminal result.
 
     def failure(key, error):
         detail = str(error).strip() or type(error).__name__
@@ -3131,7 +3133,9 @@ def measure_proxy_node_data_plane_latencies(
         _ensure_local_dirs()
         binary_path = _ensure_mihomo_binary()
     except Exception as exc:
-        return {key: failure(key, exc) for key in items}
+        for key in items:
+            publish(key, failure(key, exc))
+        return results
 
     def measure(key, item):
         delays = []
@@ -3159,7 +3163,6 @@ def measure_proxy_node_data_plane_latencies(
             attempts=attempts,
         )
 
-    results = {}
     futures = {}
     try:
         with ThreadPoolExecutor(max_workers=min(len(items), max(1, min(4, int(max_workers))))) as executor:
@@ -3167,13 +3170,14 @@ def measure_proxy_node_data_plane_latencies(
                 try:
                     futures[executor.submit(measure, key, item)] = key
                 except Exception as exc:
-                    results[key] = failure(key, exc)
+                    publish(key, failure(key, exc))
             for future in as_completed(futures):
                 key = futures[future]
                 try:
-                    results[key] = future.result()
+                    result = future.result()
                 except Exception as exc:
-                    results[key] = failure(key, exc)
+                    result = failure(key, exc)
+                publish(key, result)
     except Exception as exc:
         # Executor construction/shutdown and iteration may fail independently
         # of individual probes. Preserve already completed measurements.
@@ -3181,11 +3185,13 @@ def measure_proxy_node_data_plane_latencies(
             if key in results or not future.done():
                 continue
             try:
-                results[key] = future.result()
+                result = future.result()
             except Exception as worker_exc:
-                results[key] = failure(key, worker_exc)
+                result = failure(key, worker_exc)
+            publish(key, result)
         for key in items:
-            results.setdefault(key, failure(key, exc))
+            if key not in results:
+                publish(key, failure(key, exc))
     return results
 
 
@@ -3274,7 +3280,7 @@ def select_stable_local_proxy_node(
                 node_key=key,
                 stable=False,
                 total_attempts=rounds * len(LOCAL_AI_STABILITY_TARGETS),
-                detail=str(exc).splitlines()[0][:240] or type(exc).__name__,
+                detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:240],
             )
         results[key] = result
     def passed_short_probe(result: LocalProxyNodeStabilityResult | None) -> bool:
@@ -3317,7 +3323,7 @@ def select_stable_local_proxy_node(
             deep = LocalProxyDeepTransportProbeResult(
                 ok=False,
                 transfer_attempts=LOCAL_PROXY_DEEP_PROBE_ROUNDS,
-                detail=str(exc).splitlines()[0][:240] or type(exc).__name__,
+                detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:240],
             )
         previous = results[key]
         deep_detail = deep.detail or "Codex 长会话网络近似未通过"
@@ -3388,7 +3394,7 @@ def _probe_local_proxy_node_stability(
                 try:
                     probe = future.result()
                 except Exception as exc:
-                    probe = LocalAIProxyProbeResult(label, False, detail=str(exc).splitlines()[0][:120])
+                    probe = LocalAIProxyProbeResult(label, False, detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:120])
                 if probe.ok:
                     service_successes[label] += 1
                     if label == "OpenAI API":
@@ -3544,7 +3550,7 @@ def _probe_local_proxy_node_deep_transport(
         except Exception as exc:
             result = LocalProxyTransferRoundResult(
                 ok=False,
-                detail=str(exc).splitlines()[0][:200] or type(exc).__name__,
+                detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:200],
             )
         transfer_results.append(result)
 
@@ -3582,7 +3588,7 @@ def _probe_local_proxy_node_deep_transport(
                 ok=False,
                 successes=0,
                 attempts=LOCAL_CODEX_COMPACT_PROBE_ATTEMPTS,
-                detail=str(exc).splitlines()[0][:200] or type(exc).__name__,
+                detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:200],
             )
 
     failed_details = [result.detail for result in transfer_results if not result.ok and result.detail]
@@ -6277,7 +6283,7 @@ def _post_unauthenticated_json_through_explicit_http_proxy(
         return LocalAIProxyProbeResult(
             label="Codex 大请求网络近似",
             ok=False,
-            detail=str(exc).splitlines()[0][:180] or type(exc).__name__,
+            detail=(str(exc).strip() or type(exc).__name__).splitlines()[0][:180],
             elapsed_ms=_elapsed_ms(started),
         )
     finally:
@@ -6347,7 +6353,7 @@ def _download_exact_bytes_through_explicit_http_proxy(
                 return False, received, f"Content-Length 非整数: {content_length}"
         return True, received, f"精确收到 {received} 字节"
     except Exception as exc:
-        return False, received, str(exc).splitlines()[0][:200] or type(exc).__name__
+        return False, received, (str(exc).strip() or type(exc).__name__).splitlines()[0][:200]
     finally:
         if connection is not None:
             try:
@@ -6412,7 +6418,7 @@ def _upload_exact_bytes_through_explicit_http_proxy(
             return False, 0, f"服务端回传 {acknowledged} 字节，期望 {expected_bytes}"
         return True, expected_bytes, f"上传 {expected_bytes} 字节，服务端已核对"
     except Exception as exc:
-        return False, 0, str(exc).splitlines()[0][:200] or type(exc).__name__
+        return False, 0, (str(exc).strip() or type(exc).__name__).splitlines()[0][:200]
     finally:
         if connection is not None:
             try:

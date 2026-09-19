@@ -21,6 +21,19 @@ MISSING_PROFILE = "订阅已失效，请重新选择"
 MISSING_NODE = "固定节点已失效，请重新选择"
 
 
+def _unused_label(base, mapping, next_suffix):
+    """Keep collision-safe labels while visiting each suffix only once per base."""
+    if base not in mapping:
+        return base
+    index = next_suffix.get(base, 2)
+    label = f"{base} ({index})"
+    while label in mapping:
+        index += 1
+        label = f"{base} ({index})"
+    next_suffix[base] = index + 1
+    return label
+
+
 class NodeChoiceButton(ctk.CTkButton):
     """Keep the selected label separate from the compact button presentation."""
 
@@ -376,31 +389,62 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._busy = False
             self._status.configure(text=f"读取失败：{payload}。请关闭后重试。", text_color=COLORS["danger"])
 
+    def _ensure_mapping_cache(self):
+        # Catalogs are replaced atomically after background reads. Retain the
+        # original object, not only id(), to avoid object-ID reuse on reload.
+        if (getattr(self, "_mapping_catalog", None) is not self._catalog
+                or getattr(self, "_mapping_catalog_size", -1) != len(self._catalog)):
+            self._mapping_catalog = self._catalog
+            self._mapping_catalog_size = len(self._catalog)
+            self._mapping_profiles = {item["id"]: item for item in self._catalog}
+            self._profile_mapping_cache = {}
+            self._profile_reverse_cache = {}
+            self._node_mapping_cache = {}
+            self._node_reverse_cache = {}
+
     def _profile_values(self, service=""):
-        mapping = {DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE: ""}
+        self._ensure_mapping_cache()
+        default = DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE
+        # Metadata-only edits can update a catalog entry without replacing its
+        # node list. This small signature avoids repeating redaction per row.
+        signature = tuple((item["id"], item["name"], item.get("network_type"), bool(item.get("nodes")))
+                          for item in self._catalog)
+        cached = self._profile_mapping_cache.get(default)
+        if cached and cached[0] == signature:
+            return cached[1]
+        mapping, suffixes = {default: ""}, {}
         for profile in self._catalog:
             label = " ".join(safe_feedback_text(str(profile["name"])).split())
             if profile.get("network_type") in {"residential", "datacenter"}:
                 label += " · " + ("家宽" if profile["network_type"] == "residential" else "非家宽")
             if not profile["nodes"]:
                 label += " · 请先拉取"
-            base, index = label, 2
-            while label in mapping:
-                label = f"{base} ({index})"
-                index += 1
+            label = _unused_label(label, mapping, suffixes)
             mapping[label] = profile["id"]
+        self._profile_mapping_cache[default] = (signature, mapping)
+        reverse = {}
+        for label, value in mapping.items():
+            reverse.setdefault(value, label)
+        self._profile_reverse_cache[default] = reverse
         return mapping
 
     def _node_values(self, profile_id):
-        profile = next((item for item in self._catalog if item["id"] == profile_id), {})
-        mapping = {DEFAULT_NODE: ""}
-        for item in profile.get("nodes", []):
+        self._ensure_mapping_cache()
+        profile = self._mapping_profiles.get(profile_id, {})
+        source = profile.get("nodes", ())
+        cached = self._node_mapping_cache.get(profile_id)
+        if cached and cached[0] is source and cached[1] == len(source):
+            return cached[2]
+        mapping, suffixes = {DEFAULT_NODE: ""}, {}
+        for item in source:
             base = " ".join(safe_feedback_text(str(item["label"])).split())
-            label, index = base, 2
-            while label in mapping:
-                label = f"{base} ({index})"
-                index += 1
+            label = _unused_label(base, mapping, suffixes)
             mapping[label] = item["key"]
+        self._node_mapping_cache[profile_id] = (source, len(source), mapping)
+        reverse = {}
+        for label, key in mapping.items():
+            reverse.setdefault(key, label)
+        self._node_reverse_cache[profile_id] = reverse
         return mapping
 
     def _render(self):
@@ -480,13 +524,14 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         draft = self._drafts[self._scope]
         profile_id = draft["service_profile_bindings"].get(service, "")
         profiles = self._profile_values(service)
-        label = next((label for label, value in profiles.items() if value == profile_id), MISSING_PROFILE)
+        default = DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE
+        label = self._profile_reverse_cache[default].get(profile_id, MISSING_PROFILE)
         row["profile"].configure(state="readonly", values=[*profiles, *([MISSING_PROFILE] if label == MISSING_PROFILE else [])])
         row["profile"].set(label)
         row["profile"].configure(state="disabled" if self._busy else "readonly")
         nodes = self._node_values(profile_id)
         key = draft["service_node_bindings"].get(service, "")
-        node_label = next((label for label, value in nodes.items() if value == key), MISSING_NODE)
+        node_label = self._node_reverse_cache[profile_id].get(key, MISSING_NODE)
         row["nodes"] = nodes
         row["node"].set(node_label if profile_id else (DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE))
         row["node"].configure(state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])

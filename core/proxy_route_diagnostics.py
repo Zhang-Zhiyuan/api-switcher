@@ -10,12 +10,12 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
-import math
 import re
 from urllib.parse import urlsplit
 
 from core.lazy_imports import LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES, LOCAL_PROXY_BUILTIN_SITES
+from core.proxy_health import HEALTH_TTL_SECONDS, parse_proxy_health, proxy_health_summary
 from core.redaction import redact_sensitive_text
 
 local_proxy = LazyModule("core.local_proxy")
@@ -24,7 +24,7 @@ proxy_routing = LazyModule("core.proxy_routing")
 
 MAX_BYTES = 4 * 1024 * 1024
 SNAPSHOT_TTL = 60
-HEALTH_TTL = 180
+HEALTH_TTL = HEALTH_TTL_SECONDS
 
 # Exactly the same bounded, proxy-independent reader runs locally and over SSH.
 # This is trusted static source, never assembled from a user URL or credentials.
@@ -217,42 +217,8 @@ def saved_rules(preferences: dict) -> list[dict]:
     ]
 
 
-def _timestamp(value) -> datetime | None:
-    try:
-        result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return result.astimezone(timezone.utc) if result.tzinfo else None
-    except (ValueError, TypeError, OverflowError):
-        return None
-
-
 def health_summary(group: dict, node: dict, now: datetime) -> str:
-    test_url = group.get("testUrl")
-    extra = node.get("extra")
-    health = extra.get(test_url) if isinstance(extra, dict) and test_url else None
-    specific = isinstance(health, dict)
-    health = health if specific else node
-    history = health.get("history")
-    if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
-        return "连通性未检测（无内核探针记录）"
-    last = history[-1]
-    checked = _timestamp(last.get("time"))
-    if checked is None:
-        return "探针时间未知，不能认定当前可用"
-    age = (now - checked).total_seconds()
-    prefix = "此策略组探针" if specific else "通用探针（非此目标专测）"
-    when = checked.astimezone().strftime("%m-%d %H:%M:%S")
-    if age < -5 or age > HEALTH_TTL:
-        return f"{prefix}结果已过期 / 时钟不同步 · {when}"
-    delay = last.get("delay")
-    try:
-        valid_delay = isinstance(delay, (int, float)) and not isinstance(delay, bool) and math.isfinite(delay)
-    except (ValueError, OverflowError):
-        valid_delay = False
-    if not valid_delay:
-        return f"{prefix}延迟数据无效 · {when}"
-    if delay <= 0 or health.get("alive") is False:
-        return f"{prefix}失败 · {when}"
-    return f"{prefix}通过 · {int(delay)} ms · {when}（不代表账号或长会话可用）"
+    return proxy_health_summary(parse_proxy_health(group, node, now, ttl_seconds=HEALTH_TTL))
 
 
 @dataclass

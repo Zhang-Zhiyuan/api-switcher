@@ -41,15 +41,17 @@ def test_load_is_async_and_scope_selection_reads_only_selected_host(dialog, tk_r
     assert view._scope_combo.get() == "SSH B"
 
 
-def test_url_query_is_local_and_drops_query_secrets(dialog):
+def test_url_query_is_local_and_drops_query_secrets(dialog, tk_root):
     view, loaded = dialog
     view._entry.insert(0, "https://api.openai.com/v1?token=PRIVATE_QUERY_SECRET")
     view._show_query()
     assert len(loaded) == 1
     assert view._entry.get() == "api.openai.com"
+    wait(tk_root, lambda: not view._busy)
     text = view._report.get("1.0", "end")
     assert "PRIVATE_QUERY_SECRET" not in text and "日本家宽 01" in text
     view._show_overview()
+    wait(tk_root, lambda: not view._busy)
     assert "运行规则快照" in view._report.get("1.0", "end")
 
 

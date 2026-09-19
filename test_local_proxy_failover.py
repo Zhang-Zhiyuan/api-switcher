@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from core import local_proxy, remote_proxy
@@ -516,7 +518,9 @@ def test_failover_status_reports_healthy_backup_without_exposing_node_name(
         if path == "/proxies/AI-PROXY":
             return {"now": backup_name, "alive": True}
         assert path == "/proxies/" + backup_name
-        return {"alive": True, "history": [{"delay": 47}]}
+        return {"extra": {remote_proxy.AI_PROXY_HEALTH_CHECK_URL: {
+            "alive": True, "history": [{"delay": 47, "time": datetime.now(timezone.utc).isoformat()}],
+        }}}
 
     monkeypatch.setattr(local_proxy, "_read_local_mihomo_controller_json", controller)
 
@@ -530,7 +534,7 @@ def test_failover_status_reports_healthy_backup_without_exposing_node_name(
     assert "secret backup label" not in status.detail
 
 
-def test_failover_status_uses_group_history_and_reports_failure(monkeypatch, tmp_path):
+def test_failover_status_uses_target_specific_history_and_reports_failure(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         remote_proxy.build_mihomo_config(
@@ -546,9 +550,10 @@ def test_failover_status_uses_group_history_and_reports_failure(monkeypatch, tmp
             return {
                 "now": remote_proxy.AI_PROXY_INTERNAL_NODE_NAME,
                 "alive": False,
-                "history": [{"delay": 0}],
             }
-        return {}
+        return {"extra": {remote_proxy.AI_PROXY_HEALTH_CHECK_URL: {
+            "alive": False, "history": [{"delay": 0, "time": datetime.now(timezone.utc).isoformat()}],
+        }}}
 
     monkeypatch.setattr(local_proxy, "_read_local_mihomo_controller_json", controller)
 

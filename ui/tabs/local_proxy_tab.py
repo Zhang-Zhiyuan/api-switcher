@@ -10,6 +10,7 @@ from core.local_proxy_constants import (
     LOCAL_PROXY_BUILTIN_SITES,
     LOCAL_PROXY_CUSTOM_ROUTE_ID,
 )
+from ui.async_progress import CoalescedProgress
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import infer_feedback_severity, safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
@@ -2371,18 +2372,28 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
         self._set_cache_status("本机缓存: 正在后台恢复订阅...", "info")
         self._set_status("正在后台恢复本机缓存订阅；页面可先操作。")
+        completed = False
 
-        def run():
-            cached = remote_proxy.load_cached_proxy_subscription(state)
-            payload = {
-                "cached": cached,
-                "latencies": remote_proxy.load_proxy_subscription_latencies(state) if cached and cached.nodes else {},
-                "qualities": remote_proxy.load_proxy_subscription_qualities(state) if cached and cached.nodes else {},
-            }
-
-            def finish():
-                if not self.winfo_exists() or generation != self._saved_subscription_load_generation:
+        def finish(payload=None, *, error=""):
+            nonlocal completed
+            if completed or getattr(self, "_destroyed", False):
+                return
+            try:
+                if generation != self._saved_subscription_load_generation or not self.winfo_exists():
                     return
+            except Exception:
+                return
+            completed = True
+            if error:
+                # Publish failures without partially replacing the current nodes,
+                # measurements, selection or unsaved subscription inputs.
+                self._set_cache_status("本机缓存: 恢复失败，已保留当前节点", "error")
+                self._set_status(
+                    f"恢复本机订阅缓存失败: {error}；当前节点及未保存输入未改动。"
+                    "可重新拉取订阅或导入本地 Clash YAML；已启用的自动刷新仍会按计划执行。",
+                    "error",
+                )
+            else:
                 cached_result = payload["cached"]
                 if cached_result and cached_result.nodes:
                     self._latency_results = payload["latencies"]
@@ -2404,14 +2415,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._set_cache_status("本机缓存: 未找到可用节点", "warning")
                     self._set_status("未找到可用本机缓存；可重新拉取订阅或导入本地 Clash YAML。", "warning")
 
-                if url and auto_refresh:
-                    self._schedule_startup_refresh()
-                if schedule_periodic:
-                    self._schedule_periodic_update(initial=True)
+            # A failed cache read must not suppress the normal startup/timer
+            # refresh, nor restart this cache task in an unbounded retry loop.
+            if url and auto_refresh:
+                self._schedule_startup_refresh()
+            if schedule_periodic:
+                self._schedule_periodic_update(initial=True)
 
-            self._run_on_ui_thread(finish)
+        def run():
+            try:
+                cached = remote_proxy.load_cached_proxy_subscription(state)
+                payload = {
+                    "cached": cached,
+                    "latencies": remote_proxy.load_proxy_subscription_latencies(state) if cached and cached.nodes else {},
+                    "qualities": remote_proxy.load_proxy_subscription_qualities(state) if cached and cached.nodes else {},
+                }
+            except Exception as exc:
+                detail = safe_feedback_text(f"{type(exc).__name__}: {exc}")
+                self._run_on_ui_thread(lambda: finish(error=detail))
+                return
+            self._run_on_ui_thread(lambda: finish(payload))
 
-        threading.Thread(target=run, name="local-proxy-cache-load", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="local-proxy-cache-load", daemon=True).start()
+        except Exception as exc:
+            # Thread construction/start happens on the UI thread too.
+            finish(error=safe_feedback_text(f"无法启动缓存恢复任务 ({type(exc).__name__}): {exc}"))
 
     def _select_subscription_node_by_key(self, node_key: str) -> bool:
         if not node_key or not self._subscription_picker:
@@ -3299,6 +3328,29 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             "不会改动系统代理或当前运行节点..."
         )
 
+        scope_keys = {remote_proxy.proxy_subscription_node_key(item) for item in scope_nodes}
+
+        def show_progress(partial):
+            if (not self.winfo_exists() or generation != self._saved_subscription_load_generation
+                    or self._current_subscription_profile_id() != profile_id):
+                return
+            captured = dict(existing_latency_results)
+            captured.update(partial)
+            self._latency_results = captured
+            self._prefer_quality_sort = False
+            self._set_subscription_nodes(self._subscription_nodes, preserve_key=original_selected_key)
+            passed = sum(remote_proxy.proxy_node_latency_ok(result) for result in partial.values())
+            self._set_status(
+                f"{scope_label}：基础测速 {len(partial)}/{len(scope_keys)}，可连 {passed}，"
+                f"失败 {len(partial) - passed}；其余节点仍在测试，尚未进行 AI 稳定性验证。"
+            )
+
+        progress = CoalescedProgress(self._run_on_ui_thread, show_progress)
+
+        def report(_completed, _total, result):
+            if result.node_key in scope_keys:
+                progress.update(result.node_key, result)
+
         def run():
             results = {}
 
@@ -3320,17 +3372,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     attempts=3,
                     max_workers=remote_proxy.PROXY_LATENCY_DEFAULT_MAX_WORKERS,
                     require_all=True,
+                    progress_callback=report,
                 ), "TCP")
                 if data_plane_scope_nodes:
                     measure_group(data_plane_scope_nodes, lambda:
-                                  local_proxy.measure_proxy_node_data_plane_latencies(data_plane_scope_nodes),
+                                  local_proxy.measure_proxy_node_data_plane_latencies(
+                                      data_plane_scope_nodes, progress_callback=report,
+                                  ),
                                   "HTTPS 实际转发")
                 for item in scope_nodes:
                     key = remote_proxy.proxy_subscription_node_key(item)
                     results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
                         key, False, detail="检测未返回该节点的结果，请重试",
                     ))
+                progress.close()
             except Exception as e:
+                progress.close()
                 payload = {
                     "tcp_ok": False,
                     "latencies": {},
@@ -3554,6 +3611,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 daemon=True,
             ).start()
         except Exception as exc:
+            progress.close()
             self._set_busy(False)
             message = f"启动节点测速与稳定验证任务失败: {exc}"
             self._set_status(message, "error")

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import queue
 import threading
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import customtkinter as ctk
 
@@ -13,6 +15,44 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo
 
 def _error_text(error):
     return safe_feedback_text(str(error).strip() or type(error).__name__)
+
+
+@dataclass(frozen=True)
+class _ReportPresentation:
+    text: str
+    tags: tuple
+    stale: bool = False
+    status: str = ""
+    warning: bool = False
+
+
+def _prepare_text(text):
+    sanitized = safe_feedback_text(text)
+    tags = {}
+    for line, content in enumerate(sanitized.splitlines(), 1):
+        tag = ""
+        if any(marker in content for marker in ("已过期", "无法确定", "失败", "策略组不同", "与已保存策略组不同", "未核对")):
+            tag = "warning"
+        elif content.startswith(("目标：", "运行规则快照")) or "  ·  示例 " in content:
+            tag = "heading"
+        elif content.startswith(("读取时间", "快照", "每个目标", "仅适用", "只分析")):
+            tag = "secondary"
+        if tag:
+            tags.setdefault(tag, []).extend((f"{line}.0", f"{line}.end"))
+    return sanitized, tuple((tag, tuple(ranges)) for tag, ranges in tags.items())
+
+
+def _prepare_report(snapshot, query_host):
+    """Potentially large rule scans and redaction run only on a worker."""
+    if not isinstance(snapshot, diagnostics.RouteSnapshot):
+        raise ValueError("诊断结果为空或格式无效")
+    now = datetime.now(timezone.utc)
+    text = snapshot.explain(query_host, now=now) if query_host else diagnostics.snapshot_report(snapshot, now=now)
+    text, tags = _prepare_text(text)
+    stale = snapshot.stale(now)
+    status = ("快照已过期，请刷新后再判断线路。" if stale else
+              (snapshot.error or "已读取内核运行规则；历史探针通过不等于账号可用，未测试真实出口 IP。"))
+    return _ReportPresentation(text, tags, stale, safe_feedback_text(status), bool(stale or snapshot.error))
 
 
 class RouteDiagnosticsDialog(ctk.CTkToplevel):
@@ -29,6 +69,7 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._snapshot = None
         self._closed = False
         self._busy = False
+        self._reading = False
         self._generation = 0
         self._queue = queue.Queue()
         self._cancelled = threading.Event()
@@ -36,6 +77,7 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._start_id = None
         self._query_host = ""
         self._stale = False
+        self._visible_report_text = ""
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
 
@@ -92,27 +134,26 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._start_id = self.after(0, self.refresh)
 
     def _set_report(self, text):
+        sanitized, tags = _prepare_text(text)
+        self._install_report(_ReportPresentation(sanitized, tags))
+
+    def _install_report(self, presentation):
+        # Only Tk writes remain here; rule interpretation, text processing and
+        # redaction have already completed off the UI thread.
         self._report.configure(state="normal")
         self._report.delete("1.0", "end")
-        sanitized = safe_feedback_text(text)
-        self._report.insert("1.0", sanitized)
-        for line, content in enumerate(sanitized.splitlines(), 1):
-            tag = ""
-            if any(marker in content for marker in ("已过期", "无法确定", "失败", "策略组不同", "与已保存策略组不同", "未核对")):
-                tag = "warning"
-            elif content.startswith(("目标：", "运行规则快照")) or "  ·  示例 " in content:
-                tag = "heading"
-            elif content.startswith(("读取时间", "快照", "每个目标", "仅适用", "只分析")):
-                tag = "secondary"
-            if tag:
-                self._report._textbox.tag_add(tag, f"{line}.0", f"{line}.end")
+        self._report.insert("1.0", presentation.text)
+        for tag, ranges in presentation.tags:
+            for start in range(0, len(ranges), 400):
+                self._report._textbox.tag_add(tag, *ranges[start:start + 400])
         self._report.configure(state="disabled")
+        self._visible_report_text = presentation.text
 
     def _copy_report(self):
         if self._closed or self._busy or not self._snapshot:
             return
         try:
-            text = safe_feedback_text(self._report.get("1.0", "end").strip())
+            text = self._visible_report_text.strip()
             self.clipboard_clear()
             self.clipboard_append(text)
             self._status.configure(text="已复制本页脱敏报告；运行快照与历史探针均不代表实时请求结果。", text_color=COLORS["muted"])
@@ -122,9 +163,10 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
     def _set_busy(self, value):
         self._busy = value
         state = "disabled" if value else "normal"
-        self._refresh.configure(state=state, text="读取中…" if value else "刷新运行状态")
+        self._refresh.configure(state=state, text=("读取中…" if self._reading else "分析中…") if value else "刷新运行状态")
         self._query.configure(state="normal" if not value and self._snapshot else "disabled")
         self._copy.configure(state="normal" if not value and self._snapshot else "disabled")
+        self._overview.configure(state="normal" if not value and self._snapshot else "disabled")
         self._scope_combo.configure(state="disabled" if value else "readonly")
 
     def _switch_scope(self, scope):
@@ -140,26 +182,33 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._start_id = None
         if self._closed or self._busy:
             return
-        self._generation += 1
-        generation, scope = self._generation, self._scopes[self._scope]
+        self._reading = True
         self._snapshot = None
-        self._set_busy(True)
         self._status.configure(text="正在读取所选位置；只查询受管内核，不向输入的网址发请求。", text_color=COLORS["muted"])
         self._set_report("正在获取运行快照。旧结果已失效，不会当成本次检查结果。")
+        self._start_operation(read=True)
+
+    def _start_operation(self, *, read=False):
+        self._generation += 1
+        generation, scope = self._generation, self._scopes[self._scope]
+        self._set_busy(True)
         results, loader, cancelled = self._queue, self._loader, self._cancelled
+        current_snapshot, query_host = self._snapshot, self._query_host
 
         def worker():
             try:
-                payload = (generation, loader(scope), "")
+                snapshot = loader(scope) if read else current_snapshot
+                presentation = _prepare_report(snapshot, query_host)
+                payload = (generation, snapshot, presentation, "")
             except Exception as exc:
-                payload = (generation, None, _error_text(exc))
+                payload = (generation, None, None, _error_text(exc))
             if not cancelled.is_set():
                 results.put(payload)
 
         try:
             threading.Thread(target=worker, name="read-only-route-diagnostics", daemon=True).start()
         except Exception as exc:
-            results.put((generation, None, _error_text(exc)))
+            results.put((generation, None, None, _error_text(exc)))
         if self._poll_id is not None:
             self.after_cancel(self._poll_id)
         self._poll_id = self.after(80, self._poll)
@@ -169,23 +218,30 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         if self._closed:
             return
         try:
-            generation, snapshot, error = self._queue.get_nowait()
+            generation, snapshot, presentation, error = self._queue.get_nowait()
         except queue.Empty:
             pass
         else:
             if generation == self._generation:
                 self._snapshot = snapshot
                 self._set_busy(False)
-                if error or not isinstance(snapshot, diagnostics.RouteSnapshot):
+                if error or not isinstance(snapshot, diagnostics.RouteSnapshot) or not isinstance(presentation, _ReportPresentation):
                     self._show_failure(error or "诊断结果为空或格式无效")
                 else:
-                    self._render()
+                    try:
+                        self._stale = presentation.stale
+                        self._install_report(presentation)
+                        self._status.configure(text=presentation.status,
+                                               text_color=COLORS["warning"] if presentation.warning else COLORS["muted"])
+                    except Exception as exc:
+                        self._show_failure(exc)
         try:
-            if self._snapshot and self._snapshot.stale() != self._stale:
+            if not self._busy and self._snapshot and self._snapshot.stale() != self._stale:
                 self._render()
         except Exception as exc:
             self._show_failure(exc)
-        self._poll_id = self.after(80 if self._busy else 1000, self._poll)
+        if self._poll_id is None:
+            self._poll_id = self.after(80 if self._busy else 1000, self._poll)
 
     def _show_failure(self, error):
         self._snapshot = None
@@ -194,23 +250,11 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._set_report(_error_text(error))
 
     def _render(self):
-        if not self._snapshot:
+        if self._closed or self._busy or not self._snapshot:
             return
-        try:
-            self._stale = self._snapshot.stale()
-            self._render_snapshot()
-        except Exception as exc:
-            self._show_failure(exc)
-
-    def _render_snapshot(self):
-        snapshot = self._snapshot
-        text = snapshot.explain(self._query_host) if self._query_host else diagnostics.snapshot_report(snapshot)
-        self._set_report(text)
-        self._status.configure(
-            text="快照已过期，请刷新后再判断线路。" if snapshot.stale() else
-                 (snapshot.error or "已读取内核运行规则；历史探针通过不等于账号可用，未测试真实出口 IP。"),
-            text_color=COLORS["warning"] if snapshot.stale() or snapshot.error else COLORS["muted"],
-        )
+        self._reading = False
+        self._status.configure(text="正在后台分析运行快照；仅本地计算，不向目标发请求。", text_color=COLORS["muted"])
+        self._start_operation()
 
     def _show_query(self):
         if self._closed or self._busy or not self._snapshot:
@@ -226,9 +270,10 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._render()
 
     def _show_overview(self):
+        if self._closed or self._busy:
+            return
         self._query_host = ""
-        if not self._busy:
-            self._render()
+        self._render()
 
     def destroy(self):
         if self._closed:

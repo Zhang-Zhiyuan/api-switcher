@@ -3093,6 +3093,7 @@ def test_local_latency_gate_skips_first_unstable_and_selects_second_stable(monke
 
     tab._measure_subscription_latencies()
 
+    assert callable(calls["measure_kwargs"].pop("progress_callback"))
     assert calls["measure_kwargs"] == {
         "timeout": 3.0,
         "attempts": 3,
