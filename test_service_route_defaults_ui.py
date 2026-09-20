@@ -11,8 +11,8 @@ from core import proxy_routing
 from ui.dialogs import service_routes_dialog as routes_ui
 
 
-HOME_SERVICES = {"openai", "claude", "google_ai", "x_twitter", "reddit"}
-DC_SERVICES = {"youtube", "google", "github", "huggingface", "discord", "telegram"}
+HOME_SERVICES = {"openai", "claude", "google_ai"}
+DC_SERVICES = {"youtube", "google", "github", "huggingface", "discord", "telegram", "x_twitter", "reddit"}
 EXPECTED = {**dict.fromkeys(HOME_SERVICES, "home"), **dict.fromkeys(DC_SERVICES, "dc")}
 
 
@@ -113,6 +113,25 @@ def test_auto_fill_preserves_saved_binding_pin_and_disabled_website(route_harnes
     assert draft["builtin_sites"]["youtube"] is False
     assert draft["service_profile_bindings"]["openai"] == "home"
     assert draft["service_profile_bindings"]["google"] == "dc"
+    assert not harness.saved
+
+
+@pytest.mark.parametrize("service", ["x_twitter", "reddit"])
+def test_social_default_change_preserves_saved_home_route_until_explicit_reallocation(route_harness, service):
+    harness = route_harness(preferences={
+        "service_profile_bindings": {service: "home"},
+        "service_node_bindings": {service: "home-one"},
+        "builtin_sites": {service: True},
+    })
+    dialog = harness.open()
+    draft = dialog._drafts[dialog._scope]
+    assert draft["service_profile_bindings"][service] == "home"
+    assert draft["service_node_bindings"][service] == "home-one"
+    assert "默认非家宽" in dialog._rows[service]["state_label"].cget("text")
+    assert "建议非家宽" in dialog._rows[service]["description"]["hint"]
+    dialog._select_profile(service, routes_ui.AUTO_PROFILE)
+    assert dialog._drafts[dialog._scope]["service_profile_bindings"][service] == "dc"
+    assert service not in dialog._drafts[dialog._scope]["service_node_bindings"]
     assert not harness.saved
 
 

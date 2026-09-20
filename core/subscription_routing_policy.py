@@ -13,16 +13,18 @@ from core.local_proxy_constants import LOCAL_PROXY_BUILTIN_SITE_IDS
 
 # Traffic-allocation defaults, not claims that these services require a
 # residential IP. Unknown/custom services are deliberately never inferred.
+# Reserve the residential default for AI; ordinary browsing (including social
+# sites) uses datacenter subscriptions unless the user deliberately overrides it.
 _TARGETS = (
     ("residential", "家宽", (("openai", "OpenAI / Codex"),
                             ("claude", "Claude Code"),
-                            ("google_ai", "Google AI / Gemini"),
-                            ("x_twitter", "X / Twitter"),
-                            ("reddit", "Reddit"))),
+                            ("google_ai", "Google AI / Gemini"))),
     ("datacenter", "非家宽", (("youtube", "YouTube"),
                            ("google", "Google 搜索/账号"),
                            ("github", "GitHub"),
                            ("huggingface", "Hugging Face"),
+                           ("x_twitter", "X / Twitter"),
+                           ("reddit", "Reddit"),
                            ("discord", "Discord"),
                            ("telegram", "Telegram"))),
 )

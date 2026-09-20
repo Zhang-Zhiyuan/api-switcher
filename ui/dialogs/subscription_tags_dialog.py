@@ -39,7 +39,7 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
                      text_color=COLORS["text"], anchor="w").pack(fill="x")
         notice = ctk.CTkLabel(
             header, text="按订阅实际用途手动分类；标记不代表出口 IP 已经过质量验证。\n"
-                         "打开目标分流后，AI 优先家宽，视频、搜索、下载、通信优先非家宽。\n"
+                         "打开目标分流后，AI 服务优先家宽，其余内置网站（含 X/Reddit）优先非家宽。\n"
                          "仅补齐未配置目标，手动选择优先；标记保存不切换线路，分流需另点“保存并应用”。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )

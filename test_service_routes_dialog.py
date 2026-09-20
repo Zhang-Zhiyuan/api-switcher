@@ -81,11 +81,8 @@ def test_tagged_routes_only_fill_current_scope_and_preserve_pinned_bindings(edit
     assert draft["service_profile_bindings"]["google_ai"] == "home"
     assert draft["service_profile_bindings"]["google"] == "dc"
     assert draft["builtin_sites"]["google"] is True
-    for service in ("github", "huggingface", "discord", "telegram"):
+    for service in ("github", "huggingface", "discord", "telegram", "x_twitter", "reddit"):
         assert draft["service_profile_bindings"][service] == "dc"
-        assert draft["builtin_sites"][service] is True
-    for service in ("x_twitter", "reddit"):
-        assert draft["service_profile_bindings"][service] == "home"
         assert draft["builtin_sites"][service] is True
     assert draft["service_node_bindings"] == before[first]["service_node_bindings"]
     assert dialog._drafts[second] == before[second]

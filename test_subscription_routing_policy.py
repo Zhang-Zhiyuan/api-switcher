@@ -5,8 +5,8 @@ import pytest
 from core.subscription_routing_policy import preferred_network_type, suggest_tagged_routes
 
 
-HOME_SERVICES = {"openai", "claude", "google_ai", "x_twitter", "reddit"}
-DC_SERVICES = {"youtube", "google", "github", "huggingface", "discord", "telegram"}
+HOME_SERVICES = {"openai", "claude", "google_ai"}
+DC_SERVICES = {"youtube", "google", "github", "huggingface", "x_twitter", "reddit", "discord", "telegram"}
 EXPECTED_BINDINGS = {**dict.fromkeys(HOME_SERVICES, "home"), **dict.fromkeys(DC_SERVICES, "dc")}
 
 
@@ -27,7 +27,7 @@ def test_unique_labels_fill_defaults_without_mutating_inputs_or_enabling_disable
     draft, notices = suggest_tagged_routes(preferences, catalog)
     assert (preferences, catalog) == before
     assert draft["service_profile_bindings"] == {key: value for key, value in EXPECTED_BINDINGS.items() if key != "github"}
-    assert draft["builtin_sites"] == {**dict.fromkeys(DC_SERVICES | {"x_twitter", "reddit"}, True), "github": False}
+    assert draft["builtin_sites"] == {**dict.fromkeys(DC_SERVICES, True), "github": False}
     assert "service_node_bindings" not in draft
     assert len(notices) == 3
     assert all("草稿" in notice for notice in notices[:2])
@@ -47,7 +47,7 @@ def test_existing_invalid_disabled_and_empty_bindings_are_never_replaced():
     expected = {key: value for key, value in EXPECTED_BINDINGS.items() if key != "google_ai"}
     assert draft["service_profile_bindings"] == {**expected, **preferences["service_profile_bindings"]}
     assert draft["service_node_bindings"] == preferences["service_node_bindings"]
-    assert draft["builtin_sites"] == {**dict.fromkeys(DC_SERVICES | {"x_twitter", "reddit"}, True), "youtube": False}
+    assert draft["builtin_sites"] == {**dict.fromkeys(DC_SERVICES, True), "youtube": False}
     assert "已保留" in notices[-1]
 
 
@@ -154,6 +154,8 @@ def test_default_policy_covers_known_services_but_never_guesses_custom_targets()
     from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICE_IDS, LOCAL_PROXY_BUILTIN_SITE_IDS
 
     assert HOME_SERVICES | DC_SERVICES == LOCAL_PROXY_AI_SERVICE_IDS | LOCAL_PROXY_BUILTIN_SITE_IDS
+    assert HOME_SERVICES == LOCAL_PROXY_AI_SERVICE_IDS
+    assert DC_SERVICES == LOCAL_PROXY_BUILTIN_SITE_IDS
     for service in HOME_SERVICES:
         assert preferred_network_type(service) == "residential"
     for service in DC_SERVICES:
@@ -162,7 +164,7 @@ def test_default_policy_covers_known_services_but_never_guesses_custom_targets()
         assert preferred_network_type(service) == ""
 
 
-@pytest.mark.parametrize("service", sorted(DC_SERVICES | {"x_twitter", "reddit"}))
+@pytest.mark.parametrize("service", sorted(DC_SERVICES))
 @pytest.mark.parametrize("value", [False, 0, None, "false"])
 def test_explicitly_disabled_or_malformed_site_is_preserved_without_existing_binding(service, value):
     draft, notices = suggest_tagged_routes({"builtin_sites": {service: value}}, _catalog())
@@ -206,3 +208,29 @@ def test_malformed_candidate_count_falls_back_to_legacy_node_metadata(count):
     catalog[1]["auto_route_candidate_count"] = count
     _draft, notices = suggest_tagged_routes({}, catalog)
     assert "暂无备用" in notices[1]
+
+
+@pytest.mark.parametrize("service", ["x_twitter", "reddit"])
+def test_social_defaults_do_not_consume_home_subscription_when_datacenter_is_unavailable(service):
+    draft, _ = suggest_tagged_routes({}, _catalog()[:1])
+    assert service not in draft["service_profile_bindings"]
+    assert draft["service_profile_bindings"] == dict.fromkeys(HOME_SERVICES, "home")
+
+
+@pytest.mark.parametrize("service", ["x_twitter", "reddit"])
+@pytest.mark.parametrize("strategy", ["automatic", "fixed", "pool", "default"])
+def test_social_policy_change_never_overwrites_saved_manual_strategy(service, strategy):
+    preferences = {"builtin_sites": {service: True}}
+    if strategy == "default":
+        preferences["service_route_modes"] = {service: "default"}
+    else:
+        preferences["service_profile_bindings"] = {service: "home"}
+        if strategy == "fixed":
+            preferences["service_node_bindings"] = {service: "home-one"}
+        elif strategy == "pool":
+            preferences["service_node_pools"] = {service: ["home-one"]}
+    before = copy.deepcopy(preferences)
+    draft, _ = suggest_tagged_routes(preferences, _catalog())
+    assert preferences == before
+    for field in ("service_profile_bindings", "service_node_bindings", "service_node_pools", "service_route_modes"):
+        assert draft.get(field, {}).get(service) == preferences.get(field, {}).get(service)

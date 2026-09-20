@@ -228,7 +228,7 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 ("github.com", "datacenter"), ("raw.githubusercontent.com", "home-one"),
                 ("huggingface.co", "datacenter"), ("hf.co", "datacenter"), ("i.ytimg.com", "home-two"),
                 ("inherited.example.test", "home-one"),
-                ("x.com", "home-one"), ("reddit.com", "home-one"),
+                ("x.com", "datacenter"), ("reddit.com", "datacenter"),
                 ("discord.com", "datacenter"), ("telegram.org", "datacenter"),
             ):
                 actual_rule = proxy_route_diagnostics.match_rules(host, runtime["rules"], runtime["mode"])

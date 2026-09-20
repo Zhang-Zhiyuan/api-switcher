@@ -70,8 +70,8 @@ def test_overview_displays_manual_network_tag_and_preserves_google_home_route():
     ("discord", "residential", "非家宽"),
     ("telegram", "residential", "非家宽"),
     ("claude", "datacenter", "家宽"),
-    ("reddit", "datacenter", "家宽"),
-    ("x_twitter", "datacenter", "家宽"),
+    ("reddit", "residential", "非家宽"),
+    ("x_twitter", "residential", "非家宽"),
 ])
 def test_default_type_hint_never_overrides_a_fixed_route(service, tag, label):
     prefs = _preferences()
