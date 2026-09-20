@@ -148,3 +148,118 @@ def suggest_tagged_routes(
     if kept:
         notices.append(f"已保留{ '、'.join(kept) }的已有线路或手动修改，未覆盖节点及启用状态。")
     return draft, notices
+
+
+_LEGACY_SOCIAL_TARGETS = (("x_twitter", "X / Twitter"), ("reddit", "Reddit"))
+
+
+def _legacy_cleanup_authority_valid(preferences: dict) -> bool:
+    """Cleanup is not a configuration repair path; ambiguous authority wins."""
+    fields = ("service_profile_bindings", "service_node_bindings", "builtin_sites",
+              "service_route_modes", "service_node_pools")
+    if any(key in preferences and not isinstance(preferences[key], dict) for key in fields):
+        return False
+    if any(not isinstance(service, str) for key in fields for service in preferences.get(key, {})):
+        return False
+    for key, limit in (("service_profile_bindings", 64), ("service_node_bindings", 128)):
+        if any(not isinstance(value, str) or len(value) > limit or value != value.strip()
+               or any(ord(char) < 32 for char in value) for value in preferences.get(key, {}).values()):
+            return False
+    if any(not isinstance(value, bool) for value in preferences.get("builtin_sites", {}).values()):
+        return False
+    profiles = preferences.get("service_profile_bindings", {})
+    pins = preferences.get("service_node_bindings", {})
+    modes = preferences.get("service_route_modes", {})
+    pools = preferences.get("service_node_pools", {})
+    for service, mode in modes.items():
+        if mode != "default" or profiles.get(service) or pins.get(service) or pools.get(service):
+            return False
+    for service, keys in pools.items():
+        if (not isinstance(keys, list) or not 1 <= len(keys) <= 16 or not profiles.get(service)
+                or pins.get(service) or modes.get(service)):
+            return False
+        seen = set()
+        for key in keys:
+            if (not isinstance(key, str) or not key or key != key.strip() or len(key) > 128
+                    or any(ord(char) < 32 for char in key) or key in seen):
+                return False
+            seen.add(key)
+    if any(value and not profiles.get(service) for service, value in pins.items()):
+        return False
+    return True
+
+
+def _legacy_catalog_groups(catalog) -> dict[str, list[dict]]:
+    groups = {}
+    for row in catalog if isinstance(catalog, (list, tuple)) else ():
+        if not isinstance(row, dict):
+            continue
+        profile_id = row.get("id")
+        if (not isinstance(profile_id, str) or not profile_id or profile_id != profile_id.strip()
+                or len(profile_id) > 64 or any(ord(char) < 32 for char in profile_id)):
+            continue
+        groups.setdefault(profile_id, []).append(row)
+    return groups
+
+
+def legacy_social_route_candidates(
+    preferences: dict, catalog: list[dict], protected_services=(),
+) -> tuple[str, ...]:
+    """Identify old social defaults heuristically, without assuming provenance.
+
+    Detection does not require an available replacement. Explicit node/pool,
+    default, disabled and in-editor protected choices are never candidates.
+    """
+    if not isinstance(preferences, dict):
+        raise ValueError("服务分流草稿必须是对象")
+    if not _legacy_cleanup_authority_valid(preferences):
+        return ()
+    protected = ({protected_services} if isinstance(protected_services, str)
+                 else set(protected_services or ()))
+    profiles = preferences.get("service_profile_bindings", {})
+    pins = preferences.get("service_node_bindings", {})
+    pools = preferences.get("service_node_pools", {})
+    modes = preferences.get("service_route_modes", {})
+    sites = preferences.get("builtin_sites", {})
+    groups = _legacy_catalog_groups(catalog)
+    candidates = []
+    for service, _label in _LEGACY_SOCIAL_TARGETS:
+        if (service in protected or service in pins or service in pools or service in modes
+                or (service in sites and sites[service] is not True)):
+            continue
+        rows = groups.get(profiles.get(service), ())
+        if rows and all(row.get("network_type") == "residential" for row in rows):
+            candidates.append(service)
+    return tuple(candidates)
+
+
+def cleanup_legacy_social_routes(
+    preferences: dict, catalog: list[dict], protected_services=(),
+) -> tuple[dict, list[str]]:
+    """Explicit one-click draft cleanup; never called as a live migration.
+
+    Old versions did not persist how a binding was chosen. A residential
+    social binding may be intentional; callers must present the heuristic and
+    require the existing editor's save/apply action before changing live routes.
+    """
+    if not isinstance(preferences, dict):
+        raise ValueError("服务分流草稿必须是对象")
+    draft = copy.deepcopy(preferences)
+    notices = ["旧版未记录来源，可能是手动选择；这里只识别旧版 X / Reddit 家宽默认分流，不代表家宽线路无效。"]
+    if not _legacy_cleanup_authority_valid(draft):
+        return draft, [*notices, "服务分流草稿格式无效，未清理；请先修正已有配置。"]
+    candidates = legacy_social_route_candidates(draft, catalog, protected_services)
+    if not candidates:
+        return draft, [*notices, "没有符合清理条件的旧版社交分流；已有手动策略、保护项及启用状态均保持不变。"]
+    eligible = {profile_id for profile_id, rows in _legacy_catalog_groups(catalog).items()
+                if all(row.get("network_type") == "datacenter" and not _unavailable_reason(row) for row in rows)}
+    labels = "、".join(label for service, label in _LEGACY_SOCIAL_TARGETS if service in candidates)
+    if not eligible:
+        return draft, [*notices, f"{labels} 未清理：没有可用的非家宽订阅，请先标记并拉取缓存；已保留原分流。"]
+    if len(eligible) != 1:
+        return draft, [*notices, f"{labels} 未清理：存在 {len(eligible)} 个可用非家宽订阅，请手动选择；已保留原分流。"]
+    destination = next(iter(eligible))
+    for service in candidates:
+        draft["service_profile_bindings"][service] = destination
+    notices.append(f"已将{labels}改为唯一可用的非家宽订阅；仅修改草稿，保存并应用后生效，未更改节点策略及启用状态。")
+    return draft, notices

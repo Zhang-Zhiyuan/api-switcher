@@ -9,7 +9,10 @@ import uuid
 import customtkinter as ctk
 
 from core import proxy_routing
-from core.subscription_routing_policy import preferred_network_type, suggest_tagged_routes
+from core.subscription_routing_policy import (
+    cleanup_legacy_social_routes, legacy_social_route_candidates,
+    preferred_network_type, suggest_tagged_routes,
+)
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style, textbox_style
@@ -160,22 +163,25 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", before=header)
         tools_row = ctk.CTkFrame(footer, fg_color="transparent")
+        self._tools_row = tools_row
+        self._tools_columns = None
         tools_row.pack(fill="x", padx=20, pady=(6, 2))
         self._custom_toggle = ctk.CTkButton(tools_row, text="＋ 自定义目标", width=112, command=self._toggle_custom_form,
                                            **button_style("secondary", compact=True))
-        self._custom_toggle.pack(side="left")
         self._tags_button = ctk.CTkButton(tools_row, text="订阅标记", width=88, state="disabled",
                                          command=self._open_subscription_tags, **button_style("secondary", compact=True))
-        self._tags_button.pack(side="left", padx=(8, 0))
         self._tag_routes_button = ctk.CTkButton(tools_row, text="补齐默认分流", width=106, state="disabled",
                                                command=self._suggest_tagged_routes, **button_style("secondary", compact=True))
-        self._tag_routes_button.pack(side="left", padx=(8, 0))
+        self._legacy_cleanup_button = ctk.CTkButton(
+            tools_row, text="整理旧版分流", width=150, state="disabled",
+            command=self._cleanup_legacy_routes, **button_style("secondary", compact=True),
+        )
         self._bulk_button = ctk.CTkButton(tools_row, text="批量设置", width=88, state="disabled",
                                          command=self._open_bulk_dialog, **button_style("primary", compact=True))
-        self._bulk_button.pack(side="left", padx=(8, 0))
         self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单（0）", width=140, command=self._toggle_preview,
                                             **button_style("secondary", compact=True))
-        self._preview_toggle.pack(side="right")
+        tools_row.bind("<Configure>", self._layout_tools, add="+")
+        self._layout_tools()
         add_row = ctk.CTkFrame(footer, fg_color="transparent")
         self._custom_form = add_row
         self._custom_entry = ctk.CTkEntry(add_row, placeholder_text="新增自定义域名、网址或 IP / CIDR", **input_style())
@@ -258,6 +264,21 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             button.grid(row=index // columns, column=index % columns, sticky="ew",
                         padx=(0, 8) if index % columns < columns - 1 else 0, pady=(4, 0))
 
+    def _layout_tools(self, event=None):
+        width = (event.width if event else self._tools_row.winfo_width()) / self._tools_row._get_widget_scaling()
+        columns = 6 if width >= 940 else 3
+        if columns == self._tools_columns:
+            return
+        self._tools_columns = columns
+        for col in range(6):
+            self._tools_row.grid_columnconfigure(
+                col, weight=1 if col < columns else 0, uniform="route-tools" if col < columns else "",
+            )
+        for index, button in enumerate((self._custom_toggle, self._tags_button, self._tag_routes_button,
+                                         self._legacy_cleanup_button, self._bulk_button, self._preview_toggle)):
+            button.grid(row=index // columns, column=index % columns, sticky="ew",
+                        padx=(0, 8) if index % columns < columns - 1 else 0, pady=(2, 2))
+
     def _layout_scope_toolbar(self, event=None):
         if self._copy_button is None:
             return
@@ -314,6 +335,44 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._reload_catalog()
         if self._on_tags_saved:
             self._on_tags_saved()
+
+    def _legacy_cleanup_protected(self):
+        return self._manually_edited[self._scope] | {key for key in self._rows if self._row_changed(key)}
+
+    def _update_legacy_cleanup(self):
+        """Detection is read-only; absent provenance never authorizes a write."""
+        candidates = legacy_social_route_candidates(
+            self._drafts[self._scope], self._catalog, protected_services=self._legacy_cleanup_protected(),
+        )
+        self._legacy_cleanup_button.configure(
+            text=f"整理旧版分流（{len(candidates)}）" if candidates else "整理旧版分流",
+            state="normal" if candidates and not self._busy else "disabled",
+        )
+        return candidates
+
+    def _cleanup_legacy_routes(self):
+        if self._busy or self._closed or self._scope not in self._drafts:
+            return
+        before = self._drafts[self._scope]
+        draft, notices = cleanup_legacy_social_routes(
+            before, self._catalog, protected_services=self._legacy_cleanup_protected(),
+        )
+        changed = {service for service, profile in draft["service_profile_bindings"].items()
+                   if before["service_profile_bindings"].get(service) != profile}
+        self._drafts[self._scope] = draft
+        self._manually_edited[self._scope].update(changed)
+        self._default_notices[self._scope] = notices
+        self._preview_open = True
+        self._clear_filters()
+        self._render()
+        self._changed()
+        self._details.pack_forget()
+        self._status.configure(
+            text=(f"已整理 {len(changed)} 项疑似旧版分流，仅修改当前位置草稿。"
+                  "旧版未记录来源，可能是手动选择；请核对清单，再保存并应用。") if changed else
+                 "没有可自动整理的旧版分流，原选择已保留；请在修改清单查看原因。",
+            text_color=COLORS["accent"] if changed else COLORS["warning"],
+        )
 
     def _suggest_tagged_routes(self):
         if self._busy or self._closed or self._scope not in self._drafts:
@@ -847,6 +906,13 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if missing:
                 self._status.configure(text=self._status.cget("text") + " 部分用途未能自动分配，展开修改清单查看原因。",
                                        text_color=COLORS["warning"])
+        candidates = self._update_legacy_cleanup()
+        if candidates:
+            self._status.configure(
+                text=self._status.cget("text") + f" 检测到 {len(candidates)} 项疑似旧版 X/Reddit 家宽绑定；"
+                     "旧版未记录选择来源，可点“整理旧版分流”生成调整草稿。",
+                text_color=COLORS["warning"],
+            )
 
     def _switch_scope(self, scope):
         if not self._busy and scope in self._drafts:
@@ -961,7 +1027,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _set_editable(self, enabled):
         state = "normal" if enabled else "disabled"
         for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button,
-                       self._tags_button, self._tag_routes_button, self._bulk_button):
+                       self._tags_button, self._tag_routes_button, self._bulk_button, self._legacy_cleanup_button):
             if button:
                 button.configure(state=state)
         self._scope_combo.configure(state="readonly" if enabled and len(self._scopes) > 1 else "disabled")
@@ -973,6 +1039,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if row["delete"]:
                 row["delete"].configure(state=state)
             self._refresh_row(service)
+        if self._drafts:
+            self._update_legacy_cleanup()
 
     def _apply(self):
         if self._busy or not self._drafts:
