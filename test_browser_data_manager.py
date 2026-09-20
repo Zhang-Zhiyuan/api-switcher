@@ -1,6 +1,8 @@
+import json
 import sqlite3
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +19,75 @@ def _profile(path: Path) -> BrowserProfile:
         profile_mode="managed",
         user_data_dir=str(path),
     )
+
+
+@pytest.mark.parametrize("hidden_row", [
+    {"ProcessId": 2, "CommandLine": None},
+    {"ProcessId": 2, "CommandLine": "   "},
+    {"ProcessId": 2},
+    None,
+])
+def test_partial_browser_process_visibility_does_not_authorize_cleanup(tmp_path, monkeypatch, hidden_row):
+    manager = BrowserDataManager()
+    rows = [{"ProcessId": 1, "CommandLine": 'chrome.exe --user-data-dir="C:/unrelated"'}, hidden_row]
+    monkeypatch.setattr(browser_data_module.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout=json.dumps(rows), stderr="",
+    ))
+
+    assert manager._is_profile_used_by_browser_process(_profile(tmp_path), tmp_path) is None
+
+
+@pytest.mark.parametrize("rows, expected", [
+    ([], False),
+    ([{"CommandLine": 'chrome.exe --user-data-dir="C:/unrelated"'}], False),
+    (None, None),
+])
+def test_browser_process_visibility_result(tmp_path, monkeypatch, rows, expected):
+    monkeypatch.setattr(browser_data_module.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout=json.dumps(rows), stderr="",
+    ))
+    manager = BrowserDataManager()
+
+    assert manager._is_profile_used_by_browser_process(_profile(tmp_path), tmp_path) is expected
+
+
+def test_matching_browser_process_wins_over_hidden_rows(tmp_path, monkeypatch):
+    rows = [None, {"CommandLine": f'chrome.exe --user-data-dir="{tmp_path}"'}]
+    monkeypatch.setattr(browser_data_module.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout=json.dumps(rows), stderr="",
+    ))
+    manager = BrowserDataManager()
+
+    assert manager._is_profile_used_by_browser_process(_profile(tmp_path), tmp_path) is True
+
+
+@pytest.mark.parametrize("returncode, stdout, expected", [
+    (1, "", True),
+    (0, "chrome\n", True),
+    (0, "", False),
+])
+def test_browser_process_fallback_fails_closed_on_query_error(tmp_path, monkeypatch, returncode, stdout, expected):
+    manager = BrowserDataManager()
+    monkeypatch.setattr(manager, "_is_profile_used_by_browser_process", lambda *a: None)
+    monkeypatch.setattr(browser_data_module.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr="",
+    ))
+
+    assert manager.is_browser_running(_profile(tmp_path)) is expected
+
+
+def test_site_cleanup_stops_when_profile_lock_cannot_be_checked(tmp_path, monkeypatch):
+    (tmp_path / "SingletonLock").touch()
+    manager = BrowserDataManager()
+
+    def failed_lock(_path):
+        raise PermissionError("lock unavailable")
+
+    monkeypatch.setattr(manager, "_is_file_locked", failed_lock)
+    monkeypatch.setattr(manager, "_is_profile_used_by_browser_process", lambda *a: False)
+    assert manager.is_browser_running(_profile(tmp_path)) is True
+    with pytest.raises(RuntimeError, match="浏览器"):
+        manager.clear_site_data(_profile(tmp_path), "both")
 
 
 def test_profile_lock_guard_returns_false_when_lock_files_are_free(tmp_path, monkeypatch):

@@ -276,13 +276,11 @@ def install_proxy_integration(
         # The installer reports incremental ownership on failure. Remove only
         # a brand-new attempt; an existing compatible integration must remain
         # available when a repair encounters a transient profile-file error.
-        if not previous_compatible_hooks:
-            _remove_profile_hooks(
-                target.distro,
-                created_profiles=created_profiles,
-                strict=False,
-            )
-        raise RuntimeError(_safe_process_error(install_result, "写入 WSL 代理环境入口失败"))
+        cleanup_detail = _rollback_failed_proxy_integration(
+            target.distro, created_profiles=created_profiles,
+            remove_hooks=not previous_compatible_hooks,
+        )
+        raise RuntimeError(_safe_process_error(install_result, "写入 WSL 代理环境入口失败") + cleanup_detail)
     previous_rule = ""
     if str(previous.get("owner") or "").casefold() == "api-switcher":
         candidate = str(previous.get("firewall_rule") or "").strip()
@@ -322,15 +320,18 @@ def install_proxy_integration(
         # verification fails while the virtual subnet is changing.
         if previous_rule and previous_rule != firewall_rule:
             _delete_firewall_rule(previous_rule, strict=True)
-    except Exception:
-        if new_rule_created and firewall_rule:
-            _delete_firewall_rule(firewall_rule, strict=False)
+    except Exception as exc:
         # Rewriting an already-managed distro is safe to retain: the managed
         # shell script resolves the current WSL gateway dynamically and still
         # uses the same active proxy port. For a brand-new distro, remove only
         # the hooks created by this failed attempt.
-        if not previous_compatible_hooks:
-            _remove_profile_hooks(target.distro, created_profiles=created_profiles, strict=False)
+        cleanup_detail = _rollback_failed_proxy_integration(
+            target.distro, created_profiles=created_profiles,
+            remove_hooks=not previous_compatible_hooks,
+            firewall_rule=firewall_rule if new_rule_created else "",
+        )
+        if cleanup_detail:
+            raise RuntimeError(f"{exc}{cleanup_detail}") from exc
         raise
 
     return WSLProxyIntegrationResult(
@@ -826,6 +827,30 @@ wait "$p1" || true
 wait "$p2" || true
 cat "$tmp/codex" "$tmp/claude"
 '''.strip()
+
+
+def _rollback_failed_proxy_integration(
+    distro: str, *, created_profiles: tuple[str, ...], remove_hooks: bool,
+    firewall_rule: str = "",
+) -> str:
+    """Try each newly-owned rollback independently and retain its failure detail."""
+    def detail(exc):
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return "清理命令执行超时"
+        return redact_sensitive_text(str(exc).strip() or type(exc).__name__, max_length=300)
+
+    errors = []
+    if firewall_rule:
+        try:
+            _delete_firewall_rule(firewall_rule, strict=True)
+        except Exception as exc:
+            errors.append(f"新防火墙规则 {firewall_rule}：{detail(exc)}")
+    if remove_hooks:
+        try:
+            _remove_profile_hooks(distro, created_profiles=created_profiles, strict=True)
+        except Exception as exc:
+            errors.append(f"WSL 环境入口 {distro}：{detail(exc)}")
+    return "；WSL 回滚未完成，请检查以下受管项：" + "；".join(errors) if errors else ""
 
 
 def _remove_profile_hooks(

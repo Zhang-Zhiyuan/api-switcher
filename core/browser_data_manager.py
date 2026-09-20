@@ -70,8 +70,8 @@ class BrowserDataManager:
                     logger.debug(f"File locked: {candidate}")
                     return True
             except Exception as e:
-                logger.debug(f"Error checking lock on {candidate}: {e}")
-                continue
+                logger.warning(f"Unable to verify browser profile lock {candidate}: {e}")
+                return True
 
         # 2) Match running Chromium processes by --user-data-dir. This avoids blocking
         # cleanup just because an unrelated Chrome/Edge window is open.
@@ -94,6 +94,9 @@ class BrowserDataManager:
                 text=True,
                 timeout=5,
             )
+            if result.returncode != 0:
+                logger.warning("Browser process fallback query failed; cleanup remains blocked")
+                return True
             output = (result.stdout or "").lower()
             is_running = any(name in output for name in process_names)
             if is_running:
@@ -146,22 +149,23 @@ class BrowserDataManager:
                 return None
 
             rows = payload if isinstance(payload, list) else [payload]
-            process_count = 0
-            visible_command_count = 0
+            incomplete = False
             for row in rows:
                 if not isinstance(row, dict):
+                    incomplete = True
                     continue
-                process_count += 1
-                command_line = str(row.get("CommandLine") or "")
-                if not command_line:
+                command_line = row.get("CommandLine")
+                if not isinstance(command_line, str) or not command_line.strip():
+                    incomplete = True
                     continue
-                visible_command_count += 1
                 if self._command_line_uses_profile(command_line, profile_key):
                     logger.debug(f"Browser process uses profile {profile_dir}: pid={row.get('ProcessId')}")
                     return True
 
-            if process_count > 0 and visible_command_count == 0:
-                logger.debug("Browser processes found but command lines are unavailable; using conservative fallback")
+            if incomplete:
+                # One readable unrelated process cannot vouch for another
+                # process whose command line was hidden by Windows permissions.
+                logger.debug("Browser process command lines are incomplete; using conservative fallback")
                 return None
             return False
         except subprocess.TimeoutExpired:

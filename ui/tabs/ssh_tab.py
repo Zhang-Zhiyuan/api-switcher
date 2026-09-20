@@ -4662,7 +4662,15 @@ class SSHTab(ctk.CTkScrollableFrame):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, daemon=True).start()
+        try:
+            threading.Thread(target=run, name="ssh-proxy-quality", daemon=True).start()
+        except Exception as exc:
+            cancel_event.set()
+            self._proxy_quality_cancel_event = None
+            self._set_proxy_busy(False)
+            message = f"节点 IP 质量检测未启动，已保留原有结果，可重试: {exc}"
+            self._set_proxy_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
 
     def _measure_proxy_nodes_for_servers(
         self, server_names: list[str], nodes=None, *, quick=False, cancel_event=None, progress_callback=None,

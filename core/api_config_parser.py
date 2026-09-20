@@ -415,12 +415,142 @@ def _json_candidates(text: str) -> list[str]:
     return candidates
 
 
+def _provider_client_hint(label: str, config: dict) -> str:
+    provider_id = _provider_id_from_label(label)
+    package, _ = _json_scalar(config, {"npm", "package", "adapter"})
+    if provider_id == "anthropic" or "anthropic" in package.casefold():
+        return "claude"
+    if provider_id == "openai" or "openai" in package.casefold():
+        return "codex"
+    return ""
+
+
+def _scope_provider_json(value: object, profile_type: str) -> object:
+    """Keep one provider's URL/key together before creating flattened aliases."""
+    if isinstance(value, list):
+        return [_scope_provider_json(item, profile_type) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if _compact_name(key) in _JSON_PROVIDER_CONTAINER_KEYS and isinstance(item, dict):
+            entries = {label: config for label, config in item.items() if isinstance(config, dict)}
+            selector = next((
+                entry for name, entry in value.items()
+                if _compact_name(name) == "modelprovider" and isinstance(entry, str)
+            ), None)
+            if not isinstance(selector, str):
+                model = value.get("model")
+                # Only OpenCode's provider containers use provider/model IDs.
+                # Codex model_providers may use literal IDs such as org/model.
+                selector = (
+                    model.split("/", 1)[0]
+                    if _compact_name(key) in {"provider", "providers"}
+                    and isinstance(model, str) and "/" in model
+                    else ""
+                )
+            if entries and selector:
+                if selector not in entries:
+                    raise ValueError("指定的 API 供应商不在配置中；请只复制目标供应商的完整配置")
+                item = {selector: entries[selector]}
+            elif len(entries) > 1:
+                hints = {label: _provider_client_hint(label, config) for label, config in entries.items()}
+                matches = [label for label, hint in hints.items() if hint == profile_type and hint]
+                if len(matches) != 1 or not all(hints.values()):
+                    if not profile_type and set(hints.values()) == {"claude", "codex"}:
+                        raise ValueError("同时检测到 Claude 和 Codex 配置；请在对应 API 编辑器中粘贴解析")
+                    raise ValueError("检测到多个 API 供应商配置；请只复制目标供应商，或明确指定 model_provider")
+                selected = matches[0]
+                item = {selected: entries[selected]}
+        result[key] = _scope_provider_json(item, profile_type)
+    return result
+
+
+def _scope_provider_text(text: str, profile_type: str) -> tuple[str, tuple[str, dict] | None]:
+    # Remove inactive provider text, not just its aliases: otherwise the later
+    # URL/key sniffing fallback could still borrow inactive credentials.
+    providers: list[tuple[str, dict]] = []
+    for candidate in _json_candidates(text):
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError, RecursionError):
+            continue
+        try:
+            scoped = _scope_provider_json(parsed, profile_type)
+        except RecursionError:
+            raise ValueError("API 配置嵌套过深；请只复制目标供应商的配置片段") from None
+        if scoped != parsed:
+            text = text.replace(candidate, json.dumps(scoped, ensure_ascii=False))
+        for provider in _json_provider_entries(scoped):
+            if provider not in providers:
+                providers.append(provider)
+    if len(providers) > 1:
+        raise ValueError("检测到多个 API 供应商配置；请只复制目标供应商的完整配置")
+    return text, providers[0] if providers else None
+
+
+def _provider_pair_values(
+    values: dict[str, str], provider: tuple[str, dict], profile_type: str,
+    explicit_env_values: dict[str, str],
+) -> dict[str, str]:
+    """Resolve only the selected provider's inline key or named env reference.
+
+    Unrelated global OPENAI_* or vendor keys must not override either half of
+    this pair after provider selection. Never read the real process environment.
+    """
+    label, config = provider
+    endpoint, _ = _json_scalar(config, _JSON_URL_OPTION_KEYS)
+    token, token_option = _json_scalar(config, _JSON_TOKEN_OPTION_KEYS)
+    env_key, _ = _json_scalar(config, _JSON_ENV_OPTION_KEYS)
+    referenced_key = ""
+    if not token and env_key:
+        referenced_key = env_key.upper()
+        token = _clean_value(explicit_env_values.get(referenced_key))
+        if not token:
+            raise ValueError("所选供应商指定的密钥环境变量没有值；请同时复制该变量，不会使用其他供应商的密钥")
+    if not token:
+        raise ValueError("所选供应商缺少 API Key/Auth Token；请复制完整的供应商配置及其密钥环境变量")
+    if not endpoint:
+        raise ValueError("所选供应商缺少 API 端点；请复制完整的供应商配置，不会使用其他供应商的地址")
+
+    client = profile_type or _provider_client_hint(label, config)
+    model_keys = (
+        _CLAUDE_MODEL_KEYS if client == "claude" else _CODEX_MODEL_KEYS if client == "codex" else ()
+    )
+    retained = {"PROFILE_NAME", "API_NAME", "MODEL_PROVIDER", *_GENERIC_MODEL_KEYS, *model_keys}
+    scoped_values = {key: value for key, value in values.items() if key in retained}
+    _add_structured_json_values(scoped_values, {"provider": {label: config}})
+    scoped_values["BASEURL"] = endpoint
+    scoped_values["APIKEY"] = token
+    if referenced_key:
+        scoped_values[referenced_key] = token
+    elif token_option in {"authtoken", "bearertoken", "token"}:
+        scoped_values["AUTH_TOKEN"] = token
+        # Generic custom providers otherwise expose the token as APIKEY.
+        scoped_values.pop("APIKEY", None)
+    return scoped_values
+
+
 def _clean_setx_value(value: object) -> str:
     cleaned = _clean_value(value)
     return re.sub(r"\s+/m\s*$", "", cleaned, flags=re.IGNORECASE).strip()
 
 
-def _extract_values(text: str) -> dict[str, str]:
+def _explicit_json_env_values(parsed: object, values: dict[str, str]) -> None:
+    pending = [(parsed, True)]
+    while pending:
+        value, is_env = pending.pop()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if is_env and isinstance(item, (str, int, float, bool)):
+                    values.setdefault(str(key).upper(), _clean_value(item))
+                if isinstance(item, (dict, list)):
+                    pending.append((item, _compact_name(key) == "env"))
+        elif isinstance(value, list):
+            pending.extend((item, False) for item in value)
+
+
+def _extract_values(text: str, *, explicit_env_values: dict[str, str] | None = None) -> dict[str, str]:
     values: dict[str, str] = {}
     for match in _ASSIGNMENT_RE.finditer(text):
         values[match.group(1).upper()] = _clean_value(match.group(2))
@@ -436,6 +566,8 @@ def _extract_values(text: str) -> dict[str, str]:
         values[match.group(1).upper()] = _clean_value(match.group(2))
     for match in _FISH_SET_RE.finditer(text):
         values[match.group(1).upper()] = _clean_value(match.group(2))
+    if explicit_env_values is not None:
+        explicit_env_values.update(values)
     for pattern in (_CLI_OPTION_RE, _INLINE_OPTION_RE):
         for match in pattern.finditer(text):
             option = _compact_name(match.group(1))
@@ -467,6 +599,8 @@ def _extract_values(text: str) -> dict[str, str]:
         try:
             parsed = json.loads(candidate)
             flattened = _flatten_json(parsed)
+            if explicit_env_values is not None:
+                _explicit_json_env_values(parsed, explicit_env_values)
             _add_structured_json_values(values, parsed)
         except (TypeError, ValueError, RecursionError):
             continue
@@ -796,12 +930,16 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
         raise ValueError("剪贴板中没有可解析的 API 配置文本")
     if len(raw) > _MAX_CONFIG_TEXT_CHARS:
         raise ValueError("API 配置文本过大；请只复制包含端点、密钥和模型的配置片段")
-    values = _extract_values(raw)
-    upper_keys = set(values)
-    type_hints = _profile_type_hints(values)
     requested_type = str(profile_type or "").strip().lower()
     if requested_type and requested_type not in {"claude", "codex"}:
         raise ValueError("API 类型只能是 Claude 或 Codex")
+    raw, selected_provider = _scope_provider_text(raw, requested_type)
+    explicit_env_values: dict[str, str] = {}
+    values = _extract_values(raw, explicit_env_values=explicit_env_values)
+    if selected_provider is not None:
+        values = _provider_pair_values(values, selected_provider, requested_type, explicit_env_values)
+    upper_keys = set(values)
+    type_hints = _profile_type_hints(values)
     if requested_type:
         if len(type_hints) == 1 and requested_type not in type_hints:
             detected = next(iter(type_hints))
@@ -816,7 +954,22 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
         target_type = next(iter(type_hints), "claude")
 
     url_keys = _CLAUDE_URL_KEYS if target_type == "claude" else _CODEX_URL_KEYS
+    if selected_provider is not None and not _normalize_url(
+        values["BASEURL"], profile_type=target_type, inferred=False,
+    ):
+        raise ValueError("所选供应商的 API 端点无效；请修正该地址，不会使用其他供应商的地址")
     explicit_url, explicit_url_key = _pick_value(values, url_keys)
+    if len(type_hints) > 1:
+        # In mixed-client snippets a missing field is not permission to take
+        # the other client's credential or sniff its unrelated endpoint.
+        prefixes = ("ANTHROPIC_", "CLAUDE_") if target_type == "claude" else ("OPENAI_", "CODEX_")
+        matching_token_keys = _CLAUDE_TOKEN_KEYS if target_type == "claude" else _CODEX_TOKEN_KEYS
+        matching_token, _ = _pick_value(values, tuple(key for key in matching_token_keys if key.startswith(prefixes)))
+        if not matching_token or not _normalize_url(explicit_url, profile_type=target_type, inferred=False):
+            raise ValueError(
+                f"同时检测到 Claude 和 Codex 配置，但 {target_type.title()} 缺少独立端点或密钥；"
+                "请只复制当前类型的完整配置"
+            )
     if not explicit_url:
         explicit_url, explicit_url_key = _pick_value(
             values,

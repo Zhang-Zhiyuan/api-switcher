@@ -2433,7 +2433,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, name="local-proxy-subscription-state-load", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="local-proxy-subscription-state-load", daemon=True).start()
+        except Exception as exc:
+            self._saved_subscription_loaded = False
+            self._deferred_saved_subscription_pending = True
+            self._set_cache_status("本机缓存: 订阅读取任务未启动，已保留当前草稿", "error")
+            self._set_status(f"订阅读取任务未启动，可重新进入页面重试: {exc}", "error")
 
     def _load_subscription_cache_for_state(
         self,
@@ -4231,7 +4237,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
             self._run_on_ui_thread(finish)
 
-        threading.Thread(target=run, daemon=True).start()
+        try:
+            threading.Thread(target=run, name="local-proxy-quality", daemon=True).start()
+        except Exception as exc:
+            cancel_event.set()
+            self._quality_cancel_event = None
+            self._set_busy(False)
+            message = f"节点 IP 质量检测未启动，已保留原有结果，可重试: {exc}"
+            self._set_status(message, "error")
+            show_toast(self.winfo_toplevel(), message, is_error=True)
 
     def _open_proxy_quality_dialog(self):
         top = self.winfo_toplevel()

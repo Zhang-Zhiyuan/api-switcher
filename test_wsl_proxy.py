@@ -370,7 +370,7 @@ def test_profile_write_failure_uses_reported_partial_ownership_for_cleanup(monke
     assert removed == [
         (
             "Ubuntu-Test",
-            {"created_profiles": (".profile",), "strict": False},
+            {"created_profiles": (".profile",), "strict": True},
         )
     ]
 
@@ -571,7 +571,7 @@ def test_changed_subnet_failure_keeps_old_rule_and_hooks(monkeypatch, tmp_path):
             previous_state=previous,
         )
 
-    assert deleted == [(new_rule, {"strict": False})]
+    assert deleted == [(new_rule, {"strict": True})]
     assert removed == []
 
 
@@ -621,7 +621,7 @@ def test_same_subnet_repair_uses_alternate_rule_slot_before_failure(monkeypatch,
         )
 
     assert staged == [staged_rule]
-    assert deleted == [(staged_rule, {"strict": False})]
+    assert deleted == [(staged_rule, {"strict": True})]
 
 
 def test_remove_refuses_unowned_state(monkeypatch):
