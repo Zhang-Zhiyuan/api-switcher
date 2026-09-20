@@ -1132,13 +1132,13 @@ def _claude_account_identity_candidates(credentials: dict) -> set[str]:
 
 
 def _claude_account_matches_credentials(profile: ClaudeAccountProfile, credentials: dict) -> bool:
-    identity = _claude_account_identity_from_credentials(credentials)
-    if profile.identity == identity:
-        return True
-
     saved = get_claude_account_credentials(profile)
     if isinstance(saved, dict) and saved:
         return _account_snapshots_match(saved, credentials, "claude-login")
+
+    identity = _claude_account_identity_from_credentials(credentials)
+    if profile.identity == identity:
+        return True
 
     stable_candidates = _account_stable_identity_candidates_from_json(credentials, "claude-login")
     if stable_candidates:
@@ -1174,9 +1174,8 @@ def _claude_api_override_active(settings: dict, config: dict) -> bool:
 def _pick_claude_account_import_name(identity: str, preferred_name: str | None = None, credentials: dict | None = None) -> str:
     profiles = list_claude_account_profiles()
     for profile in profiles:
-        if profile.identity == identity:
-            return profile.name
-        if credentials and _claude_account_matches_credentials(profile, credentials):
+        if (_claude_account_matches_credentials(profile, credentials) if credentials
+                else profile.identity == identity):
             return profile.name
     return _account_import_name("Claude-账号", preferred_name or identity, {profile.name for profile in profiles})
 
@@ -1553,6 +1552,9 @@ def _account_identity_parts(data: dict, fallback_prefix: str = "official-login")
         "userId",
         "user_id",
         "account_id",
+        "accountId",
+        "accountUuid",
+        "chatgpt_account_id",
         "sub",
     ]
     human_values: list[str] = []
@@ -1586,10 +1588,14 @@ def _account_identity_parts(data: dict, fallback_prefix: str = "official-login")
         if "@" in value and len(value) <= 160:
             add_id(value)
         jwt_payload = _decode_jwt_payload(value)
-        for key in human_keys:
-            add_human(jwt_payload.get(key))
-        for key in id_keys:
-            add_id(jwt_payload.get(key))
+        # Namespaced claims can hold the only stable account ID, even when the
+        # visible email changes. Organization IDs are intentionally excluded:
+        # membership in the same organization does not prove the same user.
+        for mapping in _iter_nested_mappings(jwt_payload):
+            for key in human_keys:
+                add_human(mapping.get(key))
+            for key in id_keys:
+                add_id(mapping.get(key))
 
     display = next((value for value in human_values if value), "")
     email = next((value for value in email_values if value), "")
@@ -1641,8 +1647,41 @@ def _account_stable_identity_candidates_from_json(data: dict, fallback_prefix: s
     return set(_account_identity_parts(data, fallback_prefix)["stable_candidates"])
 
 
+def _account_snapshot_identity_conflict(saved: dict, current: dict) -> bool:
+    """Explicit account/workspace IDs outrank a shared email or display name.
+
+    Tokens rotate independently of these IDs. Keep subjects separate from user
+    IDs: an OIDC subject and a provider's user ID need not use the same namespace.
+    JWT claims are identity hints only, never authorization or signature checks.
+    """
+    families = (
+        ("account_id", "accountId", "accountUuid", "chatgpt_account_id"),
+        ("userId", "user_id"),
+        ("sub",),
+        ("organizationUuid", "organization_id"),
+    )
+
+    def identifiers(data):
+        groups = [set() for _ in families]
+        mappings = list(_iter_nested_mappings(data))
+        for token in _iter_nested_strings(data):
+            mappings.extend(_iter_nested_mappings(_decode_jwt_payload(token)))
+        for mapping in mappings:
+            for group, fields in zip(groups, families):
+                for field in fields:
+                    value = mapping.get(field)
+                    if isinstance(value, str) and value.strip():
+                        group.add(value.strip())
+        return groups
+
+    return any(left and right and left.isdisjoint(right)
+               for left, right in zip(identifiers(saved), identifiers(current)))
+
+
 def _account_snapshots_match(saved: dict, current: dict, fallback_prefix: str = "official-login") -> bool:
     if not isinstance(saved, dict) or not saved or not isinstance(current, dict) or not current:
+        return False
+    if _account_snapshot_identity_conflict(saved, current):
         return False
 
     saved_parts = _account_identity_parts(saved, fallback_prefix)
@@ -2216,13 +2255,13 @@ def _codex_account_identity_candidates(auth: dict) -> set[str]:
 
 
 def _codex_account_matches_auth(profile: CodexAccountProfile, auth: dict) -> bool:
-    identity = _codex_account_identity_from_auth(auth)
-    if profile.identity == identity:
-        return True
-
     saved = get_codex_account_auth(profile)
     if isinstance(saved, dict) and saved:
         return _account_snapshots_match(saved, auth, "codex-login")
+
+    identity = _codex_account_identity_from_auth(auth)
+    if profile.identity == identity:
+        return True
 
     stable_candidates = _account_stable_identity_candidates_from_json(auth, "codex-login")
     if stable_candidates:
@@ -2241,9 +2280,8 @@ def _codex_account_override_active(config: dict, auth: dict) -> bool:
 def _pick_codex_account_import_name(identity: str, preferred_name: str | None = None, auth: dict | None = None) -> str:
     profiles = list_codex_account_profiles()
     for profile in profiles:
-        if profile.identity == identity:
-            return profile.name
-        if auth and _codex_account_matches_auth(profile, auth):
+        if (_codex_account_matches_auth(profile, auth) if auth
+                else profile.identity == identity):
             return profile.name
     return _account_import_name("Codex-账号", preferred_name or identity, {profile.name for profile in profiles})
 

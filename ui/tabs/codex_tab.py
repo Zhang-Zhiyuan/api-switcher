@@ -4,7 +4,7 @@ import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
 from ui.tabs.tab_visibility import is_active_tab
 from ui.ui_dispatch import run_on_ui_thread
-from ui.widgets.profile_card import ProfileCard
+from ui.widgets.profile_card import ProfileCard, _bind_profile_card_action_grid
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.widgets.auto_continue_loader import resolve_auto_continue_control_class
@@ -15,6 +15,7 @@ profile_manager = LazyModule("core.profile_manager")
 ProfileEditorDialog = LazyAttribute("ui.dialogs.profile_editor", "ProfileEditorDialog")
 ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
 CodexProfile = LazyAttribute("models.profile", "CodexProfile")
+open_account_transfer = LazyAttribute("ui.dialogs.account_transfer_dialog", "open_account_transfer")
 
 CARD_RENDER_BATCH_SIZE = 2
 CARD_RENDER_BATCH_DELAY_MS = 8
@@ -70,7 +71,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle_label = ctk.CTkLabel(
             title_area,
-            text="API 配置只管理第三方 OpenAI-compatible 端点和密钥；官方账号只管理本机 ChatGPT 登录快照",
+            text="API 配置管理第三方 OpenAI-compatible 端点和密钥；官方账号支持保存登录快照与加密跨电脑迁移",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -146,7 +147,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         account_subtitle = ctk.CTkLabel(
             self._account_title,
-            text="保存本机 Codex ChatGPT 登录 auth.json 快照；切换后新开的终端会话生效",
+            text="保存 Codex ChatGPT 登录快照；可单独导出加密登录包到另一台电脑使用，切换后新终端生效",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -173,7 +174,21 @@ class CodexTab(ctk.CTkScrollableFrame):
             command=self._import_current_account,
             **button_style("secondary"),
         )
-        self._account_import_button.pack(fill="x")
+        self._account_export_login_button = ctk.CTkButton(
+            self._account_actions, text="导出当前登录", width=126,
+            command=self._export_account_login, **button_style("secondary"),
+        )
+        self._account_import_login_button = ctk.CTkButton(
+            self._account_actions, text="导入登录包", width=126,
+            command=self._import_account_login, **button_style("accent"),
+        )
+        _bind_profile_card_action_grid(self._account_actions, (
+            self._account_import_button, self._account_export_login_button, self._account_import_login_button,
+        ))
+        self._account_title.pack_forget()
+        self._account_actions.pack_forget()
+        self._account_title.pack(fill="x")
+        self._account_actions.pack(fill="x", pady=(8, 0))
 
         self._account_cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._account_cards_frame.pack(fill="x", padx=14, pady=(0, 10))
@@ -237,7 +252,6 @@ class CodexTab(ctk.CTkScrollableFrame):
 
         for title, actions in (
             (self._api_title, self._api_actions),
-            (self._account_title, self._account_actions),
         ):
             title.pack_forget()
             actions.pack_forget()
@@ -644,6 +658,7 @@ class CodexTab(ctk.CTkScrollableFrame):
                 active_label="当前账号",
                 switch_label="切换账号",
                 on_switch=self._switch_account if snapshot_ok else None,
+                on_export=self._export_account_login if snapshot_ok else None,
                 on_delete=self._delete_account,
                 border_color=COLORS["accent"] if is_active else (COLORS["danger"] if not snapshot_ok else COLORS["border_soft"]),
             )
@@ -657,6 +672,12 @@ class CodexTab(ctk.CTkScrollableFrame):
         )
         self._profile_render_after_id = after_id
         self._profile_render_after_ids.add(after_id)
+
+    def _export_account_login(self, name=None):
+        open_account_transfer(self, "codex", exporting=True, account_name=name)
+
+    def _import_account_login(self):
+        open_account_transfer(self, "codex", exporting=False)
 
     def _switch_profile(self, name):
         def perform_switch():

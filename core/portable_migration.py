@@ -240,7 +240,15 @@ def _encrypt_payload(payload: dict[str, Any], password: str) -> dict[str, Any]:
     }
 
 
-def _decrypt_bundle(bundle: dict[str, Any], password: str) -> dict[str, Any]:
+def _decrypt_bundle(
+    bundle: dict[str, Any],
+    password: str,
+    *,
+    max_payload_bytes: int | None = None,
+) -> dict[str, Any]:
+    payload_limit = MAX_DECRYPTED_PAYLOAD_BYTES if max_payload_bytes is None else max_payload_bytes
+    if type(payload_limit) is not int or payload_limit < 1:
+        raise ValueError("迁移包解密大小限制无效")
     if bundle.get("format") != BUNDLE_FORMAT:
         raise ValueError("不是 API切换器 Profile 迁移包")
     if bundle.get("version") != BUNDLE_VERSION:
@@ -284,12 +292,12 @@ def _decrypt_bundle(bundle: dict[str, Any], password: str) -> dict[str, Any]:
     if compression == "zlib":
         plaintext = _zlib_decompress_bounded(
             decrypted,
-            MAX_DECRYPTED_PAYLOAD_BYTES,
+            payload_limit,
             too_large_message="迁移包解密后内容过大",
             corrupt_message="迁移包压缩数据损坏",
         )
     elif compression in {None, "none"}:
-        if len(decrypted) > MAX_DECRYPTED_PAYLOAD_BYTES:
+        if len(decrypted) > payload_limit:
             raise ValueError("迁移包解密后内容过大")
         plaintext = decrypted
     else:

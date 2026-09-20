@@ -71,7 +71,7 @@ class ProfileCard(ctk.CTkFrame):
 
     def __init__(self, master, name: str, info_lines: list[str], is_active: bool = False,
                  active_label: str = "当前运行", switch_label: str = "切换", on_switch=None, on_test=None,
-                 on_edit=None, on_clone=None, on_delete=None, **kwargs):
+                 on_edit=None, on_clone=None, on_delete=None, on_export=None, **kwargs):
         border_color = kwargs.pop("border_color", COLORS["success"] if is_active else COLORS["border_soft"])
         frame_kwargs = card_frame_kwargs(border_color)
         if is_active:
@@ -138,6 +138,9 @@ class ProfileCard(ctk.CTkFrame):
 
         if on_clone:
             actions.append(("复制", 58, "secondary", lambda: on_clone(name)))
+
+        if on_export:
+            actions.append(("导出登录", 86, "secondary", lambda: on_export(name)))
 
         if on_delete:
             actions.append(("删除", 58, "danger", lambda: on_delete(name)))
