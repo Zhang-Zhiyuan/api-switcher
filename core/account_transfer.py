@@ -1,8 +1,9 @@
-"""Transfer exactly one official login in a bounded, password-encrypted file.
+"""Transfer one official login with optional password protection.
 
 Export never changes a live login or a saved snapshot. Import creates a locally
 encrypted account snapshot, never activates it or replaces different credentials.
 The existing account switch transaction remains the sole activation mechanism.
+An empty password explicitly exports an unencrypted, sensitive login package.
 """
 from __future__ import annotations
 
@@ -214,8 +215,10 @@ def export_account_login(
 ) -> AccountExportResult:
     """Export a current or saved official login without changing either."""
     profile_type = _profile_type(profile_type)
-    if not isinstance(password, str) or len(password) < 8:
-        raise ValueError("账号迁移密码至少需要 8 个字符")
+    if not isinstance(password, str):
+        raise ValueError("账号迁移密码必须是文本；不设密码请留空")
+    if password != "" and len(password) < 8:
+        raise ValueError("设置账号迁移密码时至少需要 8 个字符，也可以留空")
     path = Path(output_path).expanduser().resolve()
     _validate_output_path(path)
     from core.switcher import _SWITCH_LOCK
@@ -249,13 +252,13 @@ def export_account_login(
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(encoded) > MAX_ACCOUNT_PAYLOAD_BYTES:
             raise ValueError("账号登录状态过大，已拒绝导出")
-    bundle = portable_migration._encrypt_payload(payload, password)
+    bundle = portable_migration._encode_bundle_payload(payload, password)
     bundle["format"] = ACCOUNT_FORMAT
-    encrypted = json.dumps(bundle, ensure_ascii=False, indent=2)
-    if len(encrypted.encode("utf-8")) > MAX_ACCOUNT_FILE_BYTES:
-        raise ValueError("加密账号登录包过大，已拒绝导出")
+    serialized = json.dumps(bundle, ensure_ascii=False, indent=2)
+    if len(serialized.encode("utf-8")) > MAX_ACCOUNT_FILE_BYTES:
+        raise ValueError("账号登录包过大，已拒绝导出")
     _validate_output_path(path)
-    atomic_write_text(path, encrypted)
+    atomic_write_text(path, serialized)
     return AccountExportResult(path, profile_type, name, used_current)
 
 
@@ -273,19 +276,25 @@ def _read_payload(path: Path, password: str) -> dict:
         raise ValueError("账号登录包格式损坏") from exc
     if not isinstance(bundle, dict) or bundle.get("format") != ACCOUNT_FORMAT:
         raise ValueError("不是独立账号登录包，请选择 .asxaccount 文件")
-    if type(bundle.get("version")) is not int or bundle["version"] != ACCOUNT_VERSION:
+    if type(bundle.get("version")) is not int or bundle["version"] not in (
+        ACCOUNT_VERSION, portable_migration.UNENCRYPTED_BUNDLE_VERSION,
+    ):
         raise ValueError("账号登录包版本不受支持")
     if bundle.get("compression") != "zlib":
         raise ValueError("账号登录包压缩格式不受支持")
-    # Reuse the audited migration cipher, with a much smaller decompression cap.
-    # The dedicated kind below is inside the authenticated ciphertext.
+    if bundle["version"] == ACCOUNT_VERSION and password == "":
+        raise ValueError("该账号登录包已加密，请输入迁移密码")
+    # Reuse the strict encrypted/unencrypted dispatch and small size cap.
+    # The dedicated inner kind also prevents confusing another package type.
     bundle["format"] = portable_migration.BUNDLE_FORMAT
     try:
-        payload = portable_migration._decrypt_bundle(bundle, password, max_payload_bytes=MAX_ACCOUNT_PAYLOAD_BYTES)
+        payload = portable_migration._decode_bundle_payload(bundle, password, max_payload_bytes=MAX_ACCOUNT_PAYLOAD_BYTES)
     except (TypeError, AttributeError, RecursionError) as exc:
-        raise ValueError("账号登录包加密数据损坏") from exc
+        raise ValueError("账号登录包数据损坏") from exc
     except ValueError as exc:
         # Do not reflect untrusted format fields (or their content) into UI errors.
+        if bundle["version"] == portable_migration.UNENCRYPTED_BUNDLE_VERSION:
+            raise ValueError("未加密账号登录包已损坏、不受支持或超出安全限制") from exc
         raise ValueError("账号迁移密码错误，或登录包已损坏、超出安全限制") from exc
     if payload.get("kind") != ACCOUNT_FORMAT or type(payload.get("payload_version")) is not int:
         raise ValueError("账号登录包内容类型无效")
@@ -342,8 +351,8 @@ def import_account_login(
     expected_type: str | None = None,
 ) -> AccountImportResult:
     """Save one login using this machine's secret store; never activate it."""
-    if not isinstance(password, str) or not password:
-        raise ValueError("请输入账号迁移密码")
+    if not isinstance(password, str):
+        raise ValueError("账号迁移密码必须是文本；不设密码请留空")
     if expected_type is not None:
         expected_type = _profile_type(expected_type)
     payload = _read_payload(Path(input_path).expanduser().resolve(), password)

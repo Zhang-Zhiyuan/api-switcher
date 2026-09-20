@@ -1,4 +1,4 @@
-"""Password-protected ZIP export/import for local API Switcher configuration."""
+"""Optional password-protected ZIP transfer of local API Switcher configuration."""
 from __future__ import annotations
 
 import base64
@@ -30,6 +30,7 @@ from models.profile import (
 
 PACKAGE_FORMAT = "api-switcher-local-config-zip"
 PACKAGE_VERSION = 1
+PLAINTEXT_VERSION = 2
 PAYLOAD_FORMAT = "api-switcher-local-config-payload"
 PAYLOAD_VERSION = 1
 KDF_ITERATIONS = 390_000
@@ -39,6 +40,7 @@ MAX_ZIP_ENTRY_BYTES = 64 * 1024 * 1024
 MAX_DECRYPTED_PAYLOAD_BYTES = 64 * 1024 * 1024
 MANIFEST_NAME = "manifest.json"
 PAYLOAD_NAME = "payload.enc.json"
+PLAINTEXT_PAYLOAD_NAME = "payload.json"
 
 ACTIVE_TO_LIST_KEY = {
     "active_claude_profile": "claude_profiles",
@@ -75,6 +77,7 @@ class LocalConfigExportResult:
     secret_count: int
     missing_secret_refs: list[str]
     zip_bytes: int
+    encrypted: bool = True
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,7 @@ class LocalConfigPackageSummary:
     secret_count: int
     missing_secret_count: int
     created_at: str
+    encrypted: bool = True
 
 
 @dataclass(frozen=True)
@@ -110,7 +114,7 @@ def _b64decode(value: str) -> bytes:
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
-    if not password:
+    if not isinstance(password, str) or not password:
         raise ValueError("迁移密码不能为空")
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -147,6 +151,10 @@ def _encrypt_payload(payload: dict[str, Any], password: str) -> dict[str, Any]:
 
 
 def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是字符串；不加密时请留空")
+    if not password:
+        raise ValueError("完整配置 ZIP 已加密，请输入迁移密码")
     if bundle.get("format") != PAYLOAD_FORMAT:
         raise ValueError("不是 API切换器完整配置 ZIP 的加密数据")
     if bundle.get("version") != PAYLOAD_VERSION:
@@ -186,8 +194,13 @@ def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
     except InvalidTag as e:
         raise ValueError("迁移密码错误，或完整配置 ZIP 已损坏") from e
 
+    return _decode_payload_content(decrypted, bundle.get("compression"))
+
+
+def _decode_payload_content(decrypted: bytes, compression: object) -> dict[str, Any]:
+    """Apply identical size and stream-boundary checks to both transfer modes."""
     try:
-        if bundle.get("compression") == "zlib":
+        if compression == "zlib":
             decompressor = zlib.decompressobj()
             plaintext = decompressor.decompress(decrypted, MAX_DECRYPTED_PAYLOAD_BYTES + 1)
             if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES or decompressor.unconsumed_tail:
@@ -197,22 +210,77 @@ def _decrypt_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
                 raise ValueError("完整配置 ZIP 解密后内容过大")
             if not decompressor.eof or decompressor.unused_data:
                 raise ValueError("完整配置 ZIP 压缩数据损坏")
-        elif bundle.get("compression") in {None, "none"}:
+        elif compression is None or compression == "none":
             plaintext = decrypted
             if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
                 raise ValueError("完整配置 ZIP 解密后内容过大")
         else:
-            raise ValueError(f"不支持的完整配置 ZIP 压缩方式: {bundle.get('compression')}")
+            raise ValueError("不支持的完整配置 ZIP 压缩方式")
     except zlib.error as e:
         raise ValueError("完整配置 ZIP 压缩数据损坏") from e
 
     try:
         payload = json.loads(plaintext.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
         raise ValueError("完整配置 ZIP 内容损坏") from e
-    if not isinstance(payload, dict) or payload.get("payload_version") != PAYLOAD_VERSION:
+    if (not isinstance(payload, dict) or type(payload.get("payload_version")) is not int
+            or payload["payload_version"] != PAYLOAD_VERSION):
         raise ValueError("完整配置 ZIP 内容版本不受支持")
     return payload
+
+
+def _validate_export_password(password: str) -> None:
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是字符串；不加密时请留空")
+    if password and len(password) < 8:
+        raise ValueError("迁移密码至少需要 8 个字符；不加密时请留空")
+
+
+def _encode_payload(payload: dict[str, Any], password: str) -> dict[str, Any]:
+    _validate_export_password(password)
+    if password:
+        return _encrypt_payload(payload, password)
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
+        raise ValueError("完整配置 ZIP 内容过大")
+    return {
+        "format": PAYLOAD_FORMAT,
+        "version": PLAINTEXT_VERSION,
+        "cipher": {"name": "none"},
+        "compression": "zlib",
+        "payload": _b64encode(zlib.compress(plaintext, level=6)),
+    }
+
+
+def _payload_is_encrypted(bundle: dict[str, Any]) -> bool:
+    if not isinstance(bundle, dict) or bundle.get("format") != PAYLOAD_FORMAT:
+        raise ValueError("不是 API切换器完整配置 ZIP 的数据")
+    version = bundle.get("version")
+    if type(version) is not int or version not in (PAYLOAD_VERSION, PLAINTEXT_VERSION):
+        raise ValueError("不支持的完整配置 ZIP 数据版本")
+    if version == PLAINTEXT_VERSION:
+        if (set(bundle) != {"format", "version", "cipher", "compression", "payload"}
+                or bundle.get("cipher") != {"name": "none"}
+                or bundle.get("compression") != "zlib"
+                or not isinstance(bundle.get("payload"), str)):
+            raise ValueError("完整配置 ZIP 未加密数据标记不完整或混有加密参数")
+        return False
+    if not isinstance(bundle.get("cipher"), dict) or bundle["cipher"].get("name") != "AES-256-GCM":
+        raise ValueError("完整配置 ZIP 加密算法不受支持")
+    return True
+
+
+def _decode_payload(bundle: dict[str, Any], password: str) -> dict[str, Any]:
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是字符串；不加密时请留空")
+    if _payload_is_encrypted(bundle):
+        # An absent/wrong password never retries encrypted bytes as plaintext.
+        return _decrypt_payload(bundle, password)
+    try:
+        compressed = _b64decode(bundle["payload"])
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("完整配置 ZIP 编码损坏") from exc
+    return _decode_payload_content(compressed, "zlib")
 
 
 def _profile_count(store: dict[str, Any]) -> int:
@@ -459,8 +527,22 @@ def _disconnect_imported_ssh_profiles(imported_store: dict[str, Any]) -> None:
 
 
 def _payload_name_from_manifest(manifest: dict[str, Any]) -> str:
-    payload_name = str(manifest.get("payload") or PAYLOAD_NAME)
-    if payload_name != PAYLOAD_NAME:
+    if manifest.get("format") != PACKAGE_FORMAT:
+        raise ValueError("不是 API切换器完整配置 ZIP")
+    version = manifest.get("version")
+    if type(version) is not int or version not in (PACKAGE_VERSION, PLAINTEXT_VERSION):
+        raise ValueError("不支持的完整配置 ZIP 版本")
+    if version == PLAINTEXT_VERSION:
+        if manifest.get("encrypted") is not False or "kdf" in manifest or "cipher" in manifest:
+            raise ValueError("完整配置 ZIP 未加密标记无效")
+        expected = PLAINTEXT_PAYLOAD_NAME
+        payload_name = manifest.get("payload")
+    else:
+        if manifest.get("encrypted", True) is not True:
+            raise ValueError("完整配置 ZIP 加密标记与版本不一致")
+        expected = PAYLOAD_NAME
+        payload_name = manifest.get("payload") or PAYLOAD_NAME
+    if payload_name != expected:
         raise ValueError("完整配置 ZIP payload 路径异常")
     return payload_name
 
@@ -491,11 +573,24 @@ def _read_json_zip_entry(bundle: zipfile.ZipFile, name: str) -> dict[str, Any]:
     info = _validate_zip_file_entry(bundle, name)
     try:
         data = json.loads(bundle.read(info).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
         raise ValueError(f"完整配置 ZIP 的 {name} 已损坏") from e
     if not isinstance(data, dict):
         raise ValueError(f"完整配置 ZIP 的 {name} 格式异常")
     return data
+
+
+def _read_package_entries(bundle: zipfile.ZipFile) -> tuple[dict[str, Any], dict[str, Any]]:
+    _ensure_unique_zip_entries(bundle, {MANIFEST_NAME, PAYLOAD_NAME, PLAINTEXT_PAYLOAD_NAME})
+    manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
+    payload_name = _payload_name_from_manifest(manifest)
+    other_name = PLAINTEXT_PAYLOAD_NAME if payload_name == PAYLOAD_NAME else PAYLOAD_NAME
+    if other_name in bundle.namelist():
+        raise ValueError("完整配置 ZIP 同时包含加密与未加密数据条目")
+    encoded = _read_json_zip_entry(bundle, payload_name)
+    if _payload_is_encrypted(encoded) != (payload_name == PAYLOAD_NAME):
+        raise ValueError("完整配置 ZIP manifest 与数据加密标记不一致")
+    return manifest, encoded
 
 
 def _json_zip_entry_bytes(name: str, data: dict[str, Any]) -> bytes:
@@ -592,16 +687,9 @@ def inspect_local_config_zip(input_path: str | Path) -> LocalConfigPackageSummar
         raise ValueError("完整配置 ZIP 过大，请确认是否选择了正确文件")
     try:
         with zipfile.ZipFile(path, "r") as bundle:
-            _ensure_unique_zip_entries(bundle, {MANIFEST_NAME, PAYLOAD_NAME})
-            manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
-            _validate_zip_file_entry(bundle, _payload_name_from_manifest(manifest))
+            manifest, _encoded = _read_package_entries(bundle)
     except zipfile.BadZipFile as e:
         raise ValueError("完整配置 ZIP 文件损坏") from e
-
-    if manifest.get("format") != PACKAGE_FORMAT:
-        raise ValueError("不是 API切换器完整配置 ZIP")
-    if manifest.get("version") != PACKAGE_VERSION:
-        raise ValueError(f"不支持的完整配置 ZIP 版本: {manifest.get('version')}")
 
     profile_counts = manifest.get("profile_counts", {})
     if not isinstance(profile_counts, dict):
@@ -624,13 +712,13 @@ def inspect_local_config_zip(input_path: str | Path) -> LocalConfigPackageSummar
         secret_count=secret_count,
         missing_secret_count=missing_secret_count,
         created_at=str(manifest.get("created_at") or ""),
+        encrypted=manifest.get("version") == PACKAGE_VERSION,
     )
 
 
 def export_local_config_zip(output_path: str | Path, password: str) -> LocalConfigExportResult:
     """Export all local API/SSH/browser profile metadata plus referenced secrets to a ZIP."""
-    if len(password) < 8:
-        raise ValueError("迁移密码至少需要 8 个字符")
+    _validate_export_password(password)
 
     # Use the same global order as import so the store, diagnostics settings,
     # and referenced secrets come from one coherent in-process snapshot.
@@ -663,6 +751,8 @@ def _export_local_config_zip_locked(
             secrets[ref] = value
 
     created_at = datetime.now(timezone.utc).isoformat()
+    encrypted = bool(password)
+    payload_name = PAYLOAD_NAME if encrypted else PLAINTEXT_PAYLOAD_NAME
     payload = {
         "payload_version": PAYLOAD_VERSION,
         "exported_at": created_at,
@@ -672,20 +762,22 @@ def _export_local_config_zip_locked(
         "missing_secret_refs": missing,
         "notes": [
             "完整本地配置 ZIP：包含 Profile 元数据、活动选择、环境检测设置和被引用的密钥。",
-            "密钥已用迁移密码加密；ZIP 本身仅用于打包，不依赖 ZipCrypto。",
+            ("密钥已用迁移密码加密；ZIP 本身仅用于打包，不依赖 ZipCrypto。" if encrypted else
+             "此 ZIP 未加密，任何持有文件的人都可读取密钥和登录凭据；请妥善保管。"),
             "私钥认证的 SSH Profile 会保存私钥文件路径和私钥口令；不会复制私钥文件本体。",
         ],
     }
     manifest = {
         "format": PACKAGE_FORMAT,
-        "version": PACKAGE_VERSION,
+        "version": PACKAGE_VERSION if encrypted else PLAINTEXT_VERSION,
+        "encrypted": encrypted,
         "created_at": created_at,
         "profile_count": _profile_count(store),
         "profile_counts": _profile_counts_by_type(store),
         "secret_count": len(secrets),
         "missing_secret_count": len(missing),
         "network_diagnostics": _has_network_diagnostic_settings(network_diagnostics),
-        "payload": PAYLOAD_NAME,
+        "payload": payload_name,
     }
 
     path = Path(output_path).expanduser().resolve()
@@ -694,8 +786,8 @@ def _export_local_config_zip_locked(
     _validate_local_config_export_path(path, store)
     manifest_entry = _json_zip_entry_bytes(MANIFEST_NAME, manifest)
     payload_entry = _json_zip_entry_bytes(
-        PAYLOAD_NAME,
-        _encrypt_payload(payload, password),
+        payload_name,
+        _encode_payload(payload, password),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -703,7 +795,7 @@ def _export_local_config_zip_locked(
     try:
         with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             bundle.writestr(MANIFEST_NAME, manifest_entry)
-            bundle.writestr(PAYLOAD_NAME, payload_entry)
+            bundle.writestr(payload_name, payload_entry)
         if tmp_output.stat().st_size > MAX_ZIP_BYTES:
             raise ValueError("完整配置 ZIP 过大")
         replace_with_retry(tmp_output, path)
@@ -717,6 +809,7 @@ def _export_local_config_zip_locked(
         secret_count=len(secrets),
         missing_secret_refs=missing,
         zip_bytes=path.stat().st_size,
+        encrypted=encrypted,
     )
 
 
@@ -725,8 +818,8 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     Same-name profiles are replaced. Profiles with different names are preserved.
     """
-    if not password:
-        raise ValueError("请输入迁移密码")
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是字符串；不加密时请留空")
 
     path = Path(input_path).expanduser().resolve()
     if not path.exists():
@@ -738,14 +831,8 @@ def import_local_config_zip(input_path: str | Path, password: str) -> LocalConfi
 
     try:
         with zipfile.ZipFile(path, "r") as bundle:
-            _ensure_unique_zip_entries(bundle, {MANIFEST_NAME, PAYLOAD_NAME})
-            manifest = _read_json_zip_entry(bundle, MANIFEST_NAME)
-            if manifest.get("format") != PACKAGE_FORMAT:
-                raise ValueError("不是 API切换器完整配置 ZIP")
-            if manifest.get("version") != PACKAGE_VERSION:
-                raise ValueError(f"不支持的完整配置 ZIP 版本: {manifest.get('version')}")
-            payload_name = _payload_name_from_manifest(manifest)
-            payload = _decrypt_payload(_read_json_zip_entry(bundle, payload_name), password)
+            _manifest, encoded = _read_package_entries(bundle)
+            payload = _decode_payload(encoded, password)
     except zipfile.BadZipFile as e:
         raise ValueError("完整配置 ZIP 文件损坏") from e
 

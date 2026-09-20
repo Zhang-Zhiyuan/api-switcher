@@ -6,6 +6,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 from core.lazy_imports import LazyAttribute, LazyModule
+from ui.feedback import safe_feedback_text
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, font
 from ui.ui_dispatch import run_on_ui_thread
@@ -22,6 +23,13 @@ PortableExportSelectionDialog = LazyAttribute(
     "ui.dialogs.portable_export_selection_dialog",
     "PortableExportSelectionDialog",
 )
+
+
+def _migration_error_text(error: Exception, password: str) -> str:
+    detail = str(error)
+    if password:
+        detail = detail.replace(password, "[密码已隐藏]")
+    return safe_feedback_text(detail).strip() or "迁移文件处理失败，请检查文件与密码后重试"
 
 
 def _backup_tab_layout(width: int) -> tuple[bool, int, bool]:
@@ -95,7 +103,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle = ctk.CTkLabel(
             self._title_area,
-            text="创建本机备份，导出完整配置 ZIP，或导出可跨电脑迁移的加密 Profile 包",
+            text="创建本机备份，导出完整配置 ZIP，或导出跨电脑迁移的 Profile 包（密码可选）",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -333,7 +341,7 @@ class BackupTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         desc = ctk.CTkLabel(
             self._zip_text_area,
-            text="一键导出/导入本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据和引用密钥；密钥用迁移密码加密。",
+            text="一键导出/导入本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据和引用密钥；密码可选，留空导出的文件未加密，请勿公开分享。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -496,17 +504,19 @@ class BackupTab(ctk.CTkScrollableFrame):
             try:
                 result = local_config_bundle.export_local_config_zip(output_path, password)
                 message = f"完整配置 ZIP 已导出: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                message += "；凭据已加密" if password else "；未加密，任何获得文件的人都可读取其中凭据，请勿公开分享"
                 if result.missing_secret_refs:
                     message += f"，{len(result.missing_secret_refs)} 个密钥缺失"
                 show_toast(self.winfo_toplevel(), message)
             except Exception as e:
-                show_toast(self.winfo_toplevel(), f"导出 ZIP 失败: {e}", is_error=True)
+                show_toast(self.winfo_toplevel(), f"导出 ZIP 失败: {_migration_error_text(e, password)}", is_error=True)
 
         PasswordDialog(
             self.winfo_toplevel(),
-            title="设置完整配置 ZIP 密码",
-            message="ZIP 会包含本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据，以及这些条目引用的 API Key、账号 token、SSH 密码/私钥口令。请设置强密码。",
+            title="导出完整配置 ZIP（密码可选）",
+            message="ZIP 会包含本机保存的 API、官方账号快照、SSH 服务器、浏览器 Profile 元数据，以及这些条目引用的 API Key、账号 token、SSH 密码/私钥口令。可留空直接导出；加密导出需设置至少 8 个字符的密码。",
             confirm_password=True,
+            allow_empty=True,
             on_confirm=do_export,
         )
 
@@ -527,6 +537,10 @@ class BackupTab(ctk.CTkScrollableFrame):
         try:
             summary = local_config_bundle.inspect_local_config_zip(input_path)
             summary_text = f"{summary.profile_count} 个 Profile，{summary.secret_count} 个密钥"
+            summary_text += (
+                "\n保护方式：凭据已加密" if getattr(summary, "encrypted", True) else
+                "\n保护方式：未加密，文件持有者可直接读取凭据，请勿公开分享"
+            )
             if summary.missing_secret_count:
                 summary_text += f"，源包缺失 {summary.missing_secret_count} 个密钥"
             if summary.created_at:
@@ -538,9 +552,10 @@ class BackupTab(ctk.CTkScrollableFrame):
         def ask_password():
             PasswordDialog(
                 self.winfo_toplevel(),
-                title="输入完整配置 ZIP 密码",
+                title="导入完整配置 ZIP（密码可选）",
                 message="导入会合并 ZIP 中的 API、官方账号快照、SSH 和浏览器 Profile；同名 Profile 会被替换。导入前会自动创建一份配置备份。",
                 confirm_password=False,
+                allow_empty=True,
                 on_confirm=do_import,
             )
 
@@ -557,7 +572,7 @@ class BackupTab(ctk.CTkScrollableFrame):
                 else:
                     self.refresh()
             except Exception as e:
-                show_toast(self.winfo_toplevel(), f"导入 ZIP 失败: {e}", is_error=True)
+                show_toast(self.winfo_toplevel(), f"导入 ZIP 失败: {_migration_error_text(e, password)}", is_error=True)
 
         ConfirmDialog(
             self.winfo_toplevel(),
@@ -668,6 +683,7 @@ class BackupTab(ctk.CTkScrollableFrame):
                             selection=selection,
                         )
                         message = f"迁移包已导出: {result.profile_count} 个 Profile, {result.secret_count} 个密钥"
+                        message += "；已加密" if password else "；未加密，任何获得文件的人都可读取其中凭据，请勿公开分享"
                         if result.missing_secret_refs:
                             message += f"，{len(result.missing_secret_refs)} 个密钥缺失"
                         if result.browser_file_count:
@@ -680,7 +696,7 @@ class BackupTab(ctk.CTkScrollableFrame):
                             pass
                         payload = (message, False)
                     except Exception as e:
-                        payload = (f"导出失败: {e}", True)
+                        payload = (f"导出失败: {_migration_error_text(e, password)}", True)
 
                     def finish():
                         self._end_portable_operation(top)
@@ -709,12 +725,13 @@ class BackupTab(ctk.CTkScrollableFrame):
 
             PasswordDialog(
                 top,
-                title="设置迁移密码",
+                title="导出迁移包（密码可选）",
                 message=(
                     "迁移包只会包含已选择的 Profile、其引用密钥及所选浏览器 Profile 的登录数据；"
-                    "不会包含浏览器缓存、组件模型或普通运行日志。请设置强密码。"
+                    "不会包含浏览器缓存、组件模型或普通运行日志。可留空直接导出；加密导出需设置至少 8 个字符的密码。"
                 ),
                 confirm_password=True,
+                allow_empty=True,
                 on_confirm=do_export,
             )
 
@@ -752,7 +769,7 @@ class BackupTab(ctk.CTkScrollableFrame):
                         message += f"，{len(result.skipped_browser_files)} 个浏览器文件跳过"
                     payload = (message, False)
                 except Exception as e:
-                    payload = (f"导入失败: {e}", True)
+                    payload = (f"导入失败: {_migration_error_text(e, password)}", True)
 
                 def finish():
                     self._end_portable_operation(top)
@@ -784,8 +801,9 @@ class BackupTab(ctk.CTkScrollableFrame):
 
         PasswordDialog(
             top,
-            title="输入迁移密码",
+            title="导入迁移包（密码可选）",
             message="导入会合并迁移包中的 API/SSH/浏览器 Profile；同名 Profile 会被替换，浏览器数据会恢复到本机托管目录。",
             confirm_password=False,
+            allow_empty=True,
             on_confirm=do_import,
         )

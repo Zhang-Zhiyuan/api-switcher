@@ -1,5 +1,7 @@
 """Account-only migration uses synthetic credentials and an in-memory keyring."""
+import base64
 import json
+import zlib
 
 import pytest
 
@@ -218,11 +220,121 @@ def test_live_and_secret_output_paths_rejected(account_env, monkeypatch, locatio
     assert not candidates[location].exists()
 
 
-@pytest.mark.parametrize("password", ["", "1234567", None])
+@pytest.mark.parametrize("password", ["1", "1234567", "       "])
 def test_export_password_strength_enforced_before_reads(account_env, password):
     tmp_path, _ = account_env
     with pytest.raises(ValueError, match="8"):
         transfer.export_account_login(tmp_path / "out.asxaccount", password, "codex")
+
+
+@pytest.mark.parametrize("password", [None, 0, False, b"", []])
+def test_non_string_password_rejected_for_import_and_export(account_env, password):
+    tmp_path, secrets = account_env
+    with pytest.raises(ValueError, match="文本"):
+        transfer.export_account_login(tmp_path / "out.asxaccount", password, "codex")
+    with pytest.raises(ValueError, match="文本"):
+        transfer.import_account_login(tmp_path / "input.asxaccount", password)
+    assert secrets == {}
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex"])
+def test_empty_password_export_is_explicitly_unencrypted_and_imports(account_env, kind):
+    tmp_path, secrets = account_env
+    credentials = _credentials(kind)
+    _write_current(kind, credentials)
+    target = tmp_path / "unencrypted.asxaccount"
+
+    result = transfer.export_account_login(target, "", kind)
+
+    assert result.path == target
+    bundle = json.loads(target.read_text(encoding="utf-8"))
+    assert bundle["version"] == 2
+    assert bundle["cipher"] == {"name": "none"}
+    assert "kdf" not in bundle
+    assert bundle["compression"] == "zlib"
+    # Base64 plus compression is readily reversible, not password protection.
+    raw = zlib.decompress(base64.b64decode(bundle["payload"]))
+    assert b"synthetic-access" in raw
+    payload = json.loads(raw)
+    assert payload["payload_version"] == 1
+    assert payload["kind"] == transfer.ACCOUNT_FORMAT
+    assert payload["credentials"] == credentials
+    assert secrets == {}
+
+    imported = transfer.import_account_login(target, "", expected_type=kind)
+    assert imported.created_new
+    assert transfer._saved_credentials(kind, transfer._profiles(kind)[0]) == credentials
+
+
+@pytest.mark.parametrize("password", ["", "wrong-password"])
+def test_encrypted_account_never_falls_back_to_plaintext(account_env, password):
+    tmp_path, secrets = account_env
+    target = _write_bundle(tmp_path, "codex")
+    with pytest.raises(ValueError):
+        transfer.import_account_login(target, password)
+    assert secrets == {}
+    assert not profile_manager.PROFILES_FILE.exists()
+
+
+@pytest.mark.parametrize("changes", [
+    {"kdf": None}, {"kdf": {"name": "PBKDF2HMAC-SHA256"}},
+    {"nonce": "unexpected"}, {"salt": "unexpected"},
+    {"cipher": {"name": "none", "nonce": "unexpected"}},
+    {"cipher": {"name": "AES-256-GCM"}}, {"cipher": {}},
+    {"compression": "none"}, {"version": True}, {"version": 3},
+])
+def test_plain_account_mixed_or_unknown_markers_rejected(account_env, changes):
+    tmp_path, secrets = account_env
+    _write_current("claude", _credentials("claude"))
+    target = tmp_path / "unencrypted.asxaccount"
+    transfer.export_account_login(target, "", "claude")
+    bundle = json.loads(target.read_text(encoding="utf-8"))
+    bundle.update(changes)
+    target.write_text(json.dumps(bundle), encoding="utf-8")
+    with pytest.raises(ValueError):
+        transfer.import_account_login(target, "")
+    assert secrets == {}
+
+
+def test_plain_account_keeps_inner_kind_and_decompression_guards(account_env, monkeypatch):
+    tmp_path, secrets = account_env
+    target = tmp_path / "input.asxaccount"
+    payload = {"payload_version": 1, "kind": "not-account", "profile_type": "codex", "credentials": _credentials("codex")}
+    bundle = portable_migration._encode_bundle_payload(payload, "")
+    bundle["format"] = transfer.ACCOUNT_FORMAT
+    target.write_text(json.dumps(bundle), encoding="utf-8")
+    with pytest.raises(ValueError, match="内容类型"):
+        transfer.import_account_login(target, "")
+    payload["kind"] = transfer.ACCOUNT_FORMAT
+    payload["extra"] = "z" * 10000
+    bundle = portable_migration._encode_bundle_payload(payload, "")
+    bundle["format"] = transfer.ACCOUNT_FORMAT
+    target.write_text(json.dumps(bundle), encoding="utf-8")
+    monkeypatch.setattr(transfer, "MAX_ACCOUNT_PAYLOAD_BYTES", 5000)
+    with pytest.raises(ValueError, match="安全限制"):
+        transfer.import_account_login(target, "")
+    assert secrets == {}
+
+
+def test_account_password_whitespace_is_not_trimmed(account_env):
+    tmp_path, _ = account_env
+    _write_current("codex", _credentials("codex"))
+    target = tmp_path / "spaces.asxaccount"
+    password = "  surrounded-by-spaces  "
+    transfer.export_account_login(target, password, "codex")
+    assert transfer._read_payload(target, password)["profile_type"] == "codex"
+    with pytest.raises(ValueError):
+        transfer._read_payload(target, password.strip())
+
+
+def test_encrypted_account_blank_password_skips_kdf_and_gives_clear_message(account_env, monkeypatch):
+    tmp_path, secrets = account_env
+    target = _write_bundle(tmp_path, "codex")
+    monkeypatch.setattr(portable_migration, "PBKDF2HMAC", lambda **kwargs: pytest.fail("empty password must not derive"))
+    with pytest.raises(ValueError, match="已加密.*输入"):
+        transfer.import_account_login(target, "")
+    assert secrets == {}
+    assert not profile_manager.PROFILES_FILE.exists()
 
 
 @pytest.mark.parametrize("kind", ["claude", "codex"])

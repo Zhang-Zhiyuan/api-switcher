@@ -71,7 +71,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle_label = ctk.CTkLabel(
             title_area,
-            text="API 配置管理第三方 OpenAI-compatible 端点和密钥；官方账号支持保存登录快照与加密跨电脑迁移",
+            text="API 配置管理第三方 OpenAI-compatible 端点和密钥；官方账号支持保存登录快照与跨电脑迁移（密码可选）",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -147,7 +147,7 @@ class CodexTab(ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         account_subtitle = ctk.CTkLabel(
             self._account_title,
-            text="保存 Codex ChatGPT 登录快照；可单独导出加密登录包到另一台电脑使用，切换后新终端生效",
+            text="保存 Codex ChatGPT 登录快照；可单独导出登录包到另一台电脑使用（密码可选），切换后新终端生效",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",

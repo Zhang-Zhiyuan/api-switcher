@@ -399,3 +399,41 @@ def test_selected_export_uses_rotated_tokens_when_stable_account_email_changes(t
     imported = import_account_login(package, PASSWORD, expected_type=kind)
     restored = next(profile for profile in _saved(kind) if profile.name == imported.account_name)
     assert _token_pair(kind, _saved_value(kind, restored)) == _token_pair(kind, live_credentials)
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+def test_passwordless_cross_machine_transfer_preserves_existing_login_until_switch(transfer_machine, tmp_path, kind):
+    from core.account_transfer import export_account_login, import_account_login
+
+    transfer_machine.use("source")
+    source_credentials = _credentials(kind, identity="source-owner", revision="source-passwordless")
+    transfer_machine.live(kind, source_credentials)
+    source_files = _file_snapshot(_runtime_files())
+    package = tmp_path / (kind + "-no-password.asxaccount")
+    export_account_login(package, "", kind)
+    assert _file_snapshot(source_files) == source_files
+    assert not transfer_machine.secrets
+    envelope = json.loads(package.read_text(encoding="utf-8"))
+    assert envelope["version"] == 2
+    assert envelope["cipher"] == {"name": "none"}
+    assert "kdf" not in envelope
+
+    transfer_machine.use("destination")
+    destination_credentials = _credentials(kind, identity="destination-owner", revision="existing")
+    transfer_machine.live(kind, destination_credentials)
+    destination_files = _file_snapshot(_runtime_files())
+    proxies = {key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+    registry = dict(transfer_machine.registry)
+
+    imported = import_account_login(package, "", expected_type=kind)
+    assert _file_snapshot(_runtime_files()) == destination_files
+    assert len(_saved(kind)) == 2
+    assert not profile_manager.get_active_codex_account_name()
+    assert not profile_manager.get_active_claude_account_name()
+
+    _activate(kind, imported.account_name)
+    assert _token_pair(kind, _read_live(kind)) == _token_pair(kind, source_credentials)
+    assert any(_token_pair(kind, _saved_value(kind, profile)) == _token_pair(kind, destination_credentials)
+               for profile in _saved(kind))
+    assert {key: os.environ.get(key) for key in proxies} == proxies
+    assert transfer_machine.registry == registry

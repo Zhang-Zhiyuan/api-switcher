@@ -54,7 +54,8 @@ def _write_encrypted_local_config_package(path, payload, password="strong-passwo
         )
 
 
-def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_config, tmp_path):
+@pytest.mark.parametrize("password", ["strong-password", ""])
+def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_config, tmp_path, password):
     secrets = isolated_local_config
     secret_refs = {
         "claude": "claude:All:auth_token",
@@ -116,20 +117,23 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
     profile_manager.set_active_browser("Browser")
 
     package = tmp_path / "local-config.zip"
-    exported = local_config_bundle.export_local_config_zip(package, "strong-password")
+    exported = local_config_bundle.export_local_config_zip(package, password)
 
     assert exported.profile_count == 6
     assert exported.secret_count == len(secret_refs)
     assert exported.missing_secret_refs == []
     summary = local_config_bundle.inspect_local_config_zip(package)
+    assert exported.encrypted is bool(password)
+    assert summary.encrypted is bool(password)
     assert summary.profile_count == 6
     assert summary.secret_count == len(secret_refs)
     assert summary.profile_counts["ssh_profiles"] == 1
     with zipfile.ZipFile(package, "r") as bundle:
         manifest = json.loads(bundle.read("manifest.json").decode("utf-8"))
     assert manifest["format"] == local_config_bundle.PACKAGE_FORMAT
-    assert b"claude-secret" not in package.read_bytes()
-    assert b"ssh_password-secret" not in package.read_bytes()
+    if password:
+        assert b"claude-secret" not in package.read_bytes()
+        assert b"ssh_password-secret" not in package.read_bytes()
 
     profile_manager._save_store(profile_manager._get_default_store())
     secrets.clear()
@@ -148,7 +152,7 @@ def test_local_config_zip_round_trip_restores_all_profile_types(isolated_local_c
         model_provider="custom",
     ))
 
-    imported = local_config_bundle.import_local_config_zip(package, "strong-password")
+    imported = local_config_bundle.import_local_config_zip(package, password)
 
     assert imported.profile_count == 6
     assert imported.secret_count == len(secret_refs)
@@ -622,10 +626,12 @@ def test_local_config_import_rejects_missing_secret_collision_with_unowned_value
     assert profile_manager.list_codex_profiles() == []
 
 
+@pytest.mark.parametrize("password", ["strong-password", ""])
 def test_local_config_import_rolls_back_profiles_and_secrets_after_save_failure(
     isolated_local_config,
     tmp_path,
     monkeypatch,
+    password,
 ):
     secrets = isolated_local_config
     imported_ref = "claude:ImportedOwner:auth_token"
@@ -641,7 +647,7 @@ def test_local_config_import_rolls_back_profiles_and_secrets_after_save_failure(
         provider="custom",
     ))
     package = tmp_path / "rollback-save.zip"
-    local_config_bundle.export_local_config_zip(package, "strong-password")
+    local_config_bundle.export_local_config_zip(package, password)
 
     profile_manager._save_store(profile_manager._get_default_store())
     secrets.clear()
@@ -665,7 +671,7 @@ def test_local_config_import_rolls_back_profiles_and_secrets_after_save_failure(
     monkeypatch.setattr(profile_manager, "_save_store", save_then_fail)
 
     with pytest.raises(RuntimeError, match="forced profile save failure"):
-        local_config_bundle.import_local_config_zip(package, "strong-password")
+        local_config_bundle.import_local_config_zip(package, password)
 
     assert profile_manager.PROFILES_FILE.read_bytes() == profile_before
     [profile] = profile_manager.list_claude_profiles()
@@ -1160,3 +1166,182 @@ def test_local_config_export_holds_profile_then_settings_locks_through_commit(
     assert package.is_file()
     assert events[:2] == ["enter:profile", "enter:settings"]
     assert events[-2:] == ["exit:settings", "exit:profile"]
+
+
+def _plain_config_wrapper():
+    return local_config_bundle._encode_payload({
+        "payload_version": local_config_bundle.PAYLOAD_VERSION,
+        "store": profile_manager._get_default_store(),
+        "secrets": {},
+    }, "")
+
+
+def test_plain_zip_has_explicit_marker_entry_and_honest_notes(isolated_local_config, tmp_path):
+    package = tmp_path / "plain.zip"
+    local_config_bundle.export_local_config_zip(package, "")
+    with zipfile.ZipFile(package) as archive:
+        assert set(archive.namelist()) == {"manifest.json", "payload.json"}
+        manifest = json.loads(archive.read("manifest.json"))
+        wrapper = json.loads(archive.read("payload.json"))
+    assert manifest["version"] == 2 and manifest["encrypted"] is False
+    assert wrapper["version"] == 2 and wrapper["cipher"] == {"name": "none"}
+    assert "kdf" not in wrapper and wrapper["compression"] == "zlib"
+    payload = json.loads(zlib.decompress(local_config_bundle._b64decode(wrapper["payload"])))
+    assert any("未加密" in note for note in payload["notes"])
+    assert not any("已用迁移密码加密" in note for note in payload["notes"])
+    # Supplying an unnecessary password does not prevent reading an explicitly plain file.
+    assert local_config_bundle.import_local_config_zip(package, "unused-password").profile_count == 0
+
+
+@pytest.mark.parametrize("password", [None, False, 0, b"", [], {}])
+def test_zip_rejects_non_string_password_before_io(tmp_path, monkeypatch, password):
+    def unexpected_read():
+        pytest.fail("invalid password must be rejected before reading profiles")
+
+    monkeypatch.setattr(profile_manager, "_load_store", unexpected_read)
+    for operation in (local_config_bundle.export_local_config_zip, local_config_bundle.import_local_config_zip):
+        with pytest.raises(ValueError, match="字符串"):
+            operation(tmp_path / "missing.zip", password)
+    assert not (tmp_path / "missing.zip").exists()
+
+
+@pytest.mark.parametrize("password", ["a", "1234567", "       "])
+def test_nonempty_zip_export_password_still_requires_eight_characters(tmp_path, password):
+    with pytest.raises(ValueError, match="至少需要 8"):
+        local_config_bundle.export_local_config_zip(tmp_path / "short.zip", password)
+    assert not (tmp_path / "short.zip").exists()
+
+
+def test_whitespace_is_not_silently_an_unencrypted_password(isolated_local_config, tmp_path):
+    package = tmp_path / "spaces.zip"
+    local_config_bundle.export_local_config_zip(package, "        ")
+    assert local_config_bundle.inspect_local_config_zip(package).encrypted
+    assert local_config_bundle.import_local_config_zip(package, "        ").profile_count == 0
+    with pytest.raises(ValueError, match="已加密"):
+        local_config_bundle.import_local_config_zip(package, "")
+
+
+def test_legacy_encrypted_zip_without_manifest_flag_stays_compatible(isolated_local_config, tmp_path):
+    package = tmp_path / "legacy.zip"
+    _write_encrypted_local_config_package(package, {
+        "payload_version": local_config_bundle.PAYLOAD_VERSION,
+        "store": profile_manager._get_default_store(),
+        "secrets": {},
+    })
+    assert local_config_bundle.inspect_local_config_zip(package).encrypted
+    assert local_config_bundle.import_local_config_zip(package, "strong-password").profile_count == 0
+
+
+@pytest.mark.parametrize("password", ["", "wrong-password"])
+def test_encrypted_zip_never_falls_back_to_plaintext(isolated_local_config, tmp_path, monkeypatch, password):
+    package = tmp_path / "encrypted.zip"
+    local_config_bundle.export_local_config_zip(package, "strong-password")
+    before_store = profile_manager.PROFILES_FILE.read_bytes()
+    before_secrets = dict(isolated_local_config)
+
+    def unexpected_decode(*_args):
+        pytest.fail("encrypted input with a missing/wrong password must never try plaintext")
+
+    monkeypatch.setattr(local_config_bundle, "_decode_payload_content", unexpected_decode)
+    with pytest.raises(ValueError, match="密码"):
+        local_config_bundle.import_local_config_zip(package, password)
+    assert profile_manager.PROFILES_FILE.read_bytes() == before_store
+    assert isolated_local_config == before_secrets
+
+
+def test_encrypted_zip_empty_password_is_rejected_before_kdf(isolated_local_config, tmp_path, monkeypatch):
+    package = tmp_path / "encrypted.zip"
+    local_config_bundle.export_local_config_zip(package, "strong-password")
+
+    def unexpected_kdf(*_args, **_kwargs):
+        pytest.fail("missing password must not perform password derivation")
+
+    monkeypatch.setattr(local_config_bundle, "PBKDF2HMAC", unexpected_kdf)
+    with pytest.raises(ValueError, match="已加密"):
+        local_config_bundle.import_local_config_zip(package, "")
+
+
+def test_plain_zip_encoder_rejects_non_json_numeric_values():
+    with pytest.raises(ValueError):
+        local_config_bundle._encode_payload({"payload_version": 1, "value": float("nan")}, "")
+
+
+@pytest.mark.parametrize("changes", [
+    {"version": 1}, {"version": True}, {"version": 3},
+    {"cipher": {"name": "AES-256-GCM"}}, {"cipher": {"name": "none", "nonce": "ignored"}},
+    {"cipher": None}, {"kdf": None}, {"nonce": "ignored"}, {"salt": "ignored"},
+    {"compression": "none"}, {"payload": None},
+])
+def test_plain_wrapper_rejects_incomplete_or_mixed_crypto_metadata(changes):
+    wrapper = _plain_config_wrapper()
+    wrapper.update(changes)
+    with pytest.raises(ValueError):
+        local_config_bundle._decode_payload(wrapper, "")
+
+
+@pytest.mark.parametrize("field", ["format", "version", "cipher", "compression", "payload"])
+def test_plain_wrapper_requires_every_explicit_marker(field):
+    wrapper = _plain_config_wrapper()
+    del wrapper[field]
+    with pytest.raises(ValueError):
+        local_config_bundle._decode_payload(wrapper, "")
+
+
+@pytest.mark.parametrize("damage", ["invalid-base64", "truncated", "trailing", "oversized"])
+def test_plain_payload_preserves_decode_and_decompression_limits(monkeypatch, damage):
+    wrapper = _plain_config_wrapper()
+    data = local_config_bundle._b64decode(wrapper["payload"])
+    if damage == "invalid-base64":
+        wrapper["payload"] = "not!base64"
+    else:
+        if damage == "truncated":
+            data = data[:-1]
+        elif damage == "trailing":
+            data += b"unexpected-trailing-data"
+        else:
+            monkeypatch.setattr(local_config_bundle, "MAX_DECRYPTED_PAYLOAD_BYTES", 16)
+        wrapper["payload"] = local_config_bundle._b64encode(data)
+    with pytest.raises(ValueError):
+        local_config_bundle._decode_payload(wrapper, "")
+
+
+@pytest.mark.parametrize("damage", [
+    "duplicate-plain", "both-payloads", "plain-under-encrypted-name", "encrypted-under-plain-name",
+    "missing-marker", "string-marker", "manifest-v1-plain", "payload-path",
+])
+def test_zip_rejects_ambiguous_plain_manifest_or_entries(isolated_local_config, tmp_path, damage):
+    package = tmp_path / "ambiguous.zip"
+    manifest = {
+        "format": local_config_bundle.PACKAGE_FORMAT, "version": 2,
+        "encrypted": False, "payload": local_config_bundle.PLAINTEXT_PAYLOAD_NAME,
+    }
+    wrapper = _plain_config_wrapper()
+    entry_name = local_config_bundle.PLAINTEXT_PAYLOAD_NAME
+    if damage == "plain-under-encrypted-name":
+        manifest.update(version=1, encrypted=True, payload=local_config_bundle.PAYLOAD_NAME)
+        entry_name = local_config_bundle.PAYLOAD_NAME
+    elif damage == "encrypted-under-plain-name":
+        wrapper = local_config_bundle._encrypt_payload({"payload_version": 1}, "strong-password")
+    elif damage == "missing-marker":
+        del manifest["encrypted"]
+    elif damage == "string-marker":
+        manifest["encrypted"] = "false"
+    elif damage == "manifest-v1-plain":
+        manifest["version"] = 1
+    elif damage == "payload-path":
+        manifest["payload"] = "../payload.json"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr(entry_name, json.dumps(wrapper))
+        if damage == "duplicate-plain":
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                archive.writestr(entry_name, json.dumps(wrapper))
+        elif damage == "both-payloads":
+            archive.writestr(local_config_bundle.PAYLOAD_NAME, "{}")
+    before_store = profile_manager.PROFILES_FILE.read_bytes()
+    for operation, args in ((local_config_bundle.inspect_local_config_zip, (package,)),
+                            (local_config_bundle.import_local_config_zip, (package, ""))):
+        with pytest.raises(ValueError):
+            operation(*args)
+    assert profile_manager.PROFILES_FILE.read_bytes() == before_store

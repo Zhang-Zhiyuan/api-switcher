@@ -73,6 +73,9 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._messages = queue.Queue()
         self._poll_after_id = None
         self._poll_failed = False
+        self._export_encrypted = False
+        self._password_var = ctk.StringVar(master=self, value="")
+        self._password_trace = None
 
         product = "Claude" if profile_type == "claude" else "Codex"
         self._title = f"{'导出' if exporting else '导入'} {product} 登录包"
@@ -88,7 +91,7 @@ class AccountTransferDialog(ctk.CTkToplevel):
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=20, pady=(8, 18))
         self._primary = ctk.CTkButton(
-            footer, text="加密导出" if exporting else "导入并保存", width=1,
+            footer, text="无密码导出" if exporting else "导入并保存", width=1,
             command=self._submit, **button_style("primary"),
         )
         self._cancel = ctk.CTkButton(
@@ -103,12 +106,12 @@ class AccountTransferDialog(ctk.CTkToplevel):
             source = f"已保存账号：{account_name}" if account_name else "本机当前官方登录（不导出 API 密钥）"
             detail = (
                 f"{source}\n仅包含这一个账号的登录状态，不包含其他账号、代理或机器设置。"
-                "\n请只迁移你自己的账号，并通过可信方式传输登录包；密码请另行保管。"
+                "\n请只迁移你自己的账号，并通过可信方式传输登录包；如设置密码，请另行保管。"
                 "\n已保存快照可能早于当前登录，建议优先导出当前登录。"
             )
         else:
             detail = (
-                f"导入一个 {product} 加密登录包，保留其他账号及当前 API / 登录状态。"
+                f"导入一个 {product} 登录包，保留其他账号及当前 API / 登录状态。"
                 "\n导入后先保存为独立账号，再由你点击“切换到此账号”确认使用。"
                 "\n请只导入你自己的账号，不要接收不可信来源的登录包。"
             )
@@ -117,6 +120,14 @@ class AccountTransferDialog(ctk.CTkToplevel):
                              font=font(12), text_color=COLORS["muted"])
         label.pack(fill="x", pady=(0, 12))
         bind_wraplength(body, label, padding=4, min_width=260, max_width=850)
+        notice = (
+            "密码可留空。留空时未加密，任何获得文件的人都可读取其中凭据，请勿公开分享。"
+            if exporting else "无密码包可留空导入；加密包仍需正确密码。未加密文件中的凭据可被直接读取，请勿公开分享。"
+        )
+        self._password_notice = ctk.CTkLabel(body, text=notice, anchor="w", justify="left",
+                                           font=font(12), text_color=COLORS["warning"])
+        self._password_notice.pack(fill="x", pady=(0, 10))
+        bind_wraplength(body, self._password_notice, padding=4, min_width=260, max_width=850)
 
         file_row = ctk.CTkFrame(body, fg_color="transparent")
         file_row.pack(fill="x", pady=(0, 10))
@@ -129,8 +140,10 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._browse = ctk.CTkButton(file_row, text="选择文件", width=82, command=self._choose_path,
                                     **button_style("secondary"))
         self._browse.grid(row=0, column=1, padx=(8, 0))
-        self._password = ctk.CTkEntry(body, width=1, show="*",
-                                     placeholder_text="迁移密码（导出至少 8 个字符）", **input_style())
+        ctk.CTkLabel(body, text="迁移密码（可留空；加密导出至少 8 字符）", anchor="w",
+                     font=font(12), text_color=COLORS["muted"]).pack(fill="x", pady=(0, 4))
+        self._password = ctk.CTkEntry(body, width=1, show="*", textvariable=self._password_var,
+                                     placeholder_text="迁移密码（可留空；加密导出至少 8 字符）", **input_style())
         self._password.pack(fill="x", pady=(0, 8))
         self._confirmation = None
         if exporting:
@@ -143,6 +156,7 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._inputs = [self._browse, self._password]
         if self._confirmation is not None:
             self._inputs.append(self._confirmation)
+        self._password_trace = self._password_var.trace_add("write", self._update_action_label)
         center_window(self, master)
         self.grab_set()
 
@@ -150,7 +164,7 @@ class AccountTransferDialog(ctk.CTkToplevel):
         if self._busy or self._result is not None:
             return
         options = dict(parent=self, title=self._title,
-                       filetypes=[("加密账号登录包", "*.asxaccount")])
+                       filetypes=[("账号登录包", "*.asxaccount")])
         if self._exporting:
             value = filedialog.asksaveasfilename(
                 **options, defaultextension=".asxaccount", initialfile=f"{self._profile_type}-login.asxaccount",
@@ -175,8 +189,17 @@ class AccountTransferDialog(ctk.CTkToplevel):
             except Exception:
                 pass
         self._primary.configure(state="disabled" if busy else "normal",
-                                text="处理中…" if busy else ("加密导出" if self._exporting else "导入并保存"))
+                                text="处理中…" if busy else self._action_label())
         self._cancel.configure(state="disabled" if busy else "normal")
+
+    def _action_label(self):
+        if self._exporting:
+            return "加密导出" if self._password.get() else "无密码导出"
+        return "导入并保存"
+
+    def _update_action_label(self, *_args):
+        if not self._destroyed and not self._busy and self._result is None:
+            self._primary.configure(text=self._action_label())
 
     def _submit(self):
         if self._busy or self._destroyed or self._result is not None:
@@ -185,8 +208,8 @@ class AccountTransferDialog(ctk.CTkToplevel):
         if not path:
             self._set_status("请先选择登录包文件", error=True)
             return
-        if not password or (self._exporting and len(password) < 8):
-            self._set_status("导出密码至少需要 8 个字符" if self._exporting else "请输入登录包密码", error=True)
+        if self._exporting and password and len(password) < 8:
+            self._set_status("加密导出密码至少需要 8 个字符；也可留空无密码导出", error=True)
             return
         if self._exporting and password != self._confirmation.get():
             self._set_status("两次输入的密码不一致", error=True)
@@ -198,9 +221,11 @@ class AccountTransferDialog(ctk.CTkToplevel):
                 return
             self._critical_owned = True
         self._poll_failed = False
+        self._export_encrypted = bool(password)
         try:
             self._set_busy(True)
-            self._set_status("正在后台加密导出…" if self._exporting else "正在后台校验并导入…当前登录不会改变。")
+            progress = "正在后台加密导出…" if password else "正在后台无密码导出…文件未加密，请勿公开分享。"
+            self._set_status(progress if self._exporting else "正在后台校验并导入…当前登录不会改变。")
             self._poll_after_id = self.after(80, self._poll_result)
         except Exception:
             try:
@@ -219,7 +244,10 @@ class AccountTransferDialog(ctk.CTkToplevel):
                 else:
                     result = account_transfer.import_account_login(path, password, expected_type=self._profile_type)
             except Exception as exc:
-                error = safe_feedback_text(str(exc).replace(password, "[密码已隐藏]")).strip() or "登录包处理失败，请检查文件和密码后重试"
+                detail = str(exc)
+                if password:
+                    detail = detail.replace(password, "[密码已隐藏]")
+                error = safe_feedback_text(detail).strip() or "登录包处理失败，请检查文件和密码后重试"
             self._messages.put((result, error))
             # Queue polling also works in a standalone Tk host without an App dispatcher.
             dispatched = run_on_ui_thread(self, self._poll_result)
@@ -287,7 +315,11 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._cancel.configure(text="关闭")
         if self._exporting:
             self._primary.configure(text="已导出", state="disabled")
-            self._set_status("加密登录包已导出。请在另一台电脑的对应账号页选择“导入登录包”，并输入同一密码。")
+            self._set_status(
+                "加密登录包已导出。请在另一台电脑的对应账号页选择“导入登录包”，并输入同一密码。"
+                if self._export_encrypted else
+                "无密码登录包已导出。另一台电脑可直接导入。文件未加密，任何获得文件的人都可读取其中凭据，请勿公开分享。"
+            )
         else:
             self._primary.configure(text="切换到此账号", command=self._activate,
                                     state="normal" if callable(self._on_activate) else "disabled")
@@ -325,6 +357,28 @@ class AccountTransferDialog(ctk.CTkToplevel):
     def _on_destroy(self, event):
         if event.widget is self:
             self._destroyed = True
+            trace = getattr(self, "_password_trace", None)
+            if trace is not None:
+                try:
+                    self._password_var.trace_remove("write", trace)
+                except Exception:
+                    pass
+                self._password_trace = None
+            password_var = self.__dict__.get("_password_var")
+            if password_var is not None:
+                try:
+                    # Child entries may already be destroyed when this event
+                    # arrives; their CTk traces must not run against dead widgets.
+                    for modes, callback in password_var.trace_info():
+                        password_var.trace_remove(modes, callback)
+                    password_var.set("")
+                except Exception:
+                    pass
+            if self._confirmation is not None:
+                try:
+                    self._confirmation.delete(0, "end")
+                except Exception:
+                    pass
             self._cancel_poll()
             if not self._busy or not self._messages.empty():
                 self._abandon_operation()

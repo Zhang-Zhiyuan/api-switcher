@@ -1,8 +1,10 @@
-"""Password-protected portable profile migration.
+"""Portable profile migration with optional password protection.
 
 This module exports profile metadata plus app-managed secrets into a portable
 file. Secrets are decrypted from the current machine and re-encrypted with a
 user-provided migration password so they can be restored on another computer.
+An explicitly empty password selects a distinctly marked, unencrypted format;
+compression and base64 encoding do not protect its secrets.
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ from core.atomic_io import atomic_write_bytes, atomic_write_text, temp_path_for
 
 BUNDLE_FORMAT = "api-switcher-portable-profiles"
 BUNDLE_VERSION = 1
+UNENCRYPTED_BUNDLE_VERSION = 2
 KDF_ITERATIONS = 390_000
 MAX_KDF_ITERATIONS = 2_000_000
 MAX_BUNDLE_FILE_BYTES = 3 * 1024 * 1024 * 1024
@@ -203,7 +206,7 @@ def _zlib_compress_bound(source_size: int) -> int:
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
-    if not password:
+    if not isinstance(password, str) or not password:
         raise ValueError("迁移密码不能为空")
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -246,6 +249,8 @@ def _decrypt_bundle(
     *,
     max_payload_bytes: int | None = None,
 ) -> dict[str, Any]:
+    if not isinstance(password, str) or not password:
+        raise ValueError("加密迁移包需要输入密码")
     payload_limit = MAX_DECRYPTED_PAYLOAD_BYTES if max_payload_bytes is None else max_payload_bytes
     if type(payload_limit) is not int or payload_limit < 1:
         raise ValueError("迁移包解密大小限制无效")
@@ -308,6 +313,74 @@ def _decrypt_bundle(
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError("迁移包内容损坏") from e
     if not isinstance(payload, dict) or payload.get("payload_version") != 1:
+        raise ValueError("迁移包内容版本不受支持")
+    return payload
+
+
+def _encode_bundle_payload(payload: dict[str, Any], password: str) -> dict[str, Any]:
+    """Choose encryption explicitly; never encrypt with an empty password."""
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是文本；不设密码请留空")
+    if password != "":
+        return _encrypt_payload(payload, password)
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(plaintext) > MAX_DECRYPTED_PAYLOAD_BYTES:
+        raise ValueError("迁移包内容过大")
+    return {
+        "format": BUNDLE_FORMAT,
+        "version": UNENCRYPTED_BUNDLE_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "cipher": {"name": "none"},
+        "compression": "zlib",
+        "payload": _b64encode(zlib.compress(plaintext, level=6)),
+    }
+
+
+def _decode_bundle_payload(
+    bundle: dict[str, Any],
+    password: str,
+    *,
+    max_payload_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Strict version dispatch: failed AES authentication is never plaintext."""
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是文本；不设密码请留空")
+    if not isinstance(bundle, dict) or bundle.get("format") != BUNDLE_FORMAT:
+        raise ValueError("不是 API切换器 Profile 迁移包")
+    version = bundle.get("version")
+    if type(version) is not int:
+        raise ValueError("迁移包版本不受支持")
+    if version == BUNDLE_VERSION:
+        return _decrypt_bundle(bundle, password, max_payload_bytes=max_payload_bytes)
+    if version != UNENCRYPTED_BUNDLE_VERSION:
+        raise ValueError("迁移包版本不受支持")
+    allowed_fields = {"format", "version", "created_at", "cipher", "compression", "payload"}
+    if (
+        set(bundle) != allowed_fields
+        or not isinstance(bundle.get("created_at"), str)
+        or bundle.get("cipher") != {"name": "none"}
+        or bundle.get("compression") != "zlib"
+        or not isinstance(bundle.get("payload"), str)
+    ):
+        raise ValueError("未加密迁移包标记不完整或混入加密参数")
+    payload_limit = MAX_DECRYPTED_PAYLOAD_BYTES if max_payload_bytes is None else max_payload_bytes
+    if type(payload_limit) is not int or payload_limit < 1:
+        raise ValueError("迁移包解压大小限制无效")
+    try:
+        compressed = _b64decode(bundle["payload"])
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("未加密迁移包编码损坏") from exc
+    plaintext = _zlib_decompress_bounded(
+        compressed,
+        payload_limit,
+        too_large_message="迁移包解压后内容过大",
+        corrupt_message="迁移包压缩数据损坏",
+    )
+    try:
+        payload = json.loads(plaintext.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError("迁移包内容损坏") from exc
+    if not isinstance(payload, dict) or type(payload.get("payload_version")) is not int or payload["payload_version"] != 1:
         raise ValueError("迁移包内容版本不受支持")
     return payload
 
@@ -1170,8 +1243,10 @@ def export_portable_profiles(
     omitted key selects no profiles of that type; passing ``None`` preserves
     the legacy full-export behavior.
     """
-    if len(password) < 8:
-        raise ValueError("迁移密码至少需要 8 个字符")
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是文本；不设密码请留空")
+    if password != "" and len(password) < 8:
+        raise ValueError("设置迁移密码时至少需要 8 个字符，也可以留空")
 
     path = Path(output_path).expanduser().resolve()
     if path.exists() and path.is_dir():
@@ -1225,7 +1300,7 @@ def _export_portable_profiles_locked(
             "Chromium cookies may still be bound to the source OS account by the browser itself.",
         ],
     }
-    bundle = _encrypt_payload(payload, password)
+    bundle = _encode_bundle_payload(payload, password)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(bundle, ensure_ascii=False, indent=2))
@@ -1246,8 +1321,8 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
 
     Same-name profiles are replaced. Profiles with different names are kept.
     """
-    if not password:
-        raise ValueError("请输入迁移密码")
+    if not isinstance(password, str):
+        raise ValueError("迁移密码必须是文本；不设密码请留空")
 
     path = Path(input_path).expanduser().resolve()
     if not path.exists():
@@ -1256,13 +1331,17 @@ def import_portable_profiles(input_path: str | Path, password: str) -> PortableI
         raise ValueError("请选择迁移包文件")
     if path.stat().st_size > MAX_BUNDLE_FILE_BYTES:
         raise ValueError("迁移包过大，请确认是否选择了正确文件")
+    with path.open("rb") as handle:
+        raw_bundle = handle.read(MAX_BUNDLE_FILE_BYTES + 1)
+    if len(raw_bundle) > MAX_BUNDLE_FILE_BYTES:
+        raise ValueError("迁移包过大，请确认是否选择了正确文件")
     try:
-        bundle = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+        bundle = json.loads(raw_bundle.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError) as e:
         raise ValueError("迁移包 JSON 格式损坏") from e
     if not isinstance(bundle, dict):
         raise ValueError("迁移包 JSON 格式损坏")
-    payload = _decrypt_bundle(bundle, password)
+    payload = _decode_bundle_payload(bundle, password)
 
     imported_store = payload.get("store")
     if not isinstance(imported_store, dict):

@@ -44,6 +44,8 @@ def dialog(monkeypatch):
     instance._messages = Queue()
     instance._poll_after_id = None
     instance._poll_failed = False
+    instance._export_encrypted = False
+    instance._password_trace = None
     instance._profile_type = "codex"
     instance._exporting = False
     instance._account_name = None
@@ -123,7 +125,7 @@ def test_export_current_or_named_account_no_activation(dialog, name):
     ("", "password", "password", True),
     ("file.asxaccount", "short", "short", True),
     ("file.asxaccount", "password1", "password2", True),
-    ("file.asxaccount", "", None, False),
+    ("file.asxaccount", "", "mismatch", True),
 ])
 def test_invalid_form_never_starts_worker(dialog, path, password, confirmation, exporting):
     item, events, pending, _callbacks, _calls = dialog
@@ -141,6 +143,36 @@ def test_import_accepts_older_short_nonempty_password(dialog):
     item._password.value = "old"
     item._submit()
     assert len(pending) == 1
+
+
+@pytest.mark.parametrize("exporting", [False, True])
+def test_empty_password_is_forwarded_without_extra_confirmation(dialog, exporting):
+    item, _events, pending, _callbacks, calls = dialog
+    item._exporting = exporting
+    item._password.value = ""
+    item._confirmation = Widget("") if exporting else None
+    item._submit()
+    assert len(pending) == 1
+    pending.pop()()
+    item._poll_result()
+    assert calls[0][1][1] == ""
+    if exporting:
+        assert "未加密" in item._status.options["text"]
+        assert "加密登录包已导出" not in item._status.options["text"]
+
+
+def test_empty_password_error_does_not_replace_empty_substring(dialog, monkeypatch):
+    item, _events, pending, _callbacks, _calls = dialog
+    item._password.value = ""
+
+    def failed(*_args, **_kwargs):
+        raise ValueError("该文件已加密，请输入正确密码")
+
+    monkeypatch.setattr(module, "account_transfer", SimpleNamespace(import_account_login=failed))
+    item._submit()
+    pending.pop()()
+    item._poll_result()
+    assert item._status.options["text"] == "操作失败：该文件已加密，请输入正确密码"
 
 
 def test_global_critical_operation_rejects_start(dialog):
@@ -433,6 +465,35 @@ def test_native_standalone_worker_completes_through_main_thread_poll(monkeypatch
         owner.destroy()
 
 
+def test_native_optional_password_export_button_and_warning(tk_root, monkeypatch):
+    import customtkinter as ctk
+
+    owner = ctk.CTkToplevel(tk_root)
+    window = None
+    errors = []
+    monkeypatch.setattr(tk_root, "report_callback_exception", lambda *args: errors.append(args))
+    try:
+        window = module.AccountTransferDialog(owner, "codex", exporting=True)
+        assert window._primary.cget("text") == "无密码导出"
+        assert "任何获得文件的人都可读取其中凭据" in window._password_notice.cget("text")
+        window._password.insert(0, "synthetic-password")
+        tk_root.update()
+        assert window._primary.cget("text") == "加密导出"
+        window._password.delete(0, "end")
+        tk_root.update()
+        assert window._primary.cget("text") == "无密码导出"
+        window._password.insert(0, "synthetic-password")
+        password_var = window._password_var
+        window._close()
+        assert password_var.get() == ""
+        assert errors == []
+        window = None
+    finally:
+        if window is not None:
+            window.destroy()
+        owner.destroy()
+
+
 def capture_preview(directory):
     """Capture synthetic HWNDs only; never read account settings or the desktop."""
     from pathlib import Path
@@ -440,6 +501,7 @@ def capture_preview(directory):
 
     import customtkinter as ctk
     from PIL import ImageGrab
+    from ui.dialogs.password_dialog import PasswordDialog
 
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
@@ -458,6 +520,16 @@ def capture_preview(directory):
                 time.sleep(0.03)
             ImageGrab.grab(window=window.winfo_id()).save(destination / f"account-transfer-{mode}.png")
             window.destroy()
+        window = PasswordDialog(
+            root, title="导出迁移包（密码可选）",
+            message="迁移包只会包含已选择的 Profile、其引用密钥及所选浏览器 Profile 的登录数据；不会包含浏览器缓存、组件模型或普通运行日志。可留空直接导出；加密导出需设置至少 8 个字符的密码。",
+            on_confirm=lambda _password: None, confirm_password=True, allow_empty=True,
+        )
+        for _ in range(8):
+            root.update()
+            time.sleep(0.03)
+        ImageGrab.grab(window=window.winfo_id()).save(destination / "optional-migration-password.png")
+        window.destroy()
     finally:
         root.destroy()
 
