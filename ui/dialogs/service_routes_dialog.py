@@ -9,6 +9,7 @@ import uuid
 import customtkinter as ctk
 
 from core import proxy_routing
+from core.subscription_routing_policy import preferred_network_type, suggest_tagged_routes
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style, textbox_style
@@ -17,6 +18,7 @@ from ui.widgets.service_route_overview import route_changes, route_description
 DEFAULT_PROFILE = "跟随默认线路"
 DEFAULT_CUSTOM_PROFILE = "跟随自定义默认线路"
 DEFAULT_NODE = "订阅首选 + 故障切换"
+AUTO_PROFILE = "按用途重新分配"
 MISSING_PROFILE = "订阅已失效，请重新选择"
 MISSING_NODE = "固定节点已失效，请重新选择"
 
@@ -77,6 +79,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._scope_copy_dialog = None
         self._tags_dialog = None
         self._manually_edited = {scope: set() for scope in self._scopes}
+        self._auto_seeded = set()
+        self._default_notices = {}
         self._preview_open = False
         self._custom_open = False
         self._changes = []
@@ -87,7 +91,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         ctk.CTkLabel(header, text="按访问目标选择线路", font=font(20, "bold"),
                      text_color=COLORS["text"]).pack(anchor="w")
         notice = ctk.CTkLabel(
-            header, text="选择订阅 → 搜索节点或使用自动切换 → 查看修改并应用。编辑期间不改变现有线路。",
+            header, text="用途默认：AI、X/Reddit → 家宽；视频、搜索、下载、通信 → 非家宽。\n"
+                         "自动补齐未配置目标，手动选择优先；保存并应用后生效，编辑期间不改变现有线路。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(4, 10))
@@ -161,7 +166,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._tags_button = ctk.CTkButton(tools_row, text="订阅标记", width=88, state="disabled",
                                          command=self._open_subscription_tags, **button_style("secondary", compact=True))
         self._tags_button.pack(side="left", padx=(8, 0))
-        self._tag_routes_button = ctk.CTkButton(tools_row, text="按标记分流", width=106, state="disabled",
+        self._tag_routes_button = ctk.CTkButton(tools_row, text="补齐默认分流", width=106, state="disabled",
                                                command=self._suggest_tagged_routes, **button_style("secondary", compact=True))
         self._tag_routes_button.pack(side="left", padx=(8, 0))
         self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单（0）", width=140, command=self._toggle_preview,
@@ -228,6 +233,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             lines.extend([f"[{item['scope']}] {item['label']}", f"  原：{item['before']}",
                           f"  新：{'移除目标及其独立绑定' if item['removed'] else item['after']}", ""])
         text = "\n".join(lines) if lines else f"没有未保存修改。再次应用只处理当前位置：{self._scope}。"
+        notices = self._default_notices.get(self._scope, [])
+        if notices:
+            text += "\n\n按用途分流说明：\n" + "\n".join(notices)
         self._preview.configure(state="normal")
         self._preview.delete("1.0", "end")
         self._preview.insert("1.0", safe_feedback_text(text))
@@ -306,11 +314,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _suggest_tagged_routes(self):
         if self._busy or self._closed or self._scope not in self._drafts:
             return
-        from core.subscription_routing_policy import suggest_tagged_routes
-
         before = self._drafts[self._scope]
         protected = self._manually_edited[self._scope] | {key for key in self._rows if self._row_changed(key)}
         draft, notices = suggest_tagged_routes(before, self._catalog, protected_services=protected)
+        self._default_notices[self._scope] = notices
         added = sum(key not in before["service_profile_bindings"] for key in draft["service_profile_bindings"])
         self._drafts[self._scope] = draft
         self._preview_open = True
@@ -323,10 +330,50 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                  "保留已有绑定、已关闭目标和手动修改；保存并应用后生效。",
             text_color=COLORS["accent"] if added else COLORS["warning"],
         )
-        if notices:
-            self._preview.configure(state="normal")
-            self._preview.insert("end", safe_feedback_text("\n\n按标记分流说明：\n" + "\n".join(notices)))
-            self._preview.configure(state="disabled")
+
+    def _seed_tagged_defaults(self, *, reload=False):
+        """Populate only the visited scope's draft; never persist or apply here."""
+        if self._scope in self._auto_seeded and not reload:
+            return
+        self._auto_seeded.add(self._scope)
+        if not any(item.get("network_type") in {"residential", "datacenter"} for item in self._catalog):
+            self._default_notices.pop(self._scope, None)
+            return
+        before = self._drafts[self._scope]
+        draft, notices = suggest_tagged_routes(
+            before, self._catalog, protected_services=self._manually_edited[self._scope],
+        )
+        self._drafts[self._scope] = draft
+        self._default_notices[self._scope] = notices
+
+    def _use_tagged_default(self, service):
+        """Explicitly restore a single target's recommendation, not other rows."""
+        if self._busy or not preferred_network_type(service):
+            return
+        draft = copy.deepcopy(self._drafts[self._scope])
+        draft["service_profile_bindings"].pop(service, None)
+        draft["service_node_bindings"].pop(service, None)
+        draft.setdefault("service_route_modes", {}).pop(service, None)
+        if not self._rows[service]["always"]:
+            draft["builtin_sites"][service] = True
+        draft, notices = suggest_tagged_routes(
+            draft, self._catalog, protected_services=proxy_routing.service_ids(draft) - {service},
+        )
+        # A missing/ambiguous recommendation must not discard a working manual
+        # route or fixed node. Explain the next step and leave the draft intact.
+        if not draft["service_profile_bindings"].get(service):
+            self._refresh_row(service)
+            self._status.configure(text="无法按用途分配，请标记并拉取订阅，或手动选择该目标的订阅。原选择已保留。",
+                                   text_color=COLORS["warning"])
+            self._default_notices[self._scope] = notices
+            self._preview_open = True
+            self._update_preview()
+            return
+        self._drafts[self._scope] = draft
+        self._manually_edited[self._scope].add(service)
+        self._default_notices[self._scope] = notices
+        self._render()
+        self._changed(service)
 
     def _start_load(self):
         def run():
@@ -350,6 +397,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._originals, self._catalog = payload
             self._drafts = copy.deepcopy(self._originals)
             self._busy = False
+            self._seed_tagged_defaults()
             self._render()
             if self._initial_service in self._rows:
                 self._search.set(self._rows[self._initial_service]["label"])
@@ -358,7 +406,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         elif event in ("catalog", "catalog_error"):
             self._busy = False
             if event == "catalog":
+                if payload != self._catalog:
+                    self._auto_seeded.clear()
                 self._catalog = payload
+                self._seed_tagged_defaults(reload=True)
                 self._render()
             self._set_editable(True)
             self._changed()
@@ -369,6 +420,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             for scope, preferences, _message in succeeded:
                 self._originals[scope] = preferences
                 self._manually_edited[scope].clear()
+                self._default_notices.pop(scope, None)
             self._busy = False
             self._set_editable(True)
             self._preview_open = False
@@ -419,6 +471,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 label += " · " + ("家宽" if profile["network_type"] == "residential" else "非家宽")
             if not profile["nodes"]:
                 label += " · 请先拉取"
+            if label == AUTO_PROFILE:
+                label += "（订阅）"
             label = _unused_label(label, mapping, suffixes)
             mapping[label] = profile["id"]
         self._profile_mapping_cache[default] = (signature, mapping)
@@ -526,7 +580,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         profiles = self._profile_values(service)
         default = DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE
         label = self._profile_reverse_cache[default].get(profile_id, MISSING_PROFILE)
-        row["profile"].configure(state="readonly", values=[*profiles, *([MISSING_PROFILE] if label == MISSING_PROFILE else [])])
+        row["profile"].configure(state="readonly", values=[
+            *profiles, *([AUTO_PROFILE] if preferred_network_type(service) else []),
+            *([MISSING_PROFILE] if label == MISSING_PROFILE else []),
+        ])
         row["profile"].set(label)
         row["profile"].configure(state="disabled" if self._busy else "readonly")
         nodes = self._node_values(profile_id)
@@ -540,6 +597,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         row["description"] = description
         dirty = self._row_changed(service)
         state = "继承基准" if service == "custom" else ("默认启用" if row["always"] else ("已启用" if row["enabled"].get() else "未启用"))
+        preferred = preferred_network_type(service)
+        if preferred:
+            state += " · 默认" + ("家宽" if preferred == "residential" else "非家宽")
         row["state_label"].configure(text=state + (" · 未保存" if dirty else ""),
                                       text_color=COLORS["accent"] if dirty else COLORS["muted"])
         # Full names stay visible here when the dropdown entry is too narrow.
@@ -560,7 +620,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             elif not self._rows[service]["always"]:
                 enabled = bool(preferences["builtin_sites"].get(service))
             return (enabled, preferences["service_profile_bindings"].get(service, ""),
-                    preferences["service_node_bindings"].get(service, ""))
+                    preferences["service_node_bindings"].get(service, ""),
+                    preferences.get("service_route_modes", {}).get(service, ""))
         return value(self._drafts[self._scope]) != value(self._originals[self._scope])
 
     def _layout_rows(self):
@@ -636,13 +697,22 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._count_label.configure(text=f"显示 {visible} / {len(self._rows)} 项 · 勾选网站才新增专属规则；AI 服务默认启用")
 
     def _select_profile(self, service, label):
+        if label == AUTO_PROFILE:
+            self._use_tagged_default(service)
+            return
         profiles = self._profile_values(service)
         if self._busy or label not in profiles:
             return
         self._manually_edited[self._scope].add(service)
         draft = self._drafts[self._scope]
         profile_id = profiles[label]
+        modes = draft.setdefault("service_route_modes", {})
+        if profile_id:
+            modes.pop(service, None)
+        elif preferred_network_type(service):
+            modes[service] = "default"
         if draft["service_profile_bindings"].get(service, "") == profile_id:
+            self._changed(service)
             return
         had_fixed_node = bool(draft["service_node_bindings"].get(service))
         if profile_id:
@@ -735,11 +805,17 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._update_preview()
         self._status.configure(text=f"待保存：{count} 个位置、{len(self._changes)} 项目标变化（含继承影响）。可展开修改清单核对。" if count else "无未保存修改；可重新应用当前位置。连通状态需单独检查。",
                                text_color=COLORS["accent"] if count else COLORS["muted"])
+        if self._default_notices.get(self._scope):
+            missing = sum("未分配：" in notice for notice in self._default_notices[self._scope])
+            if missing:
+                self._status.configure(text=self._status.cget("text") + " 部分用途未能自动分配，展开修改清单查看原因。",
+                                       text_color=COLORS["warning"])
 
     def _switch_scope(self, scope):
         if not self._busy and scope in self._drafts:
             self._scope = scope
             self._scope_combo.set(scope)
+            self._seed_tagged_defaults()
             self._render()
             self._changed()
 
@@ -764,6 +840,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if scope in self._drafts and scope != self._scope:
                 self._drafts[scope] = copy.deepcopy(self._drafts[self._scope])
                 self._manually_edited[scope] = set(self._manually_edited[self._scope])
+                self._auto_seeded.add(scope)
+                self._default_notices[scope] = list(self._default_notices.get(self._scope, []))
         self._preview_open = True
         self._changed()
 
@@ -799,6 +877,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         draft["custom_targets"] = [item for item in draft["custom_targets"] if f"custom:{item['id']}" != service]
         draft["service_profile_bindings"].pop(service, None)
         draft["service_node_bindings"].pop(service, None)
+        draft.get("service_route_modes", {}).pop(service, None)
         self._render()
         self._changed()
 
@@ -806,6 +885,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if not self._busy and self._scope in self._originals:
             self._drafts[self._scope] = copy.deepcopy(self._originals[self._scope])
             self._manually_edited[self._scope].clear()
+            self._default_notices.pop(self._scope, None)
             self._render()
             self._changed()
 

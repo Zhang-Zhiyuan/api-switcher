@@ -152,6 +152,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_profile_combo = None
         self._proxy_subscription_name_entry = None
         self._proxy_subscription_profile_save_button = None
+        self._proxy_subscription_tags_button = None
+        self._proxy_subscription_tags_dialog = None
         self._proxy_subscription_profile_reset_button = None
         self._proxy_subscription_profile_delete_button = None
         self._proxy_subscription_profile_options = {}
@@ -975,6 +977,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_subscription_profile_combo.set(
             NEW_PROXY_SUBSCRIPTION_PROFILE_LABEL
         )
+        self._proxy_subscription_tags_button = ctk.CTkButton(
+            proxy_controls, text="标记家宽 / 非家宽", width=164,
+            command=self._open_proxy_subscription_tags,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_subscription_tags_button.grid(row=1, column=3, sticky="e", pady=(8, 0))
         self._proxy_subscription_name_label = ctk.CTkLabel(
             proxy_controls,
             text="显示名称",
@@ -2486,6 +2494,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_subscription_profile_save_button,
             getattr(self, "_proxy_subscription_profile_reset_button", None),
             self._proxy_subscription_profile_delete_button,
+            getattr(self, "_proxy_subscription_tags_button", None),
         ):
             if not button:
                 continue
@@ -2563,6 +2572,41 @@ class SSHTab(ctk.CTkScrollableFrame):
         entry.delete(0, "end")
         if value:
             entry.insert(0, value)
+
+    def _open_proxy_subscription_tags(self):
+        """Classifications are local metadata; no SSH connection or route apply."""
+        if self._proxy_busy or getattr(self, "_ssh_busy", False) or getattr(self, "_proxy_periodic_update_running", False):
+            self._set_proxy_status("代理操作正在进行，请完成后再标记订阅类型。", "warning")
+            return
+        existing = getattr(self, "_proxy_subscription_tags_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus()
+            return
+        try:
+            from ui.dialogs.subscription_tags_dialog import SubscriptionTagsDialog
+
+            catalog = [
+                {key: profile.get(key) for key in ("id", "name", "network_type")}
+                for profile in remote_proxy.list_proxy_subscription_profiles()
+            ]
+            self._proxy_subscription_tags_dialog = SubscriptionTagsDialog(
+                self.winfo_toplevel(), catalog=catalog, on_saved=self._proxy_subscription_tags_saved,
+            )
+        except Exception as exc:
+            self._set_proxy_status(
+                "打开订阅类型标记失败：" + safe_feedback_text(str(exc).strip() or type(exc).__name__), "error",
+            )
+
+    def _proxy_subscription_tags_saved(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._refresh_proxy_subscription_profile_options(preserve_editor=True)
+        routes_dialog = getattr(self, "_proxy_service_routes_dialog", None)
+        if routes_dialog is not None and routes_dialog.winfo_exists() and not routes_dialog._closed:
+            routes_dialog._reload_catalog()
+        self._update_proxy_subscription_profile_form_controls()
+        self._set_proxy_status("标记已保存，打开目标分流可预览默认分配，保存并应用后生效；名称/链接草稿及服务器线路未改动。", "success")
 
     def _proxy_subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()

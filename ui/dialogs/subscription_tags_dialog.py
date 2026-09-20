@@ -38,8 +38,9 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(header, text="为订阅标记线路类型", font=font(18, "bold"),
                      text_color=COLORS["text"], anchor="w").pack(fill="x")
         notice = ctk.CTkLabel(
-            header, text="标记为手动分类，不代表实测。保存仅改标记，不切换线路。\n"
-                         "家宽适合需要住宅出口的服务；YouTube、Google 等可选择非家宽订阅，避免占用家宽流量。",
+            header, text="按订阅实际用途手动分类；标记不代表出口 IP 已经过质量验证。\n"
+                         "打开目标分流后，AI 优先家宽，视频、搜索、下载、通信优先非家宽。\n"
+                         "仅补齐未配置目标，手动选择优先；标记保存不切换线路，分流需另点“保存并应用”。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(8, 0))

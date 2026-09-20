@@ -1,7 +1,8 @@
-"""Pure, opt-in draft suggestions from user-assigned subscription labels.
+"""Pure editor-draft defaults from user-assigned subscription labels.
 
 Labels describe the user's intent, not a verified property of an exit IP. This
 module neither reads caches nor applies routing; existing/manual choices win.
+Drafts still require an explicit save/apply before any live route can change.
 """
 from __future__ import annotations
 
@@ -78,19 +79,24 @@ def suggest_tagged_routes(
     Only unassigned, not explicitly disabled targets receive a unique source.
     No name-based inference, cross-label fallback, node pinning, or live writes
     are performed. ``protected_services`` preserves edits such as explicitly
-    choosing "follow default", which otherwise has no stored binding.
+    choosing "follow default" before saving. Persisted ``service_route_modes``
+    protects the same choice after the editor has been closed and reopened.
     """
     if not isinstance(preferences, dict):
         raise ValueError("服务分流草稿必须是对象")
     draft = copy.deepcopy(preferences)
-    for key in ("service_profile_bindings", "service_node_bindings", "builtin_sites"):
+    for key in ("service_profile_bindings", "service_node_bindings", "builtin_sites", "service_route_modes"):
         if key in draft and not isinstance(draft[key], dict):
             return draft, ["服务分流草稿格式无效，未自动分配；请先修正已有配置。"]
     profiles = draft.get("service_profile_bindings", {})
     nodes = draft.get("service_node_bindings", {})
     sites = draft.get("builtin_sites", {})
+    modes = draft.get("service_route_modes", {})
+    if any(not isinstance(service, str) or mode != "default" for service, mode in modes.items()):
+        return draft, ["服务分流线路模式无效，未自动分配；请先修正已有配置。"]
     protected = ({protected_services} if isinstance(protected_services, str)
                  else set(protected_services or ()))
+    protected.update(modes)
     catalog = [item for item in catalog if isinstance(item, dict)]
     notices = []
     kept = []

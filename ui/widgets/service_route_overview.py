@@ -36,6 +36,8 @@ def route_description(row, preferences, catalog):
     node_text = clean(node["label"]) if node else ("固定节点已失效" if node_key else "订阅首选 + 故障切换")
     if not profile_id and not node_key:
         node_text = "沿用默认节点策略"
+        if (preferences.get("service_route_modes") or {}).get(service) == "default":
+            profile_text = "默认线路（手动指定）"
     strategy = "固定节点 · 不自动换出口" if node_key else ("自动切换 · 仅限此订阅，备用按服务策略筛选" if profile_id else "跟随默认线路")
     if profile_id and not node_key and profile and not warning:
         if route_candidate_count(profile) == 1:
@@ -75,7 +77,8 @@ def route_changes(originals, drafts, catalog):
             def identity(preferences, row):
                 profiles, nodes = preferences["service_profile_bindings"], preferences["service_node_bindings"]
                 source = "custom" if service.startswith("custom:") and not profiles.get(service) else service
-                return (row, profiles.get(service), nodes.get(service), profiles.get(source), nodes.get(source))
+                return (row, profiles.get(service), nodes.get(service), profiles.get(source), nodes.get(source),
+                        preferences.get("service_route_modes", {}).get(service))
             if identity(original, old_row) == identity(draft, new_row) and old == new:
                 continue
             def describe(row, description):

@@ -65,6 +65,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_profile_save_button = None
         self._subscription_profile_reset_button = None
         self._subscription_profile_delete_button = None
+        self._subscription_tags_button = None
+        self._subscription_tags_dialog = None
         self._subscription_profile_options = {}
         self._subscription_profiles_snapshot = []
         self._subscription_profile_loading = False
@@ -348,6 +350,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._subscription_profile_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
         self._subscription_profile_combo.set(NEW_SUBSCRIPTION_PROFILE_LABEL)
+        self._subscription_tags_button = ctk.CTkButton(
+            controls, text="标记家宽 / 非家宽", width=164,
+            command=self._open_subscription_tags,
+            **button_style("secondary", compact=True),
+        )
+        self._subscription_tags_button.grid(row=1, column=3, sticky="e", pady=(8, 0))
         self._subscription_name_label = ctk.CTkLabel(
             controls,
             text="显示名称",
@@ -863,6 +871,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         if stacked:
             self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._subscription_tags_button.grid(row=1, column=3, sticky="e", pady=(8, 0))
             self._subscription_profile_combo.grid(row=2, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
             self._subscription_name_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
             self._subscription_name_entry.grid(row=4, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
@@ -883,6 +892,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._status_label.grid(row=19, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         else:
             self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=1, sticky="w", pady=(8, 0))
+            self._subscription_tags_button.grid(row=1, column=3, sticky="e", pady=(8, 0))
             self._subscription_profile_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
             self._subscription_name_label.grid(row=2, column=0, columnspan=1, sticky="w", pady=(8, 0))
             self._subscription_name_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
@@ -1205,6 +1215,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._subscription_profile_save_button,
             getattr(self, "_subscription_profile_reset_button", None),
             self._subscription_profile_delete_button,
+            getattr(self, "_subscription_tags_button", None),
         ):
             if not button:
                 continue
@@ -1715,6 +1726,42 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             on_saved=self._load_proxy_preferences_ui, initial_service=service_id,
             on_tags_saved=lambda: self._refresh_subscription_profile_options(preserve_editor=True),
         )
+
+    def _open_subscription_tags(self):
+        """Edit saved subscription metadata without saving or resetting the form."""
+        if self._busy or getattr(self, "_periodic_update_running", False):
+            self._set_status("代理操作正在进行，请完成后再标记订阅类型。", "warning")
+            return
+        existing = getattr(self, "_subscription_tags_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus()
+            return
+        try:
+            from ui.dialogs.subscription_tags_dialog import SubscriptionTagsDialog
+
+            catalog = [
+                {key: profile.get(key) for key in ("id", "name", "network_type")}
+                for profile in remote_proxy.list_proxy_subscription_profiles()
+            ]
+            self._subscription_tags_dialog = SubscriptionTagsDialog(
+                self.winfo_toplevel(), catalog=catalog, on_saved=self._subscription_tags_saved,
+            )
+        except Exception as exc:
+            self._set_status(
+                "打开订阅类型标记失败：" + safe_feedback_text(str(exc).strip() or type(exc).__name__), "error",
+            )
+
+    def _subscription_tags_saved(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._refresh_subscription_profile_options(preserve_editor=True)
+        self._request_route_catalog_refresh()
+        routes_dialog = getattr(self, "_service_routes_dialog", None)
+        if routes_dialog is not None and routes_dialog.winfo_exists() and not routes_dialog._closed:
+            routes_dialog._reload_catalog()
+        self._update_subscription_profile_form_controls()
+        self._set_status("标记已保存，打开目标分流可预览默认分配，保存并应用后生效；名称/链接草稿及当前线路未改动。", "success")
 
     def _subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()

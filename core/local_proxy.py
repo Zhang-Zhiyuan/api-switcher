@@ -521,6 +521,9 @@ def _load_local_proxy_routing_preferences_strict() -> dict:
         if set(service_profile_bindings) - proxy_routing.service_ids(preferences):
             raise RuntimeError("订阅绑定指向无效的自定义目标，已中止配置变更")
         preferences["service_node_bindings"] = proxy_routing.node_bindings(data)
+        preferences["service_route_modes"] = proxy_routing.route_modes(data)
+        if set(preferences["service_route_modes"]) - proxy_routing.service_ids(preferences):
+            raise RuntimeError("线路模式指向无效的自定义目标，已中止配置变更")
         return preferences
 
 
@@ -611,6 +614,10 @@ def local_proxy_strict_privacy_desired_authoritative() -> bool:
 def save_local_proxy_preferences(**updates) -> dict:
     with _LOCAL_PROXY_PREFS_LOCK:
         preferences = load_local_proxy_preferences()
+        if "service_route_modes" in updates:
+            # Unlike optional legacy fields, an explicit null is invalid
+            # authority, not permission to silently forget a manual choice.
+            proxy_routing.route_modes({**preferences, **updates})
         preferences.update({key: value for key, value in updates.items() if value is not None})
         preferences = _normalize_local_proxy_preferences(preferences)
         preferences["updated_at"] = remote_proxy._now_iso()
@@ -1397,17 +1404,22 @@ def set_local_proxy_service_profile_binding_and_apply(
     previous_bindings = dict(previous.get("service_profile_bindings") or {})
     previous_nodes = dict(previous.get("service_node_bindings") or {})
     previous_builtin_sites = dict(previous.get("builtin_sites") or {})
+    previous_modes = dict(previous.get("service_route_modes") or {})
     updated_bindings = dict(previous_bindings)
     updated_builtin_sites = dict(previous_builtin_sites)
+    updated_modes = dict(previous_modes)
     if target_profile_id:
         updated_bindings[service_key] = target_profile_id
+        updated_modes.pop(service_key, None)
         if service_key in LOCAL_PROXY_BUILTIN_SITE_IDS:
             updated_builtin_sites[service_key] = True
     else:
         updated_bindings.pop(service_key, None)
+        updated_modes[service_key] = "default"
     if (
         updated_bindings == previous_bindings
         and updated_builtin_sites == previous_builtin_sites
+        and updated_modes == previous_modes
     ):
         return f"{_local_proxy_service_label(service_key)} 的订阅线路未变化"
 
@@ -1415,6 +1427,7 @@ def set_local_proxy_service_profile_binding_and_apply(
         service_profile_bindings=updated_bindings,
         builtin_sites=updated_builtin_sites,
         service_node_bindings={key: value for key, value in previous_nodes.items() if key != service_key},
+        service_route_modes=updated_modes,
     )
     try:
         apply_message = apply_local_proxy_routing_to_running()
@@ -1425,6 +1438,7 @@ def set_local_proxy_service_profile_binding_and_apply(
                 service_profile_bindings=previous_bindings,
                 builtin_sites=previous_builtin_sites,
                 service_node_bindings=previous_nodes,
+                service_route_modes=previous_modes,
             )
         except Exception as rollback_exc:
             rollback_error = rollback_exc
@@ -4476,6 +4490,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
         "custom_targets": custom_targets,
         "service_profile_bindings": service_profile_bindings,
         "service_node_bindings": proxy_routing.node_bindings(raw, strict=False),
+        "service_route_modes": proxy_routing.route_modes(raw),
         "last_node": last_node,
         "updated_at": str(raw.get("updated_at") or ""),
     }

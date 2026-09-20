@@ -24,7 +24,7 @@ local_proxy = LazyModule("core.local_proxy")
 remote_proxy = LazyModule("core.remote_proxy")
 
 ROUTE_KEYS = (
-    "builtin_sites", "custom_targets", "service_profile_bindings", "service_node_bindings",
+    "builtin_sites", "custom_targets", "service_profile_bindings", "service_node_bindings", "service_route_modes",
 )
 _HOST_LOCKS: dict[str, threading.RLock] = {}
 _HOST_LOCKS_GUARD = threading.Lock()
@@ -71,6 +71,30 @@ def node_bindings(preferences: dict, *, strict: bool = True) -> dict[str, str]:
     return result
 
 
+def route_modes(preferences: dict) -> dict[str, str]:
+    """Preserve explicit default-route choices across editor sessions.
+
+    Absence means the service is eligible for a draft suggestion, not that a
+    live route may be changed. This metadata never selects an outbound itself.
+    """
+    raw = preferences.get("service_route_modes", {})
+    if not isinstance(raw, dict):
+        raise ValueError("service_route_modes 线路模式必须是对象")
+    allowed = service_ids(preferences)
+    profiles = preferences.get("service_profile_bindings") or {}
+    nodes = preferences.get("service_node_bindings") or {}
+    result = {}
+    for service, mode in raw.items():
+        if not isinstance(service, str) or mode != "default":
+            raise ValueError("service_route_modes 线路模式只支持 default（跟随默认）")
+        if service not in allowed:
+            continue
+        if (isinstance(profiles, dict) and profiles.get(service)) or (isinstance(nodes, dict) and nodes.get(service)):
+            raise ValueError(f"{service} 的跟随默认模式与订阅或固定节点绑定冲突")
+        result[service] = "default"
+    return result
+
+
 def route_snapshot(preferences: dict) -> dict:
     return {
         key: copy.deepcopy(preferences.get(key, [] if key == "custom_targets" else {}))
@@ -86,7 +110,8 @@ def normalize_routes(preferences: dict) -> dict:
             preferences[key], list if key == "custom_targets" else dict
         ):
             labels = {"builtin_sites": "站点开关", "custom_targets": "自定义目标",
-                      "service_profile_bindings": "订阅绑定", "service_node_bindings": "节点绑定"}
+                      "service_profile_bindings": "订阅绑定", "service_node_bindings": "节点绑定",
+                      "service_route_modes": "线路模式"}
             raise ValueError(f"服务分流的{labels[key]}格式无效")
     normalized = local_proxy._normalize_local_proxy_preferences(preferences)
     normalized["service_profile_bindings"] = (
@@ -95,6 +120,9 @@ def normalize_routes(preferences: dict) -> dict:
     if set(normalized["service_profile_bindings"]) - service_ids(normalized):
         raise ValueError("订阅绑定指向无效的自定义目标，请先修正域名或 IP")
     normalized["service_node_bindings"] = node_bindings(preferences)
+    normalized["service_route_modes"] = route_modes(preferences)
+    if set(normalized["service_route_modes"]) - service_ids(normalized):
+        raise ValueError("线路模式指向无效的自定义目标，请先修正域名或 IP")
     return route_snapshot(normalized)
 
 
@@ -264,8 +292,9 @@ def load_ssh_routes(ssh_name: str) -> dict:
 
 
 def _save_ssh_routes(ssh_name: str, preferences: dict):
+    normalized = normalize_routes(preferences)
     atomic_write_text(_host_path(ssh_name), json.dumps(
-        {"ssh_name": ssh_name, "routes": route_snapshot(preferences)},
+        {"ssh_name": ssh_name, "routes": normalized},
         ensure_ascii=False, indent=2,
     ))
 
