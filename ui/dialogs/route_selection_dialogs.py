@@ -5,6 +5,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from core.proxy_routing import MAX_SERVICE_NODE_POOL_SIZE
 from core.subscription_routing_policy import route_candidate_count
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, input_style
@@ -12,6 +13,8 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, font,
 
 AUTO_MODE = "订阅内自动切换"
 FIXED_MODE = "固定节点"
+POOL_MODE = "自选候选自动切换"
+MAX_POOL_NODES = MAX_SERVICE_NODE_POOL_SIZE
 
 
 def matching_nodes(nodes, query):
@@ -54,11 +57,12 @@ class DraftChoiceDialog(ctk.CTkToplevel):
 
 class RouteNodeDialog(DraftChoiceDialog):
     def __init__(self, master, *, service_label, profile_name, nodes, selected_key, on_select,
-                 auto_route_usable=True, auto_route_candidate_count=None):
+                 auto_route_usable=True, auto_route_candidate_count=None,
+                 selected_keys=None, on_select_pool=None):
         super().__init__(master)
         self.title("选择节点策略")
-        self.geometry("680x600")
-        self.minsize(440, 410)
+        self.geometry("700x710" if on_select_pool or selected_keys else "680x600")
+        self.minsize(480, 540 if on_select_pool or selected_keys else 410)
         self.configure(fg_color=COLORS["app_bg"])
         self._nodes = [dict(item) for item in nodes]
         self._keys = {item["key"] for item in self._nodes}
@@ -68,15 +72,46 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._auto_route_usable = auto_route_usable is True and self._candidate_count > 0
         self._selected_key = selected_key
         self._on_select = on_select
+        source_keys = [selected_keys] if isinstance(selected_keys, str) else (selected_keys or ())
+        self._selected_keys = list(dict.fromkeys(key for key in source_keys if isinstance(key, str) and key))
+        self._on_select_pool = on_select_pool
+        self._pool_enabled = callable(on_select_pool) or bool(self._selected_keys)
+        self._pool_feedback = ""
+        self._refreshing_list = False
         self._filter_after_id = None
         self._closed = False
         self._visible = []
-        self._mode = FIXED_MODE if selected_key else AUTO_MODE
+        self._mode = POOL_MODE if self._selected_keys else (FIXED_MODE if selected_key else AUTO_MODE)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=18, pady=(6, 16))
+        self._pool_frame = ctk.CTkFrame(footer, fg_color=COLORS["surface"])
+        self._pool_caption = ctk.CTkLabel(self._pool_frame, text="已选候选 · 从上到下为故障切换优先顺序",
+                                         font=font(11), anchor="w")
+        self._pool_caption.pack(fill="x", padx=8, pady=(5, 2))
+        pool_body = NodeListFrame(self._pool_frame, fg_color="transparent", height=90)
+        pool_body.pack(fill="x", padx=8, pady=(0, 6))
+        pool_actions = ctk.CTkFrame(pool_body, fg_color="transparent", height=80)
+        pool_actions.pack(side="right", fill="y", padx=(8, 0))
+        for label, command in (("上移", lambda: self._move_pool(-1)),
+                               ("下移", lambda: self._move_pool(1)),
+                               ("移除", self._remove_pool)):
+            ctk.CTkButton(pool_actions, text=label, width=66, command=command,
+                          **{**button_style("secondary", compact=True), "height": 24}).pack(fill="x", pady=1)
+        self._pool_list = tk.Listbox(
+            pool_body, exportselection=False, activestyle="dotbox", height=4,
+            bg=COLORS["field_bg"], fg=COLORS["text"], selectbackground=COLORS["primary"],
+            selectforeground=COLORS["text"], borderwidth=0, highlightthickness=0,
+        )
+        pool_body.listbox = self._pool_list
+        pool_body.sync_font()
+        pool_scroll = ctk.CTkScrollbar(pool_body, command=self._pool_list.yview, height=80)
+        pool_scroll.pack(side="right", fill="y")
+        self._pool_list.configure(yscrollcommand=pool_scroll.set)
+        self._pool_list.pack(fill="both", expand=True)
+        self._pool_list.bind("<Delete>", lambda _event: self._remove_pool())
         self._selection = ctk.CTkLabel(footer, text="", font=font(12), anchor="w", justify="left", height=22)
         self._selection.pack(fill="x", pady=(0, 8))
         bind_wraplength(footer, self._selection, padding=4)
@@ -92,12 +127,17 @@ class RouteNodeDialog(DraftChoiceDialog):
                               font=font(17, "bold"), text_color=COLORS["text"], anchor="w", justify="left")
         heading.pack(fill="x", padx=18, pady=(16, 8))
         bind_wraplength(self, heading, padding=40)
-        self._modes = ctk.CTkSegmentedButton(self, values=[AUTO_MODE, FIXED_MODE], command=self._set_mode, font=font(12),
+        modes = [AUTO_MODE, POOL_MODE, FIXED_MODE] if self._pool_enabled else [AUTO_MODE, FIXED_MODE]
+        self._modes = ctk.CTkSegmentedButton(self, values=modes, command=self._set_mode, font=font(12),
                                            selected_color=COLORS["primary"], unselected_color=COLORS["secondary"])
         self._modes.pack(fill="x", padx=18)
         self._modes.set(self._mode)
-        note = ctk.CTkLabel(self, text="自动：只在此订阅内故障切换。固定：保持所选节点，不自动换出口。\n"
-                           "列表来自本地缓存，未执行实时测速。这里的选择只写入草稿。",
+        note_text = ("全订阅：使用首选和订阅备用。自选：只在勾选节点间按顺序故障切换。\n"
+                     "固定：不自动换出口。列表来自本地缓存；选择仅写入草稿，保存并应用后生效。"
+                     if self._pool_enabled else
+                     "自动：只在此订阅内故障切换。固定：保持所选节点，不自动换出口。\n"
+                     "列表来自本地缓存，未执行实时测速。这里的选择只写入草稿。")
+        note = ctk.CTkLabel(self, text=note_text,
                            text_color=COLORS["muted"], font=font(11), anchor="w", justify="left")
         note.pack(fill="x", padx=18, pady=8)
         bind_wraplength(self, note, padding=40)
@@ -136,9 +176,11 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._search.focus_set()
 
     def _set_mode(self, mode):
+        if mode not in {AUTO_MODE, FIXED_MODE, POOL_MODE} or (mode == POOL_MODE and not self._pool_enabled):
+            return
         self._mode = mode
         self._modes.set(mode)
-        self._update_selection()
+        self._filter()
 
     def _schedule_filter(self, _event=None):
         if self._filter_after_id:
@@ -150,20 +192,70 @@ class RouteNodeDialog(DraftChoiceDialog):
             self.after_cancel(self._filter_after_id)
             self._filter_after_id = None
         self._visible = matching_nodes(self._nodes, self._search.get())
+        self._refreshing_list = True
+        self._list.configure(selectmode="multiple" if self._mode == POOL_MODE else "browse")
         self._list.delete(0, "end")
-        labels = [safe_feedback_text(str(item["label"])) for item in self._visible]
+        labels = [("☑ " if item["key"] in self._selected_keys else "☐ ")
+                  + safe_feedback_text(str(item["label"])) if self._mode == POOL_MODE
+                  else safe_feedback_text(str(item["label"])) for item in self._visible]
         # Chunk Tcl arguments, keeping the underlying list widget and selection.
         for start in range(0, len(labels), 200):
             self._list.insert("end", *labels[start:start + 200])
         for index, item in enumerate(self._visible):
-            if item["key"] == self._selected_key:
+            if self._mode == POOL_MODE and item["key"] in self._selected_keys:
+                self._list.selection_set(index)
+            elif self._mode != POOL_MODE and item["key"] == self._selected_key:
                 self._list.selection_set(index)
                 self._list.activate(index)
                 self._list.see(index)
                 break
+        self._refreshing_list = False
         self._count.configure(text=f"显示 {len(self._visible)} / {len(self._nodes)} 个节点"
-                              + (" · 无匹配结果，请更换关键词" if not self._visible else " · 点击节点即可选择固定出口"))
+                              + (" · 无匹配结果，请更换关键词" if not self._visible else
+                                 " · 点击勾选/取消，搜索不会丢失已选项" if self._mode == POOL_MODE else
+                                 " · 点击节点即可选择固定出口"))
+        if self._mode == POOL_MODE:
+            self._pool_frame.pack(fill="x", pady=(0, 6), before=self._selection)
+            self._render_pool()
+        else:
+            self._pool_frame.pack_forget()
         self._update_selection()
+
+    def _render_pool(self, selected_index=None):
+        if selected_index is None:
+            selected = self._pool_list.curselection()
+            selected_index = selected[0] if selected else None
+        self._pool_list.delete(0, "end")
+        labels = {item["key"]: safe_feedback_text(str(item["label"])) for item in self._nodes}
+        for index, key in enumerate(self._selected_keys):
+            label = labels.get(key, "已失效的候选 · " + safe_feedback_text(key[:16]))
+            self._pool_list.insert("end", f"{index + 1}. {label}")
+            if key not in self._keys:
+                self._pool_list.itemconfigure(index, fg=COLORS["warning"])
+        if selected_index is not None and self._selected_keys:
+            selected_index = max(0, min(selected_index, len(self._selected_keys) - 1))
+            self._pool_list.selection_set(selected_index)
+            self._pool_list.see(selected_index)
+        self._pool_caption.configure(text=f"已选 {len(self._selected_keys)}/{MAX_POOL_NODES} · 从上到下为故障切换优先顺序")
+
+    def _move_pool(self, step):
+        selected = self._pool_list.curselection()
+        if self._mode != POOL_MODE or not selected:
+            return
+        index = selected[0]
+        target = index + step
+        if 0 <= target < len(self._selected_keys):
+            self._selected_keys[index], self._selected_keys[target] = self._selected_keys[target], self._selected_keys[index]
+            self._render_pool(target)
+
+    def _remove_pool(self):
+        selected = self._pool_list.curselection()
+        if self._mode != POOL_MODE or not selected:
+            return
+        self._selected_keys.pop(selected[0])
+        self._pool_feedback = ""
+        self._filter()
+        self._render_pool(selected[0])
 
     def _update_selection(self):
         item = next((item for item in self._nodes if item["key"] == self._selected_key), None)
@@ -176,6 +268,20 @@ class RouteNodeDialog(DraftChoiceDialog):
                 text = "当前订阅首选无法独立运行，请选择固定节点，或返回订阅区更换首选后重读缓存。"
             elif self._candidate_count == 1:
                 text = "仅 1 个独立候选节点，暂无备用可切换；将使用订阅首选。"
+        elif self._mode == POOL_MODE:
+            missing = sum(key not in self._keys for key in self._selected_keys)
+            valid = bool(self._selected_keys) and not missing and len(self._selected_keys) <= MAX_POOL_NODES and callable(self._on_select_pool)
+            text = f"仅在这 {len(self._selected_keys)} 个候选中按顺序故障切换，不使用订阅内其他节点。"
+            if not self._selected_keys:
+                text = f"请勾选候选节点（最多 {MAX_POOL_NODES} 个）；可在已选列表中调整优先顺序。"
+            elif missing:
+                text = f"有 {missing} 个已选节点不在当前缓存中。已保留原选择，请移除失效项或重新拉取订阅后再保存。"
+            elif len(self._selected_keys) > MAX_POOL_NODES:
+                text = f"已选数量超过 {MAX_POOL_NODES} 个，请移除多余候选；不会静默截断原列表。"
+            elif len(self._selected_keys) == 1:
+                text = "仅选 1 个候选，暂无备用可切换；可继续勾选同订阅节点。"
+            if self._pool_feedback:
+                text = self._pool_feedback + " " + text
         else:
             text = "已选固定节点：" + safe_feedback_text(str(item["label"])) if item else "请选择一个节点；原固定节点缺失时不会自动替换。"
             valid = item is not None
@@ -183,7 +289,25 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._choose.configure(state="normal" if valid else "disabled")
 
     def _select_visible(self, _event=None):
+        if self._refreshing_list:
+            return
         selected = self._list.curselection()
+        if self._mode == POOL_MODE:
+            scroll_position = self._list.yview()[0]
+            visible_keys = {item["key"] for item in self._visible}
+            requested = [self._visible[index]["key"] for index in selected if index < len(self._visible)]
+            self._selected_keys = [key for key in self._selected_keys if key not in visible_keys or key in requested]
+            self._pool_feedback = ""
+            for key in requested:
+                if key in self._selected_keys:
+                    continue
+                if len(self._selected_keys) >= MAX_POOL_NODES:
+                    self._pool_feedback = f"最多选择 {MAX_POOL_NODES} 个候选，未添加超出的节点。"
+                    break
+                self._selected_keys.append(key)
+            self._filter()
+            self._list.yview_moveto(scroll_position)
+            return
         if selected and selected[0] < len(self._visible):
             self._selected_key = self._visible[selected[0]]["key"]
             self._set_mode(FIXED_MODE)
@@ -192,12 +316,17 @@ class RouteNodeDialog(DraftChoiceDialog):
         if self._visible:
             self._list.focus_set()
             if not self._list.curselection():
-                self._list.selection_set(0)
                 self._list.activate(0)
-                self._select_visible()
+                if self._mode != POOL_MODE:
+                    self._list.selection_set(0)
+                    self._select_visible()
         return "break"
 
     def _commit_from_list(self, _event=None):
+        if self._mode == POOL_MODE:
+            # Multi-selection must not close after a double click or Enter;
+            # only the explicit footer action commits the complete candidate set.
+            return "break"
         if self._list.curselection():
             self._select_visible()
             self._commit()
@@ -205,6 +334,14 @@ class RouteNodeDialog(DraftChoiceDialog):
 
     def _commit(self):
         if self._closed or not self._nodes:
+            return
+        if self._mode == POOL_MODE:
+            if (not self._selected_keys or len(self._selected_keys) > MAX_POOL_NODES
+                    or any(key not in self._keys for key in self._selected_keys)
+                    or not callable(self._on_select_pool)):
+                return
+            self._on_select_pool(list(self._selected_keys))
+            self.destroy()
             return
         if self._mode == AUTO_MODE and not self._auto_route_usable:
             return

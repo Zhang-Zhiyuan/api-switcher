@@ -18,6 +18,7 @@ def route_description(row, preferences, catalog):
     source = "custom" if inherited else service
     profile_id = bindings.get(source, "")
     node_key = nodes.get(source, "")
+    pool = (preferences.get("service_node_pools") or {}).get(source, [])
     profile = next((item for item in catalog if item["id"] == profile_id), None)
     node = next((item for item in (profile or {}).get("nodes", []) if item["key"] == node_key), None)
     def clean(value):
@@ -29,17 +30,27 @@ def route_description(row, preferences, catalog):
         warning = "固定节点已失效，请重新选择"
     elif profile_id and not profile.get("nodes"):
         warning = profile.get("error") or "订阅暂无可用缓存，请先拉取"
+    pool_names = {item["key"]: clean(item["label"]) for item in (profile or {}).get("nodes", [])}
+    missing = sum(key not in pool_names for key in pool)
+    if pool and missing and not warning:
+        warning = ("自选候选全部失效，请重新选择；不会扩大候选范围" if missing == len(pool)
+                   else f"自选候选缺失 {missing} / {len(pool)} 个；仅在剩余候选中切换，请检查订阅")
     profile_text = clean(profile["name"]) if profile else ("订阅已失效" if profile_id else "默认线路")
     network_type = (profile or {}).get("network_type", "unknown")
     if network_type in {"residential", "datacenter"}:
         profile_text += " · " + ("家宽" if network_type == "residential" else "非家宽")
     node_text = clean(node["label"]) if node else ("固定节点已失效" if node_key else "订阅首选 + 故障切换")
-    if not profile_id and not node_key:
+    if not profile_id and not node_key and not pool:
         node_text = "沿用默认节点策略"
         if (preferences.get("service_route_modes") or {}).get(service) == "default":
             profile_text = "默认线路（手动指定）"
     strategy = "固定节点 · 不自动换出口" if node_key else ("自动切换 · 仅限此订阅，备用按服务策略筛选" if profile_id else "跟随默认线路")
-    if profile_id and not node_key and profile and not warning:
+    if pool:
+        node_text = f"自选 {len(pool)} 个候选：" + " → ".join(pool_names.get(key, "已失效") for key in pool)
+        strategy = "按候选优先顺序和服务连通性切换 · 不使用未选节点"
+        if len(pool) - missing == 1:
+            strategy += " · 当前仅 1 个可用候选，暂无备用"
+    if profile_id and not node_key and not pool and profile and not warning:
         if route_candidate_count(profile) == 1:
             node_text = "订阅首选（暂无备用）"
             strategy = "缓存仅 1 个可用节点，暂无备用可切换"
@@ -78,7 +89,8 @@ def route_changes(originals, drafts, catalog):
                 profiles, nodes = preferences["service_profile_bindings"], preferences["service_node_bindings"]
                 source = "custom" if service.startswith("custom:") and not profiles.get(service) else service
                 return (row, profiles.get(service), nodes.get(service), profiles.get(source), nodes.get(source),
-                        preferences.get("service_route_modes", {}).get(service))
+                        preferences.get("service_route_modes", {}).get(service),
+                        tuple(preferences.get("service_node_pools", {}).get(source, [])))
             if identity(original, old_row) == identity(draft, new_row) and old == new:
                 continue
             def describe(row, description):

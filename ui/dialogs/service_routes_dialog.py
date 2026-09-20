@@ -77,6 +77,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._category = "全部"
         self._node_dialog = None
         self._scope_copy_dialog = None
+        self._bulk_dialog = None
         self._tags_dialog = None
         self._manually_edited = {scope: set() for scope in self._scopes}
         self._auto_seeded = set()
@@ -169,6 +170,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._tag_routes_button = ctk.CTkButton(tools_row, text="补齐默认分流", width=106, state="disabled",
                                                command=self._suggest_tagged_routes, **button_style("secondary", compact=True))
         self._tag_routes_button.pack(side="left", padx=(8, 0))
+        self._bulk_button = ctk.CTkButton(tools_row, text="批量设置", width=88, state="disabled",
+                                         command=self._open_bulk_dialog, **button_style("primary", compact=True))
+        self._bulk_button.pack(side="left", padx=(8, 0))
         self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单（0）", width=140, command=self._toggle_preview,
                                             **button_style("secondary", compact=True))
         self._preview_toggle.pack(side="right")
@@ -353,6 +357,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         draft = copy.deepcopy(self._drafts[self._scope])
         draft["service_profile_bindings"].pop(service, None)
         draft["service_node_bindings"].pop(service, None)
+        draft.get("service_node_pools", {}).pop(service, None)
         draft.setdefault("service_route_modes", {}).pop(service, None)
         if not self._rows[service]["always"]:
             draft["builtin_sites"][service] = True
@@ -588,9 +593,12 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         row["profile"].configure(state="disabled" if self._busy else "readonly")
         nodes = self._node_values(profile_id)
         key = draft["service_node_bindings"].get(service, "")
+        pool = draft.get("service_node_pools", {}).get(service, [])
         node_label = self._node_reverse_cache[profile_id].get(key, MISSING_NODE)
         row["nodes"] = nodes
         row["node"].set(node_label if profile_id else (DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE))
+        if pool:
+            row["node"].set(f"自选 {len(pool)} 个候选 · 自动切换")
         row["node"].configure(state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
         row["info"]["enabled"] = bool(row["enabled"].get())
         description = route_description(row["info"], draft, self._catalog)
@@ -621,6 +629,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 enabled = bool(preferences["builtin_sites"].get(service))
             return (enabled, preferences["service_profile_bindings"].get(service, ""),
                     preferences["service_node_bindings"].get(service, ""),
+                    tuple(preferences.get("service_node_pools", {}).get(service, [])),
                     preferences.get("service_route_modes", {}).get(service, ""))
         return value(self._drafts[self._scope]) != value(self._originals[self._scope])
 
@@ -714,18 +723,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if draft["service_profile_bindings"].get(service, "") == profile_id:
             self._changed(service)
             return
-        had_fixed_node = bool(draft["service_node_bindings"].get(service))
+        had_fixed_node = bool(draft["service_node_bindings"].get(service) or draft.get("service_node_pools", {}).get(service))
         if profile_id:
             draft["service_profile_bindings"][service] = profile_id
         else:
             draft["service_profile_bindings"].pop(service, None)
         draft["service_node_bindings"].pop(service, None)
+        draft.get("service_node_pools", {}).pop(service, None)
         if profile_id and not self._rows[service]["always"]:
             self._toggle(service, True)
         else:
             self._changed(service)
         if had_fixed_node:
-            self._status.configure(text="订阅已更改，原固定节点已从草稿解除。请确认新的节点策略后再保存。",
+            self._status.configure(text="订阅已更改，原固定节点或候选池已从草稿解除。请确认新的节点策略后再保存。",
                                    text_color=COLORS["warning"])
 
     def _open_node_picker(self, service):
@@ -747,7 +757,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._node_dialog = RouteNodeDialog(
             self, service_label=self._rows[service]["label"], profile_name=profile["name"], nodes=nodes,
             selected_key=self._drafts[scope]["service_node_bindings"].get(service, ""),
+            selected_keys=self._drafts[scope].get("service_node_pools", {}).get(service, []),
             on_select=lambda key: self._accept_node_choice(scope, service, profile_id, key),
+            on_select_pool=lambda keys: self._accept_node_pool(scope, service, profile_id, keys),
             auto_route_usable=profile.get("auto_route_usable", True),
             auto_route_candidate_count=profile.get("auto_route_candidate_count"),
         )
@@ -763,12 +775,28 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         label = next(label for label, value in nodes.items() if value == key)
         self._select_node(service, label)
 
+    def _accept_node_pool(self, scope, service, profile_id, keys):
+        if self._busy or self._closed or scope != self._scope or service not in self._rows:
+            return
+        draft = self._drafts[scope]
+        available = set(self._node_values(profile_id).values()) - {""}
+        if (draft["service_profile_bindings"].get(service) != profile_id
+                or not keys or len(keys) > proxy_routing.MAX_SERVICE_NODE_POOL_SIZE
+                or len(set(keys)) != len(keys) or any(key not in available for key in keys)):
+            self._status.configure(text="订阅或候选节点已经变化，请重新选择；原草稿未被覆盖。", text_color=COLORS["warning"])
+            return
+        draft["service_node_bindings"].pop(service, None)
+        draft.setdefault("service_node_pools", {})[service] = list(keys)
+        self._manually_edited[scope].add(service)
+        self._changed(service)
+
     def _select_node(self, service, label):
         if self._busy or label not in self._rows[service]["nodes"]:
             return
         self._manually_edited[self._scope].add(service)
         key = self._rows[service]["nodes"][label]
         bindings = self._drafts[self._scope]["service_node_bindings"]
+        self._drafts[self._scope].get("service_node_pools", {}).pop(service, None)
         if key:
             bindings[service] = key
         else:
@@ -833,6 +861,33 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             on_copy=self._copy_to_scopes,
         )
 
+    def _open_bulk_dialog(self):
+        if self._busy or self._closed:
+            return
+        if self._bulk_dialog and self._bulk_dialog.winfo_exists():
+            self._bulk_dialog.lift()
+            return
+        from ui.dialogs.service_route_bulk_dialog import RouteBulkDialog
+
+        scope = self._scope
+        self._bulk_dialog = RouteBulkDialog(
+            self, rows=proxy_routing.route_rows(self._drafts[scope]), catalog=self._catalog,
+            on_apply=lambda services, operation, **choices: self._accept_bulk_edit(scope, services, operation, **choices),
+        )
+
+    def _accept_bulk_edit(self, scope, services, operation, **choices):
+        if self._busy or self._closed or scope != self._scope:
+            raise ValueError("当前位置已变化，请重新打开批量设置")
+        from ui.dialogs.service_route_bulk_dialog import apply_route_batch
+
+        draft, notices = apply_route_batch(self._drafts[scope], self._catalog, services, operation, **choices)
+        self._drafts[scope] = draft
+        self._manually_edited[scope].update(services)
+        self._default_notices[scope] = notices
+        self._preview_open = True
+        self._render()
+        self._changed()
+
     def _copy_to_scopes(self, targets):
         if self._busy:
             return
@@ -877,6 +932,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         draft["custom_targets"] = [item for item in draft["custom_targets"] if f"custom:{item['id']}" != service]
         draft["service_profile_bindings"].pop(service, None)
         draft["service_node_bindings"].pop(service, None)
+        draft.get("service_node_pools", {}).pop(service, None)
         draft.get("service_route_modes", {}).pop(service, None)
         self._render()
         self._changed()
@@ -892,7 +948,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _set_editable(self, enabled):
         state = "normal" if enabled else "disabled"
         for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button,
-                       self._tags_button, self._tag_routes_button):
+                       self._tags_button, self._tag_routes_button, self._bulk_button):
             if button:
                 button.configure(state=state)
         self._scope_combo.configure(state="readonly" if enabled and len(self._scopes) > 1 else "disabled")
@@ -939,7 +995,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._closed = True
-        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog):
+        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog, self._bulk_dialog):
             if dialog and dialog.winfo_exists():
                 dialog.destroy()
         if self._filter_after_id:

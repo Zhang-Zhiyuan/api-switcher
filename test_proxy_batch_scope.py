@@ -1744,7 +1744,7 @@ def test_local_refresh_and_hot_update_fetches_then_applies_running_proxy(monkeyp
     assert toasts[-1][1]["is_error"] is False
 
 
-def test_ssh_periodic_refresh_uses_persisted_strict_download_policy(monkeypatch):
+def test_ssh_manual_refresh_uses_persisted_strict_download_policy(monkeypatch):
     first = _node(1, "香港-1")
     second = _node(2, "美国-2")
     profile_id = "profile-ssh"
@@ -1840,7 +1840,9 @@ def test_ssh_periodic_refresh_uses_persisted_strict_download_policy(monkeypatch)
     tab.winfo_exists = lambda: True
     tab.winfo_toplevel = lambda: object()
 
-    tab._start_proxy_subscription_hot_update(manual=False)
+    # Manual refresh still saves the current editor. Timer behavior is covered
+    # separately with saved-only URLs and an explicit persisted host allowlist.
+    tab._start_proxy_subscription_hot_update(manual=True)
 
     assert calls["fetch"] == [
         (
@@ -1882,7 +1884,7 @@ def test_ssh_periodic_refresh_uses_persisted_strict_download_policy(monkeypatch)
     assert calls["schedule"] == 1
     assert statuses[-1][1] == "warning"
     assert "已跳过" in statuses[-1][0]
-    assert toasts == []
+    assert toasts[-1][1]["is_error"] is True
 
 
 def test_refresh_hot_updates_must_acquire_global_lock_before_saving_profile(monkeypatch):

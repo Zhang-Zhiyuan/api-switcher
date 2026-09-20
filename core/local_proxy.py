@@ -521,6 +521,7 @@ def _load_local_proxy_routing_preferences_strict() -> dict:
         if set(service_profile_bindings) - proxy_routing.service_ids(preferences):
             raise RuntimeError("订阅绑定指向无效的自定义目标，已中止配置变更")
         preferences["service_node_bindings"] = proxy_routing.node_bindings(data)
+        preferences["service_node_pools"] = proxy_routing.node_pools(data)
         preferences["service_route_modes"] = proxy_routing.route_modes(data)
         if set(preferences["service_route_modes"]) - proxy_routing.service_ids(preferences):
             raise RuntimeError("线路模式指向无效的自定义目标，已中止配置变更")
@@ -618,6 +619,8 @@ def save_local_proxy_preferences(**updates) -> dict:
             # Unlike optional legacy fields, an explicit null is invalid
             # authority, not permission to silently forget a manual choice.
             proxy_routing.route_modes({**preferences, **updates})
+        if "service_node_pools" in updates:
+            proxy_routing.node_pools({**preferences, **updates})
         preferences.update({key: value for key, value in updates.items() if value is not None})
         preferences = _normalize_local_proxy_preferences(preferences)
         preferences["updated_at"] = remote_proxy._now_iso()
@@ -1403,6 +1406,7 @@ def set_local_proxy_service_profile_binding_and_apply(
     previous = _load_local_proxy_routing_preferences_strict()
     previous_bindings = dict(previous.get("service_profile_bindings") or {})
     previous_nodes = dict(previous.get("service_node_bindings") or {})
+    previous_pools = dict(previous.get("service_node_pools") or {})
     previous_builtin_sites = dict(previous.get("builtin_sites") or {})
     previous_modes = dict(previous.get("service_route_modes") or {})
     updated_bindings = dict(previous_bindings)
@@ -1426,7 +1430,10 @@ def set_local_proxy_service_profile_binding_and_apply(
     save_local_proxy_preferences(
         service_profile_bindings=updated_bindings,
         builtin_sites=updated_builtin_sites,
-        service_node_bindings={key: value for key, value in previous_nodes.items() if key != service_key},
+        service_node_bindings={key: value for key, value in previous_nodes.items()
+                               if key != service_key or previous_bindings.get(service_key) == target_profile_id},
+        service_node_pools={key: value for key, value in previous_pools.items()
+                           if key != service_key or previous_bindings.get(service_key) == target_profile_id},
         service_route_modes=updated_modes,
     )
     try:
@@ -1438,6 +1445,7 @@ def set_local_proxy_service_profile_binding_and_apply(
                 service_profile_bindings=previous_bindings,
                 builtin_sites=previous_builtin_sites,
                 service_node_bindings=previous_nodes,
+                service_node_pools=previous_pools,
                 service_route_modes=previous_modes,
             )
         except Exception as rollback_exc:
@@ -1493,6 +1501,7 @@ def clear_local_proxy_service_profile_bindings_and_apply(profile_id: str) -> str
     if not affected:
         return "该订阅没有被服务分流使用"
     previous_nodes = dict(previous.get("service_node_bindings") or {})
+    previous_pools = dict(previous.get("service_node_pools") or {})
     updated_bindings = {
         service_id: bound_id
         for service_id, bound_id in previous_bindings.items()
@@ -1501,13 +1510,15 @@ def clear_local_proxy_service_profile_bindings_and_apply(profile_id: str) -> str
     save_local_proxy_preferences(
         service_profile_bindings=updated_bindings,
         service_node_bindings={key: value for key, value in previous_nodes.items() if key not in affected},
+        service_node_pools={key: value for key, value in previous_pools.items() if key not in affected},
     )
     try:
         apply_message = apply_local_proxy_routing_to_running()
     except Exception as exc:
         rollback_error = None
         try:
-            save_local_proxy_preferences(service_profile_bindings=previous_bindings, service_node_bindings=previous_nodes)
+            save_local_proxy_preferences(service_profile_bindings=previous_bindings, service_node_bindings=previous_nodes,
+                                         service_node_pools=previous_pools)
         except Exception as rollback_exc:
             rollback_error = rollback_exc
         suffix = (
@@ -1616,14 +1627,16 @@ def apply_local_proxy_routing_to_running() -> str:
     # ``reload_local_ai_proxy`` reads it again immediately before building the
     # config, closing the window where a corrupt file could otherwise downgrade
     # strict privacy through the permissive UI reader.
-    _load_local_proxy_routing_preferences_strict()
+    preferences = _load_local_proxy_routing_preferences_strict()
+    warnings = proxy_routing.node_pool_warnings(preferences)
+    suffix = "；" + "；".join(warnings) if warnings else ""
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
         state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT,
         "本机代理端口",
     )
     if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
-        return "代理范围已保存；本机代理未运行，下次启动时生效"
+        return "代理范围已保存；本机代理未运行，下次启动时生效" + suffix
     node = _read_local_managed_proxy_node() or _load_last_proxy_node()
     if not node:
         raise RuntimeError("未读取到当前运行节点，无法热更新代理范围")
@@ -1633,7 +1646,7 @@ def apply_local_proxy_routing_to_running() -> str:
     return reload_local_ai_proxy(
         remote_proxy.format_proxy_node(node),
         persist_subscription_selection=False,
-    )
+    ) + suffix
 
 
 @_serialized_local_proxy_operation("自动启动本机代理")
@@ -2376,9 +2389,14 @@ def reload_local_ai_proxy_verified(
     automatic_update: bool = False,
     _prevalidated_result: LocalProxyNodeStabilityResult | None = None,
     _expected_original_node: dict | None = None,
+    _expected_current_key: str | None = None,
 ) -> str:
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
     original_node = _read_local_managed_proxy_node()
+    if _expected_current_key is not None and not _subscription_refresh_origin_matches(
+        original_node, _expected_current_key, profile_id,
+    ):
+        return "订阅已刷新，但默认节点或订阅分组已变化，已保留当前运行节点"
     fallback_nodes = _local_proxy_fallback_nodes(
         requested_node,
         candidate_nodes,
@@ -2460,10 +2478,24 @@ def reload_local_ai_proxy_verified(
     )
 
 
+def _subscription_refresh_origin_matches(node: dict | None, expected_key: str, profile_id: str) -> bool:
+    """Saved timer provenance, rechecked inside the existing commit lock."""
+    try:
+        if not expected_key or remote_proxy.proxy_node_key(node or {}) != expected_key:
+            return False
+        if profile_id and remote_proxy.load_proxy_subscription_state().get("active_profile_id") != profile_id:
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def refresh_running_local_ai_proxy_from_subscription(
     nodes,
     quality_results: dict[str, remote_proxy.ProxyNodeQualityResult | dict] | None = None,
     profile_id: str = "",
+    *,
+    expected_current_key: str | None = None,
 ) -> str:
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
@@ -2478,6 +2510,10 @@ def refresh_running_local_ai_proxy_from_subscription(
     current_node = _read_local_managed_proxy_node()
     if current_node is None:
         return "订阅已刷新，但无法读取当前运行节点，无法保证失败回滚，已保留当前运行节点"
+    if expected_current_key is not None and not _subscription_refresh_origin_matches(
+        current_node, expected_current_key, profile_id,
+    ):
+        return "订阅已刷新，但默认节点或订阅分组已变化，已保留当前运行节点"
     current_key = ""
     if current_node:
         try:
@@ -2498,6 +2534,7 @@ def refresh_running_local_ai_proxy_from_subscription(
             candidates,
             quality_results=quality_results,
             profile_id=profile_id,
+            **({"_expected_current_key": expected_current_key} if expected_current_key is not None else {}),
         )
 
     automatic_candidates = remote_proxy.automatic_proxy_subscription_nodes(
@@ -2535,6 +2572,7 @@ def refresh_running_local_ai_proxy_from_subscription(
         automatic_update=True,
         _prevalidated_result=selected_result,
         _expected_original_node=current_node,
+        **({"_expected_current_key": expected_current_key} if expected_current_key is not None else {}),
     )
 
 
@@ -2557,6 +2595,17 @@ def refresh_running_local_service_routes_from_subscription(
     )
     if not candidates:
         raise RuntimeError("订阅里没有可用于服务分流的节点")
+    preferences = _load_local_proxy_routing_preferences_strict()
+    pools = proxy_routing.node_pools(preferences)
+    # Check explicit authority before changing even the subscription's default
+    # selection. A vanished custom pool must leave the original live config
+    # and saved primary alone; an unrelated cached node is not a substitute.
+    proxy_routing.node_pool_warnings(preferences, profile_id=clean_id)
+    pinned = proxy_routing.node_bindings(preferences)
+    if all(service in pools or service in pinned for service in bound_services):
+        apply_message = apply_local_proxy_routing_to_running()
+        labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
+        return f"已刷新 {labels} 的独立订阅节点池；{apply_message}"
     state = remote_proxy.load_proxy_subscription_state()
     profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
     profile = profiles.get(clean_id)
@@ -4490,6 +4539,7 @@ def _normalize_local_proxy_preferences(data: dict | None) -> dict:
         "custom_targets": custom_targets,
         "service_profile_bindings": service_profile_bindings,
         "service_node_bindings": proxy_routing.node_bindings(raw, strict=False),
+        "service_node_pools": proxy_routing.node_pools(raw),
         "service_route_modes": proxy_routing.route_modes(raw),
         "last_node": last_node,
         "updated_at": str(raw.get("updated_at") or ""),
@@ -4564,8 +4614,11 @@ def _routing_options_from_preferences(preferences: dict | None = None) -> dict:
     }
 
 
-def _subscription_route_group_name(profile_id: str, service_id: str = "openai", node_key: str = "") -> str:
-    identity = json.dumps([profile_id, node_key, *_service_route_health_contract((service_id,))])
+def _subscription_route_group_name(profile_id: str, service_id: str = "openai", node_key: str = "", node_keys=()) -> str:
+    values = [profile_id, node_key, *_service_route_health_contract((service_id,))]
+    if node_keys:
+        values.append(list(node_keys))
+    identity = json.dumps(values)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12].upper()
     return f"SUB-{digest}-PROXY"
 
@@ -4645,7 +4698,9 @@ def _selected_subscription_route_pool(
     *,
     ai_sensitive: bool,
     node_key: str = "",
+    node_keys=(),
     cached=_UNLOADED_SUBSCRIPTION_ROUTE_CACHE,
+    warnings: list[str] | None = None,
 ) -> tuple[dict, tuple[dict, ...]]:
     # None is an observed missing cache, not permission to load a newer version
     # halfway through a multi-service configuration build.
@@ -4654,6 +4709,44 @@ def _selected_subscription_route_pool(
     if cached is None or not cached.nodes:
         name = str(profile.get("name") or "该订阅").strip() or "该订阅"
         raise RuntimeError(f"服务分流订阅“{name}”没有可用缓存，请先拉取或导入")
+    if node_keys:
+        # Explicit candidates have their own authority and priority order. Do
+        # not widen or re-rank this pool using the subscription's global pick,
+        # IP quality cache, or any unselected node when a candidate disappears.
+        validated = proxy_routing.node_pools({
+            "service_profile_bindings": {"openai": "validation"},
+            "service_node_bindings": {"openai": node_key} if node_key else {},
+            "service_node_pools": {"openai": list(node_keys)},
+        })["openai"]
+        by_key = {remote_proxy.proxy_subscription_node_key(item): item for item in cached.nodes}
+        selected, seen = [], set()
+        unavailable = aliases = 0
+        for key in validated:
+            item = by_key.get(key)
+            if item is None:
+                unavailable += 1
+                continue
+            try:
+                node = remote_proxy._normalize_proxy_node(item.node)
+                connection_key = remote_proxy._proxy_node_connection_key(node)
+            except (TypeError, ValueError):
+                unavailable += 1
+                continue
+            if str(node.get("dialer-proxy") or "").strip():
+                unavailable += 1
+                continue
+            if connection_key not in seen:
+                selected.append(node)
+                seen.add(connection_key)
+            else:
+                aliases += 1
+        if not selected:
+            raise RuntimeError("自选候选节点已全部缺失或无法独立运行，已停止更新；请重新选择候选节点，不会扩大到整个订阅")
+        if unavailable and warnings is not None:
+            warnings.append(f"{unavailable} 个自选候选节点缺失或无法独立运行，当前仅使用剩余 {len(selected)} 个；不会加入未选节点")
+        if aliases and warnings is not None:
+            warnings.append(f"{aliases} 个自选候选节点实际为重复连接，已合并；实际可切换连接数 {len(selected)} 个")
+        return selected[0], tuple(selected[1:])
     selected_key = node_key or str(profile.get("selected_node_key") or "").strip()
     selected_item = next(
         (
@@ -4751,6 +4844,7 @@ def _service_route_blueprint(
     )
     active_targets = _active_service_route_targets(preferences)
     pinned_nodes = proxy_routing.node_bindings(preferences)
+    selected_pools = proxy_routing.node_pools(preferences)
     requested: dict[str, dict] = {}
     service_routes: dict[str, str] = {}
     for service_id in active_targets:
@@ -4758,14 +4852,15 @@ def _service_route_blueprint(
         if not profile_id:
             continue
         node_key = pinned_nodes.get(service_id, "")
+        node_keys = selected_pools.get(service_id, [])
         health_url, expected_status = _service_route_health_contract((service_id,))
-        pool_id = json.dumps([profile_id, node_key, health_url, expected_status])
+        pool_id = json.dumps([profile_id, node_key, health_url, expected_status, node_keys])
         entry = requested.setdefault(
             pool_id,
-            {"profile_id": profile_id, "node_key": node_key, "service_ids": []},
+            {"profile_id": profile_id, "node_key": node_key, "node_keys": node_keys, "service_ids": []},
         )
         entry["service_ids"].append(service_id)
-        service_routes[service_id] = _subscription_route_group_name(profile_id, service_id, node_key)
+        service_routes[service_id] = _subscription_route_group_name(profile_id, service_id, node_key, node_keys)
     # Resolve target ownership before deduplicating pools. Pool insertion order
     # must not let an earlier shared pool lose a later explicit custom override.
     # Exact custom targets win over built-ins, including "follow default";
@@ -4812,7 +4907,7 @@ def _resolve_service_subscription_routes(preferences: dict) -> dict:
             )
             raise RuntimeError(f"{services} 绑定的订阅已被删除，请重新选择")
         ai_sensitive = bool(set(request["service_ids"]) & LOCAL_PROXY_AI_SERVICE_IDS)
-        cache_key = (profile_id, request["node_key"], ai_sensitive)
+        cache_key = (profile_id, request["node_key"], ai_sensitive, tuple(request["node_keys"]))
         if cache_key not in resolved_pools:
             if profile_id not in subscription_caches:
                 # URL imports overwrite the same cache path. Read once per
@@ -4821,6 +4916,7 @@ def _resolve_service_subscription_routes(preferences: dict) -> dict:
                 subscription_caches[profile_id] = remote_proxy.load_cached_proxy_subscription(profile)
             resolved_pools[cache_key] = _selected_subscription_route_pool(
                 profile, ai_sensitive=ai_sensitive, node_key=request["node_key"],
+                node_keys=request["node_keys"],
                 cached=subscription_caches[profile_id],
             )
         route_node, route_fallbacks = resolved_pools[cache_key]
@@ -4843,6 +4939,7 @@ def _resolve_service_subscription_routes(preferences: dict) -> dict:
                 "health_checked": True,
                 "health_check_url": health_url,
                 "health_check_expected_status": expected_status,
+                **({"selected_pool": True} if request["node_keys"] else {}),
             }
         )
     return {

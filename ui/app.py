@@ -175,6 +175,8 @@ class App(ctk.CTk):
         self._main_layout_mode = None
         self._local_proxy_watchdog_after_id = None
         self._local_proxy_watchdog_running = False
+        self._subscription_timer_bootstrap_after_id = None
+        self._subscription_timer_bootstrap_running = False
         self._tab_specs = {label: (attr, module_name, class_name, eager) for label, attr, module_name, class_name, eager in TAB_SPECS}
         for _label, attr, _module_name, _class_name, _eager in TAB_SPECS:
             setattr(self, attr, None)
@@ -388,6 +390,7 @@ class App(ctk.CTk):
             self.after(90, self._schedule_initial_tab_load)
         self.after(900, self._auto_start_local_proxy)
         self.after(2500, self._schedule_local_proxy_watchdog)
+        self._subscription_timer_bootstrap_after_id = self.after(1800, self._restore_subscription_timers)
         preload_mode = os.environ.get("API_SWITCHER_PRELOAD_TABS", DEFAULT_TAB_PRELOAD_MODE).strip().lower()
         if preload_mode != "0":
             self._schedule_lazy_tab_preload(preload_mode, delay_ms=TAB_CLASS_PRELOAD_START_MS)
@@ -397,6 +400,53 @@ class App(ctk.CTk):
                 TAB_WARMUP_START_MS,
                 lambda mode=warmup_mode: self._start_lazy_tab_warmup(priority_only=mode not in {"1", "all"}),
             )
+
+    def _restore_subscription_timers(self):
+        """Restore opted-in timers without requiring a visit to either proxy tab."""
+        self._subscription_timer_bootstrap_after_id = None
+        if self._exit_requested or self._subscription_timer_bootstrap_running:
+            return
+        self._subscription_timer_bootstrap_running = True
+
+        def finish(state, classes, error=""):
+            self._subscription_timer_bootstrap_running = False
+            if self._exit_requested:
+                return
+            failed = bool(error)
+            for label, tab_class in classes:
+                try:
+                    tab = self._instantiate_tab_from_class(label, tab_class, background=True)
+                    if tab is None:
+                        raise RuntimeError("定时刷新页面初始化失败")
+                    tab._restore_periodic_subscription_timer(state)
+                except Exception as exc:
+                    failed = True
+                    logger.warning("Subscription timer restore failed for %s: %s", label, safe_feedback_text(str(exc)))
+            if failed:
+                self._set_app_status("订阅定时刷新尚未恢复，将在 30 秒后重试；现有代理未改变。")
+                self._subscription_timer_bootstrap_after_id = self.after(30000, self._restore_subscription_timers)
+
+        def run():
+            try:
+                from core import remote_proxy
+
+                state = remote_proxy.load_proxy_subscription_state()
+                classes = []
+                for label, setting in (("Win11 代理", "local_periodic_update_enabled"),
+                                       ("SSH 服务器", "ssh_periodic_update_enabled")):
+                    if state.get(setting) is True:
+                        _attr, module, name, _eager = self._tab_specs[label]
+                        classes.append((label, self._resolve_tab_class(label, module, name)))
+                self._run_on_ui_thread(lambda: finish(state, classes))
+            except Exception as exc:
+                detail = safe_feedback_text(str(exc).strip() or type(exc).__name__)
+                logger.warning("Could not restore subscription timers: %s", detail)
+                self._run_on_ui_thread(lambda error=detail: finish({}, [], error))
+
+        try:
+            threading.Thread(target=run, name="subscription-timer-restore", daemon=True).start()
+        except Exception as exc:
+            finish({}, [], safe_feedback_text(str(exc).strip() or type(exc).__name__))
 
     def _logical_main_width(self) -> int:
         width = self.winfo_width()
@@ -1681,6 +1731,13 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self._lazy_tab_preload_after_id = None
+        subscription_timer_after = self.__dict__.get("_subscription_timer_bootstrap_after_id")
+        if subscription_timer_after:
+            try:
+                self.after_cancel(subscription_timer_after)
+            except Exception:
+                pass
+        self._subscription_timer_bootstrap_after_id = None
         pending_warmup_after_id = self.__dict__.get("_pending_tab_warmup_after_id")
         if pending_warmup_after_id:
             try:

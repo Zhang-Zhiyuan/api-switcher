@@ -189,6 +189,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_strict_privacy_explicit = False
         self._proxy_privacy_notice_label = None
         self._proxy_periodic_update_after_id = None
+        self._proxy_periodic_update_poll_after_id = None
+        self._proxy_periodic_update_interval_saved = 60
+        self._proxy_periodic_update_servers = ()
         self._proxy_periodic_update_running = False
         self._proxy_subscription_hot_update_lock_owned = False
         self._proxy_startup_refresh_after_id = None
@@ -1092,6 +1095,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             **input_style(),
         )
         self._proxy_periodic_update_entry.grid(row=1, column=2, sticky="ew", padx=(6, 0), pady=(6, 0))
+        if getattr(self, "_subscription_timer_restored", False):
+            self._proxy_periodic_update_entry.insert(0, str(self._proxy_periodic_update_interval_saved))
+        self._proxy_periodic_update_entry.bind("<Return>", self._on_proxy_periodic_interval_edited, add="+")
+        self._proxy_periodic_update_entry.bind("<FocusOut>", self._on_proxy_periodic_interval_edited, add="+")
         ctk.CTkLabel(
             proxy_sub_action_frame,
             text="分钟",
@@ -1697,6 +1704,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._cancel_server_refresh_finish()
         self._cancel_proxy_startup_refresh()
         self._cancel_proxy_periodic_update()
+        if getattr(self, "_proxy_periodic_update_poll_after_id", None) is not None:
+            try:
+                self.after_cancel(self._proxy_periodic_update_poll_after_id)
+            except Exception:
+                pass
+            self._proxy_periodic_update_poll_after_id = None
         super().destroy()
 
     def _resolve_ui_dispatch(self):
@@ -3232,16 +3245,21 @@ class SSHTab(ctk.CTkScrollableFrame):
         saved_path = str(state.get("saved_path") or "").strip()
         periodic_update = bool(state.get("ssh_periodic_update_enabled"))
         interval_minutes = str(state.get("ssh_periodic_update_interval_minutes") or "60")
+        from core.subscription_auto_refresh import saved_server_names
+
         self._proxy_auto_refresh_var.set(auto_refresh)
-        self._proxy_periodic_update_var.set(periodic_update)
+        if not getattr(self, "_subscription_timer_restored", False):
+            self._proxy_periodic_update_interval_saved = interval_minutes
+            self._proxy_periodic_update_servers = saved_server_names(state.get("ssh_periodic_update_servers"))
+            self._proxy_periodic_update_var.set(periodic_update)
+            if self._proxy_periodic_update_entry:
+                self._proxy_periodic_update_entry.delete(0, "end")
+                self._proxy_periodic_update_entry.insert(0, interval_minutes)
+            self._subscription_timer_restored = True
         self._proxy_strict_privacy_explicit = "ssh_strict_privacy" in state
         strict_privacy_var = getattr(self, "_proxy_strict_privacy_var", None)
         if strict_privacy_var is not None:
             strict_privacy_var.set(bool(state.get("ssh_strict_privacy")))
-
-        if self._proxy_periodic_update_entry:
-            self._proxy_periodic_update_entry.delete(0, "end")
-            self._proxy_periodic_update_entry.insert(0, interval_minutes)
 
         if preserve_editor:
             self._set_proxy_cache_status("本机缓存: 已读取订阅列表，暂未切换草稿")
@@ -3386,7 +3404,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _proxy_periodic_update_interval_minutes(self) -> int:
         raw = self._proxy_periodic_update_entry.get().strip() if self._proxy_periodic_update_entry else ""
         try:
-            value = int(raw or "60")
+            value = int(raw or getattr(self, "_proxy_periodic_update_interval_saved", 60))
         except ValueError:
             value = 60
         value = min(max(value, 5), 1440)
@@ -3396,14 +3414,31 @@ class SSHTab(ctk.CTkScrollableFrame):
         return value
 
     def _on_proxy_periodic_update_toggle(self):
+        self._subscription_timer_restored = True
         enabled = bool(self._proxy_periodic_update_var.get())
         interval = self._proxy_periodic_update_interval_minutes()
-        remote_proxy.save_proxy_subscription_state(
-            ssh_periodic_update_enabled=enabled,
-            ssh_periodic_update_interval_minutes=interval,
-        )
+        from core.subscription_auto_refresh import saved_server_names
+
+        names = saved_server_names(self._selected_sync_server_names()) if enabled else ()
+        if enabled and not names:
+            self._proxy_periodic_update_var.set(False)
+            self._cancel_proxy_periodic_update()
+            self._set_proxy_status("请先勾选要定时刷新的 SSH 服务器，再开启定时热更新。", "warning")
+            return
+        self._proxy_periodic_update_servers = names
+        self._proxy_periodic_update_interval_saved = interval
+        try:
+            remote_proxy.save_proxy_subscription_state(
+                ssh_periodic_update_enabled=enabled,
+                ssh_periodic_update_interval_minutes=interval,
+                ssh_periodic_update_servers=list(names),
+            )
+        except Exception as exc:
+            self._set_proxy_status(f"定时设置保存失败，仅本次运行生效：{exc}", "warning")
+            self._schedule_proxy_periodic_update()
+            return
         if enabled:
-            self._set_proxy_status(f"已开启 SSH 代理定时热更新；每 {interval} 分钟拉取订阅，并无重启热更新正在运行的 SSH 代理。", "success")
+            self._set_proxy_status(f"已开启 SSH 定时刷新：每 {interval} 分钟更新已保存订阅及 {len(names)} 台已确认服务器；切换页面勾选不改变目标，退出程序后暂停。", "success")
         else:
             self._set_proxy_status("已关闭 SSH 代理定时热更新。")
         self._schedule_proxy_periodic_update(initial=not enabled)
@@ -3468,13 +3503,45 @@ class SSHTab(ctk.CTkScrollableFrame):
             on_confirm=commit,
         )
 
-    def _schedule_proxy_periodic_update(self, initial: bool = False):
+    def _on_proxy_periodic_interval_edited(self, _event=None):
+        interval = self._proxy_periodic_update_interval_minutes()
+        if str(interval) == str(getattr(self, "_proxy_periodic_update_interval_saved", 60)):
+            return
+        self._proxy_periodic_update_interval_saved = interval
+        try:
+            remote_proxy.save_proxy_subscription_state(ssh_periodic_update_interval_minutes=interval)
+        except Exception as exc:
+            self._set_proxy_status(f"刷新间隔保存失败，仅本次运行生效：{exc}", "warning")
+        self._schedule_proxy_periodic_update()
+
+    def _restore_periodic_subscription_timer(self, state: dict):
+        """Restore a confirmed host allowlist without creating a remote session."""
+        if getattr(self, "_subscription_timer_restored", False):
+            return
+        from core.subscription_auto_refresh import saved_server_names
+
+        self._proxy_periodic_update_var.set(bool(state.get("ssh_periodic_update_enabled")))
+        self._proxy_periodic_update_servers = saved_server_names(state.get("ssh_periodic_update_servers"))
+        try:
+            interval = min(max(int(state.get("ssh_periodic_update_interval_minutes") or 60), 5), 1440)
+        except (TypeError, ValueError):
+            interval = 60
+        self._proxy_periodic_update_interval_saved = interval
+        if self._proxy_periodic_update_entry:
+            self._proxy_periodic_update_entry.delete(0, "end")
+            self._proxy_periodic_update_entry.insert(0, str(interval))
+        if bool(self._proxy_periodic_update_var.get()) and not self._proxy_periodic_update_servers:
+            self._set_proxy_status("旧定时设置尚未确认 SSH 目标；请勾选服务器后重新开启定时热更新。", "warning")
+        if not getattr(self, "_proxy_periodic_update_after_id", None) and not self._proxy_periodic_update_running:
+            self._schedule_proxy_periodic_update(initial=True)
+        self._subscription_timer_restored = True
+
+    def _schedule_proxy_periodic_update(self, initial: bool = False, *, retry: bool = False):
         self._cancel_proxy_periodic_update()
-        if not bool(self._proxy_periodic_update_var.get()):
+        if getattr(self, "_destroyed", False) or not bool(self._proxy_periodic_update_var.get()):
             return
         interval_minutes = self._proxy_periodic_update_interval_minutes()
-        delay_minutes = 1 if initial else interval_minutes
-        remote_proxy.save_proxy_subscription_state(ssh_periodic_update_interval_minutes=interval_minutes)
+        delay_minutes = 1 if initial or retry else interval_minutes
         self._proxy_periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_proxy_periodic_update)
 
     def _cancel_proxy_periodic_update(self):
@@ -3491,11 +3558,20 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _run_proxy_periodic_update(self):
         self._proxy_periodic_update_after_id = None
-        if not bool(self._proxy_periodic_update_var.get()):
+        if getattr(self, "_destroyed", False) or not bool(self._proxy_periodic_update_var.get()):
             return
-        self._start_proxy_subscription_hot_update(manual=False)
+        try:
+            self._start_proxy_subscription_hot_update(manual=False)
+        except Exception as exc:
+            self._set_proxy_status(f"SSH 定时刷新未启动，1 分钟后重试：{exc}", "warning")
+            self._schedule_proxy_periodic_update(retry=True)
 
     def _start_proxy_subscription_hot_update(self, *, manual: bool):
+        if not manual:
+            from ui.subscription_auto_refresh import start_saved_refresh
+
+            start_saved_refresh(self, scope="ssh", thread_factory=threading.Thread)
+            return
         mode = "手动" if manual else "定时"
         if self._proxy_periodic_update_running or self._proxy_busy or self._ssh_busy:
             if manual:

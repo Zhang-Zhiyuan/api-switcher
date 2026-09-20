@@ -25,7 +25,9 @@ remote_proxy = LazyModule("core.remote_proxy")
 
 ROUTE_KEYS = (
     "builtin_sites", "custom_targets", "service_profile_bindings", "service_node_bindings", "service_route_modes",
+    "service_node_pools",
 )
+MAX_SERVICE_NODE_POOL_SIZE = 16
 _HOST_LOCKS: dict[str, threading.RLock] = {}
 _HOST_LOCKS_GUARD = threading.Lock()
 _BINDINGS_LOCK = threading.RLock()
@@ -83,16 +85,76 @@ def route_modes(preferences: dict) -> dict[str, str]:
     allowed = service_ids(preferences)
     profiles = preferences.get("service_profile_bindings") or {}
     nodes = preferences.get("service_node_bindings") or {}
+    pools = preferences.get("service_node_pools") or {}
     result = {}
     for service, mode in raw.items():
         if not isinstance(service, str) or mode != "default":
             raise ValueError("service_route_modes 线路模式只支持 default（跟随默认）")
         if service not in allowed:
             continue
-        if (isinstance(profiles, dict) and profiles.get(service)) or (isinstance(nodes, dict) and nodes.get(service)):
-            raise ValueError(f"{service} 的跟随默认模式与订阅或固定节点绑定冲突")
+        if ((isinstance(profiles, dict) and profiles.get(service))
+                or (isinstance(nodes, dict) and nodes.get(service))
+                or (isinstance(pools, dict) and pools.get(service))):
+            raise ValueError(f"{service} 的跟随默认模式与订阅或节点绑定冲突")
         result[service] = "default"
     return result
+
+
+def node_pools(preferences: dict) -> dict[str, list[str]]:
+    """Validate ordered explicit candidates; absence alone means full automatic.
+
+    Invalid or empty authority must never be normalized into an unrestricted
+    subscription pool. Missing cache entries remain persisted for later refresh.
+    """
+    raw = preferences.get("service_node_pools", {})
+    if not isinstance(raw, dict):
+        raise ValueError("service_node_pools 候选节点池必须是对象")
+    allowed = service_ids(preferences)
+    profiles = preferences.get("service_profile_bindings") or {}
+    fixed = preferences.get("service_node_bindings") or {}
+    modes = preferences.get("service_route_modes") or {}
+    result = {}
+    for service, values in raw.items():
+        if service not in allowed:
+            continue
+        if not isinstance(values, list) or not 1 <= len(values) <= MAX_SERVICE_NODE_POOL_SIZE:
+            raise ValueError(f"{service} 的候选节点池必须包含 1 至 {MAX_SERVICE_NODE_POOL_SIZE} 个节点")
+        keys = []
+        for key in values:
+            if (not isinstance(key, str) or not key.strip() or len(key) > 128
+                    or any(ord(char) < 32 for char in key) or key.strip() in keys):
+                raise ValueError(f"{service} 的候选节点标识无效或重复")
+            keys.append(key.strip())
+        profile_id = profiles.get(service) if isinstance(profiles, dict) else None
+        if (not isinstance(profile_id, str) or not profile_id.strip() or len(profile_id) > 64
+                or any(ord(char) < 32 for char in profile_id)):
+            raise ValueError(f"{service} 的候选节点池没有对应订阅，请重新选择线路")
+        if ((isinstance(fixed, dict) and fixed.get(service))
+                or (isinstance(modes, dict) and modes.get(service))):
+            raise ValueError(f"{service} 的候选节点池与固定节点或跟随默认模式冲突")
+        result[service] = keys
+    return result
+
+
+def node_pool_warnings(preferences: dict, *, profile_id: str = "") -> tuple[str, ...]:
+    """Resolve only selected pools, returning non-secret partial-cache notices."""
+    pools = node_pools(preferences)
+    profiles, caches = {}, {}
+    notices = []
+    for service, keys in pools.items():
+        bound = preferences["service_profile_bindings"][service]
+        if profile_id and bound != profile_id:
+            continue
+        if bound not in profiles:
+            profiles[bound] = local_proxy._proxy_subscription_profile_for_route(bound)
+            caches[bound] = remote_proxy.load_cached_proxy_subscription(profiles[bound])
+        detail = []
+        local_proxy._selected_subscription_route_pool(
+            profiles[bound], ai_sensitive=False, node_keys=keys,
+            cached=caches[bound], warnings=detail,
+        )
+        notices.extend(f"{local_proxy._local_proxy_service_label(service)}：{notice}" for notice in detail)
+    return tuple(notices)
 
 
 def route_snapshot(preferences: dict) -> dict:
@@ -111,7 +173,7 @@ def normalize_routes(preferences: dict) -> dict:
         ):
             labels = {"builtin_sites": "站点开关", "custom_targets": "自定义目标",
                       "service_profile_bindings": "订阅绑定", "service_node_bindings": "节点绑定",
-                      "service_route_modes": "线路模式"}
+                      "service_route_modes": "线路模式", "service_node_pools": "候选节点池"}
             raise ValueError(f"服务分流的{labels[key]}格式无效")
     normalized = local_proxy._normalize_local_proxy_preferences(preferences)
     normalized["service_profile_bindings"] = (
@@ -120,6 +182,7 @@ def normalize_routes(preferences: dict) -> dict:
     if set(normalized["service_profile_bindings"]) - service_ids(normalized):
         raise ValueError("订阅绑定指向无效的自定义目标，请先修正域名或 IP")
     normalized["service_node_bindings"] = node_bindings(preferences)
+    normalized["service_node_pools"] = node_pools(preferences)
     normalized["service_route_modes"] = route_modes(preferences)
     if set(normalized["service_route_modes"]) - service_ids(normalized):
         raise ValueError("线路模式指向无效的自定义目标，请先修正域名或 IP")
@@ -143,6 +206,7 @@ def validate_routes(preferences: dict) -> dict:
         local_proxy._selected_subscription_route_pool(
             profile, ai_sensitive=False,
             node_key=normalized["service_node_bindings"].get(service, ""),
+            node_keys=normalized["service_node_pools"].get(service, ()),
         )
     remote_proxy.build_mihomo_config(
         {"name": "validation", "type": "http", "server": "127.0.0.1", "port": 9},
@@ -335,6 +399,7 @@ def apply_ssh_routes(ssh_name: str, preferences: dict, *, expected=None, mixed_p
     if expected is not None and previous != route_snapshot(expected):
         raise RuntimeError(f"{ssh_name}: 线路已被其他操作修改，请重新打开编辑器")
     updated = validate_routes(preferences)
+    warnings = node_pool_warnings(updated)
     status = remote_proxy.inspect_ai_proxy(ssh_name, mixed_port)
     current = None
     message = "代理未运行；已保存，下次部署生效"
@@ -363,4 +428,5 @@ def apply_ssh_routes(ssh_name: str, preferences: dict, *, expected=None, mixed_p
             except Exception as rollback:
                 raise RuntimeError(f"{ssh_name}: 应用线路失败，原绑定回滚也失败: {rollback}") from exc
             raise RuntimeError(f"{ssh_name}: 应用线路失败，已恢复原绑定: {exc}") from exc
-    return f"{ssh_name}: 目标分流已保存；{message}"
+    suffix = "；" + "；".join(warnings) if warnings else ""
+    return f"{ssh_name}: 目标分流已保存；{message}{suffix}"

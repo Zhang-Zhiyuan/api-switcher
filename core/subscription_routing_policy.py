@@ -85,13 +85,14 @@ def suggest_tagged_routes(
     if not isinstance(preferences, dict):
         raise ValueError("服务分流草稿必须是对象")
     draft = copy.deepcopy(preferences)
-    for key in ("service_profile_bindings", "service_node_bindings", "builtin_sites", "service_route_modes"):
+    for key in ("service_profile_bindings", "service_node_bindings", "builtin_sites", "service_route_modes", "service_node_pools"):
         if key in draft and not isinstance(draft[key], dict):
             return draft, ["服务分流草稿格式无效，未自动分配；请先修正已有配置。"]
     profiles = draft.get("service_profile_bindings", {})
     nodes = draft.get("service_node_bindings", {})
     sites = draft.get("builtin_sites", {})
     modes = draft.get("service_route_modes", {})
+    pools = draft.get("service_node_pools", {})
     if any(not isinstance(service, str) or mode != "default" for service, mode in modes.items()):
         return draft, ["服务分流线路模式无效，未自动分配；请先修正已有配置。"]
     protected = ({protected_services} if isinstance(protected_services, str)
@@ -107,7 +108,7 @@ def suggest_tagged_routes(
             # user's authority. Suggestions must not repair them silently.
             disabled = (service in LOCAL_PROXY_BUILTIN_SITE_IDS
                         and service in sites and sites[service] is not True)
-            if service in profiles or service in nodes or service in protected or disabled:
+            if service in profiles or service in nodes or service in pools or service in protected or disabled:
                 kept.append(label)
             else:
                 pending.append((service, label))

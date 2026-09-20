@@ -420,7 +420,8 @@ def load_snapshot(ssh_name: str | None = None) -> RouteSnapshot:
     for item in blueprint["requested"].values():
         group = blueprint["service_routes"][item["service_ids"][0]]
         snapshot.groups[group] = profiles.get(item["profile_id"], "订阅已失效") + (
-            " · 固定节点" if item["node_key"] else " · 订阅内自动切换")
+            f" · 自选候选 {len(item['node_keys'])} 个 · 自动切换" if item.get("node_keys")
+            else " · 固定节点" if item["node_key"] else " · 订阅内自动切换")
     config_text = ""
     labels_verified = False
     try:

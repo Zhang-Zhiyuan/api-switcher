@@ -4023,13 +4023,17 @@ def _managed_additional_proxy_groups(
         ).strip()
         if (health_url, expected_status) not in AI_PROXY_ADDITIONAL_HEALTH_CHECKS:
             raise ValueError(f"订阅策略组 {group_name} 的健康检查契约不受支持")
+        selected_pool = raw_spec.get("selected_pool", False)
+        if not isinstance(selected_pool, bool):
+            raise ValueError(f"订阅策略组 {group_name} 的自选候选模式无效")
         primary_name, fallback_prefix = _managed_additional_node_names(group_name)
         nodes = _managed_mihomo_proxy_nodes(
             primary_node,
             raw_spec.get("fallback_proxy_nodes"),
             primary_name=primary_name,
             fallback_name_prefix=fallback_prefix,
-            max_nodes=_additional_proxy_group_max_nodes(health_url, expected_status),
+            max_nodes=(SERVICE_PROXY_FALLBACK_MAX_NODES if selected_pool
+                       else _additional_proxy_group_max_nodes(health_url, expected_status)),
         )
         node_names = [str(node["name"]) for node in nodes]
         if any(name in seen_node_names for name in node_names):
@@ -4242,8 +4246,10 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
     for group in proxy_groups:
         group_name = str(group.get("name") or "").strip()
         members = group.get("proxies")
-        pool_limit = (AI_PROXY_FALLBACK_MAX_NODES if group_name == "AI-PROXY" else
-                      _additional_proxy_group_max_nodes(group.get("url"), group.get("expected-status")))
+        # Explicit service candidates may contain up to 16 AI nodes; full-auto
+        # generation still uses its existing smaller budget. Strict recognition
+        # checks the same isolated, bounded group contract for both strategies.
+        pool_limit = (AI_PROXY_FALLBACK_MAX_NODES if group_name == "AI-PROXY" else SERVICE_PROXY_FALLBACK_MAX_NODES)
         if (
             not group_name
             or group_name in seen_group_names
@@ -5564,14 +5570,18 @@ def refresh_running_ai_proxy_from_subscription(
             return f"{ssh_name}: AI 代理未运行，已跳过订阅热更新"
         routes = proxy_routing.load_ssh_routes(ssh_name)
         if profile_id and profile_id in routes["service_profile_bindings"].values():
+            # One reload rebuilds every bound route, including subscriptions
+            # refreshed together by the timer. Report all affected pool gaps.
+            warnings = proxy_routing.node_pool_warnings(routes)
             current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
             if not current_node:
                 raise RuntimeError(f"{ssh_name}: 无法读取默认节点，已停止分流订阅热更新")
-            return reload_ai_proxy(
+            message = reload_ai_proxy(
                 ssh_name, format_proxy_node(current_node), mixed_port,
                 persist_selection=False, routing_preferences=routes,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
+            return message + ("；" + "；".join(warnings) if warnings else "")
     candidates = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
     if not candidates:
         return f"{ssh_name}: 订阅里没有可用节点，已跳过热更新"
