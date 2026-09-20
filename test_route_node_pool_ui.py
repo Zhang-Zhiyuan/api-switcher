@@ -172,6 +172,44 @@ def test_selecting_deep_in_long_list_preserves_scroll_position(pool_picker):
     assert abs(case.dialog._list.yview()[0] - before) < 0.02
 
 
+def test_pool_toggle_keeps_keyboard_position_without_rebuilding_large_list(pool_picker, monkeypatch):
+    case = pool_picker(nodes=_nodes(2000))
+    dialog = case.dialog
+    dialog._set_mode(POOL_MODE)
+    dialog._list.activate(1500)
+    dialog._list.selection_anchor(1490)
+    dialog._list.yview_moveto(0.75)
+    before = dialog._list.yview()[0]
+
+    def unexpected_rebuild():
+        pytest.fail("a candidate click must not filter and rebuild the entire subscription")
+
+    monkeypatch.setattr(dialog, "_filter", unexpected_rebuild)
+    _choose_visible(dialog, 1500)
+    assert dialog._list.index("active") == 1500
+    assert dialog._list.index("anchor") == 1490
+    assert abs(dialog._list.yview()[0] - before) < 0.02
+    assert dialog._list.get(1500).startswith("☑")
+    assert dialog._list.get(1499).startswith("☐")
+    _choose_visible(dialog, 1500, 1501)
+    assert dialog._selected_keys == ["node-1500", "node-1501"]
+    dialog._pool_list.selection_set(0)
+    dialog._remove_pool()
+    assert dialog._selected_keys == ["node-1501"]
+    assert dialog._list.get(1500).startswith("☐")
+    assert dialog._list.curselection() == (1501,)
+    assert dialog._list.index("active") == 1500
+
+
+def test_incremental_pool_checks_preserve_other_selections_when_toggled_in_reverse_order(pool_picker):
+    case = pool_picker(selected_keys=["node-1", "node-4", "node-7"])
+    dialog = case.dialog
+    _choose_visible(dialog, 0, 2, 4, 6)
+    assert dialog._selected_keys == ["node-4", "node-0", "node-2", "node-6"]
+    assert dialog._list.curselection() == (0, 2, 4, 6)
+    assert [index for index in range(8) if dialog._list.get(index).startswith("☑")] == [0, 2, 4, 6]
+
+
 def capture_preview(directory):
     """Create isolated wide/narrow screenshots without real subscriptions."""
     import customtkinter as ctk

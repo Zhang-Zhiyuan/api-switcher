@@ -136,20 +136,24 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 {"id": "hf", "kind": "domain", "value": "huggingface.co", "enabled": True},
                 {"id": "hfshort", "kind": "domain", "value": "hf.co", "enabled": True},
                 {"id": "default", "kind": "domain", "value": "ytimg.com", "enabled": True},
+                {"id": "inherited", "kind": "domain", "value": "inherited.example.test", "enabled": True},
             ],
             "service_profile_bindings": {
                 "claude": "home",
+                "custom": "home",
                 "custom:api": "dc", "custom:network": "home", "custom:host": "dc",
                 "github": "home", "huggingface": "home",
                 "custom:github": "dc", "custom:hf": "dc", "custom:hfshort": "dc",
             },
             "service_node_bindings": {
                 "claude": remote_proxy.proxy_node_key(second), "custom:api": remote_proxy.proxy_node_key(datacenter),
+                "custom": remote_proxy.proxy_node_key(first),
                 "custom:network": remote_proxy.proxy_node_key(first), "custom:host": remote_proxy.proxy_node_key(datacenter),
                 "github": remote_proxy.proxy_node_key(first),
                 "huggingface": remote_proxy.proxy_node_key(second), "custom:github": remote_proxy.proxy_node_key(datacenter),
                 "custom:hf": remote_proxy.proxy_node_key(datacenter), "custom:hfshort": remote_proxy.proxy_node_key(datacenter),
             },
+            "service_route_modes": {"custom:default": "default"},
         }
         catalog = [
             {"id": profile_id, "network_type": network_type, "auto_route_usable": True,
@@ -223,6 +227,7 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
                 ("203.0.113.8", "home-one"), ("203.0.113.9", "datacenter"),
                 ("github.com", "datacenter"), ("raw.githubusercontent.com", "home-one"),
                 ("huggingface.co", "datacenter"), ("hf.co", "datacenter"), ("i.ytimg.com", "home-two"),
+                ("inherited.example.test", "home-one"),
                 ("x.com", "home-one"), ("reddit.com", "home-one"),
                 ("discord.com", "datacenter"), ("telegram.org", "datacenter"),
             ):

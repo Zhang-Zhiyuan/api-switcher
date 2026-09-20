@@ -99,16 +99,17 @@ def _wait_until(predicate, message, timeout=10):
 
 
 @pytest.mark.parametrize("primary_dead_at_start", [False, True])
-def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
-    monkeypatch, tmp_path, primary_dead_at_start,
+@pytest.mark.parametrize("route_mode", ["tagged_datacenter", "selected_ai"])
+def test_real_mihomo_pool_fails_over_only_within_authorized_candidates(
+    monkeypatch, tmp_path, primary_dead_at_start, route_mode,
 ):
     binary = Path(os.environ.get("API_SWITCHER_MIHOMO_TEST_CORE") or local_proxy.LOCAL_PROXY_BIN_DIR / "mihomo.exe")
     if not binary.is_file():
         pytest.skip("Local mihomo core is not installed")
     with ExitStack() as stack:
-        home, primary, backup, direct = [
+        home, primary, backup, direct, excluded = [
             _LoopbackOutbound(name, stack)
-            for name in ("residential-home", "dc-primary", "dc-backup", "direct-sentinel")
+            for name in ("residential-home", "dc-primary", "dc-backup", "direct-sentinel", "unselected")
         ]
         _patch_profiles(monkeypatch, {"home": (home.node,), "dc": (primary.node, backup.node)})
         catalog = [
@@ -122,13 +123,27 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
         preferences, _notices = suggest_tagged_routes({}, catalog)
         assert "youtube" not in preferences.get("service_node_bindings", {})
         assert "google" not in preferences.get("service_node_bindings", {})
+        service_hosts = {"youtube": "youtube.com", "google": "google.com"}
+        service_groups = [local_proxy._subscription_route_group_name("dc", service)
+                          for service in service_hosts]
+        if route_mode == "selected_ai":
+            # The cache deliberately has an unselected healthy node first and
+            # reverses the selected nodes: only explicit membership/order count.
+            _patch_profiles(monkeypatch, {"pool": (excluded.node, backup.node, primary.node)})
+            service_hosts = {"openai": "api.openai.com", "claude": "api.anthropic.com",
+                             "google_ai": "generativelanguage.googleapis.com"}
+            keys = [remote_proxy.proxy_node_key(node) for node in (primary.node, backup.node)]
+            preferences = {
+                "service_profile_bindings": {service: "pool" for service in service_hosts},
+                "service_node_pools": {service: list(keys) for service in service_hosts},
+            }
+            service_groups = [local_proxy._subscription_route_group_name("pool", service, node_keys=keys)
+                              for service in service_hosts]
         port = _port_pair()
         config = yaml.safe_load(remote_proxy.build_mihomo_config(
             home.node, port, log_level="silent", **proxy_routing.config_options(preferences),
         ))
         groups = {group["name"]: group for group in config["proxy-groups"]}
-        service_groups = [local_proxy._subscription_route_group_name("dc", service)
-                          for service in ("youtube", "google")]
         nodes = {node["name"]: node for node in config["proxies"]}
         aliases = {}
         for group_name in service_groups:
@@ -147,7 +162,7 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
                               "expected-status": "204", "interval": 1,
                               "timeout": 500, "lazy": False})
         config["dns"] = {"enable": False}
-        config["hosts"] = {"youtube.com": "127.0.0.1", "google.com": "127.0.0.1"}
+        config["hosts"] = {host: "127.0.0.1" for host in service_hosts.values()}
         config["ipv6"] = False
         config["allow-lan"] = False
         config["bind-address"] = "127.0.0.1"
@@ -172,7 +187,7 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
                     return response.read(1024).decode("ascii")
 
             if not primary_dead_at_start:
-                for host in ("youtube.com", "google.com"):
+                for host in service_hosts.values():
                     assert fetch(host) == "dc-primary"
                 primary.stop()
 
@@ -185,12 +200,12 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
                     for group, (first, secondary) in aliases.items()
                 )
 
-            _wait_until(using_backup, lambda: "same-subscription backup was not selected: " + repr({
+            _wait_until(using_backup, lambda: "authorized backup was not selected: " + repr({
                 "proxies": {key: value for key, value in _proxies(controller).items()
                             if key in aliases or any(key in names for names in aliases.values())},
                 "backup_hits": backup.hits,
             }))
-            for host in ("youtube.com", "google.com"):
+            for host in service_hosts.values():
                 assert fetch(host) == "dc-backup"
 
             backup.stop()
@@ -201,7 +216,7 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
                            for group_aliases in aliases.values() for name in group_aliases)
 
             _wait_until(all_dead, "failed subscription nodes were not marked unavailable")
-            for host in ("youtube.com", "google.com"):
+            for host in service_hosts.values():
                 with pytest.raises((error.URLError, ConnectionError, TimeoutError)):
                     fetch(host)
             # If routing accidentally leaked to the residential/default route
@@ -210,6 +225,7 @@ def test_real_mihomo_nonresidential_pool_fails_over_without_home_or_direct(
             assert direct.hits["/traffic"] == 0
             assert not any("/traffic" in path for path in home.hits)
             assert not any("/traffic" in path for path in direct.hits)
+            assert not excluded.hits
         finally:
             process.terminate()
             try:

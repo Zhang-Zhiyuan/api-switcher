@@ -87,7 +87,7 @@ def test_metadata_changes_invalidate_profile_labels_but_not_node_cache():
     assert view._profile_values() is not old_profiles
     assert view._node_values("a") is old_nodes
     assert view._profile_values("custom:1")[routes.DEFAULT_CUSTOM_PROFILE] == ""
-    assert routes.DEFAULT_PROFILE not in view._profile_values("custom:1")
+    assert view._profile_values("custom:1")[routes.DEFAULT_PROFILE] == ""
 
 
 def test_same_named_profiles_have_stable_unique_choices():

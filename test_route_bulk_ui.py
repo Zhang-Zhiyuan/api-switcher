@@ -9,7 +9,7 @@ import pytest
 
 from core import proxy_routing
 from ui.dialogs import service_route_bulk_dialog as bulk_ui
-from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
+from ui.dialogs.service_routes_dialog import DEFAULT_CUSTOM_PROFILE, DEFAULT_PROFILE, ServiceRoutesDialog
 from ui.widgets.service_route_overview import route_changes, route_description
 
 
@@ -181,6 +181,27 @@ def test_pool_order_and_missing_candidates_are_visible_in_overview_and_preview()
     assert "不会扩大" in missing["hint"]
 
 
+def test_custom_explicit_default_does_not_inherit_shared_candidate_pool_or_its_changes():
+    original = _preferences()
+    original["custom_targets"][0]["enabled"] = True
+    original["service_profile_bindings"]["custom"] = "home"
+    original["service_node_pools"]["custom"] = ["two", "one"]
+    draft, _ = bulk_ui.apply_route_batch(original, _catalog(), ["custom:demo"], bulk_ui.FOLLOW)
+    row = next(row for row in proxy_routing.route_rows(draft) if row["id"] == "custom:demo")
+    desc = route_description(row, draft, _catalog())
+    assert not desc["inherited"]
+    assert desc["profile"] == "默认线路（手动指定）"
+    assert desc["node"] == "沿用默认节点策略"
+    assert "继承" not in desc["hint"]
+    changes = route_changes({"Win": original}, {"Win": draft}, _catalog())
+    assert [change["service"] for change in changes] == ["custom:demo"]
+    assert "自选 2" in changes[0]["before"] and "自选" not in changes[0]["after"]
+    changed_default = copy.deepcopy(draft)
+    changed_default["service_node_pools"]["custom"].reverse()
+    changes = route_changes({"Win": draft}, {"Win": changed_default}, _catalog())
+    assert [change["service"] for change in changes] == ["custom"]
+
+
 def _wait(root, predicate):
     deadline = time.monotonic() + 5
     while not predicate() and time.monotonic() < deadline:
@@ -221,6 +242,28 @@ def test_editor_bulk_is_current_scope_draft_only_and_preview_lists_selected_targ
     assert "自选 2" in dialog._rows["claude"]["node"].get()
 
 
+def test_custom_target_can_switch_between_inherited_and_explicit_device_default(editor):
+    dialog = editor.dialog
+    scope = dialog._scope
+    dialog._accept_bulk_edit(scope, ["custom"], bulk_ui.SET_ROUTE,
+                              profile_id="home", node_keys=["two", "one"])
+    dialog._accept_bulk_edit(scope, ["custom:demo"], bulk_ui.FOLLOW)
+    row = dialog._rows["custom:demo"]
+    assert row["profile"].get() == DEFAULT_PROFILE
+    assert row["node"].get() == DEFAULT_PROFILE
+    assert not row["description"]["inherited"]
+    assert DEFAULT_CUSTOM_PROFILE in row["profile"].cget("values")
+    dialog._select_profile("custom:demo", DEFAULT_CUSTOM_PROFILE)
+    assert "custom:demo" not in dialog._drafts[scope]["service_route_modes"]
+    assert row["profile"].get() == DEFAULT_CUSTOM_PROFILE
+    assert row["description"]["inherited"]
+    assert "自选 2" in row["description"]["node"]
+    dialog._select_profile("custom:demo", DEFAULT_PROFILE)
+    assert dialog._drafts[scope]["service_route_modes"]["custom:demo"] == "default"
+    assert not row["description"]["inherited"]
+    assert not editor.applied
+
+
 def test_editor_bulk_stale_scope_and_invalid_pool_do_not_modify_either_scope(editor):
     dialog = editor.dialog
     first, second = dialog._scopes
@@ -232,6 +275,19 @@ def test_editor_bulk_stale_scope_and_invalid_pool_do_not_modify_either_scope(edi
         dialog._accept_bulk_edit(second, ["claude", "youtube"], bulk_ui.SET_ROUTE,
                                   profile_id="dc", node_keys=["missing"])
     assert dialog._drafts == before and not editor.applied
+
+
+def test_scope_copy_callback_cannot_copy_from_a_different_source_than_displayed(editor):
+    dialog = editor.dialog
+    first, second = dialog._scopes
+    dialog._accept_bulk_edit(first, ["claude"], bulk_ui.FOLLOW)
+    dialog._open_copy_dialog()
+    picker = dialog._scope_copy_dialog
+    dialog._switch_scope(second)
+    before = copy.deepcopy(dialog._drafts)
+    picker._on_copy([first])
+    assert dialog._drafts == before and not editor.applied
+    assert "来源位置已变化" in dialog._status.cget("text")
 
 
 def test_editor_pool_callback_only_updates_intended_binding_and_keeps_order(editor):

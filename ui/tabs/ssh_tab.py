@@ -3537,12 +3537,19 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._subscription_timer_restored = True
 
     def _schedule_proxy_periodic_update(self, initial: bool = False, *, retry: bool = False):
-        self._cancel_proxy_periodic_update()
         if getattr(self, "_destroyed", False) or not bool(self._proxy_periodic_update_var.get()):
+            self._cancel_proxy_periodic_update()
             return
-        interval_minutes = self._proxy_periodic_update_interval_minutes()
+        # Background completion must not consume an unconfirmed entry draft.
+        try:
+            interval_minutes = min(max(int(self._proxy_periodic_update_interval_saved), 5), 1440)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            interval_minutes = 60
         delay_minutes = 1 if initial or retry else interval_minutes
-        self._proxy_periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_proxy_periodic_update)
+        replacement = self.after(delay_minutes * 60 * 1000, self._run_proxy_periodic_update)
+        # A scheduling error must not discard a still-valid earlier timer.
+        self._cancel_proxy_periodic_update()
+        self._proxy_periodic_update_after_id = replacement
 
     def _cancel_proxy_periodic_update(self):
         if not self._proxy_periodic_update_after_id:

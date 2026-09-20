@@ -1572,6 +1572,26 @@ def set_proxy_subscription_selected_node(node: dict | None, *, profile_id: str =
     return save_proxy_subscription_state(**updates)
 
 
+def restore_proxy_subscription_selected_node(
+    profile_id: str, *, expected_node_key: str,
+    previous_node_key: str, previous_node_display: str,
+) -> bool:
+    """Undo only this operation's selection, never a newer selection or cache."""
+    clean_id = str(profile_id or "").strip()
+    if not clean_id or not expected_node_key:
+        return False
+    with _PROXY_SUBSCRIPTION_STATE_LOCK:
+        state = _normalize_proxy_subscription_state(load_proxy_subscription_state())
+        profile = (state.get("profiles") or {}).get(clean_id)
+        if not isinstance(profile, dict) or profile.get("selected_node_key") != expected_node_key:
+            return False
+        profile["selected_node_key"] = previous_node_key
+        profile["selected_node_display"] = previous_node_display
+        profile["updated_at"] = _now_iso()
+        _persist_proxy_subscription_state(_sync_active_profile_to_state(state))
+        return True
+
+
 def save_proxy_subscription_latencies(
     latencies: dict[str, ProxyNodeLatencyResult | dict],
     *,
@@ -5572,7 +5592,7 @@ def refresh_running_ai_proxy_from_subscription(
         if profile_id and profile_id in routes["service_profile_bindings"].values():
             # One reload rebuilds every bound route, including subscriptions
             # refreshed together by the timer. Report all affected pool gaps.
-            warnings = proxy_routing.node_pool_warnings(routes)
+            warnings = proxy_routing.node_pool_warnings(routes, active_only=True)
             current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
             if not current_node:
                 raise RuntimeError(f"{ssh_name}: 无法读取默认节点，已停止分流订阅热更新")

@@ -136,9 +136,18 @@ def node_pools(preferences: dict) -> dict[str, list[str]]:
     return result
 
 
-def node_pool_warnings(preferences: dict, *, profile_id: str = "") -> tuple[str, ...]:
+def node_pool_warnings(preferences: dict, *, profile_id: str = "", active_only: bool = False) -> tuple[str, ...]:
     """Resolve only selected pools, returning non-secret partial-cache notices."""
     pools = node_pools(preferences)
+    if active_only:
+        # Runtime rebuilds must not be blocked by stale candidates on disabled
+        # or entirely overridden targets which emit no outbound at all. Keep
+        # their persisted authority untouched; editor validation still checks
+        # every saved pool before enabling or changing it.
+        blueprint = local_proxy._service_route_blueprint(preferences)
+        used_groups = set(blueprint["proxy_domain_routes"].values()) | set(blueprint["proxy_ip_cidr_routes"].values())
+        pools = {service: keys for service, keys in pools.items()
+                 if blueprint["service_routes"].get(service) in used_groups}
     profiles, caches = {}, {}
     notices = []
     for service, keys in pools.items():

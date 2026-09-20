@@ -470,6 +470,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if cached and cached[0] == signature:
             return cached[1]
         mapping, suffixes = {default: ""}, {}
+        if service.startswith("custom:"):
+            mapping[DEFAULT_PROFILE] = ""
         for profile in self._catalog:
             label = " ".join(safe_feedback_text(str(profile["name"])).split())
             if profile.get("network_type") in {"residential", "datacenter"}:
@@ -585,6 +587,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         profiles = self._profile_values(service)
         default = DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE
         label = self._profile_reverse_cache[default].get(profile_id, MISSING_PROFILE)
+        if not profile_id and draft.get("service_route_modes", {}).get(service) == "default":
+            label = DEFAULT_PROFILE
         row["profile"].configure(state="readonly", values=[
             *profiles, *([AUTO_PROFILE] if preferred_network_type(service) else []),
             *([MISSING_PROFILE] if label == MISSING_PROFILE else []),
@@ -596,7 +600,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         pool = draft.get("service_node_pools", {}).get(service, [])
         node_label = self._node_reverse_cache[profile_id].get(key, MISSING_NODE)
         row["nodes"] = nodes
-        row["node"].set(node_label if profile_id else (DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE))
+        row["node"].set(node_label if profile_id else label)
         if pool:
             row["node"].set(f"自选 {len(pool)} 个候选 · 自动切换")
         row["node"].configure(state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
@@ -718,6 +722,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         modes = draft.setdefault("service_route_modes", {})
         if profile_id:
             modes.pop(service, None)
+        elif service.startswith("custom:"):
+            if label == DEFAULT_PROFILE:
+                modes[service] = "default"
+            else:
+                modes.pop(service, None)
         elif preferred_network_type(service):
             modes[service] = "default"
         if draft["service_profile_bindings"].get(service, "") == profile_id:
@@ -855,10 +864,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             return
         from ui.dialogs.route_selection_dialogs import RouteScopeCopyDialog
 
+        source = self._scope
         self._scope_copy_dialog = RouteScopeCopyDialog(
-            self, source=self._scope, scopes=[scope for scope in self._scopes if scope != self._scope],
+            self, source=source, scopes=[scope for scope in self._scopes if scope != source],
             dirty_scopes={scope for scope in self._scopes if self._drafts[scope] != self._originals[scope]},
-            on_copy=self._copy_to_scopes,
+            on_copy=lambda targets: self._copy_to_scopes(targets, source=source),
         )
 
     def _open_bulk_dialog(self):
@@ -888,8 +898,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._render()
         self._changed()
 
-    def _copy_to_scopes(self, targets):
-        if self._busy:
+    def _copy_to_scopes(self, targets, *, source=None):
+        if self._busy or self._closed:
+            return
+        if source is not None and source != self._scope:
+            self._status.configure(text="来源位置已变化，未复制草稿；请重新打开复制窗口。", text_color=COLORS["warning"])
             return
         for scope in dict.fromkeys(targets):
             if scope in self._drafts and scope != self._scope:

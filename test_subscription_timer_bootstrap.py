@@ -116,6 +116,24 @@ def test_restore_failure_retries_without_staying_busy(harness):
     assert events[-1][0:2] == ("schedule", 30000)
 
 
+def test_one_tab_import_failure_does_not_block_the_other_saved_timer(harness):
+    app, state, events, complete = harness
+    state.update(local_periodic_update_enabled=True, ssh_periodic_update_enabled=True)
+    resolve = app._resolve_tab_class
+
+    def fail_local(label, module, name):
+        if label == "Win11 代理":
+            raise ImportError("synthetic local page unavailable")
+        return resolve(label, module, name)
+
+    app._resolve_tab_class = fail_local
+    app._restore_subscription_timers()
+    complete()
+    assert not app._subscription_timer_bootstrap_running
+    assert [event[1] for event in events if event[0] == "restore"] == ["SSH 服务器"]
+    assert events[-1][0:2] == ("schedule", 30000)
+
+
 def test_shutdown_before_ui_dispatch_does_not_restore_or_retry(harness):
     app, state, events, complete = harness
     state["ssh_periodic_update_enabled"] = True

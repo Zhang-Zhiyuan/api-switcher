@@ -432,12 +432,20 @@ class App(ctk.CTk):
 
                 state = remote_proxy.load_proxy_subscription_state()
                 classes = []
+                errors = []
                 for label, setting in (("Win11 代理", "local_periodic_update_enabled"),
                                        ("SSH 服务器", "ssh_periodic_update_enabled")):
                     if state.get(setting) is True:
-                        _attr, module, name, _eager = self._tab_specs[label]
-                        classes.append((label, self._resolve_tab_class(label, module, name)))
-                self._run_on_ui_thread(lambda: finish(state, classes))
+                        try:
+                            _attr, module, name, _eager = self._tab_specs[label]
+                            classes.append((label, self._resolve_tab_class(label, module, name)))
+                        except Exception as exc:
+                            # A broken optional page must not prevent the other
+                            # opted-in scope from restoring its saved timer.
+                            detail = safe_feedback_text(str(exc).strip() or type(exc).__name__)
+                            errors.append(f"{label}: {detail}")
+                            logger.warning("Could not load subscription timer page %s: %s", label, detail)
+                self._run_on_ui_thread(lambda: finish(state, classes, "; ".join(errors)))
             except Exception as exc:
                 detail = safe_feedback_text(str(exc).strip() or type(exc).__name__)
                 logger.warning("Could not restore subscription timers: %s", detail)

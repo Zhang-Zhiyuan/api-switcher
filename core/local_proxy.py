@@ -1628,7 +1628,7 @@ def apply_local_proxy_routing_to_running() -> str:
     # config, closing the window where a corrupt file could otherwise downgrade
     # strict privacy through the permissive UI reader.
     preferences = _load_local_proxy_routing_preferences_strict()
-    warnings = proxy_routing.node_pool_warnings(preferences)
+    warnings = proxy_routing.node_pool_warnings(preferences, active_only=True)
     suffix = "；" + "；".join(warnings) if warnings else ""
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
@@ -2600,7 +2600,7 @@ def refresh_running_local_service_routes_from_subscription(
     # Check explicit authority before changing even the subscription's default
     # selection. A vanished custom pool must leave the original live config
     # and saved primary alone; an unrelated cached node is not a substitute.
-    proxy_routing.node_pool_warnings(preferences, profile_id=clean_id)
+    proxy_routing.node_pool_warnings(preferences, profile_id=clean_id, active_only=True)
     pinned = proxy_routing.node_bindings(preferences)
     if all(service in pools or service in pinned for service in bound_services):
         apply_message = apply_local_proxy_routing_to_running()
@@ -2642,7 +2642,22 @@ def refresh_running_local_service_routes_from_subscription(
             selected.node,
             profile_id=clean_id,
         )
-    apply_message = apply_local_proxy_routing_to_running()
+    try:
+        apply_message = apply_local_proxy_routing_to_running()
+    except Exception as exc:
+        if not selection_changed:
+            raise
+        try:
+            restored = remote_proxy.restore_proxy_subscription_selected_node(
+                clean_id,
+                expected_node_key=remote_proxy.proxy_node_key(selected.node),
+                previous_node_key=selected_key,
+                previous_node_display=str(profile.get("selected_node_display") or ""),
+            )
+        except Exception as rollback:
+            raise RuntimeError(f"独立订阅线路更新失败: {exc}；原订阅首选回滚失败: {rollback}") from exc
+        suffix = "已恢复原订阅首选" if restored else "订阅首选已被其他操作修改，未覆盖新选择"
+        raise RuntimeError(f"独立订阅线路更新失败: {exc}；{suffix}") from exc
     labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
     selection_note = "；原选择已失效，已改用订阅中的首个独立节点" if selection_changed else ""
     return f"已刷新 {labels} 的独立订阅节点池{selection_note}；{apply_message}"
@@ -4816,7 +4831,11 @@ def _active_service_route_targets(preferences: dict) -> dict[str, dict[str, tupl
         if not isinstance(entry, dict) or not _coerce_bool(entry.get("enabled"), True):
             continue
         entry_service_id = f"custom:{entry.get('id') or ''}"
-        if (preferences.get("service_profile_bindings") or {}).get(entry_service_id):
+        if ((preferences.get("service_profile_bindings") or {}).get(entry_service_id)
+                or (preferences.get("service_route_modes") or {}).get(entry_service_id) == "default"):
+            # An explicit per-target default means AI-PROXY, not inheritance
+            # from the shared custom subscription. Keep its rule separate so
+            # it also overrides an overlapping built-in subscription route.
             targets[entry_service_id] = {
                 "domains": (str(entry.get("value") or ""),) if entry.get("kind") == "domain" else (),
                 "ip_cidrs": (str(entry.get("value") or ""),) if entry.get("kind") == "ip-cidr" else (),

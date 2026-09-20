@@ -197,6 +197,28 @@ def test_timer_schedule_does_not_depend_on_disk_writes(timer, monkeypatch):
     assert len(timer.calls.after) == 1
 
 
+def test_automatic_schedule_preserves_unconfirmed_interval_input(timer):
+    class DraftEntry:
+        def get(self):
+            pytest.fail("background rescheduling must not read or normalize the interval draft")
+
+    setattr(timer.tab, timer.prefix + "periodic_update_entry", DraftEntry())
+    timer.schedule()
+    assert timer.calls.delays == [30 * 60000]
+    timer.schedule(retry=True)
+    assert timer.calls.delays[-1] == 60000
+
+
+def test_replacement_schedule_failure_keeps_existing_timer(timer):
+    timer.schedule()
+    original = getattr(timer.tab, timer.prefix + "periodic_update_after_id")
+    timer.tab.after = lambda *args: (_ for _ in ()).throw(RuntimeError("synthetic after failure"))
+    with pytest.raises(RuntimeError, match="synthetic after failure"):
+        timer.schedule()
+    assert getattr(timer.tab, timer.prefix + "periodic_update_after_id") == original
+    assert list(timer.calls.after) == [original]
+
+
 def test_background_timer_runs_with_saved_targets_and_preserves_dirty_editor(timer):
     timer.calls.dirty = True
     timer.start()

@@ -66,6 +66,7 @@ class RouteNodeDialog(DraftChoiceDialog):
         self.configure(fg_color=COLORS["app_bg"])
         self._nodes = [dict(item) for item in nodes]
         self._keys = {item["key"] for item in self._nodes}
+        self._node_labels = {item["key"]: safe_feedback_text(str(item["label"])) for item in self._nodes}
         self._candidate_count = route_candidate_count({
             "nodes": self._nodes, "auto_route_candidate_count": auto_route_candidate_count,
         })
@@ -192,12 +193,13 @@ class RouteNodeDialog(DraftChoiceDialog):
             self.after_cancel(self._filter_after_id)
             self._filter_after_id = None
         self._visible = matching_nodes(self._nodes, self._search.get())
+        self._visible_indices = {item["key"]: index for index, item in enumerate(self._visible)}
         self._refreshing_list = True
         self._list.configure(selectmode="multiple" if self._mode == POOL_MODE else "browse")
         self._list.delete(0, "end")
         labels = [("☑ " if item["key"] in self._selected_keys else "☐ ")
-                  + safe_feedback_text(str(item["label"])) if self._mode == POOL_MODE
-                  else safe_feedback_text(str(item["label"])) for item in self._visible]
+                  + self._node_labels[item["key"]] if self._mode == POOL_MODE
+                  else self._node_labels[item["key"]] for item in self._visible]
         # Chunk Tcl arguments, keeping the underlying list widget and selection.
         for start in range(0, len(labels), 200):
             self._list.insert("end", *labels[start:start + 200])
@@ -226,9 +228,8 @@ class RouteNodeDialog(DraftChoiceDialog):
             selected = self._pool_list.curselection()
             selected_index = selected[0] if selected else None
         self._pool_list.delete(0, "end")
-        labels = {item["key"]: safe_feedback_text(str(item["label"])) for item in self._nodes}
         for index, key in enumerate(self._selected_keys):
-            label = labels.get(key, "已失效的候选 · " + safe_feedback_text(key[:16]))
+            label = self._node_labels.get(key, "已失效的候选 · " + safe_feedback_text(key[:16]))
             self._pool_list.insert("end", f"{index + 1}. {label}")
             if key not in self._keys:
                 self._pool_list.itemconfigure(index, fg=COLORS["warning"])
@@ -252,13 +253,43 @@ class RouteNodeDialog(DraftChoiceDialog):
         selected = self._pool_list.curselection()
         if self._mode != POOL_MODE or not selected:
             return
+        previous = set(self._selected_keys)
         self._selected_keys.pop(selected[0])
         self._pool_feedback = ""
-        self._filter()
+        self._sync_pool_rows(previous)
         self._render_pool(selected[0])
+        self._update_selection()
+
+    def _sync_pool_rows(self, previous, requested=()):
+        """Update only changed checks; keep native keyboard focus and scroll."""
+        selected = set(self._selected_keys)
+        active, anchor = self._list.index("active"), self._list.index("anchor")
+        scroll = self._list.yview()[0]
+        self._refreshing_list = True
+        try:
+            for key in previous ^ selected:
+                index = self._visible_indices.get(key)
+                if index is None:
+                    continue
+                self._list.delete(index)
+                self._list.insert(index, ("☑ " if key in selected else "☐ ") + self._node_labels[key])
+                if key in selected:
+                    self._list.selection_set(index)
+            # The native widget may have accepted more selections than the
+            # bounded pool allows. Undo only those checks, without relisting.
+            for key in set(requested) - selected:
+                index = self._visible_indices.get(key)
+                if index is not None:
+                    self._list.selection_clear(index)
+            if self._visible:
+                self._list.activate(active)
+                self._list.selection_anchor(anchor)
+            self._list.yview_moveto(scroll)
+        finally:
+            self._refreshing_list = False
 
     def _update_selection(self):
-        item = next((item for item in self._nodes if item["key"] == self._selected_key), None)
+        label = self._node_labels.get(self._selected_key)
         if self._mode == AUTO_MODE:
             text = "使用订阅首选；备用按服务策略筛选，仅在此订阅内故障切换。"
             valid = bool(self._nodes) and self._auto_route_usable
@@ -283,8 +314,8 @@ class RouteNodeDialog(DraftChoiceDialog):
             if self._pool_feedback:
                 text = self._pool_feedback + " " + text
         else:
-            text = "已选固定节点：" + safe_feedback_text(str(item["label"])) if item else "请选择一个节点；原固定节点缺失时不会自动替换。"
-            valid = item is not None
+            text = "已选固定节点：" + label if label is not None else "请选择一个节点；原固定节点缺失时不会自动替换。"
+            valid = label is not None
         self._selection.configure(text=text, text_color=COLORS["text"] if valid else COLORS["warning"])
         self._choose.configure(state="normal" if valid else "disabled")
 
@@ -293,10 +324,9 @@ class RouteNodeDialog(DraftChoiceDialog):
             return
         selected = self._list.curselection()
         if self._mode == POOL_MODE:
-            scroll_position = self._list.yview()[0]
-            visible_keys = {item["key"] for item in self._visible}
+            previous = set(self._selected_keys)
             requested = [self._visible[index]["key"] for index in selected if index < len(self._visible)]
-            self._selected_keys = [key for key in self._selected_keys if key not in visible_keys or key in requested]
+            self._selected_keys = [key for key in self._selected_keys if key not in self._visible_indices or key in requested]
             self._pool_feedback = ""
             for key in requested:
                 if key in self._selected_keys:
@@ -305,8 +335,9 @@ class RouteNodeDialog(DraftChoiceDialog):
                     self._pool_feedback = f"最多选择 {MAX_POOL_NODES} 个候选，未添加超出的节点。"
                     break
                 self._selected_keys.append(key)
-            self._filter()
-            self._list.yview_moveto(scroll_position)
+            self._sync_pool_rows(previous, requested)
+            self._render_pool()
+            self._update_selection()
             return
         if selected and selected[0] < len(self._visible):
             self._selected_key = self._visible[selected[0]]["key"]

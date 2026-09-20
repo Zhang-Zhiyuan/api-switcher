@@ -2622,12 +2622,20 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._subscription_timer_restored = True
 
     def _schedule_periodic_update(self, initial: bool = False, *, retry: bool = False):
-        self._cancel_periodic_update()
         if getattr(self, "_destroyed", False) or not bool(self._periodic_update_var.get()):
+            self._cancel_periodic_update()
             return
-        interval_minutes = self._periodic_update_interval_minutes()
+        # Completion/retry must not submit or rewrite an interval draft while
+        # the user is typing. Only explicit edit/toggle handlers commit it.
+        try:
+            interval_minutes = min(max(int(self._periodic_update_interval_saved), 5), 1440)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            interval_minutes = 60
         delay_minutes = 1 if initial or retry else interval_minutes
-        self._periodic_update_after_id = self.after(delay_minutes * 60 * 1000, self._run_periodic_update)
+        replacement = self.after(delay_minutes * 60 * 1000, self._run_periodic_update)
+        # Retain the existing timer if Tk cannot create its replacement.
+        self._cancel_periodic_update()
+        self._periodic_update_after_id = replacement
 
     def _cancel_periodic_update(self):
         if not self._periodic_update_after_id:

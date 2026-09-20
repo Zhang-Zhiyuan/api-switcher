@@ -14,7 +14,8 @@ def route_description(row, preferences, catalog):
     service = row["id"]
     bindings = preferences.get("service_profile_bindings") or {}
     nodes = preferences.get("service_node_bindings") or {}
-    inherited = service.startswith("custom:") and not bindings.get(service)
+    inherited = (service.startswith("custom:") and not bindings.get(service)
+                 and (preferences.get("service_route_modes") or {}).get(service) != "default")
     source = "custom" if inherited else service
     profile_id = bindings.get(source, "")
     node_key = nodes.get(source, "")
@@ -87,7 +88,9 @@ def route_changes(originals, drafts, catalog):
             new = route_description(new_row, draft, catalog) if new_row else None
             def identity(preferences, row):
                 profiles, nodes = preferences["service_profile_bindings"], preferences["service_node_bindings"]
-                source = "custom" if service.startswith("custom:") and not profiles.get(service) else service
+                inherited = (service.startswith("custom:") and not profiles.get(service)
+                             and preferences.get("service_route_modes", {}).get(service) != "default")
+                source = "custom" if inherited else service
                 return (row, profiles.get(service), nodes.get(service), profiles.get(source), nodes.get(source),
                         preferences.get("service_route_modes", {}).get(service),
                         tuple(preferences.get("service_node_pools", {}).get(source, [])))
