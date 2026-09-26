@@ -9,6 +9,7 @@ import argparse
 import base64
 from contextlib import ExitStack
 import ctypes
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -116,6 +117,7 @@ def main():
     parser.add_argument("--label", choices=("before", "after", "verify"), default="verify")
     parser.add_argument("--tab", help="Capture one tab by its exact display label")
     parser.add_argument("--focus-maintenance", action="store_true", help="Also capture the Win11 proxy lifecycle notice")
+    parser.add_argument("--expand-shortcuts", action="store_true", help="Also exercise the optional global shortcuts")
     parser.add_argument("--onscreen", action="store_true", help="Compare screen rendering; requires the preview to own the foreground")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -140,7 +142,7 @@ def main():
     if not specs:
         parser.error("unknown tab")
 
-    destination = WORKSPACE / "dist" / "ui-audit-20260921" / args.label
+    destination = WORKSPACE / "dist" / f"ui-audit-{date.today():%Y%m%d}" / args.label
     destination.mkdir(parents=True, exist_ok=True)
     errors, captures, blocked = [], [], []
     secrets = {}
@@ -176,6 +178,8 @@ def main():
         if args.view in {"scaled", "tiny"}:
             ctk.set_widget_scaling(1.5)
         root = App()
+        if args.expand_shortcuts:
+            root._quick_tools_toggle.invoke()
         root.title("API 配置切换器 · 隔离界面检查（合成数据）")
         root.geometry({"wide": "1120x800+30+30", "compact": "740x720+30+30", "scaled": "960x760+30+30", "tiny": "480x600+30+30"}[args.view])
         def callback_error(kind, error, _tb):
@@ -187,7 +191,8 @@ def main():
         root.report_callback_exception = callback_error
         def capture(label, tab, suffix="top"):
             root.lift()
-            path = destination / f"{args.view}-{label}-{suffix}.png"
+            variant = ("-expanded" if args.focus_maintenance else "") + ("-shortcuts" if args.expand_shortcuts else "")
+            path = destination / f"{args.view}-{label}-{suffix}{variant}.png"
             capture_window_image(root, onscreen=args.onscreen).save(path)
             left, right = root.winfo_rootx(), root.winfo_rootx() + root.winfo_width()
             top, bottom = root.winfo_rooty(), root.winfo_rooty() + root.winfo_height()
@@ -206,15 +211,37 @@ def main():
                     except Exception:
                         text = type(widget).__name__
                     overflow.append({"text": text, "x": x - left, "width": width})
-            captures.append({"file": path.name, "tab": label, "size": [root.winfo_width(), root.winfo_height()], "horizontal_overflow": overflow})
+            sizes = {}
+            for name in ("_controls_grid", "_subscription_picker_host", "_subscription_picker", "_node_actions",
+                         "_proxy_subscription_picker_host", "_proxy_subscription_picker"):
+                widget = getattr(tab, name, None)
+                if widget is not None:
+                    sizes[name] = [widget.winfo_width(), widget.winfo_height()]
+            sections = {}
+            if label == "Win11 代理":
+                for name, widget in (("routes", tab._route_overview.master),
+                                     ("policy", tab._policy_toggle.master.master),
+                                     ("nodes", tab._controls_grid.master)):
+                    sections[name] = [widget.winfo_y(), widget.winfo_height()]
+                bounds = list(sections.items())
+                for (name, (y, height)), (next_name, (next_y, _)) in zip(bounds, bounds[1:]):
+                    if y + height > next_y:
+                        errors.append(f"{label}: overlapping sections {name}/{next_name}")
+            captures.append({"file": path.name, "tab": label, "size": [root.winfo_width(), root.winfo_height()],
+                             "horizontal_overflow": overflow, "layout_sizes": sizes, "section_bounds": sections})
             print(json.dumps(captures[-1], ensure_ascii=False), flush=True)
 
         def finish():
             root._exit_requested = True
+            for item in captures:
+                if item["horizontal_overflow"]:
+                    errors.append(f"{item['file']}: horizontal control overflow")
             report = {"view": args.view, "captures": captures, "callback_errors": errors, "blocked_operations": blocked,
                       "widget_scaling": root._shell._get_widget_scaling(), "window_scaling": root._get_window_scaling(),
                       "capture_mode": "foreground-client" if args.onscreen else "native-window"}
-            (destination / f"{args.view}-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            report_name = args.view + (f"-{args.tab}" if args.tab else "")
+            report_name += ("-expanded" if args.focus_maintenance else "") + ("-shortcuts" if args.expand_shortcuts else "")
+            (destination / f"{report_name}-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             print("VISUAL_ERRORS", errors, "BLOCKED_OPERATIONS", len(blocked), flush=True)
             root.destroy()
 

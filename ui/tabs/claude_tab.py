@@ -72,7 +72,7 @@ class ClaudeTab(ProfileTabRendering, ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         subtitle_label = ctk.CTkLabel(
             title_area,
-            text="API 配置管理第三方端点和密钥；官方账号支持保存登录快照与跨电脑迁移（密码可选）",
+            text="切换第三方 API，或保存与迁移官方账号。两类配置分别管理。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -104,7 +104,7 @@ class ClaudeTab(ProfileTabRendering, ctk.CTkScrollableFrame):
         ).pack(anchor="w")
         api_subtitle = ctk.CTkLabel(
             self._api_title,
-            text="写入 Claude settings/config，用于切换 Anthropic-compatible API、模型和权限",
+            text="管理服务地址、密钥、模型和权限。切换前可检查将写入的设置。",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",

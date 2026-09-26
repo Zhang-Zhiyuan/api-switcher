@@ -118,7 +118,9 @@ def test_rule_preview_layout_and_capture(editor_factory, tk_root, geometry, scal
         width, height = (int(value) for value in geometry.split("x"))
         assert abs(dialog.winfo_width() - width * dialog._get_window_scaling()) <= 2
         assert abs(dialog.winfo_height() - height * dialog._get_window_scaling()) <= 2
-        assert dialog._table.winfo_height() >= 100 * dialog._get_widget_scaling()
+        assert not dialog._table.winfo_viewable()
+        assert not dialog._filters.winfo_viewable()
+        assert dialog._preview.winfo_height() >= 200 * dialog._get_widget_scaling()
         text = dialog._preview.get("1.0", "end")
         assert "youtube.com：覆盖" in text and "googleapis.com" in text
         assert "本机尚无此服务器" in text and "非运行态" in text
@@ -133,6 +135,12 @@ def test_rule_preview_layout_and_capture(editor_factory, tk_root, geometry, scal
             assert directory.is_relative_to(Path(__file__).resolve().parent / "dist")
             directory.mkdir(parents=True, exist_ok=True)
             capture_window_image(dialog).save(directory / f"preflight-{geometry}-{scale}.png")
+        dialog._preview_toggle.invoke()
+        tk_root.update()
+        assert dialog._table.winfo_viewable() and not dialog._preview.winfo_viewable()
+        assert dialog._table.winfo_height() >= 160 * dialog._get_widget_scaling()
+        if output:
+            capture_window_image(dialog).save(directory / f"editor-{geometry}-{scale}.png")
         assert not applied
     finally:
         ctk.set_widget_scaling(1.0)

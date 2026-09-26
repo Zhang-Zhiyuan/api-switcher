@@ -161,18 +161,24 @@ def test_cleanup_action_and_save_remain_inside_narrow_window(route_harness):
     harness = route_harness(preferences=_legacy_preferences())
     dialog = harness.open()
     dialog.geometry("720x680")
+    _wait(harness.root, lambda: dialog.winfo_viewable())
+    assert dialog._tools_columns == 4
+    primary = (dialog._custom_toggle, dialog._bulk_button, dialog._more_toggle, dialog._preview_toggle)
+    assert {int(button.grid_info()["row"]) for button in primary} == {0}
+    dialog._more_toggle.invoke()
     harness.root.update()
-    assert dialog._tools_columns == 3
-    buttons = (dialog._custom_toggle, dialog._tags_button, dialog._tag_routes_button,
-               dialog._bulk_button, dialog._legacy_cleanup_button, dialog._preview_toggle)
-    assert {int(button.grid_info()["row"]) for button in buttons} == {0, 1}
+    maintenance = (dialog._tags_button, dialog._tag_routes_button, dialog._reload_button, dialog._legacy_cleanup_button)
+    assert {int(button.grid_info()["row"]) for button in maintenance} == {0, 1}
+    buttons = (*primary, *maintenance)
     for button in (*buttons, dialog._save_button):
+        assert button.winfo_viewable()
         assert button.winfo_rootx() >= dialog.winfo_rootx()
         assert button.winfo_rootx() + button.winfo_width() <= dialog.winfo_rootx() + dialog.winfo_width()
         assert button.winfo_rooty() + button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
     dialog._cleanup_legacy_routes()
     harness.root.update()
     assert dialog._preview_open
+    assert dialog._preview.winfo_viewable() and not dialog._more_tools.winfo_viewable()
     assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
 
 

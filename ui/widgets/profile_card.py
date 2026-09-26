@@ -140,7 +140,7 @@ class ProfileCard(ctk.CTkFrame):
             actions.append((switch_label, 76 if len(switch_label) > 2 else 62, "primary", lambda: on_switch(name)))
 
         if on_test:
-            actions.append(("测试", 58, "accent", lambda: on_test(name)))
+            actions.append(("测试", 58, "secondary", lambda: on_test(name)))
 
         if on_edit:
             actions.append(("编辑", 58, "secondary", lambda: on_edit(name)))
@@ -166,7 +166,8 @@ class ProfileCard(ctk.CTkFrame):
                     text=text,
                     width=width,
                     command=command,
-                    **button_style(kind, compact=True),
+                    **({**button_style("secondary", compact=True), "text_color": COLORS["danger"]}
+                       if kind == "danger" else button_style(kind, compact=True)),
                 )
                 action_buttons.append(button)
             _bind_profile_card_action_grid(btn_frame, action_buttons)

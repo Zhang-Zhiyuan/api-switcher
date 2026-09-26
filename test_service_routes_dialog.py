@@ -366,12 +366,15 @@ def test_footer_reserves_space_and_actions_wrap_using_widget_scaling(editor):
     scale = dialog._actions._get_widget_scaling()
     assert dialog.pack_slaves()[0] is dialog._actions.master
     assert dialog._actions.master.pack_info()["side"] == "bottom"
-    dialog._layout_actions(SimpleNamespace(width=560 * scale))
+    dialog._layout_actions(SimpleNamespace(width=360 * scale))
     assert dialog._save_button.grid_info()["row"] == 1
-    assert dialog._save_button.grid_info()["column"] == 1
+    assert dialog._save_button.grid_info()["column"] == 0
+    dialog._layout_actions(SimpleNamespace(width=560 * scale))
+    assert dialog._save_button.grid_info()["row"] == 0
+    assert dialog._save_button.grid_info()["column"] == 2
     dialog._layout_actions(SimpleNamespace(width=900 * scale))
     assert dialog._save_button.grid_info()["row"] == 0
-    assert dialog._save_button.grid_info()["column"] == 3
+    assert dialog._save_button.grid_info()["column"] == 2
     dialog._layout_scope_toolbar(SimpleNamespace(width=560 * scale))
     assert dialog._copy_button.grid_info()["row"] == 1
     dialog._layout_scope_toolbar(SimpleNamespace(width=900 * scale))

@@ -14,6 +14,7 @@ from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
+from ui.widgets.action_group import wrap_action_group
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -1244,6 +1245,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             wraplength=120,
         )
         self._proxy_subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
+        wrap_action_group(proxy_node_actions, hint=self._proxy_subscription_action_hint_label)
         self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
             text="待部署节点: 未选择",
@@ -1392,6 +1394,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("danger", compact=True),
         )
         self._proxy_remote_cleanup_button.pack(anchor="e", pady=(0, 10))
+        wrap_action_group(proxy_button_frame)
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,

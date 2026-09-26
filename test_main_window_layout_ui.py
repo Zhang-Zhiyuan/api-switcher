@@ -48,11 +48,20 @@ def assert_inside(widget, parent):
 @pytest.mark.parametrize("geometry", ["1120x800", "740x720", "480x600"])
 def test_toolbar_and_feedback_remain_visible_at_compact_and_high_dpi_sizes(tk_root, geometry, scale):
     ctk.set_widget_scaling(scale)
+    # Wait out CTk's temporary one-second fixed min/max after scaling before
+    # choosing geometry; otherwise a narrow case may still use the last size.
+    deadline = time.monotonic() + 1.1
+    while time.monotonic() < deadline:
+        tk_root.update()
+        time.sleep(0.02)
     tk_root.geometry(geometry)
+    if not tk_root._quick_tools_expanded:
+        tk_root._quick_tools_toggle.invoke()
     settle(tk_root)
     columns = global_action_columns(tk_root._logical_main_width())
     assert len({button.grid_info()["column"] for button in tk_root._global_action_buttons}) == columns
-    assert bool(tk_root._brand_header.winfo_ismapped()) == (columns == 4)
+    assert tk_root._brand_header.winfo_ismapped()
+    assert_inside(tk_root._quick_tools_toggle, tk_root)
     for button in tk_root._global_action_buttons:
         assert_inside(button, tk_root)
         assert button._text_label.winfo_reqwidth() <= button.winfo_width()
@@ -61,6 +70,26 @@ def test_toolbar_and_feedback_remain_visible_at_compact_and_high_dpi_sizes(tk_ro
     assert status.winfo_height() >= status.winfo_reqheight()
     assert status.winfo_rooty() + status.winfo_height() <= tk_root.winfo_rooty() + tk_root.winfo_height()
     assert tk_root._tabview.winfo_height() > 30
+
+
+def test_collapsing_shortcuts_keeps_values_and_returns_space_to_the_page(tk_root):
+    ctk.set_widget_scaling(1)
+    settle(tk_root)
+    if not tk_root._quick_tools_expanded:
+        tk_root._quick_tools_toggle.invoke()
+    settle(tk_root)
+    before = tk_root._tabview.winfo_height()
+    values = tk_root.claude_switch.get(), tk_root.codex_switch.get()
+    tk_root._quick_tools_toggle.invoke()
+    settle(tk_root)
+    assert not tk_root._action_panel.winfo_viewable()
+    assert tk_root._quick_tools_toggle.winfo_viewable()
+    assert tk_root._tab_navigation.winfo_viewable()
+    assert tk_root._tabview.winfo_height() > before
+    tk_root._quick_tools_toggle.invoke()
+    settle(tk_root)
+    assert values == (tk_root.claude_switch.get(), tk_root.codex_switch.get())
+    assert all(button.winfo_viewable() for button in tk_root._global_action_buttons)
 
 
 @pytest.mark.parametrize("scale", [1, 1.5])

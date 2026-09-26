@@ -13,7 +13,7 @@ from ui.widgets.adaptive_tab_bar import AdaptiveTabBar
 logger = logging.getLogger(__name__)
 ENV_TAB_LABEL = "环境变量"
 PROXY_QUALITY_DIALOG_LABEL = "代理质量检测"
-ENV_TAB_BUTTON_TEXT = "HF_TOKEN 等"
+ENV_TAB_BUTTON_TEXT = "环境变量"
 QUICK_SWITCH_TITLE = "快速切换 API"
 CLAUDE_QUICK_SWITCH_LABEL = "Claude Code 使用"
 CODEX_QUICK_SWITCH_LABEL = "Codex CLI 使用"
@@ -202,29 +202,25 @@ class App(ctk.CTk):
 
         # Top bar
         topbar = ctk.CTkFrame(self._shell, fg_color="transparent")
-        topbar.pack(fill="x", pady=(0, 12))
+        topbar.pack(fill="x", pady=(0, 8))
 
         title_area = ctk.CTkFrame(topbar, fg_color="transparent")
         self._brand_header = title_area
         title_area.pack(fill="x")
+        self._quick_tools_expanded = False
+        self._quick_tools_toggle = ctk.CTkButton(
+            title_area, text="快捷工具 ▾", width=110, command=self._toggle_quick_tools,
+            **button_style("secondary", compact=True),
+        )
+        self._quick_tools_toggle.pack(side="right", padx=(8, 0))
 
         ctk.CTkLabel(
             title_area,
             text="API 配置切换器",
             text_color=COLORS["text"],
-            font=font(22, "bold"),
-        ).pack(anchor="w")
-
-        subtitle_label = ctk.CTkLabel(
-            title_area,
-            text="第三方 API 配置、官方账号快照、本机浏览器 Profile 分区管理",
-            text_color=COLORS["muted"],
-            font=font(12),
-            anchor="w",
-            justify="left",
-        )
-        subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
-        bind_wraplength(title_area, subtitle_label, padding=12, min_width=260, max_width=620)
+            font=font(15, "bold"),
+            height=24,
+        ).pack(side="left")
 
         self._action_panel = ctk.CTkFrame(
             topbar,
@@ -233,7 +229,8 @@ class App(ctk.CTk):
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        self._action_panel.pack(fill="x", pady=(10, 0))
+        # Optional shortcuts preserve their values while collapsed. The main
+        # navigation and page actions remain immediately available.
         self._action_panel.grid_columnconfigure(0, weight=1)
 
         # Quick switch menu
@@ -295,7 +292,7 @@ class App(ctk.CTk):
             text=ENV_TAB_BUTTON_TEXT,
             width=108,
             command=self._show_env_tab,
-            **button_style("primary"),
+            **button_style("secondary", compact=True),
         )
         self._global_action_buttons.append(env_button)
 
@@ -304,7 +301,7 @@ class App(ctk.CTk):
             text="健康检查",
             width=96,
             command=self._show_health_check,
-            **button_style("accent"),
+            **button_style("secondary", compact=True),
         )
         self._global_action_buttons.append(health_button)
 
@@ -313,7 +310,7 @@ class App(ctk.CTk):
             text="回滚上次",
             width=96,
             command=self._restore_latest_backup,
-            **button_style("warning"),
+            **button_style("secondary", compact=True),
         )
         self._global_action_buttons.append(rollback_button)
 
@@ -322,7 +319,7 @@ class App(ctk.CTk):
             text="刷新全部",
             width=96,
             command=self.refresh_all,
-            **button_style("secondary"),
+            **button_style("secondary", compact=True),
         )
         self._global_action_buttons.append(refresh_button)
         for index, button in enumerate(self._global_action_buttons):
@@ -490,22 +487,17 @@ class App(ctk.CTk):
         self._main_layout_mode = mode
         action_columns = global_action_columns(width)
 
-        # The native title bar already names the app. On a narrow/high-DPI
-        # window, keep operational controls and content instead of duplicating
-        # the branding and multi-line introduction above them.
-        if mode == "narrow":
-            self._brand_header.pack_forget()
-            self._action_panel.pack(fill="x", pady=0)
+        if self._quick_tools_expanded:
+            self._action_panel.pack(fill="x", pady=(4, 0))
         else:
-            self._brand_header.pack(fill="x", before=self._action_panel)
-            self._action_panel.pack(fill="x", pady=(10, 0))
+            self._action_panel.pack_forget()
 
         for column in range(4):
             self._button_group.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
             self._switch_frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
 
         if mode == "wide":
-            self._shell.pack(fill="both", expand=True, padx=20, pady=(18, 14))
+            self._shell.pack(fill="both", expand=True, padx=16, pady=(10, 10))
             self._action_panel.grid_columnconfigure(0, weight=1)
             self._action_panel.grid_columnconfigure(1, weight=0)
             self._switch_frame.grid(row=0, column=0, columnspan=1, sticky="w", padx=(12, 8), pady=9)
@@ -543,6 +535,15 @@ class App(ctk.CTk):
                 padx=(0 if index % action_columns == 0 else 6, 0),
                 pady=(0 if index < action_columns else 5, 0),
             )
+
+    def _toggle_quick_tools(self):
+        """Disclosure is presentation-only; it never switches a profile."""
+        self._quick_tools_expanded = not self._quick_tools_expanded
+        self._quick_tools_toggle.configure(text="收起快捷工具 ▴" if self._quick_tools_expanded else "快捷工具 ▾")
+        if self._quick_tools_expanded:
+            self._action_panel.pack(fill="x", pady=(4, 0))
+        else:
+            self._action_panel.pack_forget()
 
     def _hide_native_tab_header(self) -> None:
         segmented_button = getattr(self._tabview, "_segmented_button", None)

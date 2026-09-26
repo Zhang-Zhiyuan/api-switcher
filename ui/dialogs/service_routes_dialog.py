@@ -101,20 +101,22 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._auto_seeded = set()
         self._default_notices = {}
         self._preview_open = False
+        self._results_open = False
+        self._more_open = False
+        self._content_view = None
         self._custom_open = False
         self._changes = []
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=20, pady=(16, 8))
-        ctk.CTkLabel(header, text="按访问目标选择线路", font=font(20, "bold"),
+        header.pack(fill="x", padx=20, pady=(12, 8))
+        ctk.CTkLabel(header, text="目标分流", font=font(20, "bold"),
                      text_color=COLORS["text"]).pack(anchor="w")
         notice = ctk.CTkLabel(
-            header, text="用途默认：AI 服务（OpenAI/Claude/Gemini）→ 家宽；其余内置网站（含 X/Reddit）→ 非家宽。\n"
-                         "也可选择直连；手动选择优先。保存并应用后生效，编辑期间不改变现有线路。",
+            header, text="为每个网站选择订阅、节点或直连。修改先保留为草稿，保存并应用后生效。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
-        notice.pack(fill="x", pady=(4, 10))
+        notice.pack(fill="x", pady=(2, 6))
         self._intro_notice = notice
         bind_wraplength(header, notice, padding=8)
         toolbar = ctk.CTkFrame(header, fg_color="transparent")
@@ -152,7 +154,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._recovery_button.pack(anchor="w", pady=(6, 0))
 
         filters = ctk.CTkFrame(self, fg_color="transparent")
-        filters.pack(fill="x", padx=20, pady=(0, 8))
+        self._filters = filters
+        filters.pack(fill="x", padx=20, pady=(0, 4))
         self._categories = ctk.CTkSegmentedButton(
             filters, values=["全部", "AI 服务", "网站", "自定义", "待修复"], command=self._set_category,
             font=font(12), selected_color=COLORS["primary"], unselected_color=COLORS["secondary"],
@@ -160,10 +163,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._categories.pack(fill="x")
         self._categories.set("全部")
 
-        search_bar = ctk.CTkFrame(self, fg_color="transparent")
-        search_bar.pack(fill="x", padx=20, pady=(0, 8))
+        search_bar = ctk.CTkFrame(filters, fg_color="transparent")
+        search_bar.pack(fill="x", pady=(6, 2))
         self._search = ctk.StringVar(value="")
-        ctk.CTkLabel(search_bar, text="搜索目标 / 已选线路", font=font(12), text_color=COLORS["text"]).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(search_bar, text="搜索", font=font(12), text_color=COLORS["text"]).pack(side="left", padx=(0, 8))
         search = ctk.CTkEntry(search_bar, textvariable=self._search,
                             placeholder_text="目标 / 订阅 / 节点名称", **input_style())
         search.pack(side="left", fill="x", expand=True)
@@ -171,12 +174,14 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                                  **button_style("secondary", compact=True))
         self._clear_filter_button.pack(side="left", padx=(8, 0))
         self._search.trace_add("write", lambda *_args: self._schedule_filter())
-        self._count_label = ctk.CTkLabel(self, text="", font=font(11), text_color=COLORS["muted"], anchor="w", height=20)
-        self._count_label.pack(fill="x", padx=22, pady=(0, 4))
-        bind_wraplength(self, self._count_label, padding=44)
+        self._count_label = ctk.CTkLabel(filters, text="", font=font(11), text_color=COLORS["muted"], anchor="w", height=20)
+        self._count_label.pack(fill="x", pady=(0, 2))
+        bind_wraplength(filters, self._count_label, padding=4)
 
-        self._table = ctk.CTkScrollableFrame(self, fg_color=COLORS["surface"])
-        self._table.pack(fill="both", expand=True, padx=20)
+        self._content = ctk.CTkFrame(self, fg_color="transparent")
+        self._content.pack(fill="both", expand=True, padx=20)
+        self._table = ctk.CTkScrollableFrame(self._content, fg_color=COLORS["surface"])
+        self._table.pack(fill="both", expand=True)
         self._table.bind("<Configure>", self._on_resize, add="+")
         self._loading = ctk.CTkLabel(self._table, text="正在读取订阅、节点和已保存线路…", text_color=COLORS["muted"])
         self._loading.pack(pady=30)
@@ -189,22 +194,24 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._tools_row = tools_row
         self._tools_columns = None
         tools_row.pack(fill="x", padx=20, pady=(6, 2))
+        self._more_tools = ctk.CTkFrame(footer, fg_color=COLORS["surface_alt"], corner_radius=6)
+        self._more_toggle = ctk.CTkButton(tools_row, text="更多设置 ▾", width=100, command=self._toggle_more,
+                                        **button_style("secondary", compact=True))
         self._custom_toggle = ctk.CTkButton(tools_row, text="＋ 自定义目标", width=112, command=self._toggle_custom_form,
                                            **button_style("secondary", compact=True))
-        self._tags_button = ctk.CTkButton(tools_row, text="订阅标记", width=88, state="disabled",
+        self._tags_button = ctk.CTkButton(self._more_tools, text="标记家宽 / 非家宽", width=100, state="disabled",
                                          command=self._open_subscription_tags, **button_style("secondary", compact=True))
-        self._tag_routes_button = ctk.CTkButton(tools_row, text="补齐默认分流", width=106, state="disabled",
+        self._tag_routes_button = ctk.CTkButton(self._more_tools, text="补齐默认分流", width=100, state="disabled",
                                                command=self._suggest_tagged_routes, **button_style("secondary", compact=True))
         self._legacy_cleanup_button = ctk.CTkButton(
-            tools_row, text="整理旧版分流", width=150, state="disabled",
+            self._more_tools, text="整理旧版分流", width=100, state="disabled",
             command=self._cleanup_legacy_routes, **button_style("secondary", compact=True),
         )
         self._bulk_button = ctk.CTkButton(tools_row, text="批量设置", width=88, state="disabled",
-                                         command=self._open_bulk_dialog, **button_style("primary", compact=True))
-        self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单（0）", width=140, command=self._toggle_preview,
+                                         command=self._open_bulk_dialog, **button_style("secondary", compact=True))
+        self._preview_toggle = ctk.CTkButton(tools_row, text="检查修改（0）", width=120, state="disabled", command=self._toggle_preview,
                                             **button_style("secondary", compact=True))
         tools_row.bind("<Configure>", self._layout_tools, add="+")
-        self._layout_tools()
         add_row = ctk.CTkFrame(footer, fg_color="transparent")
         self._custom_form = add_row
         self._custom_entry = ctk.CTkEntry(add_row, placeholder_text="新增自定义域名、网址或 IP / CIDR", **input_style())
@@ -214,29 +221,37 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                        command=self._add_custom, **button_style("secondary", compact=True))
         self._add_button.pack(side="right")
         note = ctk.CTkLabel(
-            footer, text="直连使用目标设备自身网络，严格隐私模式下不可启用。未勾选目标不等于直连；自定义规则优先。",
+            self._more_tools, text="用途默认：AI → 家宽，其他内置网站 → 非家宽；手动选择优先。\n"
+                                   "补齐和整理只生成草稿。直连需自身网络可达，不能与严格隐私同时启用。",
             font=font(11), text_color=COLORS["muted"], justify="left", anchor="w", height=20,
         )
-        note.pack(fill="x", padx=20, pady=(8, 4))
+        note.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(4, 8))
         self._footer_note = note
-        bind_wraplength(self, note, padding=44)
+        bind_wraplength(self._more_tools, note, padding=20)
         self._status = ctk.CTkLabel(footer, text="正在加载…", font=font(12), anchor="w", justify="left", height=22)
         self._status.pack(fill="x", padx=20)
         bind_wraplength(self, self._status, padding=44)
-        self._details = ctk.CTkTextbox(footer, height=84, **textbox_style())
-        self._preview = ctk.CTkTextbox(footer, height=110, **textbox_style())
+        self._review_heading = ctk.CTkLabel(self._content, text="", font=font(14, "bold"),
+                                          text_color=COLORS["text"], anchor="w")
+        self._details = ctk.CTkTextbox(self._content, height=120, **textbox_style())
+        self._preview = ctk.CTkTextbox(self._content, height=120, **textbox_style())
         actions = ctk.CTkFrame(footer, fg_color="transparent")
         self._actions = actions
-        actions.pack(fill="x", padx=20, pady=(8, 16))
-        self._reset_button = ctk.CTkButton(actions, text="撤销当前修改", command=self._reset, width=100,
+        actions.pack(fill="x", padx=20, pady=(6, 12))
+        self._reset_button = ctk.CTkButton(actions, text="撤销修改", command=self._reset, width=100,
                                          state="disabled", **button_style("secondary", compact=True))
-        self._reload_button = ctk.CTkButton(actions, text="重读订阅缓存", command=self._reload_catalog, width=100,
+        self._reload_button = ctk.CTkButton(self._more_tools, text="重读订阅缓存", command=self._reload_catalog, width=100,
                                           state="disabled", **button_style("secondary", compact=True))
         self._save_button = ctk.CTkButton(actions, text="保存并应用", command=self._apply, width=112,
                                         state="disabled", **button_style("accent"))
         self._close_button = ctk.CTkButton(actions, text="关闭", command=self._close, width=70,
                                          **button_style("secondary", compact=True))
         self._action_columns = None
+        for col in range(2):
+            self._more_tools.grid_columnconfigure(col, weight=1, uniform="route-more")
+        for index, button in enumerate((self._tags_button, self._tag_routes_button, self._reload_button, self._legacy_cleanup_button)):
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=8, pady=(6, 0))
+        self._layout_tools()
         actions.bind("<Configure>", self._layout_actions, add="+")
         self._layout_actions()
         center_window(self, master)
@@ -244,8 +259,12 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._start_load()
 
     def _toggle_custom_form(self):
+        self._preview_open = self._results_open = False
+        self._update_preview()
         self._custom_open = not self._custom_open
         if self._custom_open:
+            if self._more_open:
+                self._toggle_more()
             self._custom_form.pack(fill="x", padx=20, pady=(6, 0), before=self._status)
             self._custom_entry.focus_set()
         else:
@@ -253,21 +272,57 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._custom_toggle.configure(text="收起自定义输入" if self._custom_open else "＋ 自定义目标")
 
     def _toggle_preview(self):
-        self._preview_open = not self._preview_open
+        if self._busy or not self._drafts:
+            return
+        if self._results_open:
+            self._results_open = False
+            self._preview_open = False
+        else:
+            self._preview_open = not self._preview_open
         self._update_preview()
 
-    def _update_preview(self):
-        count = len(self._changes)
-        self._preview_toggle.configure(text=f"{'收起清单 / 规则' if self._preview_open else '修改清单 / 规则'}（{count}）")
-        if not self._preview_open:
-            self._preview.pack_forget()
-            self._intro_notice.pack(fill="x", pady=(4, 10), before=self._scope_toolbar)
-            self._footer_note.pack(fill="x", padx=20, pady=(8, 4), before=self._status)
+    def _toggle_more(self):
+        self._more_open = not self._more_open
+        if self._more_open:
+            if self._custom_open:
+                self._custom_open = False
+                self._custom_form.pack_forget()
+                self._custom_toggle.configure(text="＋ 自定义目标")
+            self._more_tools.pack(fill="x", padx=20, pady=(4, 2), before=self._status)
+        else:
+            self._more_tools.pack_forget()
+        self._more_toggle.configure(text="收起设置 ▴" if self._more_open else "更多设置 ▾")
+
+    def _sync_content_view(self):
+        """Review/results use the content area, never shrink the editor footer."""
+        view = "preview" if self._preview_open else "results" if self._results_open else "edit"
+        _configure_changed(self._preview_toggle, text="返回编辑" if view != "edit" else f"检查修改（{len(self._changes)}）")
+        if view == self._content_view:
             return
-        # Expanded previews must not squeeze the target list to zero height
-        # at high DPI. The preview repeats the relevant routing/privacy caveats.
-        self._intro_notice.pack_forget()
-        self._footer_note.pack_forget()
+        self._content_view = view
+        self._table.pack_forget()
+        self._preview.pack_forget()
+        self._details.pack_forget()
+        self._review_heading.pack_forget()
+        if view == "edit":
+            self._filters.pack(fill="x", padx=20, pady=(0, 4), before=self._content)
+            self._table.pack(fill="both", expand=True)
+        else:
+            self._filters.pack_forget()
+            if self._more_open:
+                self._toggle_more()
+            if self._custom_open:
+                self._custom_open = False
+                self._custom_form.pack_forget()
+                self._custom_toggle.configure(text="＋ 自定义目标")
+            self._review_heading.configure(text="修改清单与规则说明" if view == "preview" else "应用结果")
+            self._review_heading.pack(fill="x", pady=(0, 6))
+            (self._preview if view == "preview" else self._details).pack(fill="both", expand=True)
+
+    def _update_preview(self):
+        self._sync_content_view()
+        if not self._preview_open or not self._drafts:
+            return
         lines = []
         for item in self._changes:
             lines.extend([f"[{item['scope']}] {item['label']}", f"  原：{item['before']}",
@@ -283,7 +338,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             description = route_description(row, self._drafts[self._scope], self._catalog)
             return f"{row['label']}（{description['profile']}）"
         text += ("\n\n规则覆盖 / 生效范围（当前位置草稿，非运行态）：\n"
-                 "同一目标以自定义设置为准；子域名 / 更小网段优先。域名规则排在 IP 规则之前。")
+                 "同一目标以自定义设置为准；子域名 / 更小网段优先。域名规则排在 IP 规则之前。\n"
+                 "未勾选目标不等于直连；直连需目标设备自身网络可达，不能与严格隐私同时启用。")
         for notice in preview["overlaps"][:40]:
             label = "覆盖" if notice["kind"] == "override" else f"子范围例外于 {notice['parent']}"
             text += f"\n• {notice['target']}：{label}；{describe(notice['shadowed'])} → {describe(notice['winner'])}"
@@ -301,7 +357,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._preview.delete("1.0", "end")
         self._preview.insert("1.0", safe_feedback_text(text))
         self._preview.configure(state="disabled")
-        self._preview.pack(fill="x", padx=20, pady=(4, 0), before=self._actions)
 
     def _preflight(self, scope):
         draft = self._drafts[scope]
@@ -332,19 +387,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _layout_actions(self, event=None):
         width = (event.width if event else self._actions.winfo_width()) / self._actions._get_widget_scaling()
-        columns = 4 if width >= 620 else 2
+        columns = 3 if width >= 380 else 2
         if columns == self._action_columns:
             return
         self._action_columns = columns
         for col in range(4):
             self._actions.grid_columnconfigure(col, weight=1 if col < columns else 0, uniform="route-actions" if col < columns else "")
-        for index, button in enumerate((self._reset_button, self._reload_button, self._close_button, self._save_button)):
+        for index, button in enumerate((self._reset_button, self._close_button, self._save_button)):
             button.grid(row=index // columns, column=index % columns, sticky="ew",
                         padx=(0, 8) if index % columns < columns - 1 else 0, pady=(4, 0))
 
     def _layout_tools(self, event=None):
         width = (event.width if event else self._tools_row.winfo_width()) / self._tools_row._get_widget_scaling()
-        columns = 6 if width >= 940 else 3
+        columns = 4 if width >= 540 else 2
         if columns == self._tools_columns:
             return
         self._tools_columns = columns
@@ -352,8 +407,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._tools_row.grid_columnconfigure(
                 col, weight=1 if col < columns else 0, uniform="route-tools" if col < columns else "",
             )
-        for index, button in enumerate((self._custom_toggle, self._tags_button, self._tag_routes_button,
-                                         self._legacy_cleanup_button, self._bulk_button, self._preview_toggle)):
+        for index, button in enumerate((self._custom_toggle, self._bulk_button, self._more_toggle, self._preview_toggle)):
             button.grid(row=index // columns, column=index % columns, sticky="ew",
                         padx=(0, 8) if index % columns < columns - 1 else 0, pady=(2, 2))
 
@@ -594,14 +648,15 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._changed()
             lines = [f"{scope}: {message}" for scope, _prefs, message in succeeded]
             lines.extend(f"{scope}: {error}" for scope, error in errors)
-            self._status.configure(text=f"已处理 {len(succeeded)} 个位置，未成功 {len(errors)} 个；实际结果见下方。"
+            self._status.configure(text=f"已处理 {len(succeeded)} 个位置，未成功 {len(errors)} 个。"
                                        + ("未成功项保留草稿，可再次应用重试。" if errors else ""),
                                    text_color=COLORS["warning"] if errors else COLORS["success"])
-            self._details.pack(fill="x", padx=20, pady=(4, 0), before=self._actions)
             self._details.configure(state="normal")
             self._details.delete("1.0", "end")
             self._details.insert("1.0", safe_feedback_text("\n".join(lines)))
             self._details.configure(state="disabled")
+            self._results_open = True
+            self._sync_content_view()
             if succeeded and self._on_saved:
                 self._on_saved()
         else:
@@ -884,7 +939,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 tile.pack(fill="x", pady=(0, 6), padx=2)
             if not visible:
                 self._empty.pack(fill="x", padx=12, pady=24)
-        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 勾选网站才新增专属规则；AI 服务默认启用")
+        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 勾选网站启用独立线路；AI 服务默认启用")
 
     def _select_profile(self, service, label):
         if label == AUTO_PROFILE:
@@ -1007,6 +1062,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._changed(service)
 
     def _changed(self, service=""):
+        self._results_open = False
         count = sum(self._drafts[scope] != self._originals[scope] for scope in self._scopes)
         self._changes = route_changes(self._originals, self._drafts, self._catalog)
         keys = ([service] + [key for key in self._rows if key.startswith("custom:") and service == "custom"]) if service else self._rows
@@ -1018,19 +1074,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if count:
             self._details.pack_forget()
         self._update_preview()
-        self._status.configure(text=f"待保存：{count} 个位置、{len(self._changes)} 项目标变化（含继承影响）。可展开修改清单核对。" if count else "无未保存修改；可重新应用当前位置。连通状态需单独检查。",
+        self._status.configure(text=f"待保存 · {count} 个位置 · {len(self._changes)} 项目标变化（含继承影响）" if count else "无未保存修改 · 可重新应用当前位置；此处不代表实时连通状态。",
                                text_color=COLORS["accent"] if count else COLORS["muted"])
         if self._default_notices.get(self._scope):
             missing = sum("未分配：" in notice for notice in self._default_notices[self._scope])
             if missing:
-                self._status.configure(text=self._status.cget("text") + " 部分用途未能自动分配，展开修改清单查看原因。",
+                self._status.configure(text=self._status.cget("text") + " 部分用途未分配，请点“检查修改”查看。",
                                        text_color=COLORS["warning"])
         candidates = self._update_legacy_cleanup()
         preflight = self._preflight(self._scope)
         if preflight["overlaps"] or preflight["privacy_conflict"]:
             self._status.configure(
                 text=self._status.cget("text") + (" 直连与严格隐私冲突，应用前需调整。" if preflight["privacy_conflict"] else
-                                                 f" 有 {len(preflight['overlaps'])} 处规则覆盖 / 例外，展开清单查看。"),
+                                                 f" · {len(preflight['overlaps'])} 处规则覆盖 / 例外，请检查修改。"),
                 text_color=COLORS["warning"],
             )
         if self._recovery_button:
@@ -1042,7 +1098,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if candidates:
             self._status.configure(
                 text=self._status.cget("text") + f" 检测到 {len(candidates)} 项疑似旧版 X/Reddit 家宽绑定；"
-                     "旧版未记录选择来源，可点“整理旧版分流”生成调整草稿。",
+                     "可在“更多设置 → 整理旧版分流”中核对。",
                 text_color=COLORS["warning"],
             )
 
@@ -1160,7 +1216,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         state = "normal" if enabled else "disabled"
         for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button,
                        self._tags_button, self._tag_routes_button, self._bulk_button, self._legacy_cleanup_button,
-                       self._recovery_button):
+                       self._recovery_button, self._preview_toggle):
             if button:
                 button.configure(state=state)
         self._scope_combo.configure(state="readonly" if enabled and len(self._scopes) > 1 else "disabled")

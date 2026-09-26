@@ -19,6 +19,7 @@ from ui.proxy_lifecycle import PROXY_MAINTENANCE_NOTICE
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
+from ui.widgets.action_group import wrap_action_group
 from ui.widgets.service_route_overview import ServiceRouteOverview
 from ui.widgets.toast import show_toast
 
@@ -659,6 +660,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             wraplength=126,
         )
         self._subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
+        wrap_action_group(node_actions, hint=self._subscription_action_hint_label)
         self._selected_label = ctk.CTkLabel(
             controls,
             text="待启动节点: 未选择",
@@ -784,6 +786,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             **button_style("danger", compact=True),
         )
         self._stop_button.pack(anchor="e")
+        wrap_action_group(actions)
 
         self._status_label = ctk.CTkLabel(
             controls,
@@ -895,12 +898,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._node_selection_heading.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(14, 0))
             self._subscription_nodes_label.grid(row=11, column=0, columnspan=4, sticky="w", pady=(8, 0))
             self._subscription_picker_host.grid(row=12, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._node_actions.grid(row=13, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._node_actions.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(8, 0))
             self._selected_label.grid(row=14, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
             self._proxy_start_heading.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(14, 0))
             self._pending_node_label.grid(row=16, column=0, columnspan=4, sticky="nw", pady=(8, 0))
             self._node_text_host.grid(row=17, column=0, columnspan=4, sticky="ew", padx=0, pady=(6, 0))
-            self._proxy_actions.grid(row=18, column=0, columnspan=4, sticky="w", pady=(8, 0))
+            self._proxy_actions.grid(row=18, column=0, columnspan=4, sticky="ew", pady=(8, 0))
             self._status_label.grid(row=19, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         else:
             self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=1, sticky="w", pady=(8, 0))
@@ -910,19 +913,21 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._subscription_name_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
             self._profile_actions.grid(row=2, column=3, columnspan=1, sticky="e", pady=(8, 0))
             self._subscription_link_label.grid(row=3, column=0, columnspan=1, sticky="w", pady=(8, 0))
-            self._subscription_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-            subscription_actions.grid(row=3, column=3, columnspan=1, sticky="e", pady=(8, 0))
-            self._cache_label.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
-            self._node_selection_heading.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-            self._subscription_nodes_label.grid(row=6, column=0, columnspan=1, sticky="w", pady=(8, 0))
-            self._subscription_picker_host.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-            self._node_actions.grid(row=6, column=3, columnspan=1, sticky="e", pady=(8, 0))
-            self._selected_label.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
-            self._proxy_start_heading.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-            self._pending_node_label.grid(row=9, column=0, columnspan=1, sticky="nw", pady=(8, 0))
-            self._node_text_host.grid(row=9, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-            self._proxy_actions.grid(row=9, column=3, columnspan=1, sticky="ne", pady=(8, 0))
-            self._status_label.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+            self._subscription_entry.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            # Subscription tools have their own row; they must not widen the
+            # node sidebar and leave half the picker area empty.
+            subscription_actions.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+            self._cache_label.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._node_selection_heading.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._subscription_nodes_label.grid(row=7, column=0, columnspan=1, sticky="nw", pady=(8, 0))
+            self._subscription_picker_host.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+            self._node_actions.grid(row=7, column=3, columnspan=1, sticky="new", pady=(8, 0))
+            self._selected_label.grid(row=8, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(6, 0))
+            self._proxy_start_heading.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            self._pending_node_label.grid(row=10, column=0, columnspan=1, sticky="nw", pady=(8, 0))
+            self._node_text_host.grid(row=10, column=1, columnspan=2, sticky="new", padx=(8, 8), pady=(8, 0))
+            self._proxy_actions.grid(row=10, column=3, columnspan=1, sticky="new", pady=(8, 0))
+            self._status_label.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None

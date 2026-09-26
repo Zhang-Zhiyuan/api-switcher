@@ -132,11 +132,15 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._header = ctk.CTkFrame(self, fg_color="transparent")
         self._header.pack(fill="x")
         self._title = ctk.CTkLabel(self._header, text="目标分流", font=font(15, "bold"), text_color=COLORS["text"], anchor="w")
-        self._manage = ctk.CTkButton(self._header, text="管理目标分流", width=130,
+        self._header_actions = ctk.CTkFrame(self._header, fg_color="transparent")
+        self._header_action_columns = None
+        self._manage = ctk.CTkButton(self._header_actions, text="管理目标分流", width=130,
                                      command=lambda: self._open(""), **button_style("primary", compact=True))
-        self._inspect = (ctk.CTkButton(self._header, text="运行状态 / 网址去向", width=158,
+        self._inspect = (ctk.CTkButton(self._header_actions, text="检查网址去向", width=130,
                                       command=inspect_command, **button_style("secondary", compact=True))
                          if inspect_command else None)
+        self._header.bind("<Configure>", self._layout_header_actions, add="+")
+        self._layout_header_actions()
         self._summary = ctk.CTkLabel(self, text="正在读取已保存线路…", font=font(12),
                                     text_color=COLORS["muted"], anchor="w", justify="left")
         self._summary.pack(fill="x", pady=(4, 8))
@@ -153,7 +157,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._more = ctk.CTkButton(self, text="查看未启用目标", command=self._toggle_inactive,
                                    **button_style("secondary", compact=True))
         self._note = ctk.CTkLabel(
-            self, text="这里展示已保存配置，不代表实时连通状态。添加目标、启用站点和选择线路后，在编辑窗口统一保存并应用。",
+            self, text="已保存配置不代表实时连通；点“检查网址去向”核对运行状态。线路修改需在编辑窗口保存并应用。"
+                       if inspect_command else "这里只展示已保存配置，不代表实时连通；线路修改需在编辑窗口保存并应用。",
             font=font(11), text_color=COLORS["muted_soft"], anchor="w", justify="left")
         self._note.pack(fill="x", pady=(6, 0))
         bind_wraplength(self, self._note, padding=8)
@@ -230,6 +235,22 @@ class ServiceRouteOverview(ctk.CTkFrame):
         # CTkFrame binds Configure to its canvas, so event.widget is not self.
         self._layout(event.width / self._get_widget_scaling() < 700)
 
+    def _layout_header_actions(self, event=None):
+        # Use the available header width, not the buttons' requested width;
+        # otherwise wrapping changes its own breakpoint and can oscillate.
+        width = (event.width if event else self._header.winfo_width()) / self._get_widget_scaling()
+        columns = 2 if width >= 280 else 1
+        if columns == self._header_action_columns:
+            return
+        self._header_action_columns = columns
+        for col in range(2):
+            self._header_actions.grid_columnconfigure(col, weight=1 if col < columns else 0)
+        self._manage.grid(row=0, column=0, sticky="ew")
+        if self._inspect:
+            self._inspect.grid(row=0 if columns == 2 else 1, column=1 if columns == 2 else 0,
+                               sticky="ew", padx=(8, 0) if columns == 2 else 0,
+                               pady=0 if columns == 2 else (6, 0))
+
     def _layout(self, narrow, *, force=False):
         scale = self._get_widget_scaling()
         if narrow == self._narrow and scale == self._layout_scale and not force:
@@ -239,12 +260,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._heading.grid_columnconfigure(3, minsize=round(76 * scale))
         self._header.grid_columnconfigure(0, weight=1)
         self._title.grid(row=0, column=0, sticky="w")
-        self._manage.grid(row=1 if narrow else 0, column=0 if narrow else 1,
-                          sticky="w" if narrow else "e", pady=(6, 0) if narrow else 0)
-        if self._inspect:
-            self._inspect.grid(row=2 if narrow else 0, column=0 if narrow else 2,
-                               sticky="w" if narrow else "e", padx=0 if narrow else (8, 0),
-                               pady=(6, 0) if narrow else 0)
+        self._header_actions.grid(row=1 if narrow else 0, column=0 if narrow else 1,
+                                  sticky="ew" if narrow else "e", pady=(6, 0) if narrow else 0)
         if narrow:
             self._heading.pack_forget()
         else:
