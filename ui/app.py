@@ -65,10 +65,9 @@ def main_layout_mode(width: int) -> str:
 def global_action_columns(width: int) -> int:
     """Choose a toolbar grid that remains visible at the current width."""
 
-    # Four fixed-width buttons do not fit reliably once the header wraps. A
-    # 2x2 grid lets the parent shrink without retaining an oversized request
-    # width, so no action is clipped on compact or narrow windows.
-    return 4 if main_layout_mode(int(width)) == "wide" else 2
+    # In compact mode the actions get a full row, so four buttons still fit.
+    # Reserve the taller 2x2 grid for genuinely narrow windows only.
+    return 2 if main_layout_mode(int(width)) == "narrow" else 4
 
 
 def app_status_severity(message: str) -> str:
@@ -206,6 +205,7 @@ class App(ctk.CTk):
         topbar.pack(fill="x", pady=(0, 12))
 
         title_area = ctk.CTkFrame(topbar, fg_color="transparent")
+        self._brand_header = title_area
         title_area.pack(fill="x")
 
         ctk.CTkLabel(
@@ -367,7 +367,9 @@ class App(ctk.CTk):
             border_width=1,
             border_color=COLORS["border_soft"],
         )
-        footer.pack(fill="x", pady=(8, 0))
+        # Reserve feedback space before the expanding tab body takes its parcel;
+        # otherwise Tk can hide the status bar in short/high-DPI windows.
+        footer.pack(side="bottom", fill="x", pady=(8, 0), before=self._tabview)
         self._status = ctk.CTkLabel(
             footer,
             text="就绪",
@@ -379,6 +381,7 @@ class App(ctk.CTk):
         self._status.pack(fill="x", anchor="w", padx=10, pady=6)
         bind_wraplength(footer, self._status, padding=20, min_width=180, max_width=1400)
         self.bind("<Configure>", self._schedule_main_layout, add="+")
+        self._shell.bind("<Configure>", lambda _event: self._schedule_main_layout(), add="+")
         self.after_idle(self._apply_main_layout)
         self._schedule_ui_callback_pump(delay_ms=UI_CALLBACK_IDLE_POLL_MS)
 
@@ -480,49 +483,60 @@ class App(ctk.CTk):
     def _apply_main_layout(self) -> None:
         self._main_layout_after_id = None
         self._hide_native_tab_header()
-        mode = main_layout_mode(self._logical_main_width())
+        width = self._logical_main_width()
+        mode = main_layout_mode(width)
         if mode == self._main_layout_mode:
             return
         self._main_layout_mode = mode
+        action_columns = global_action_columns(width)
+
+        # The native title bar already names the app. On a narrow/high-DPI
+        # window, keep operational controls and content instead of duplicating
+        # the branding and multi-line introduction above them.
+        if mode == "narrow":
+            self._brand_header.pack_forget()
+            self._action_panel.pack(fill="x", pady=0)
+        else:
+            self._brand_header.pack(fill="x", before=self._action_panel)
+            self._action_panel.pack(fill="x", pady=(10, 0))
 
         for column in range(4):
             self._button_group.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
             self._switch_frame.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
 
         if mode == "wide":
-            self._shell.pack_configure(padx=20, pady=(18, 14))
+            self._shell.pack(fill="both", expand=True, padx=20, pady=(18, 14))
             self._action_panel.grid_columnconfigure(0, weight=1)
             self._action_panel.grid_columnconfigure(1, weight=0)
-            self._switch_frame.grid_configure(row=0, column=0, columnspan=1, sticky="w", padx=(12, 8), pady=9)
-            self._button_group.grid_configure(row=0, column=1, columnspan=1, sticky="e", padx=(0, 12), pady=9)
-            self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
-            self._claude_switch_group.grid_configure(row=0, column=1, sticky="w", padx=(0, 10))
-            self._codex_switch_group.grid_configure(row=0, column=2, sticky="w", padx=0)
-            action_columns = global_action_columns(self._logical_main_width())
+            self._switch_frame.grid(row=0, column=0, columnspan=1, sticky="w", padx=(12, 8), pady=9)
+            self._button_group.grid(row=0, column=1, columnspan=1, sticky="e", padx=(0, 12), pady=9)
+            self._switch_title.grid(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
+            self._claude_switch_group.grid(row=0, column=1, sticky="w", padx=(0, 10))
+            self._codex_switch_group.grid(row=0, column=2, sticky="w", padx=0)
         else:
             shell_padding = 12 if mode == "compact" else 8
-            self._shell.pack_configure(padx=shell_padding, pady=(12, 10))
+            self._shell.pack(fill="both", expand=True, padx=shell_padding, pady=(12, 10))
             self._action_panel.grid_columnconfigure(0, weight=1)
             self._action_panel.grid_columnconfigure(1, weight=1)
-            self._switch_frame.grid_configure(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(9, 4))
-            self._button_group.grid_configure(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(3, 9))
+            self._switch_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(9, 4))
+            self._button_group.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(3, 9))
             if mode == "compact":
-                self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
-                self._claude_switch_group.grid_configure(row=0, column=1, sticky="w", padx=(0, 10))
-                self._codex_switch_group.grid_configure(row=0, column=2, sticky="w", padx=0)
-                action_columns = global_action_columns(self._logical_main_width())
+                self._switch_title.grid(row=0, column=0, rowspan=1, columnspan=1, sticky="w", padx=(0, 10), pady=(17, 0))
+                self._claude_switch_group.grid(row=0, column=1, sticky="w", padx=(0, 10))
+                self._codex_switch_group.grid(row=0, column=2, sticky="w", padx=0)
             else:
                 self._switch_frame.grid_columnconfigure(0, weight=1)
                 self._switch_frame.grid_columnconfigure(1, weight=1)
-                self._switch_title.grid_configure(row=0, column=0, rowspan=1, columnspan=2, sticky="w", padx=0, pady=(0, 3))
-                self._claude_switch_group.grid_configure(row=1, column=0, sticky="w", padx=(0, 6))
-                self._codex_switch_group.grid_configure(row=1, column=1, sticky="w", padx=0)
-                action_columns = global_action_columns(self._logical_main_width())
+                self._switch_title.grid(row=0, column=0, rowspan=1, columnspan=2, sticky="w", padx=0, pady=(0, 3))
+                self._claude_switch_group.grid(row=1, column=0, sticky="w", padx=(0, 6))
+                self._codex_switch_group.grid(row=1, column=1, sticky="w", padx=0)
 
         for column in range(action_columns):
             self._button_group.grid_columnconfigure(column, weight=1, uniform="global-actions")
         for index, button in enumerate(self._global_action_buttons):
-            button.grid_configure(
+            # Use CTk's grid wrapper, not Tk's inherited grid_configure: the
+            # wrapper updates the geometry replayed on subsequent DPI changes.
+            button.grid(
                 row=index // action_columns,
                 column=index % action_columns,
                 sticky="ew",

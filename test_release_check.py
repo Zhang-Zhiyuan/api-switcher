@@ -351,3 +351,77 @@ def test_run_command_reports_missing_executable(monkeypatch):
     monkeypatch.setattr(release_check.subprocess, "run", missing)
 
     assert release_check.run_command("missing", ["missing-tool"]) is False
+
+
+def test_native_module_discovery_does_not_import_tests(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    sources = {
+        "test_fixture.py": "raise RuntimeError('do not import')\ndef test_window(tk_root): pass\n",
+        "tests/test_ctk.py": "def test_root():\n    root = ctk.CTk()\n",
+        "test_tk.py": "def test_root():\n    root = Tk()\n",
+        "test_plain.py": "def test_something(): pass\n",
+        "test_text_only.py": "EXAMPLE = 'ctk.CTk() tk_root'\ndef test_something(): pass\n",
+        "test_tray.py": "def main():\n    root = ctk.CTk()\n",
+        "test_api_connection.py": "def test_manual():\n    root = ctk.CTk()\n",
+        "build/test_generated.py": "def test_root():\n    root = ctk.CTk()\n",
+        "storage/test_user_data.py": "def test_window(tk_root): pass\n",
+    }
+    for filename, source in sources.items():
+        path = Path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+
+    assert {path.as_posix() for path in release_check._native_pytest_modules()} == {
+        "test_fixture.py", "test_tk.py", "tests/test_ctk.py",
+    }
+
+
+def test_native_module_discovery_does_not_hide_invalid_test_syntax(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("test_invalid.py").write_text("def broken(:", encoding="utf-8")
+    # Leave collection errors to the main pytest batch, not silently ignore them.
+    assert release_check._native_pytest_modules() == []
+
+
+def test_pytest_batches_cover_native_modules_once_and_continue_after_failure(monkeypatch):
+    modules = [Path("test_window_a.py"), Path("tests/test_window_b.py")]
+    monkeypatch.setattr(release_check, "_native_pytest_modules", lambda: modules)
+    calls = []
+
+    def run(label, command):
+        calls.append((label, command))
+        return len(calls) != 2
+
+    monkeypatch.setattr(release_check, "run_command", run)
+    command = ["python", "-m", "pytest", "-q", "--basetemp", "safe-temp"]
+    original = list(command)
+
+    assert release_check.run_pytest_checks(command) is False
+    assert command == original
+    assert calls == [
+        ("pytest", [*command, "--ignore=test_window_a.py", "--ignore=tests/test_window_b.py"]),
+        ("pytest", [*command, "test_window_a.py"]),
+        ("pytest", [*command, "tests/test_window_b.py"]),
+    ]
+
+
+def test_pytest_batch_without_native_modules_runs_unmodified(monkeypatch):
+    monkeypatch.setattr(release_check, "_native_pytest_modules", lambda: [])
+    calls = []
+    monkeypatch.setattr(release_check, "run_command", lambda label, command: calls.append((label, command)) or True)
+    assert release_check.run_pytest_checks(["pytest"]) is True
+    assert calls == [("pytest", ["pytest"])]
+
+
+def test_release_entrypoint_uses_isolated_gui_batch_runner(monkeypatch):
+    for name in ("check_runtime_dependencies", "check_release_dependency_versions",
+                 "check_source_mojibake", "check_python_syntax", "check_git_diff",
+                 "check_artifacts", "cleanup_intermediate_files"):
+        monkeypatch.setattr(release_check, name, lambda: True)
+    monkeypatch.setattr(release_check.sys, "argv", ["release_check.py"])
+    monkeypatch.setattr(release_check, "CHECKS", [("ruff", ["lint"]), ("pytest", ["tests"])])
+    calls = []
+    monkeypatch.setattr(release_check, "run_command", lambda label, cmd: calls.append((label, cmd)) or True)
+    monkeypatch.setattr(release_check, "run_pytest_checks", lambda cmd: calls.append(("isolated", cmd)) or True)
+    assert release_check.main() == 0
+    assert calls == [("ruff", ["lint"]), ("isolated", ["tests"])]

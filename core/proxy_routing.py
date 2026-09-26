@@ -5,6 +5,8 @@ stay in the existing subscription cache; each deployment resolves a fresh snapsh
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 from contextlib import ExitStack, contextmanager
 from functools import wraps
@@ -28,6 +30,8 @@ ROUTE_KEYS = (
     "service_node_pools",
 )
 MAX_SERVICE_NODE_POOL_SIZE = 16
+ROUTE_SNAPSHOT_MARKER = "# API-Switcher-Routes-v1: "
+MAX_ROUTE_SNAPSHOT_BYTES = 262144
 _HOST_LOCKS: dict[str, threading.RLock] = {}
 _HOST_LOCKS_GUARD = threading.Lock()
 _BINDINGS_LOCK = threading.RLock()
@@ -74,10 +78,11 @@ def node_bindings(preferences: dict, *, strict: bool = True) -> dict[str, str]:
 
 
 def route_modes(preferences: dict) -> dict[str, str]:
-    """Preserve explicit default-route choices across editor sessions.
+    """Preserve explicit default/direct choices across editor sessions.
 
     Absence means the service is eligible for a draft suggestion, not that a
-    live route may be changed. This metadata never selects an outbound itself.
+    live route may be changed. Direct is an explicit outbound, not a subscription
+    label or an invitation to automatically fall back to a proxy.
     """
     raw = preferences.get("service_route_modes", {})
     if not isinstance(raw, dict):
@@ -88,16 +93,22 @@ def route_modes(preferences: dict) -> dict[str, str]:
     pools = preferences.get("service_node_pools") or {}
     result = {}
     for service, mode in raw.items():
-        if not isinstance(service, str) or mode != "default":
-            raise ValueError("service_route_modes 线路模式只支持 default（跟随默认）")
+        if not isinstance(service, str) or mode not in ("default", "direct"):
+            raise ValueError("service_route_modes 线路模式只支持 default（跟随默认）或 direct（直连）")
         if service not in allowed:
             continue
         if ((isinstance(profiles, dict) and profiles.get(service))
                 or (isinstance(nodes, dict) and nodes.get(service))
                 or (isinstance(pools, dict) and pools.get(service))):
-            raise ValueError(f"{service} 的跟随默认模式与订阅或节点绑定冲突")
-        result[service] = "default"
+            raise ValueError(f"{service} 的跟随默认或直连模式与订阅或节点绑定冲突")
+        result[service] = mode
     return result
+
+
+def validate_outbound_privacy(routes, *, strict_privacy: bool) -> None:
+    """An explicit bypass must never silently downgrade a fail-closed policy."""
+    if strict_privacy and "DIRECT" in routes:
+        raise ValueError("直连目标与严格隐私模式冲突：请将目标改为代理线路，或先关闭该设备的严格隐私模式；未自动修改隐私设置。")
 
 
 def node_pools(preferences: dict) -> dict[str, list[str]]:
@@ -131,7 +142,7 @@ def node_pools(preferences: dict) -> dict[str, list[str]]:
             raise ValueError(f"{service} 的候选节点池没有对应订阅，请重新选择线路")
         if ((isinstance(fixed, dict) and fixed.get(service))
                 or (isinstance(modes, dict) and modes.get(service))):
-            raise ValueError(f"{service} 的候选节点池与固定节点或跟随默认模式冲突")
+            raise ValueError(f"{service} 的候选节点池与固定节点、跟随默认或直连模式冲突")
         result[service] = keys
     return result
 
@@ -203,7 +214,91 @@ def config_options(preferences: dict) -> dict:
     # Scope/strict-privacy are owned by each existing deployment's settings.
     options.pop("strict_privacy", None)
     options.pop("proxy_non_cn", None)
-    return {**options, **local_proxy._resolve_service_subscription_routes(preferences)}
+    return {**options, **local_proxy._resolve_service_subscription_routes(preferences),
+            "service_route_preferences": normalize_routes(preferences)}
+
+
+def _rules_digest(rules) -> str:
+    return hashlib.sha256(json.dumps(rules, ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def route_snapshot_marker(preferences: dict, rules: list[str]) -> str:
+    """Recoverable intent, never subscription credentials or node definitions.
+
+    The digest detects stale comments after manual rule edits; it is not a
+    signature, encryption, or proof of who last edited the remote file.
+    """
+    payload = {"routes": normalize_routes(preferences), "rules_sha256": _rules_digest(rules)}
+    payload["snapshot_sha256"] = _rules_digest([payload["routes"], payload["rules_sha256"]])
+    raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if len(raw) > MAX_ROUTE_SNAPSHOT_BYTES:
+        raise ValueError("服务分流恢复记录过大，请减少自定义目标")
+    return ROUTE_SNAPSHOT_MARKER + base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _managed_route_document(content: str) -> dict:
+    if (not isinstance(content, str) or len(content) > 2 * 1024 * 1024
+            or remote_proxy.AI_PROXY_CONFIG_MARKER not in content.splitlines()):
+        raise ValueError("远端不是可识别的受管配置，已停止覆盖线路")
+    try:
+        parsed = remote_proxy.yaml.safe_load(content)
+    except Exception as exc:
+        raise ValueError("远端配置无法解析，已停止覆盖线路") from exc
+    if (not isinstance(parsed, dict) or not isinstance(parsed.get("rules"), list)
+            or not parsed["rules"] or any(not isinstance(rule, str) for rule in parsed["rules"])):
+        raise ValueError("远端分流规则无效，已停止覆盖线路")
+    return parsed
+
+
+def recover_routes_from_config(content: str) -> dict:
+    """Read a bounded, self-consistent snapshot; does not access subscriptions."""
+    parsed = _managed_route_document(content)
+    lines = [line for line in content.splitlines() if line.startswith(ROUTE_SNAPSHOT_MARKER)]
+    if not lines:
+        raise ValueError("远端没有新版分流恢复记录；旧配置无法可靠还原订阅绑定，请核对后手动设置。远端未修改。")
+    if len(lines) != 1 or len(lines[0]) > MAX_ROUTE_SNAPSHOT_BYTES * 4 // 3 + 128:
+        raise ValueError("远端分流恢复记录重复或过大，未恢复")
+    try:
+        raw = base64.b64decode(lines[0][len(ROUTE_SNAPSHOT_MARKER):], altchars=b"-_", validate=True)
+        if len(raw) > MAX_ROUTE_SNAPSHOT_BYTES:
+            raise ValueError("oversized snapshot")
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate snapshot field")
+                result[key] = value
+            return result
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+        if not isinstance(payload, dict) or set(payload) != {"routes", "rules_sha256", "snapshot_sha256"}:
+            raise ValueError("invalid snapshot shape")
+        routes = normalize_routes(payload["routes"])
+        if (payload["routes"] != routes or payload["rules_sha256"] != _rules_digest(parsed["rules"])
+                or payload["snapshot_sha256"] != _rules_digest([payload["routes"], payload["rules_sha256"]])):
+            raise ValueError("snapshot does not match rules")
+    except (binascii.Error, UnicodeError, ValueError, TypeError, RecursionError) as exc:
+        raise ValueError("远端恢复记录损坏或与现行规则不一致，未恢复；请核对后手动设置") from exc
+    return routes
+
+
+def _remote_has_route_authority(content: str) -> bool:
+    if not content.strip():
+        return False
+    parsed = _managed_route_document(content)
+    # Even disabled/manual-default choices need their metadata preserved.
+    if ROUTE_SNAPSHOT_MARKER.rstrip() in content and any(recover_routes_from_config(content).values()):
+        return True
+    if "API-SWITCHER-SUB-" in content:
+        return True
+    baseline = {f"DOMAIN-SUFFIX,{domain},AI-PROXY" for domain in remote_proxy.AI_PROXY_DOMAINS}
+    baseline.update(remote_proxy.PRIVATE_DIRECT_IP_RULES)
+    baseline.update(("GEOIP,CN,DIRECT", "MATCH,AI-PROXY", "MATCH,DIRECT"))
+    # Legacy custom targets, direct overrides and extra groups must never be
+    # silently replaced by an empty local record during a normal refresh.
+    groups = parsed.get("proxy-groups")
+    return (any(rule not in baseline for rule in parsed["rules"])
+            or not isinstance(groups, list) or len(groups) != 1
+            or not isinstance(groups[0], dict) or groups[0].get("name") != "AI-PROXY")
 
 
 def validate_routes(preferences: dict) -> dict:
@@ -372,15 +467,36 @@ def _save_ssh_routes(ssh_name: str, preferences: dict):
     ))
 
 
+def load_ssh_route_editor_preferences(ssh_name: str) -> dict:
+    with host_lock(ssh_name):
+        return {**load_ssh_routes(ssh_name), "_authority_missing": not _host_path(ssh_name).exists()}
+
+
+@serialized_binding_change
+@serialized_ssh_route_operation
+def recover_ssh_routes(ssh_name: str) -> dict:
+    """Restore missing local intent only; never reload/write the remote proxy."""
+    if _host_path(ssh_name).exists():
+        raise ValueError("本机已有该服务器的分流记录，未覆盖；请重新打开编辑器")
+    content = remote_proxy.read_managed_ai_proxy_config(ssh_name)
+    routes = recover_routes_from_config(content)
+    if _host_path(ssh_name).exists():
+        raise ValueError("本机分流记录已被其他操作创建，未覆盖；请重新打开编辑器")
+    _save_ssh_routes(ssh_name, routes)
+    return routes
+
+
 def ssh_config_options(ssh_name: str, old_config: str = "", override=None) -> dict:
-    if override is None and not _host_path(ssh_name).exists() and "API-SWITCHER-SUB-" in old_config:
-        raise RuntimeError(f"{ssh_name}: 远端已有独立线路，但本机没有对应绑定，请先打开“目标分流”重新设置")
+    if override is None and not _host_path(ssh_name).exists() and _remote_has_route_authority(old_config):
+        raise RuntimeError(f"{ssh_name}: 远端已有独立线路或分流规则，但本机没有对应绑定；"
+                           "请在“目标分流”恢复本地分流记录，或核对后重新设置。远端配置未覆盖。")
     return config_options(load_ssh_routes(ssh_name) if override is None else override)
 
 
 def ssh_probe_kwargs(ssh_name: str) -> dict:
     routes = load_ssh_routes(ssh_name)
-    return {"routing_preferences": routes} if routes["service_profile_bindings"] else {}
+    explicit = routes["service_profile_bindings"] or "direct" in routes["service_route_modes"].values()
+    return {"routing_preferences": routes} if explicit else {}
 
 
 def ssh_bindings_for_profile(profile_id: str) -> tuple[str, ...]:
@@ -404,6 +520,7 @@ def ssh_bindings_for_profile(profile_id: str) -> tuple[str, ...]:
 @serialized_binding_change
 @serialized_ssh_route_operation
 def apply_ssh_routes(ssh_name: str, preferences: dict, *, expected=None, mixed_port=7890) -> str:
+    had_record = _host_path(ssh_name).exists()
     previous = load_ssh_routes(ssh_name)
     if expected is not None and previous != route_snapshot(expected):
         raise RuntimeError(f"{ssh_name}: 线路已被其他操作修改，请重新打开编辑器")
@@ -433,7 +550,12 @@ def apply_ssh_routes(ssh_name: str, preferences: dict, *, expected=None, mixed_p
                 raise RuntimeError("代理运行状态已变化，请重新检查后应用")
         except Exception as exc:
             try:
-                _save_ssh_routes(ssh_name, previous)
+                if had_record:
+                    _save_ssh_routes(ssh_name, previous)
+                else:
+                    # Missing authority is not an empty authorized record.
+                    # Preserve that distinction after a failed first apply.
+                    _host_path(ssh_name).unlink(missing_ok=True)
             except Exception as rollback:
                 raise RuntimeError(f"{ssh_name}: 应用线路失败，原绑定回滚也失败: {rollback}") from exc
             raise RuntimeError(f"{ssh_name}: 应用线路失败，已恢复原绑定: {exc}") from exc

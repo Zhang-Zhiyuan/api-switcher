@@ -118,6 +118,62 @@ def test_window_wraplength_uses_label_widget_scale_not_window_scale():
     assert label.configures == [{"wraplength": 560}]
 
 
+def test_wraplength_uses_nearest_laid_out_ancestor_for_new_container():
+    container = _WrapContainer(width=1)
+    container.master = _WrapContainer(width=1)
+    container.master.master = _WrapContainer(width=900)
+    label = _WrapLabel()
+    label._get_widget_scaling = lambda: 1.5
+    theme.bind_wraplength(container, label, padding=40)
+    container.idle_callbacks.pop(0)()
+    assert label.configures == [{"wraplength": 560}]
+    container.width = 450
+    container.bindings["<Configure>"](SimpleNamespace(widget=container))
+    container.idle_callbacks.pop(0)()
+    assert label.configures[-1] == {"wraplength": 260}
+
+
+def test_wraplength_retains_fallback_when_no_ancestor_has_geometry():
+    container, label = _WrapContainer(width=1), _WrapLabel()
+    theme.bind_wraplength(container, label, min_width=170)
+    container.idle_callbacks.pop(0)()
+    assert label.configures == [{"wraplength": 170}]
+
+
+def test_wraplength_ignores_unrelated_descendant_configure_events():
+    container, label = _WrapContainer(), _WrapLabel()
+    theme.bind_wraplength(container, label)
+    container.idle_callbacks.pop(0)()
+    for _ in range(200):
+        container.bindings["<Configure>"](SimpleNamespace(widget=object()))
+    assert not container.idle_callbacks
+    container.bindings["<Configure>"](SimpleNamespace(widget=container))
+    container.idle_callbacks.pop(0)()
+    assert len(label.configures) == 1  # Same width needs no redraw either.
+
+
+def test_wraplength_accepts_label_only_scaling_events():
+    container, label = _WrapContainer(width=900), _WrapLabel()
+    label._label, label._canvas = object(), object()
+    label._get_widget_scaling = lambda: 1.0
+    theme.bind_wraplength(container, label, padding=40)
+    container.idle_callbacks.pop(0)()
+    for scale, source in ((1.5, label._label), (2.0, label._canvas), (1.0, label)):
+        label._get_widget_scaling = lambda value=scale: value
+        container.bindings["<Configure>"](SimpleNamespace(widget=source))
+        container.idle_callbacks.pop(0)()
+        assert label.configures[-1] == {"wraplength": round(900 / scale) - 40}
+
+
+def test_configure_if_changed_only_passes_changed_fields():
+    values, calls = {"text": "ready", "text_color": "green"}, []
+    widget = SimpleNamespace(cget=values.get, configure=lambda **opts: calls.append(opts))
+    theme.configure_if_changed(widget, **values)
+    assert calls == []
+    theme.configure_if_changed(widget, text="ready", text_color="red")
+    assert calls == [{"text_color": "red"}]
+
+
 def test_wheel_delta_handles_touchpad_and_malformed_events():
     assert theme._wheel_direction(SimpleNamespace(delta=0.5, num=0)) == 1
     assert theme._wheel_direction(SimpleNamespace(delta=-0.5, num=0)) == -1

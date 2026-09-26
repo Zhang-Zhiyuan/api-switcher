@@ -45,13 +45,29 @@ def account_env(tmp_path, monkeypatch):
 
 def _credentials(kind, *, token="synthetic-access", email="account@example.test"):
     if kind == "codex":
+        # A real Codex client requires a decodable id_token as well as the pair.
+        claims = base64.urlsafe_b64encode(json.dumps({"synthetic": True}).encode()).decode().rstrip("=")
         return {"auth_mode": "chatgpt", "tokens": {
+            "id_token": "synthetic." + claims + ".signature",
             "access_token": token, "refresh_token": "synthetic-refresh", "account_id": email,
-        }, "email": email, "last_refresh": "2026-09-21T00:00:00Z"}
+        }, "email": email, "last_refresh": "2026-09-21T00:00:00+00:00"}
     return {"claudeAiOauth": {
         "accessToken": token, "refreshToken": "synthetic-refresh", "expiresAt": 1900000000000,
         "scopes": ["user:inference", "user:profile"], "subscriptionType": "pro",
     }, "email": email}
+
+
+def test_named_codex_export_does_not_downgrade_newer_saved_tokens(account_env):
+    tmp_path, _ = account_env
+    saved = _credentials("codex", token="newer-saved-access")
+    saved["last_refresh"] = "2026-09-21T10:00:00+00:00"
+    _save("codex", "chosen", saved)
+    older = _credentials("codex", token="older-live-access")
+    older["last_refresh"] = "2026-09-20T10:00:00Z"
+    _write_current("codex", older)
+    result = transfer.export_account_login(tmp_path / "newer.asxaccount", "", "codex", "chosen")
+    assert not result.used_current_login
+    assert transfer._read_payload(result.path, "")["credentials"] == saved
 
 
 def _write_current(kind, credentials):
@@ -369,6 +385,70 @@ def test_invalid_official_credentials_rejected(account_env, kind, bad_credential
         transfer.import_account_login(target, PASSWORD)
     assert secrets == {}
     assert not profile_manager.PROFILES_FILE.exists()
+
+
+@pytest.mark.parametrize("field", ["id_token", "access_token", "refresh_token"])
+def test_incomplete_codex_login_is_rejected_before_export_or_import(account_env, field):
+    tmp_path, secrets = account_env
+    credentials = _credentials("codex")
+    credentials["tokens"].pop(field)
+    _write_current("codex", credentials)
+    target = tmp_path / "output.asxaccount"
+    with pytest.raises(ValueError):
+        transfer.export_account_login(target, "", "codex")
+    assert not target.exists()
+    package = _write_bundle(tmp_path, "codex", credentials)
+    with pytest.raises(ValueError):
+        transfer.import_account_login(package, PASSWORD)
+    assert secrets == {}
+    assert not profile_manager.PROFILES_FILE.exists()
+
+
+@pytest.mark.parametrize("refresh_time", [
+    0, [], True, "invalid-date", "2026-09-21", "20260921T000000Z",
+    "2026-W39-1T00:00:00Z", "2026-09-21T00Z", "2026-09-21T00:00:00+00:00:30",
+])
+def test_invalid_codex_refresh_date_is_not_silently_reset(account_env, refresh_time):
+    credentials = _credentials("codex")
+    credentials["last_refresh"] = refresh_time
+    with pytest.raises(ValueError, match="last_refresh"):
+        transfer._clean_credentials("codex", credentials)
+
+
+@pytest.mark.parametrize("claims", [
+    {"email": ["synthetic@example.test"]},
+    {"https://api.openai.com/auth": {"chatgpt_account_id": 123}},
+    {"https://api.openai.com/auth": {"chatgpt_plan_type": []}},
+])
+def test_codex_id_token_claim_types_rejected_before_persisting(account_env, claims):
+    tmp_path, secrets = account_env
+    credentials = _credentials("codex")
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    credentials["tokens"]["id_token"] = "synthetic." + payload + ".signature"
+    path = _write_bundle(tmp_path, "codex", credentials)
+    with pytest.raises(ValueError, match="id_token"):
+        transfer.import_account_login(path, PASSWORD)
+    assert not secrets and not profile_manager.PROFILES_FILE.exists()
+
+
+def test_external_codex_auth_is_not_converted_to_managed_login(account_env):
+    credentials = _credentials("codex")
+    credentials["auth_mode"] = "chatgptAuthTokens"
+    with pytest.raises(ValueError, match="临时登录"):
+        transfer._clean_credentials("codex", credentials)
+
+
+def test_expired_access_token_with_refresh_token_is_preserved_and_warned(account_env):
+    tmp_path, _ = account_env
+    credentials = _credentials("codex")
+    expired = base64.urlsafe_b64encode(b'{"exp":1}').decode().rstrip("=")
+    credentials["tokens"]["access_token"] = "synthetic." + expired + ".signature"
+    _write_current("codex", credentials)
+    result = transfer.export_account_login(tmp_path / "expired.asxaccount", "", "codex")
+    assert any("过期" in warning for warning in result.warnings)
+    assert transfer._read_payload(result.path, "")["credentials"] == credentials
+    imported = transfer.import_account_login(result.path, "", "codex")
+    assert any("过期" in warning for warning in imported.warnings)
 
 
 @pytest.mark.parametrize("kind", ["claude", "codex"])

@@ -14,9 +14,19 @@ def route_description(row, preferences, catalog):
     service = row["id"]
     bindings = preferences.get("service_profile_bindings") or {}
     nodes = preferences.get("service_node_bindings") or {}
+    modes = preferences.get("service_route_modes") or {}
     inherited = (service.startswith("custom:") and not bindings.get(service)
-                 and (preferences.get("service_route_modes") or {}).get(service) != "default")
+                 and not modes.get(service))
     source = "custom" if inherited else service
+    if modes.get(source) == "direct":
+        hint = "目标设备直接访问，不经过代理节点；需自身网络可达，严格隐私模式下不可启用。"
+        if inherited:
+            hint = "继承自定义默认 · " + hint
+        if not row["enabled"]:
+            hint = "未启用 · 仅保留直连选择，勾选并保存后才生效。"
+        return {"profile": "直连（不经过代理）", "node": "无需代理节点", "hint": hint,
+                "warning": False, "bound": not inherited, "enabled": bool(row["enabled"]),
+                "inherited": inherited, "source_hint": hint}
     profile_id = bindings.get(source, "")
     node_key = nodes.get(source, "")
     pool = (preferences.get("service_node_pools") or {}).get(source, [])
@@ -89,7 +99,7 @@ def route_changes(originals, drafts, catalog):
             def identity(preferences, row):
                 profiles, nodes = preferences["service_profile_bindings"], preferences["service_node_bindings"]
                 inherited = (service.startswith("custom:") and not profiles.get(service)
-                             and preferences.get("service_route_modes", {}).get(service) != "default")
+                             and not preferences.get("service_route_modes", {}).get(service))
                 source = "custom" if inherited else service
                 return (row, profiles.get(service), nodes.get(service), profiles.get(source), nodes.get(source),
                         preferences.get("service_route_modes", {}).get(service),
@@ -133,7 +143,7 @@ class ServiceRouteOverview(ctk.CTkFrame):
         bind_wraplength(self, self._summary, padding=8)
         self._heading = ctk.CTkFrame(self, fg_color=COLORS["surface_alt"], corner_radius=6)
         self._heading.pack(fill="x", pady=(0, 4))
-        for column, text in enumerate(("访问目标", "订阅线路", "节点策略")):
+        for column, text in enumerate(("访问目标", "访问线路", "节点策略")):
             self._heading.grid_columnconfigure(column, weight=(2, 3, 4)[column], uniform="route-overview")
             ctk.CTkLabel(self._heading, text=text, font=font(11), text_color=COLORS["muted"], anchor="w").grid(
                 row=0, column=column, sticky="ew", padx=10, pady=2)
@@ -167,7 +177,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         # Only non-secret presentation data is retained; equal refreshes do not redraw.
         descriptions = [(row, route_description(row, preferences, catalog)) for row in proxy_routing.route_rows(preferences)
                         if row["id"] != "custom" or preferences.get("custom_targets")
-                        or (preferences.get("service_profile_bindings") or {}).get("custom")]
+                        or (preferences.get("service_profile_bindings") or {}).get("custom")
+                        or (preferences.get("service_route_modes") or {}).get("custom")]
         signature = repr(descriptions)
         if signature == self._signature:
             return

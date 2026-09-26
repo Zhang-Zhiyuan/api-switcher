@@ -393,6 +393,13 @@ def textbox_style(monospace: bool = False) -> dict:
     }
 
 
+def configure_if_changed(widget, **options) -> None:
+    """Avoid CTk redraw and native layout work for unchanged presentation."""
+    changes = {key: value for key, value in options.items() if widget.cget(key) != value}
+    if changes:
+        widget.configure(**changes)
+
+
 def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, max_width: int = 980) -> None:
     """Keep CTkLabel wraplength responsive to its container."""
     state = {"after_id": None, "wraplength": None}
@@ -403,6 +410,12 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
             if not label.winfo_exists():
                 return
             width = container.winfo_width()
+            if width <= 1:
+                # Avoid an initial narrow wrap followed by a full-list reflow.
+                parent = getattr(container, "master", None)
+                while parent is not None and width <= 1:
+                    width = parent.winfo_width()
+                    parent = getattr(parent, "master", None)
             try:
                 # CTkToplevel exposes window scaling, not widget scaling. Text
                 # wraplength is always in the label's widget-logical units.
@@ -426,6 +439,11 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
             return
 
     def schedule_update(_event=None):
+        source = getattr(_event, "widget", None)
+        if source is not None and not any(source is target for target in event_targets):
+            # Toplevel bindtags also receive every child's Configure event.
+            # Label events still cover widget-only DPI changes.
+            return
         if state.get("after_id"):
             return
         try:
@@ -433,6 +451,8 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
         except Exception:
             update()
 
+    event_targets = (container, getattr(container, "_canvas", None), label,
+                     getattr(label, "_canvas", None), getattr(label, "_label", None))
     try:
         container.bind("<Configure>", schedule_update, add="+")
     except TypeError:

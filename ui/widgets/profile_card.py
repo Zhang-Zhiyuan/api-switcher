@@ -30,6 +30,15 @@ def _bind_profile_card_action_grid(container, buttons) -> None:
     def apply_layout(event=None):
         try:
             width = int(getattr(event, "width", 0) or container.winfo_width())
+            if width <= 1:
+                # A just-created frame has no geometry yet. Starting every
+                # card with a one-column toolbar causes a tall layout followed
+                # by an expensive full-list reflow when its real width arrives.
+                parent = getattr(container, "master", None)
+                while parent is not None and width <= 1:
+                    width = parent.winfo_width()
+                    parent = getattr(parent, "master", None)
+                width = max(1, width - 28)
             try:
                 scaling = float(container._get_widget_scaling())
             except (AttributeError, TypeError, ValueError):

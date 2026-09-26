@@ -5,10 +5,10 @@ from core.lazy_imports import LazyAttribute, LazyModule
 from ui.tabs.tab_visibility import is_active_tab
 from ui.ui_dispatch import run_on_ui_thread
 from ui.widgets.profile_card import ProfileCard, _bind_profile_card_action_grid
-from ui.widgets.empty_state import EmptyState
+from ui.widgets.profile_card_list import ProfileTabRendering
 from ui.widgets.toast import show_toast
 from ui.widgets.auto_continue_loader import resolve_auto_continue_control_class
-from ui.theme import COLORS, bind_wraplength, button_style, font, recent_user_scroll
+from ui.theme import COLORS, bind_wraplength, button_style, configure_if_changed, font, recent_user_scroll
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -17,8 +17,6 @@ ConfirmDialog = LazyAttribute("ui.dialogs.confirm_dialog", "ConfirmDialog")
 ClaudeProfile = LazyAttribute("models.profile", "ClaudeProfile")
 open_account_transfer = LazyAttribute("ui.dialogs.account_transfer_dialog", "open_account_transfer")
 
-CARD_RENDER_BATCH_SIZE = 2
-CARD_RENDER_BATCH_DELAY_MS = 8
 DEFERRED_CONTROL_SCROLL_IDLE_MS = 850
 DEFERRED_CONTROL_RETRY_MS = 260
 PROFILE_TAB_STACK_MAX_WIDTH = 560
@@ -30,7 +28,7 @@ def _profile_tab_stacked(width: int) -> bool:
     return int(width) <= PROFILE_TAB_STACK_MAX_WIDTH
 
 
-class ClaudeTab(ctk.CTkScrollableFrame):
+class ClaudeTab(ProfileTabRendering, ctk.CTkScrollableFrame):
     """Tab for managing Claude Code API configs and official accounts."""
 
     def __init__(self, master, **kwargs):
@@ -41,8 +39,9 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._runtime_label = None
         self._account_runtime_label = None
         self._refresh_generation = 0
-        self._profile_render_after_id = None
-        self._profile_render_after_ids = set()
+        self._refresh_inflight = False
+        self._refresh_worker_generation = None
+        self._refresh_requested = False
         self._refresh_finish_after_id = None
         self._deferred_render_pending = False
         self._destroyed = False
@@ -56,6 +55,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         self._profile_tests_inflight: set[str] = set()
         self._profile_test_buttons: dict[str, object] = {}
         self._build_ui()
+        self._init_card_rendering("Claude", lambda: is_active_tab(self))
 
     def _build_ui(self):
         # Header
@@ -353,18 +353,6 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         if not self._destroyed:
             self.refresh()
 
-    def _cancel_profile_render(self):
-        after_ids = set(self._profile_render_after_ids)
-        if self._profile_render_after_id:
-            after_ids.add(self._profile_render_after_id)
-        for after_id in after_ids:
-            try:
-                self.after_cancel(after_id)
-            except Exception:
-                pass
-        self._profile_render_after_id = None
-        self._profile_render_after_ids.clear()
-
     def _suspend_background_work(self):
         if self._auto_continue_after_id:
             self._deferred_auto_continue_pending = True
@@ -373,7 +361,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             except Exception:
                 pass
             self._auto_continue_after_id = None
-        if self._profile_render_after_id or self._profile_render_after_ids:
+        if self._card_render_pending():
             self._deferred_render_pending = True
             self._cancel_profile_render()
 
@@ -414,10 +402,22 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         show_switch_preview(top, kind, name, on_confirm=on_confirm, on_cancel=self._refresh_shell_state)
 
     def refresh(self):
+        if self.__dict__.get("_destroyed", False):
+            return
         if not self._cards_frame or not self._account_cards_frame:
             return
+        initial = self.__dict__.get("_initial_refresh_after_id")
+        if initial is not None:
+            self.after_cancel(initial)
+            self._initial_refresh_after_id = None
         self._refresh_generation += 1
         generation = self._refresh_generation
+        if self.__dict__.get("_refresh_inflight", False):
+            self._refresh_requested = True
+            return
+        self._refresh_inflight = True
+        self._refresh_worker_generation = generation
+        self._refresh_requested = False
         self._cancel_profile_render()
         self._show_refresh_loading()
 
@@ -455,19 +455,36 @@ class ClaudeTab(ctk.CTkScrollableFrame):
                 payload = {"ok": False, "error": str(exc)}
 
             def finish():
+                if self._refresh_worker_generation != generation:
+                    return
+                self._refresh_worker_generation = None
                 self._refresh_finish_after_id = None
-                if generation != self._refresh_generation or not self._is_alive():
+                self._refresh_inflight = False
+                if not self._is_alive():
+                    return
+                if self._refresh_requested:
+                    self._refresh_requested = False
+                    self.refresh()
+                    return
+                if generation != self._refresh_generation:
                     return
                 if not payload["ok"]:
                     self._show_refresh_error(payload["error"])
                     return
                 self._render_refresh_payload(payload, generation)
 
-            run_on_ui_thread(self, finish)
+            if run_on_ui_thread(self, finish) is False and self._refresh_worker_generation == generation:
+                # Scheduling can fail during a window transition. Release only
+                # Python state here; the worker must never call Tk as fallback.
+                self._refresh_worker_generation = None
+                self._deferred_render_pending = True
+                self._refresh_inflight = False
 
         try:
             threading.Thread(target=worker, name="claude-tab-refresh", daemon=True).start()
         except Exception as exc:
+            self._refresh_worker_generation = None
+            self._refresh_inflight = False
             self._show_refresh_error(f"刷新任务启动失败: {exc}")
 
     def _is_alive(self) -> bool:
@@ -478,52 +495,13 @@ class ClaudeTab(ctk.CTkScrollableFrame):
         except Exception:
             return False
 
-    def _clear_frame(self, frame):
-        for widget in frame.winfo_children():
-            widget.destroy()
-
-    def _show_refresh_loading(self):
-        self._clear_frame(self._cards_frame)
-        self._clear_frame(self._account_cards_frame)
-        ctk.CTkLabel(
-            self._cards_frame,
-            text="正在后台读取 Claude API 配置...",
-            text_color=COLORS["muted"],
-            font=font(12),
-            anchor="w",
-        ).pack(fill="x", pady=(12, 4))
-        ctk.CTkLabel(
-            self._account_cards_frame,
-            text="正在后台读取 Claude 官方账号快照...",
-            text_color=COLORS["muted"],
-            font=font(12),
-            anchor="w",
-        ).pack(fill="x", pady=(4, 4))
-
-    def _show_refresh_error(self, message: str):
-        self._clear_frame(self._cards_frame)
-        self._clear_frame(self._account_cards_frame)
-        text = f"读取 Claude 配置失败: {message}"
-        ctk.CTkLabel(
-            self._cards_frame,
-            text=text,
-            text_color=COLORS["danger"],
-            font=font(12),
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", pady=(12, 4))
-        if self._runtime_label:
-            self._runtime_label.configure(text=text, text_color=COLORS["danger"])
-
     def _render_refresh_payload(self, payload: dict, generation: int):
+        if generation != self._refresh_generation or not self._is_alive():
+            return
         if not is_active_tab(self):
             self._deferred_render_pending = True
             return
-        for w in self._cards_frame.winfo_children():
-            w.destroy()
-        for w in self._account_cards_frame.winfo_children():
-            w.destroy()
-
+        self._cancel_profile_render()
         profiles = payload["profiles"]
         account_profiles = payload["accounts"]
         runtime = payload["runtime"]
@@ -554,7 +532,7 @@ class ClaudeTab(ctk.CTkScrollableFrame):
 
             if stored_active and stored_active != active:
                 text = f"{text} | API 记录: {stored_active}"
-            self._runtime_label.configure(text=text, text_color=color)
+            configure_if_changed(self._runtime_label, text=text, text_color=color)
 
         if self._account_runtime_label:
             if active_account:
@@ -573,106 +551,52 @@ class ClaudeTab(ctk.CTkScrollableFrame):
             else:
                 account_text = "官方账号当前未生效: 未发现可用登录凭据"
                 account_color = COLORS["muted"]
-            self._account_runtime_label.configure(text=account_text, text_color=account_color)
+            configure_if_changed(self._account_runtime_label, text=account_text, text_color=account_color)
 
-        if not profiles:
-            EmptyState(
-                self._cards_frame,
-                "暂无 Claude API 配置",
-                "新建第三方 API 配置，或从当前 Claude Code API 设置中导入。",
-                "新建 API 配置",
-                self._create_profile,
-            ).pack(fill="x", pady=(12, 4))
-        else:
-            self._render_profile_cards_batch(profiles, generation)
-
-        if not account_profiles:
-            EmptyState(
-                self._account_cards_frame,
-                "暂无 Claude 官方账号",
-                "先在 Claude Code 登录账号，再导入当前账号快照。",
-                "导入当前账号",
-                self._import_current_account,
-            ).pack(fill="x", pady=(4, 4))
-            return
-
-        self._render_account_cards_batch(account_profiles, generation)
-
-    def _render_profile_cards_batch(self, profiles: list[dict], generation: int, start: int = 0):
-        if generation != self._refresh_generation or not self._is_alive():
-            return
-        if not is_active_tab(self):
-            self._deferred_render_pending = True
-            self._profile_render_after_id = None
-            return
-        batch_size = CARD_RENDER_BATCH_SIZE
-        end = min(len(profiles), start + batch_size)
-        for item in profiles[start:end]:
-            profile = item["profile"]
-            is_active = bool(item["is_active"])
-            info = [
-                f"认证: {item.get('auth_identity') or 'no-auth'}  |  端点: {profile.base_url or '(默认)'}",
-                f"Provider: {profile.provider}  |  模型: {profile.model}  |  推理力度: {profile.effort_level}  |  权限: {profile.permissions_mode}",
-            ]
-            card = ProfileCard(
-                self._cards_frame, profile.name, info, is_active=is_active,
-                active_label="当前 API",
-                switch_label="切换 API",
-                on_switch=self._switch_profile,
-                on_test=self._test_profile,
-                on_edit=self._edit_profile,
-                on_clone=self._clone_profile,
-                on_delete=self._delete_profile,
-                border_color=COLORS["success"] if is_active else COLORS["border_soft"],
-            )
-            card.pack(fill="x", pady=5)
-            self._register_profile_test_button(profile.name, card)
-        if end >= len(profiles):
-            self._profile_render_after_id = None
-            return
-        after_id = self.after(
-            CARD_RENDER_BATCH_DELAY_MS,
-            lambda: self._render_profile_cards_batch(profiles, generation, end),
+        # Avoid repeatedly moving native account widgets as API cards grow.
+        self._render_profile_cards_batch(
+            profiles, generation, on_complete=lambda: self._render_account_cards_batch(account_profiles, generation),
         )
-        self._profile_render_after_id = after_id
-        self._profile_render_after_ids.add(after_id)
 
-    def _render_account_cards_batch(self, accounts: list[dict], generation: int, start: int = 0):
-        if generation != self._refresh_generation or not self._is_alive():
-            return
-        if not is_active_tab(self):
-            self._deferred_render_pending = True
-            self._profile_render_after_id = None
-            return
-        batch_size = CARD_RENDER_BATCH_SIZE
-        end = min(len(accounts), start + batch_size)
-        for item in accounts[start:end]:
-            account = item["profile"]
-            is_active = bool(item["is_active"])
-            snapshot_ok, snapshot_status = item["snapshot"]
-            info = [
-                f"身份: {account.identity}",
-                f"状态: {snapshot_status}  |  凭据: 本机加密保存  |  保存时间: {account.created_at or '-'}",
-            ]
-            card = ProfileCard(
-                self._account_cards_frame, account.name, info, is_active=is_active,
-                active_label="当前账号",
-                switch_label="切换账号",
-                on_switch=self._switch_account if snapshot_ok else None,
-                on_export=self._export_account_login if snapshot_ok else None,
-                on_delete=self._delete_account,
-                border_color=COLORS["accent"] if is_active else (COLORS["danger"] if not snapshot_ok else COLORS["border_soft"]),
-            )
-            card.pack(fill="x", pady=5)
-        if end >= len(accounts):
-            self._profile_render_after_id = None
-            return
-        after_id = self.after(
-            CARD_RENDER_BATCH_DELAY_MS,
-            lambda: self._render_account_cards_batch(accounts, generation, end),
+    def _create_profile_card(self, item):
+        profile = item["profile"]
+        is_active = bool(item["is_active"])
+        info = [
+            f"认证: {item.get('auth_identity') or 'no-auth'}  |  端点: {profile.base_url or '(默认)'}",
+            f"Provider: {profile.provider}  |  模型: {profile.model}  |  推理力度: {profile.effort_level}  |  权限: {profile.permissions_mode}",
+        ]
+        card = ProfileCard(
+            self._cards_frame, profile.name, info, is_active=is_active,
+            active_label="当前 API",
+            switch_label="切换 API",
+            on_switch=self._switch_profile,
+            on_test=self._test_profile,
+            on_edit=self._edit_profile,
+            on_clone=self._clone_profile,
+            on_delete=self._delete_profile,
+            border_color=COLORS["success"] if is_active else COLORS["border_soft"],
         )
-        self._profile_render_after_id = after_id
-        self._profile_render_after_ids.add(after_id)
+        self._register_profile_test_button(profile.name, card)
+        return card
+
+    def _create_account_card(self, item):
+        account = item["profile"]
+        is_active = bool(item["is_active"])
+        snapshot_ok, snapshot_status = item["snapshot"]
+        info = [
+            f"身份: {account.identity}",
+            f"状态: {snapshot_status}  |  凭据: 本机加密保存  |  保存时间: {account.created_at or '-'}",
+        ]
+        card = ProfileCard(
+            self._account_cards_frame, account.name, info, is_active=is_active,
+            active_label="当前账号",
+            switch_label="切换账号",
+            on_switch=self._switch_account if snapshot_ok else None,
+            on_export=self._export_account_login if snapshot_ok else None,
+            on_delete=self._delete_account,
+            border_color=COLORS["accent"] if is_active else (COLORS["danger"] if not snapshot_ok else COLORS["border_soft"]),
+        )
+        return card
 
     def _export_account_login(self, name=None):
         open_account_transfer(self, "claude", exporting=True, account_name=name)

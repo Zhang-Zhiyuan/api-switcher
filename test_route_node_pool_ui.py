@@ -213,13 +213,15 @@ def test_incremental_pool_checks_preserve_other_selections_when_toggled_in_rever
 def capture_preview(directory):
     """Create isolated wide/narrow screenshots without real subscriptions."""
     import customtkinter as ctk
-    from PIL import ImageGrab
+    from tools.ui_visual_audit import capture_window_image
 
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
-    root.withdraw()
+    root.title("隔离候选池预览（合成数据）")
+    root.geometry("320x180+30+30")
+    root.update()
     dialog = RouteNodeDialog(
         root, service_label="YouTube", profile_name="合成非家宽订阅 B",
         nodes=_nodes(30), selected_key="", selected_keys=["node-1", "node-4", "node-9"],
@@ -232,10 +234,7 @@ def capture_preview(directory):
             for _ in range(15):
                 root.update()
                 time.sleep(0.03)
-            ImageGrab.grab(bbox=(
-                dialog.winfo_rootx(), dialog.winfo_rooty(),
-                dialog.winfo_rootx() + dialog.winfo_width(), dialog.winfo_rooty() + dialog.winfo_height(),
-            )).save(destination / f"node-pool-{name}.png")
+            capture_window_image(dialog).save(destination / f"node-pool-{name}.png")
     finally:
         dialog.destroy()
         root.destroy()

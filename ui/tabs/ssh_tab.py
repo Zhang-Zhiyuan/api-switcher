@@ -5141,7 +5141,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._proxy_service_routes_dialog = ServiceRoutesDialog(
             self.winfo_toplevel(), scopes=server_names,
-            load_preferences=proxy_routing.load_ssh_routes,
+            load_preferences=proxy_routing.load_ssh_route_editor_preferences,
+            recover_preferences=proxy_routing.recover_ssh_routes,
             apply_preferences=lambda scope, preferences, expected: proxy_routing.apply_ssh_routes(
                 scope, preferences, expected=expected,
             ),

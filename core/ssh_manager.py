@@ -1,10 +1,11 @@
+import codecs
 import logging
 import errno
 import posixpath
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 import paramiko
 from core import security
@@ -378,8 +379,14 @@ class SSHManager:
         *,
         timeout: int,
         max_output_bytes: int,
+        stdout_callback: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[int, str, str]:
-        """Drain stdout/stderr together so either stream cannot deadlock SSH."""
+        """Drain both streams, optionally publishing decoded stdout as it arrives.
+
+        Cancellation closes only this command's channel, never the cached SSH
+        connection. Callbacks run on the caller's worker, not on the UI thread.
+        """
 
         limit = max(1, int(max_output_bytes))
         channel = getattr(stdout, "channel", None)
@@ -395,22 +402,35 @@ class SSHManager:
             callable(getattr(channel, name, None)) for name in channel_methods
         )
 
+        def check_cancelled():
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("已取消远程命令")
+
+        def close_channel():
+            close = getattr(channel, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
         if not use_channel:
-            stdout_raw = cls._read_stream_bounded(stdout, limit, "远程命令输出")
-            remaining = max(0, limit - len(stdout_raw))
-            stderr_raw = cls._read_stream_bounded(
-                stderr,
-                remaining or 1,
-                "远程命令输出",
-            )
-            if len(stdout_raw) + len(stderr_raw) > limit:
-                raise ValueError(f"远程命令输出超过 {limit} 字节上限")
-            exit_status = stdout.channel.recv_exit_status()
-            return (
-                exit_status,
-                stdout_raw.decode("utf-8", errors="replace"),
-                stderr_raw.decode("utf-8", errors="replace"),
-            )
+            try:
+                check_cancelled()
+                stdout_raw = cls._read_stream_bounded(stdout, limit, "远程命令输出")
+                stdout_text = stdout_raw.decode("utf-8", errors="replace")
+                if stdout_callback is not None and stdout_text:
+                    stdout_callback(stdout_text)
+                check_cancelled()
+                remaining = max(0, limit - len(stdout_raw))
+                stderr_raw = cls._read_stream_bounded(stderr, remaining or 1, "远程命令输出")
+                if len(stdout_raw) + len(stderr_raw) > limit:
+                    raise ValueError(f"远程命令输出超过 {limit} 字节上限")
+                exit_status = stdout.channel.recv_exit_status()
+                return exit_status, stdout_text, stderr_raw.decode("utf-8", errors="replace")
+            except Exception:
+                close_channel()
+                raise
 
         try:
             deadline = time.monotonic() + max(0.1, float(timeout))
@@ -418,9 +438,13 @@ class SSHManager:
             deadline = time.monotonic() + 30.0
         stdout_payload = bytearray()
         stderr_payload = bytearray()
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         try:
             while True:
+                check_cancelled()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"远程命令输出读取超过 {timeout} 秒")
                 progressed = False
                 for ready_name, recv_name, target in (
                     ("recv_ready", "recv", stdout_payload),
@@ -428,19 +452,25 @@ class SSHManager:
                 ):
                     ready = getattr(channel, ready_name)
                     receive = getattr(channel, recv_name)
-                    while ready():
+                    # One chunk per stream per turn prevents a noisy stdout
+                    # from starving stderr, cancellation or the total deadline.
+                    if ready():
                         remaining = limit - len(stdout_payload) - len(stderr_payload)
                         chunk = receive(min(REMOTE_COMMAND_READ_CHUNK_BYTES, remaining + 1))
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8", errors="replace")
                         if not chunk:
-                            break
+                            continue
                         target.extend(chunk)
                         progressed = True
                         if len(stdout_payload) + len(stderr_payload) > limit:
                             raise ValueError(
                                 f"远程命令输出超过 {limit} 字节上限"
                             )
+                        if target is stdout_payload and stdout_callback is not None:
+                            decoded = decoder.decode(chunk)
+                            if decoded:
+                                stdout_callback(decoded)
 
                 if (
                     channel.exit_status_ready()
@@ -452,13 +482,12 @@ class SSHManager:
                     raise TimeoutError(f"远程命令输出读取超过 {timeout} 秒")
                 if not progressed:
                     time.sleep(0.01)
+            if stdout_callback is not None:
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    stdout_callback(tail)
         except Exception:
-            close = getattr(channel, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+            close_channel()
             raise
 
         return (
@@ -607,10 +636,14 @@ class SSHManager:
         log_command: bool = True,
         get_pty: bool = False,
         max_output_bytes: int = MAX_REMOTE_COMMAND_OUTPUT_BYTES,
+        stdout_callback: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[int, str, str]:
         """Execute a command and return (exit_status, stdout, stderr)."""
         if not cmd or not cmd.strip():
             raise ValueError("命令不能为空")
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("已取消远程命令")
 
         try:
             logger.debug(f"Executing command: {cmd if log_command else '[redacted]'}")
@@ -628,11 +661,15 @@ class SSHManager:
                 stderr,
                 timeout=timeout,
                 max_output_bytes=max_output_bytes,
+                stdout_callback=stdout_callback,
+                cancel_event=cancel_event,
             )
             logger.debug(f"Command exit status: {exit_status}")
 
             return exit_status, stdout_data, stderr_data
 
+        except InterruptedError:
+            raise
         except Exception as e:
             logger.error(f"Error executing command: {e}")
             raise RuntimeError(f"执行远程命令失败: {_ssh_exception_detail(e)}") from e

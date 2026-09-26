@@ -95,7 +95,7 @@ def suggest_tagged_routes(
     sites = draft.get("builtin_sites", {})
     modes = draft.get("service_route_modes", {})
     pools = draft.get("service_node_pools", {})
-    if any(not isinstance(service, str) or mode != "default" for service, mode in modes.items()):
+    if any(not isinstance(service, str) or mode not in ("default", "direct") for service, mode in modes.items()):
         return draft, ["服务分流线路模式无效，未自动分配；请先修正已有配置。"]
     protected = ({protected_services} if isinstance(protected_services, str)
                  else set(protected_services or ()))
@@ -172,7 +172,7 @@ def _legacy_cleanup_authority_valid(preferences: dict) -> bool:
     modes = preferences.get("service_route_modes", {})
     pools = preferences.get("service_node_pools", {})
     for service, mode in modes.items():
-        if mode != "default" or profiles.get(service) or pins.get(service) or pools.get(service):
+        if mode not in ("default", "direct") or profiles.get(service) or pins.get(service) or pools.get(service):
             return False
     for service, keys in pools.items():
         if (not isinstance(keys, list) or not 1 <= len(keys) <= 16 or not profiles.get(service)

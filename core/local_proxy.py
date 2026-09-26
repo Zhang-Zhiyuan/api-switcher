@@ -623,6 +623,14 @@ def save_local_proxy_preferences(**updates) -> dict:
             proxy_routing.node_pools({**preferences, **updates})
         preferences.update({key: value for key, value in updates.items() if value is not None})
         preferences = _normalize_local_proxy_preferences(preferences)
+        if preferences["strict_privacy"] and "direct" in preferences["service_route_modes"].values():
+            # Validate even with the kernel stopped, and before writing either
+            # setting. Disabled/fully overridden direct choices emit no bypass.
+            blueprint = _service_route_blueprint(preferences)
+            proxy_routing.validate_outbound_privacy(
+                {*blueprint["proxy_domain_routes"].values(), *blueprint["proxy_ip_cidr_routes"].values()},
+                strict_privacy=True,
+            )
         preferences["updated_at"] = remote_proxy._now_iso()
         _ensure_local_dirs()
         atomic_write_text(
@@ -4640,14 +4648,12 @@ def _subscription_route_group_name(profile_id: str, service_id: str = "openai", 
 
 def _service_route_health_contract(service_ids) -> tuple[str, str]:
     requested = {str(service_id or "").strip() for service_id in service_ids or ()}
-    for service in LOCAL_PROXY_AI_SERVICES:
+    for service in (*LOCAL_PROXY_AI_SERVICES, *LOCAL_PROXY_BUILTIN_SITES):
         if str(service.get("id") or "") in requested:
             return (
                 str(service.get("health_check_url") or ""),
                 str(service.get("health_check_expected_status") or ""),
             )
-    if "youtube" in requested:
-        return "https://www.youtube.com/generate_204", "204"
     return "https://www.gstatic.com/generate_204", "204"
 
 
@@ -4832,9 +4838,9 @@ def _active_service_route_targets(preferences: dict) -> dict[str, dict[str, tupl
             continue
         entry_service_id = f"custom:{entry.get('id') or ''}"
         if ((preferences.get("service_profile_bindings") or {}).get(entry_service_id)
-                or (preferences.get("service_route_modes") or {}).get(entry_service_id) == "default"):
-            # An explicit per-target default means AI-PROXY, not inheritance
-            # from the shared custom subscription. Keep its rule separate so
+                or (preferences.get("service_route_modes") or {}).get(entry_service_id) in ("default", "direct")):
+            # Explicit default/direct choices do not inherit the shared
+            # custom route. Keep their rules separate so
             # it also overrides an overlapping built-in subscription route.
             targets[entry_service_id] = {
                 "domains": (str(entry.get("value") or ""),) if entry.get("kind") == "domain" else (),
@@ -4862,11 +4868,15 @@ def _service_route_blueprint(
         else {}
     )
     active_targets = _active_service_route_targets(preferences)
+    modes = proxy_routing.route_modes(preferences)
     pinned_nodes = proxy_routing.node_bindings(preferences)
     selected_pools = proxy_routing.node_pools(preferences)
     requested: dict[str, dict] = {}
     service_routes: dict[str, str] = {}
     for service_id in active_targets:
+        if modes.get(service_id) == "direct":
+            service_routes[service_id] = "DIRECT"
+            continue
         profile_id = str(bindings.get(service_id) or "").strip()
         if not profile_id:
             continue
@@ -4886,22 +4896,34 @@ def _service_route_blueprint(
     # different (parent/child) targets keep the builder's most-specific rule order.
     domain_routes: dict[str, str] = {}
     ip_cidr_routes: dict[str, str] = {}
+    domain_owners, ip_owners, overridden = {}, {}, []
     for service_id in sorted(active_targets, key=lambda service: (
         2 if service.startswith("custom:") else 1 if service == LOCAL_PROXY_CUSTOM_ROUTE_ID else 0
     )):
         target = active_targets[service_id]
         route = service_routes.get(service_id, "AI-PROXY")
-        domain_routes.update((str(domain), route) for domain in target.get("domains") or ())
-        ip_cidr_routes.update((str(cidr), route) for cidr in target.get("ip_cidrs") or ())
+        for values, routes, owners in ((target.get("domains"), domain_routes, domain_owners),
+                                       (target.get("ip_cidrs"), ip_cidr_routes, ip_owners)):
+            for value in values or ():
+                value = str(value)
+                if value in routes and routes[value] != route:
+                    overridden.append({"target": value, "shadowed": owners[value], "winner": service_id,
+                                       "kind": "override"})
+                routes[value], owners[value] = route, service_id
     return {"requested": requested, "service_routes": service_routes,
-            "proxy_domain_routes": domain_routes, "proxy_ip_cidr_routes": ip_cidr_routes}
+            "proxy_domain_routes": domain_routes, "proxy_ip_cidr_routes": ip_cidr_routes,
+            "domain_owners": domain_owners, "ip_owners": ip_owners, "overridden_targets": overridden}
 
 
 def _resolve_service_subscription_routes(preferences: dict) -> dict:
     blueprint = _service_route_blueprint(preferences)
     requested, service_routes = blueprint["requested"], blueprint["service_routes"]
     if not requested:
-        return {"additional_proxy_groups": (), "proxy_domain_routes": {}, "proxy_ip_cidr_routes": {}}
+        # A direct-only configuration has no subscription pools but still
+        # needs its explicit rules (including overrides of broad proxy scope).
+        return {"additional_proxy_groups": (),
+                "proxy_domain_routes": blueprint["proxy_domain_routes"],
+                "proxy_ip_cidr_routes": blueprint["proxy_ip_cidr_routes"]}
     domain_routes = blueprint["proxy_domain_routes"]
     ip_cidr_routes = blueprint["proxy_ip_cidr_routes"]
     used_groups = set(domain_routes.values()) | set(ip_cidr_routes.values())
@@ -7177,27 +7199,35 @@ def _classify_ai_probe_response(
         except (json.JSONDecodeError, TypeError, ValueError):
             parsed_error = {}
         error = parsed_error.get("error") if isinstance(parsed_error, dict) else None
-        identified = status == 401 and isinstance(error, dict) and bool(error)
+        error = error if isinstance(error, dict) else {}
+        challenge = (str(error.get("message") or "") + " " + str(error.get("type") or "")).casefold()
+        identified = status == 401 and any(
+            token in challenge for token in ("api key", "authentication", "unauthorized", "invalid_api_key")
+        )
         return identified, "", f"HTTP {status}" + (
             "，OpenAI API 身份已确认" if identified else "，未确认 OpenAI API 身份"
         )
 
     if label == "Claude/Anthropic":
+        try:
+            parsed_error = json.loads(text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed_error = {}
+        error = parsed_error.get("error") if isinstance(parsed_error, dict) else None
+        error = error if isinstance(error, dict) else {}
+        error_text = (str(error.get("type") or "") + " " + str(error.get("message") or "")).casefold()
         identified = (
             status in {400, 401}
-            and (
-                json_error_shape
-                and any(
-                    token in lowered
-                    for token in (
-                        "api key",
-                        "authentication",
-                        "unauthorized",
-                        "x-api-key",
-                        "anthropic-version",
-                    )
+            and any(
+                token in error_text
+                for token in (
+                    "api key", "authentication", "unauthorized",
+                    "x-api-key", "anthropic-version",
                 )
             )
+            and not any(token in error_text for token in (
+                "region", "country", "location", "not supported", "disabled", "quota", "policy", "blocked",
+            ))
         )
         return identified, "", f"HTTP {status}" + ("，Anthropic 身份已确认" if identified else "，未确认 Anthropic 身份")
 
@@ -7218,7 +7248,7 @@ def _classify_ai_probe_response(
             )
             policy_rejection = any(
                 token in message
-                for token in ("region", "country", "disabled", "quota", "policy", "blocked")
+                for token in ("region", "country", "location", "not supported", "disabled", "quota", "policy", "blocked")
             )
             identified = (
                 credential_challenge

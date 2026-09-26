@@ -441,13 +441,15 @@ def test_bulk_cancel_does_not_apply_selection(bulk):
 def capture_preview(directory):
     """Capture synthetic batch choices without opening the app or persisting."""
     import customtkinter as ctk
-    from PIL import ImageGrab
+    from tools.ui_visual_audit import capture_window_image
 
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
-    root.withdraw()
+    root.title("隔离批量设置预览（合成数据）")
+    root.geometry("320x180+30+30")
+    root.update()
     catalog = _catalog()
     catalog[0]["network_type"], catalog[1]["network_type"] = "residential", "datacenter"
     dialog = bulk_ui.RouteBulkDialog(
@@ -464,10 +466,7 @@ def capture_preview(directory):
             for _ in range(15):
                 root.update()
                 time.sleep(0.03)
-            ImageGrab.grab(bbox=(
-                dialog.winfo_rootx(), dialog.winfo_rooty(),
-                dialog.winfo_rootx() + dialog.winfo_width(), dialog.winfo_rooty() + dialog.winfo_height(),
-            )).save(destination / f"bulk-{name}.png")
+            capture_window_image(dialog).save(destination / f"bulk-{name}.png")
     finally:
         dialog.destroy()
         root.destroy()

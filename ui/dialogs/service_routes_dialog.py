@@ -9,6 +9,7 @@ import uuid
 import customtkinter as ctk
 
 from core import proxy_routing
+from core.proxy_route_preview import route_preflight
 from core.subscription_routing_policy import (
     cleanup_legacy_social_routes, legacy_social_route_candidates,
     preferred_network_type, suggest_tagged_routes,
@@ -19,11 +20,19 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo
 from ui.widgets.service_route_overview import route_changes, route_description
 
 DEFAULT_PROFILE = "跟随默认线路"
+DIRECT_PROFILE = "直连（不经过代理）"
 DEFAULT_CUSTOM_PROFILE = "跟随自定义默认线路"
 DEFAULT_NODE = "订阅首选 + 故障切换"
 AUTO_PROFILE = "按用途重新分配"
 MISSING_PROFILE = "订阅已失效，请重新选择"
 MISSING_NODE = "固定节点已失效，请重新选择"
+
+
+def _configure_changed(widget, **options):
+    """CTk redraws even unchanged options; avoid that work for reused rows."""
+    changed = {key: value for key, value in options.items() if widget.cget(key) != value}
+    if changed:
+        widget.configure(**changed)
 
 
 def _unused_label(base, mapping, next_suffix):
@@ -43,6 +52,8 @@ class NodeChoiceButton(ctk.CTkButton):
     """Keep the selected label separate from the compact button presentation."""
 
     def set(self, value):
+        if getattr(self, "_value", None) == value:
+            return
         self._value = value
         short = value if len(value) <= 28 else value[:27] + "…"
         self.configure(text=short + "  ›")
@@ -53,7 +64,8 @@ class NodeChoiceButton(ctk.CTkButton):
 
 class ServiceRoutesDialog(ctk.CTkToplevel):
     def __init__(self, master, *, scopes, load_preferences, apply_preferences,
-                 on_saved=None, initial_service="", catalog_loader=None, on_tags_saved=None):
+                 on_saved=None, initial_service="", catalog_loader=None, on_tags_saved=None,
+                 recover_preferences=None):
         super().__init__(master)
         self.title("目标分流 · 订阅与节点")
         self.geometry("1040x760")
@@ -65,6 +77,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._applier = apply_preferences
         self._on_saved = on_saved
         self._on_tags_saved = on_tags_saved
+        self._recoverer = recover_preferences
+        self._contexts = {}
+        self._preflight_cache = {}
         self._catalog_loader = catalog_loader or proxy_routing.load_route_catalog
         self._drafts = {}
         self._originals = {}
@@ -96,10 +111,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                      text_color=COLORS["text"]).pack(anchor="w")
         notice = ctk.CTkLabel(
             header, text="用途默认：AI 服务（OpenAI/Claude/Gemini）→ 家宽；其余内置网站（含 X/Reddit）→ 非家宽。\n"
-                         "自动补齐未配置目标，手动选择优先；保存并应用后生效，编辑期间不改变现有线路。",
+                         "也可选择直连；手动选择优先。保存并应用后生效，编辑期间不改变现有线路。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(4, 10))
+        self._intro_notice = notice
         bind_wraplength(header, notice, padding=8)
         toolbar = ctk.CTkFrame(header, fg_color="transparent")
         self._scope_toolbar = toolbar
@@ -127,6 +143,13 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._scope_inline = None
         toolbar.bind("<Configure>", self._layout_scope_toolbar, add="+")
         self._layout_scope_toolbar()
+        self._recovery_button = None
+        if recover_preferences:
+            self._recovery_button = ctk.CTkButton(
+                header, text="从远端恢复本地分流记录（不改变远端）", state="disabled",
+                command=self._recover_routes, **button_style("secondary", compact=True),
+            )
+            self._recovery_button.pack(anchor="w", pady=(6, 0))
 
         filters = ctk.CTkFrame(self, fg_color="transparent")
         filters.pack(fill="x", padx=20, pady=(0, 8))
@@ -191,10 +214,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                        command=self._add_custom, **button_style("secondary", compact=True))
         self._add_button.pack(side="right")
         note = ctk.CTkLabel(
-            footer, text="未启用的目标仍遵循默认代理范围，并不等于直连。第三方 API 请添加实际域名；自定义规则优先。",
+            footer, text="直连使用目标设备自身网络，严格隐私模式下不可启用。未勾选目标不等于直连；自定义规则优先。",
             font=font(11), text_color=COLORS["muted"], justify="left", anchor="w", height=20,
         )
         note.pack(fill="x", padx=20, pady=(8, 4))
+        self._footer_note = note
         bind_wraplength(self, note, padding=44)
         self._status = ctk.CTkLabel(footer, text="正在加载…", font=font(12), anchor="w", justify="left", height=22)
         self._status.pack(fill="x", padx=20)
@@ -234,10 +258,16 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _update_preview(self):
         count = len(self._changes)
-        self._preview_toggle.configure(text=f"{'收起' if self._preview_open else '查看'}修改清单（{count}）")
+        self._preview_toggle.configure(text=f"{'收起清单 / 规则' if self._preview_open else '修改清单 / 规则'}（{count}）")
         if not self._preview_open:
             self._preview.pack_forget()
+            self._intro_notice.pack(fill="x", pady=(4, 10), before=self._scope_toolbar)
+            self._footer_note.pack(fill="x", padx=20, pady=(8, 4), before=self._status)
             return
+        # Expanded previews must not squeeze the target list to zero height
+        # at high DPI. The preview repeats the relevant routing/privacy caveats.
+        self._intro_notice.pack_forget()
+        self._footer_note.pack_forget()
         lines = []
         for item in self._changes:
             lines.extend([f"[{item['scope']}] {item['label']}", f"  原：{item['before']}",
@@ -246,11 +276,59 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         notices = self._default_notices.get(self._scope, [])
         if notices:
             text += "\n\n按用途分流说明：\n" + "\n".join(notices)
+        preview = self._preflight(self._scope)
+        rows = {row["id"]: row for row in proxy_routing.route_rows(self._drafts[self._scope])}
+        def describe(service):
+            row = rows[service]
+            description = route_description(row, self._drafts[self._scope], self._catalog)
+            return f"{row['label']}（{description['profile']}）"
+        text += ("\n\n规则覆盖 / 生效范围（当前位置草稿，非运行态）：\n"
+                 "同一目标以自定义设置为准；子域名 / 更小网段优先。域名规则排在 IP 规则之前。")
+        for notice in preview["overlaps"][:40]:
+            label = "覆盖" if notice["kind"] == "override" else f"子范围例外于 {notice['parent']}"
+            text += f"\n• {notice['target']}：{label}；{describe(notice['shadowed'])} → {describe(notice['winner'])}"
+        if len(preview["overlaps"]) > 40:
+            text += f"\n另有 {len(preview['overlaps']) - 40} 处覆盖 / 例外，请缩小目标范围后逐项核对。"
+        if not preview["overlaps"]:
+            text += "\n未发现不同出口间的重叠规则。"
+        if preview["privacy_conflict"]:
+            text += "\n无法应用：直连目标与该设备的严格隐私模式冲突，请调整后再保存。"
+        elif preview["direct"] and self._contexts.get(self._scope, {}).get("strict_privacy") is None:
+            text += "\n直连依赖目标设备自身网络；远端严格隐私状态将在应用时核验。"
+        if self._contexts.get(self._scope, {}).get("_authority_missing"):
+            text += "\n本机尚无此服务器的分流记录。若远端已有分流，请先恢复本地记录，避免用空白草稿重建。"
         self._preview.configure(state="normal")
         self._preview.delete("1.0", "end")
         self._preview.insert("1.0", safe_feedback_text(text))
         self._preview.configure(state="disabled")
         self._preview.pack(fill="x", padx=20, pady=(4, 0), before=self._actions)
+
+    def _preflight(self, scope):
+        draft = self._drafts[scope]
+        strict = self._contexts.get(scope, {}).get("strict_privacy")
+        previous = self._preflight_cache.get(scope)
+        if previous is None or previous[:2] != (draft, strict):
+            result = route_preflight(draft, strict_privacy=strict)
+            self._preflight_cache[scope] = (copy.deepcopy(draft), strict, result)
+        return self._preflight_cache[scope][2]
+
+    def _recover_routes(self, *, discard_draft=False):
+        if self._busy or not self._recoverer or self._scope not in self._drafts:
+            return
+        if not discard_draft and self._drafts[self._scope] != self._originals[self._scope]:
+            ConfirmDialog(self, title="恢复本地分流记录", message="将丢弃当前位置的未保存草稿并读取远端记录；不改变远端代理。",
+                          on_confirm=lambda: self._recover_routes(discard_draft=True))
+            return
+        scope = self._scope
+        self._busy = True
+        self._set_editable(False)
+        self._status.configure(text="正在读取远端分流记录，仅恢复本机记录，不改变远端代理…", text_color=COLORS["muted"])
+        def run():
+            try:
+                self._queue.put(("recovered", (scope, self._recoverer(scope))))
+            except Exception as exc:
+                self._queue.put(("recovery_error", safe_feedback_text(str(exc))))
+        self._start_worker(run, "service-routes-recover")
 
     def _layout_actions(self, event=None):
         width = (event.width if event else self._actions.winfo_width()) / self._actions._get_widget_scaling()
@@ -396,6 +474,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _seed_tagged_defaults(self, *, reload=False):
         """Populate only the visited scope's draft; never persist or apply here."""
+        if self._contexts.get(self._scope, {}).get("_authority_missing"):
+            return
         if self._scope in self._auto_seeded and not reload:
             return
         self._auto_seeded.add(self._scope)
@@ -442,8 +522,12 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _start_load(self):
         def run():
             try:
-                preferences = {scope: proxy_routing.route_snapshot(self._loader(scope)) for scope in self._scopes}
-                self._queue.put(("loaded", (preferences, self._catalog_loader())))
+                raw = {scope: self._loader(scope) for scope in self._scopes}
+                preferences = {scope: proxy_routing.route_snapshot(value) for scope, value in raw.items()}
+                contexts = {scope: {"strict_privacy": value.get("strict_privacy"),
+                                    "_authority_missing": value.get("_authority_missing", False)}
+                            for scope, value in raw.items()}
+                self._queue.put(("loaded", (preferences, self._catalog_loader(), contexts)))
             except Exception as exc:
                 self._queue.put(("error", safe_feedback_text(str(exc))))
         self._start_worker(run, "service-routes-load")
@@ -458,7 +542,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._poll_id = self.after(60, self._poll)
             return
         if event == "loaded":
-            self._originals, self._catalog = payload
+            self._originals, self._catalog, self._contexts = payload
             self._drafts = copy.deepcopy(self._originals)
             self._busy = False
             self._seed_tagged_defaults()
@@ -479,12 +563,31 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._changed()
             if event == "catalog_error":
                 self._status.configure(text=f"缓存读取失败：{payload}。已保留草稿和原有列表。", text_color=COLORS["danger"])
+        elif event in ("recovered", "recovery_error"):
+            self._busy = False
+            if event == "recovered":
+                scope, recovered = payload
+                self._originals[scope] = proxy_routing.route_snapshot(recovered)
+                self._drafts[scope] = copy.deepcopy(self._originals[scope])
+                self._contexts[scope]["_authority_missing"] = False
+                self._auto_seeded.add(scope)
+                self._manually_edited[scope].clear()
+                self._default_notices.pop(scope, None)
+                self._render()
+            self._set_editable(True)
+            self._changed()
+            self._status.configure(
+                text="已恢复本地分流记录；远端代理未改变。缺失的订阅或节点需另行导入，核对后再应用。"
+                if event == "recovered" else f"未恢复：{payload}。草稿和远端配置未改变。",
+                text_color=COLORS["success"] if event == "recovered" else COLORS["danger"],
+            )
         elif event == "applied":
             succeeded, errors = payload
             for scope, preferences, _message in succeeded:
                 self._originals[scope] = preferences
                 self._manually_edited[scope].clear()
                 self._default_notices.pop(scope, None)
+                self._contexts.setdefault(scope, {})["_authority_missing"] = False
             self._busy = False
             self._set_editable(True)
             self._preview_open = False
@@ -537,7 +640,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 label += " · " + ("家宽" if profile["network_type"] == "residential" else "非家宽")
             if not profile["nodes"]:
                 label += " · 请先拉取"
-            if label == AUTO_PROFILE:
+            if label in (AUTO_PROFILE, DIRECT_PROFILE):
                 label += "（订阅）"
             label = _unused_label(label, mapping, suffixes)
             mapping[label] = profile["id"]
@@ -586,8 +689,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if service in self._rows:
                 row = self._rows[service]
                 row["info"], row["label"] = info, info["label"]
-                row["enabled"].set(info["enabled"])
-                row["name"].configure(text=safe_feedback_text(info["label"]))
+                if row["enabled"].get() != info["enabled"]:
+                    row["enabled"].set(info["enabled"])
+                _configure_changed(row["name"], text=safe_feedback_text(info["label"]))
                 self._refresh_row(service)
                 continue
             profiles = self._profile_values(service)
@@ -611,7 +715,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             bind_wraplength(target, name, padding=30, min_width=130)
             state_label = ctk.CTkLabel(target, text="", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
             state_label.grid(row=1, column=1, sticky="w")
-            profile_caption = ctk.CTkLabel(tile, text="订阅线路", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
+            profile_caption = ctk.CTkLabel(tile, text="访问线路 · 订阅 / 直连", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
             profile_combo = ctk.CTkComboBox(
                 tile, values=list(profiles), state="readonly", width=160,
                 command=lambda label, key=service: self._select_profile(key, label), **combo_style(),
@@ -646,32 +750,39 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         profiles = self._profile_values(service)
         default = DEFAULT_CUSTOM_PROFILE if service.startswith("custom:") else DEFAULT_PROFILE
         label = self._profile_reverse_cache[default].get(profile_id, MISSING_PROFILE)
-        if not profile_id and draft.get("service_route_modes", {}).get(service) == "default":
-            label = DEFAULT_PROFILE
-        row["profile"].configure(state="readonly", values=[
-            *profiles, *([AUTO_PROFILE] if preferred_network_type(service) else []),
+        mode = draft.get("service_route_modes", {}).get(service)
+        if not profile_id:
+            if mode == "default":
+                label = DEFAULT_PROFILE
+            elif mode == "direct":
+                label = DIRECT_PROFILE
+        profile_labels = list(profiles)
+        profile_labels.insert(1, DIRECT_PROFILE)
+        _configure_changed(row["profile"], state="disabled" if self._busy else "readonly", values=[
+            *profile_labels, *([AUTO_PROFILE] if preferred_network_type(service) else []),
             *([MISSING_PROFILE] if label == MISSING_PROFILE else []),
         ])
-        row["profile"].set(label)
-        row["profile"].configure(state="disabled" if self._busy else "readonly")
+        if row["profile"].get() != label:
+            row["profile"].set(label)
         nodes = self._node_values(profile_id)
         key = draft["service_node_bindings"].get(service, "")
         pool = draft.get("service_node_pools", {}).get(service, [])
         node_label = self._node_reverse_cache[profile_id].get(key, MISSING_NODE)
         row["nodes"] = nodes
-        row["node"].set(node_label if profile_id else label)
-        if pool:
-            row["node"].set(f"自选 {len(pool)} 个候选 · 自动切换")
-        row["node"].configure(state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
+        row["node"].set("无需代理节点" if mode == "direct" else
+                        f"自选 {len(pool)} 个候选 · 自动切换" if pool else node_label if profile_id else label)
+        _configure_changed(row["node"], state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
         row["info"]["enabled"] = bool(row["enabled"].get())
         description = route_description(row["info"], draft, self._catalog)
         row["description"] = description
         dirty = self._row_changed(service)
         state = "继承基准" if service == "custom" else ("默认启用" if row["always"] else ("已启用" if row["enabled"].get() else "未启用"))
         preferred = preferred_network_type(service)
-        if preferred:
+        if mode == "direct":
+            state += " · 手动直连"
+        elif preferred:
             state += " · 默认" + ("家宽" if preferred == "residential" else "非家宽")
-        row["state_label"].configure(text=state + (" · 未保存" if dirty else ""),
+        _configure_changed(row["state_label"], text=state + (" · 未保存" if dirty else ""),
                                       text_color=COLORS["accent"] if dirty else COLORS["muted"])
         # Full names stay visible here when the dropdown entry is too narrow.
         detail = description["hint"]
@@ -679,8 +790,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             detail = f'{description["profile"]} → {description["node"]} · {detail}'
         elif description["source_hint"] and not description["warning"]:
             detail = description["source_hint"]
-        row["detail"].configure(text=detail, text_color=COLORS["warning"] if description["warning"] else COLORS["muted_soft"])
-        row["tile"].configure(border_width=1 if dirty or description["warning"] else 0,
+        _configure_changed(row["detail"], text=detail, text_color=COLORS["warning"] if description["warning"] else COLORS["muted_soft"])
+        _configure_changed(row["tile"], border_width=1 if dirty or description["warning"] else 0,
                                border_color=COLORS["warning"] if description["warning"] else COLORS["accent"] if dirty else COLORS["border_soft"])
 
     def _row_changed(self, service):
@@ -697,7 +808,11 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         return value(self._drafts[self._scope]) != value(self._originals[self._scope])
 
     def _layout_rows(self):
+        layout = (self._narrow, self._table._get_widget_scaling())
         for row in self._rows.values():
+            if row.get("layout") == layout:
+                continue
+            row["layout"] = layout
             tile = row["tile"]
             for widget in tile.winfo_children():
                 widget.grid_forget()
@@ -722,9 +837,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _on_resize(self, event):
         narrow = event.width / self._table._get_widget_scaling() < 860
-        if narrow != self._narrow:
-            self._narrow = narrow
-            self._layout_rows()
+        self._narrow = narrow
+        self._layout_rows()
 
     def _schedule_filter(self):
         if self._filter_after_id:
@@ -749,10 +863,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if not hasattr(self, "_empty"):
             return
         query = self._search.get().strip().casefold()
-        self._empty.pack_forget()
-        visible = 0
+        visible = []
         for service, row in self._rows.items():
-            row["tile"].pack_forget()
             aliases = "gpt chatgpt" if service == "openai" else ""
             description = row["description"]
             text = f"{service} {row['label']} {aliases} {description['profile']} {description['node']}".casefold()
@@ -762,34 +874,41 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._category == "全部" or self._category == category
                 or self._category == "待修复" and description["warning"])
             if show:
-                row["tile"].pack(fill="x", pady=(0, 6), padx=2)
-                visible += 1
-        if not visible:
-            self._empty.pack(fill="x", padx=12, pady=24)
-        self._count_label.configure(text=f"显示 {visible} / {len(self._rows)} 项 · 勾选网站才新增专属规则；AI 服务默认启用")
+                visible.append(row["tile"])
+        if tuple(visible) != getattr(self, "_visible_tiles", None):
+            self._visible_tiles = tuple(visible)
+            self._empty.pack_forget()
+            for row in self._rows.values():
+                row["tile"].pack_forget()
+            for tile in visible:
+                tile.pack(fill="x", pady=(0, 6), padx=2)
+            if not visible:
+                self._empty.pack(fill="x", padx=12, pady=24)
+        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 勾选网站才新增专属规则；AI 服务默认启用")
 
     def _select_profile(self, service, label):
         if label == AUTO_PROFILE:
             self._use_tagged_default(service)
             return
         profiles = self._profile_values(service)
-        if self._busy or label not in profiles:
+        if self._busy or (label not in profiles and label != DIRECT_PROFILE):
             return
         self._manually_edited[self._scope].add(service)
         draft = self._drafts[self._scope]
-        profile_id = profiles[label]
+        direct = label == DIRECT_PROFILE
+        profile_id = "" if direct else profiles[label]
         modes = draft.setdefault("service_route_modes", {})
-        if profile_id:
-            modes.pop(service, None)
-        elif service.startswith("custom:"):
-            if label == DEFAULT_PROFILE:
-                modes[service] = "default"
-            else:
-                modes.pop(service, None)
-        elif preferred_network_type(service):
+        if direct:
+            modes[service] = "direct"
+        elif label == DEFAULT_PROFILE:
             modes[service] = "default"
+        else:
+            modes.pop(service, None)
         if draft["service_profile_bindings"].get(service, "") == profile_id:
-            self._changed(service)
+            if direct and not self._rows[service]["always"]:
+                self._toggle(service, True)
+            else:
+                self._changed(service)
             return
         had_fixed_node = bool(draft["service_node_bindings"].get(service) or draft.get("service_node_pools", {}).get(service))
         if profile_id:
@@ -798,12 +917,12 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             draft["service_profile_bindings"].pop(service, None)
         draft["service_node_bindings"].pop(service, None)
         draft.get("service_node_pools", {}).pop(service, None)
-        if profile_id and not self._rows[service]["always"]:
+        if (profile_id or direct) and not self._rows[service]["always"]:
             self._toggle(service, True)
         else:
             self._changed(service)
         if had_fixed_node:
-            self._status.configure(text="订阅已更改，原固定节点或候选池已从草稿解除。请确认新的节点策略后再保存。",
+            self._status.configure(text="线路已更改，原固定节点或候选池已从草稿解除。请确认新的访问线路后再保存。",
                                    text_color=COLORS["warning"])
 
     def _open_node_picker(self, service):
@@ -907,6 +1026,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._status.configure(text=self._status.cget("text") + " 部分用途未能自动分配，展开修改清单查看原因。",
                                        text_color=COLORS["warning"])
         candidates = self._update_legacy_cleanup()
+        preflight = self._preflight(self._scope)
+        if preflight["overlaps"] or preflight["privacy_conflict"]:
+            self._status.configure(
+                text=self._status.cget("text") + (" 直连与严格隐私冲突，应用前需调整。" if preflight["privacy_conflict"] else
+                                                 f" 有 {len(preflight['overlaps'])} 处规则覆盖 / 例外，展开清单查看。"),
+                text_color=COLORS["warning"],
+            )
+        if self._recovery_button:
+            missing = self._contexts.get(self._scope, {}).get("_authority_missing")
+            self._recovery_button.configure(state="normal" if missing and not self._busy else "disabled")
+            if missing:
+                self._status.configure(text="本机缺少该服务器分流记录；已有部署请先恢复，首次部署可手动设置后应用。",
+                                       text_color=COLORS["warning"])
         if candidates:
             self._status.configure(
                 text=self._status.cget("text") + f" 检测到 {len(candidates)} 项疑似旧版 X/Reddit 家宽绑定；"
@@ -1027,22 +1159,23 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _set_editable(self, enabled):
         state = "normal" if enabled else "disabled"
         for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button,
-                       self._tags_button, self._tag_routes_button, self._bulk_button, self._legacy_cleanup_button):
+                       self._tags_button, self._tag_routes_button, self._bulk_button, self._legacy_cleanup_button,
+                       self._recovery_button):
             if button:
                 button.configure(state=state)
         self._scope_combo.configure(state="readonly" if enabled and len(self._scopes) > 1 else "disabled")
         self._custom_entry.configure(state=state)
         self._custom_toggle.configure(state=state)
         for service, row in self._rows.items():
-            row["check"].configure(state="disabled" if row["always"] else state)
-            row["profile"].configure(state="readonly" if enabled else "disabled")
+            _configure_changed(row["check"], state="disabled" if row["always"] else state)
+            _configure_changed(row["profile"], state="readonly" if enabled else "disabled")
             if row["delete"]:
-                row["delete"].configure(state=state)
+                _configure_changed(row["delete"], state=state)
             self._refresh_row(service)
         if self._drafts:
             self._update_legacy_cleanup()
 
-    def _apply(self):
+    def _apply(self, *, allow_missing=False):
         if self._busy or not self._drafts:
             return
         pending = {scope: copy.deepcopy(value) for scope, value in self._drafts.items()
@@ -1050,6 +1183,20 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if not pending:
             # Allow explicitly reapplying refreshed subscription caches.
             pending[self._scope] = copy.deepcopy(self._drafts[self._scope])
+        conflicts = [scope for scope in pending if self._preflight(scope)["privacy_conflict"]]
+        if conflicts:
+            self._preview_open = True
+            self._update_preview()
+            self._status.configure(text="未应用：以下位置的直连与严格隐私冲突：" + "、".join(conflicts),
+                                   text_color=COLORS["danger"])
+            return
+        missing = [scope for scope in pending if self._contexts.get(scope, {}).get("_authority_missing")]
+        if missing and not allow_missing:
+            ConfirmDialog(self, title="确认重建分流规则", message=safe_feedback_text(
+                "本机尚无这些服务器的分流记录：" + "、".join(missing)
+                + "。若远端已有分流，建议取消并先恢复记录。继续将按当前草稿重建远端规则，而不是合并未知旧规则。"),
+                on_confirm=lambda: self._apply(allow_missing=True))
+            return
         originals = copy.deepcopy(self._originals)
         self._busy = True
         self._set_editable(False)

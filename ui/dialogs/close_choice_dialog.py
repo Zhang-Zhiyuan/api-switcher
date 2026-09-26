@@ -1,5 +1,6 @@
 import customtkinter as ctk
 
+from ui.proxy_lifecycle import PROXY_MAINTENANCE_NOTICE
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font
 
 
@@ -17,8 +18,8 @@ class CloseChoiceDialog(ctk.CTkToplevel):
     def __init__(self, master, on_minimize=None, on_exit=None, on_cancel=None):
         super().__init__(master)
         self.title("关闭 API切换器")
-        self.geometry("460x220")
-        self.minsize(420, 200)
+        self.geometry("500x280")
+        self.minsize(420, 240)
         self.resizable(True, True)
         self.configure(fg_color=COLORS["app_bg"])
         self.grab_set()
@@ -49,7 +50,7 @@ class CloseChoiceDialog(ctk.CTkToplevel):
 
         message_label = ctk.CTkLabel(
             body,
-            text="最小化后程序会继续在系统右下角托盘运行；直接退出会停止当前 GUI 进程。",
+            text=PROXY_MAINTENANCE_NOTICE,
             justify="left",
             text_color=COLORS["muted"],
             font=font(13),

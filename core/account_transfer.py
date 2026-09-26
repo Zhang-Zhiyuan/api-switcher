@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,10 @@ _IDENTITY_KEYS = (
     "accountUuid", "accountId", "chatgpt_account_id",
 )
 _TOKEN_KEYS = ("access_token", "refresh_token", "id_token", "accessToken", "refreshToken", "idToken")
+_CODEX_REFRESH_TIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-5][0-9]:[0-5][0-9]"
+    r"(?:\.[0-9]{1,9})?(?:[Zz]|[+-][0-9]{2}:[0-5][0-9])"
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class AccountExportResult:
     profile_type: str
     account_name: str
     used_current_login: bool
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,7 @@ class AccountImportResult:
     profile_type: str
     account_name: str
     created_new: bool
+    warnings: tuple[str, ...] = ()
 
 
 def _profile_type(value: object) -> str:
@@ -73,6 +80,9 @@ def _clean_credentials(profile_type: str, value: object) -> dict:
     if not isinstance(value, dict):
         raise ValueError("账号登录状态必须是有效的官方 OAuth 凭据")
     if profile_type == "codex":
+        if str(value.get("auth_mode") or "").lower() in {"chatgptauthtokens", "chatgpt_auth_tokens"}:
+            raise ValueError("这是外部程序管理的 Codex 临时登录，不能作为可刷新的账号迁移；请用 codex login 独立登录")
+        value = auth_parser.normalize_codex_token_fields(value)
         raw_tokens = value.get("tokens")
         if not isinstance(raw_tokens, dict):
             raise ValueError("Codex 登录状态缺少官方登录 token，不能导入 API 配置")
@@ -85,10 +95,46 @@ def _clean_credentials(profile_type: str, value: object) -> dict:
                 tokens[key] = token
         if not any(tokens.get(key, "").strip() for key in ("access_token", "refresh_token", "accessToken", "refreshToken")):
             raise ValueError("Codex 登录状态没有可用的 access/refresh token")
+        missing = [key for key in ("id_token", "access_token", "refresh_token") if not tokens.get(key, "").strip()]
+        if missing:
+            raise ValueError(
+                "Codex 登录状态不完整（缺少 " + ", ".join(missing)
+                + "），无法迁移可自动续期的官方账号。请在源电脑重新登录后导出当前登录。"
+            )
+        claims = auth_parser.codex_token_claims(tokens["id_token"])
+        if not claims:
+            raise ValueError("Codex id_token 格式无效，客户端无法读取；请重新登录后导出当前登录")
+        # Codex deserializes these optional claim fields as strings. A JSON
+        # payload that Python can decode is not necessarily readable by Codex.
+        # Unknown extra claims remain untouched; this is not signature checking.
+        for mapping, fields in (
+            (claims, ("email",)),
+            (claims.get("https://api.openai.com/auth"), ("chatgpt_account_id", "chatgpt_plan_type")),
+        ):
+            if mapping is None:
+                continue
+            if not isinstance(mapping, dict) or any(
+                mapping.get(key) is not None and not isinstance(mapping[key], str) for key in fields
+            ):
+                raise ValueError("Codex id_token 账号字段类型无效，客户端无法读取；请重新导出当前登录")
         _copy_identity(raw_tokens, tokens)
         result = {"auth_mode": "chatgpt", "tokens": tokens}
-        if isinstance(value.get("last_refresh"), str):
-            result["last_refresh"] = value["last_refresh"]
+        if value.get("last_refresh") is not None:
+            from datetime import datetime
+
+            refresh_time = value["last_refresh"]
+            try:
+                # datetime.fromisoformat also accepts compact/week dates and
+                # second-granularity UTC offsets, which Codex's RFC3339 parser
+                # rejects. Preserve the accepted original string and precision.
+                if not isinstance(refresh_time, str) or not _CODEX_REFRESH_TIME.fullmatch(refresh_time):
+                    raise ValueError
+                parsed_refresh = datetime.fromisoformat(refresh_time.replace("Z", "+00:00").replace("z", "+00:00"))
+                if parsed_refresh.tzinfo is None:
+                    raise ValueError
+            except (ValueError, OverflowError):
+                raise ValueError("Codex last_refresh 格式无效，请重新导出当前登录") from None
+            result["last_refresh"] = refresh_time
     else:
         raw_oauth = value.get("claudeAiOauth")
         if not isinstance(raw_oauth, dict):
@@ -129,6 +175,22 @@ def _clean_credentials(profile_type: str, value: object) -> dict:
     if len(encoded) > MAX_ACCOUNT_PAYLOAD_BYTES:
         raise ValueError("账号登录状态过大，已拒绝处理")
     return result
+
+
+def _login_warnings(profile_type: str, credentials: dict) -> tuple[str, ...]:
+    if profile_type != "codex":
+        return ()
+    from datetime import datetime, timezone
+
+    warnings = []
+    tokens = credentials.get("tokens") or {}
+    access_claims = auth_parser.codex_token_claims(tokens.get("access_token"))
+    expiry = auth_parser._auth_timestamp(access_claims.get("exp"))
+    if expiry and expiry <= datetime.now(timezone.utc).timestamp():
+        warnings.append("访问令牌已过期，需要 Codex 使用刷新凭据续期；若刷新凭据已失效或已被另一台电脑使用，须重新登录后导出。")
+    if not tokens.get("refresh_token"):
+        warnings.append("登录包缺少刷新凭据，不能保证到另一台电脑后自动续期；建议在源电脑重新登录并导出当前登录。")
+    return tuple(warnings)
 
 
 def _read_current_raw(profile_type: str, *, require_official_mode: bool = True) -> dict:
@@ -239,7 +301,8 @@ def export_account_login(
                 current = _read_current(profile_type)
             except (OSError, ValueError):
                 current = None
-            if current is not None and _same_login(profile_type, credentials, current):
+            if (current is not None and _same_login(profile_type, credentials, current)
+                    and not (profile_type == "codex" and auth_parser.codex_auth_is_newer(credentials, current))):
                 credentials = current
                 used_current = True
         payload = {
@@ -259,7 +322,7 @@ def export_account_login(
         raise ValueError("账号登录包过大，已拒绝导出")
     _validate_output_path(path)
     atomic_write_text(path, serialized)
-    return AccountExportResult(path, profile_type, name, used_current)
+    return AccountExportResult(path, profile_type, name, used_current, _login_warnings(profile_type, credentials))
 
 
 def _read_payload(path: Path, password: str) -> dict:
@@ -360,6 +423,7 @@ def import_account_login(
     if expected_type is not None and expected_type != profile_type:
         raise ValueError("账号登录包类型与当前页面不一致，请在对应的 Claude/Codex 页面导入")
     credentials = _clean_credentials(profile_type, payload.get("credentials"))
+    warnings = _login_warnings(profile_type, credentials)
     name = _account_name(payload.get("account_name"), f"{profile_type}-账号")
     from core.switcher import _SWITCH_LOCK
 
@@ -370,19 +434,43 @@ def import_account_login(
         except (OSError, ValueError):
             current_raw = None
         current = _clean_credentials(profile_type, current_raw) if current_raw is not None else None
-        if current is None or current == credentials:
+        if profile_type == "codex":
+            incoming = credentials
+            candidates = [(current, None)] if current is not None else []
             for profile in existing:
                 try:
-                    saved = _saved_credentials(profile_type, profile)
+                    candidates.append((_saved_credentials(profile_type, profile), profile))
                 except (OSError, ValueError):
                     continue
-                if saved == credentials:
-                    return AccountImportResult(profile_type, profile.name, False)
+            chosen_profile = None
+            for candidate, profile in candidates:
+                if (_same_login(profile_type, incoming, candidate)
+                        and auth_parser.codex_auth_is_newer(candidate, credentials)):
+                    credentials, chosen_profile = candidate, profile
+            if credentials != incoming:
+                warnings = (*_login_warnings(profile_type, credentials),
+                            "登录包比本机同一账号的凭据更旧，已保留本机较新的完整登录状态，避免退回失效 token。")
+                if chosen_profile is not None:
+                    return AccountImportResult(profile_type, chosen_profile.name, False, warnings)
+        # An unrelated live account cannot overwrite this exact snapshot when
+        # switching later. Re-importing it must be idempotent, including parallel
+        # import attempts. Same-identity/different-token bundles still require
+        # separate snapshots so preserve-current cannot erase the imported pair.
+        matches = (profile_manager._codex_account_matches_auth if profile_type == "codex"
+                   else profile_manager._claude_account_matches_credentials)
+        for profile in existing:
+            try:
+                saved = _saved_credentials(profile_type, profile)
+            except (OSError, ValueError):
+                continue
+            # Use preserve-current's own identity matcher here. Its legacy
+            # display-name fallback is broader than _same_login; absence of
+            # strong IDs must not be mistaken for proof of different accounts.
+            if saved == credentials and (current is None or current == credentials or not matches(profile, current_raw)):
+                return AccountImportResult(profile_type, profile.name, False, warnings)
         accounts = []
         names = {item.name for item in existing}
         if current is not None and current != credentials:
-            matches = (profile_manager._codex_account_matches_auth if profile_type == "codex"
-                       else profile_manager._claude_account_matches_credentials)
             if not any(matches(profile, current_raw) for profile in existing):
                 # The switcher preserves live tokens before activating a saved
                 # account. Put a destination snapshot FIRST, so that preserving
@@ -399,4 +487,4 @@ def import_account_login(
         accounts.append((profile, credentials))
         _save_new_accounts(profile_type, accounts)
         name = profile.name
-    return AccountImportResult(profile_type, name, True)
+    return AccountImportResult(profile_type, name, True, warnings)

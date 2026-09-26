@@ -100,8 +100,13 @@ def test_explicit_node_remains_pinned_even_when_recently_failed(monkeypatch):
 
 @pytest.mark.parametrize("service,url,status,pool_size", [
     ("youtube", "https://www.youtube.com/generate_204", "204", 16),
-    ("google", "https://www.gstatic.com/generate_204", "204", 16),
-    ("github", "https://www.gstatic.com/generate_204", "204", 16),
+    ("google", "https://www.google.com/generate_204", "204", 16),
+    ("github", "https://github.com/robots.txt", "200", 16),
+    ("huggingface", "https://huggingface.co/robots.txt", "200", 16),
+    ("x_twitter", "https://x.com/robots.txt", "200", 16),
+    ("reddit", "https://www.reddit.com/robots.txt", "200", 16),
+    ("discord", "https://discord.com/api/v10/gateway", "200", 16),
+    ("telegram", "https://telegram.org/", "200", 16),
     ("openai", "https://api.openai.com/v1/models", "200/401", 5),
 ])
 def test_generated_groups_use_bounded_live_https_fallback_without_other_exits(monkeypatch, service, url, status, pool_size):
@@ -114,13 +119,39 @@ def test_generated_groups_use_bounded_live_https_fallback_without_other_exits(mo
     group = next(group for group in parsed["proxy-groups"] if group["name"] != "AI-PROXY")
     assert group["type"] == "fallback"
     assert group["url"] == url and group["expected-status"] == status
-    assert group["interval"] == 10 and group["timeout"] == 5000
+    assert group["interval"] == (10 if service == "openai" else 30) and group["timeout"] == 5000
     assert group["lazy"] is False and group["max-failed-times"] == 1
     assert len(group["proxies"]) == pool_size
     assert not ({"DIRECT", "AI-PROXY", "REJECT"} & set(group["proxies"]))
     members = {node["name"]: node for node in parsed["proxies"]}
     assert {members[name]["server"] for name in group["proxies"]} <= {node["server"] for node in nodes}
     assert remote_proxy._managed_config_strict_privacy_enabled(config)
+
+
+@pytest.mark.parametrize("url,status", [("https://www.gstatic.com/generate_204", "204"),
+                                       ("https://www.youtube.com/generate_204", "204")])
+def test_previous_website_interval_keeps_strict_ownership(url, status):
+    spec = {"name": "SUB-123456789ABC-PROXY", "proxy_node": _node(1), "health_checked": True,
+            "health_check_url": url, "health_check_expected_status": status}
+    text = remote_proxy.build_mihomo_config(_node(0), strict_privacy=True, additional_proxy_groups=[spec],
+                                           extra_proxy_domains=["example.test"],
+                                           proxy_domain_routes={"example.test": spec["name"]})
+    old = text.replace("interval: 30", "interval: 10")
+    assert old != text
+    assert remote_proxy._managed_config_strict_privacy_enabled(old)
+    assert not remote_proxy._managed_config_strict_privacy_enabled(text.replace("interval: 30", "interval: 3600"))
+
+
+def test_websites_on_same_subscription_have_independent_target_health(monkeypatch):
+    _patch_profiles(monkeypatch, {"dc": (_node(1), _node(2))})
+    preferences = {"builtin_sites": {"google": True, "github": True},
+                   "service_profile_bindings": {"google": "dc", "github": "dc"}}
+    options = proxy_routing.config_options(preferences)
+    groups = options["additional_proxy_groups"]
+    assert len(groups) == 2
+    assert len({group["name"] for group in groups}) == 2
+    assert {group["health_check_url"] for group in groups} == {
+        "https://www.google.com/generate_204", "https://github.com/robots.txt"}
 
 
 def test_wider_website_pool_does_not_change_ai_pool_or_mutable_tag_group_identity(monkeypatch):

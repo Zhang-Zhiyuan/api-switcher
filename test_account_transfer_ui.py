@@ -20,6 +20,9 @@ class Widget:
     def configure(self, **options):
         self.options.update(options)
 
+    def cget(self, option):
+        return self.options.get(option, "")
+
     def delete(self, *_args):
         self.value = ""
 
@@ -104,6 +107,16 @@ def test_import_background_default_keeps_login_until_explicit_activation(dialog)
     assert item._password.get() == ""
     item._primary.options["command"]()
     assert events[-2:] == ["destroy", ("activate", "Imported account")]
+
+
+def test_import_shows_stale_bundle_warning_without_claiming_login_success(dialog):
+    item, _events, _pending, _callbacks, _calls = dialog
+    item._finish(SimpleNamespace(account_name="Saved account", warnings=("已保留本机较新凭据",)), None)
+    text = item._status.options["text"]
+    assert "已保留本机较新凭据" in text
+    assert "未验证服务端登录" in text
+    assert "refresh token" in text
+    assert "登录成功" not in text
 
 
 @pytest.mark.parametrize("name", [None, "Saved official account"])
@@ -370,18 +383,32 @@ def test_critical_ui_restore_failure_does_not_lock_transfer_dialog(dialog):
 
 
 @pytest.mark.parametrize("exporting", [False, True])
-def test_native_transfer_footer_stays_visible_in_small_window(exporting, tk_root):
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+def test_native_transfer_footer_stays_visible_in_small_window(exporting, kind, tk_root):
     import customtkinter as ctk
+    import time
 
     root = ctk.CTkToplevel(tk_root)
     root.geometry("680x560")
     window = None
     try:
-        window = module.AccountTransferDialog(root, "claude", exporting=exporting, on_activate=lambda _name: None)
+        window = module.AccountTransferDialog(root, kind, exporting=exporting, on_activate=lambda _name: None)
         window.geometry("440x360")
-        root.update()
+        # Windows maps a new transient asynchronously; one update can run
+        # before its owner receives the Map event on a busy release-test host.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            root.update()
+            if window._primary.winfo_ismapped() and window._cancel.winfo_ismapped():
+                break
+            time.sleep(0.01)
         for button in (window._primary, window._cancel):
-            assert button.winfo_ismapped()
+            assert button.winfo_ismapped(), {
+                "owner_state": root.state(), "window_state": window.state(),
+                "owner_mapped": root.winfo_ismapped(), "window_mapped": window.winfo_ismapped(),
+                "geometry": window.geometry(), "button_grid": button.grid_info(),
+                "footer_geometry": button.master.winfo_geometry(),
+            }
             assert button.winfo_rootx() >= window.winfo_rootx()
             assert button.winfo_rootx() + button.winfo_width() <= window.winfo_rootx() + window.winfo_width()
             assert button.winfo_rooty() + button.winfo_height() <= window.winfo_rooty() + window.winfo_height()
@@ -500,7 +527,7 @@ def capture_preview(directory):
     import time
 
     import customtkinter as ctk
-    from PIL import ImageGrab
+    from tools.ui_visual_audit import capture_window_image
     from ui.dialogs.password_dialog import PasswordDialog
 
     destination = Path(directory)
@@ -518,7 +545,7 @@ def capture_preview(directory):
             for _ in range(8):
                 root.update()
                 time.sleep(0.03)
-            ImageGrab.grab(window=window.winfo_id()).save(destination / f"account-transfer-{mode}.png")
+            capture_window_image(window).save(destination / f"account-transfer-{mode}.png")
             window.destroy()
         window = PasswordDialog(
             root, title="导出迁移包（密码可选）",
@@ -528,7 +555,7 @@ def capture_preview(directory):
         for _ in range(8):
             root.update()
             time.sleep(0.03)
-        ImageGrab.grab(window=window.winfo_id()).save(destination / "optional-migration-password.png")
+        capture_window_image(window).save(destination / "optional-migration-password.png")
         window.destroy()
     finally:
         root.destroy()

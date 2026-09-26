@@ -472,6 +472,25 @@ def switch_codex_account(name: str) -> None:
     profiles = profile_manager.list_codex_account_profiles()
     target = next((p for p in profiles if p.name == name), target)
     auth = profile_manager.load_codex_account_auth(target)
+    target_auth = auth
+    # Old app versions can leave several snapshots of the same account. A
+    # chosen card must not restore an older refresh bundle when a provably
+    # newer, complete bundle for that exact account is already saved locally.
+    for candidate in profiles:
+        if candidate.name == target.name:
+            continue
+        try:
+            candidate_auth = profile_manager.load_codex_account_auth(candidate)
+        except (OSError, ValueError):
+            continue
+        tokens = candidate_auth.get("tokens") or {}
+        if (all(isinstance(tokens.get(key), str) and tokens[key].strip()
+                for key in ("id_token", "access_token", "refresh_token"))
+                and auth_parser.codex_token_claims(tokens["id_token"])
+                and profile_manager._account_snapshots_match(target_auth, candidate_auth, "codex-login")
+                and profile_manager._account_snapshots_match(auth, candidate_auth, "codex-login")
+                and auth_parser.codex_auth_is_newer(candidate_auth, auth)):
+            auth = candidate_auth
 
     backup_manager.create_backup(f"切换 Codex 官方账号到 {name}")
 

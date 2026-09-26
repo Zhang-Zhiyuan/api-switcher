@@ -117,18 +117,20 @@ def test_adaptive_navigation_forgets_hidden_controls_and_restores_dropdown_geome
 
 
 @pytest.mark.parametrize("orientation", ["vertical", "horizontal"])
-def test_real_scrollbar_draw_drag_resize_theme_and_scaling(orientation):
+def test_real_scrollbar_draw_drag_resize_theme_and_scaling(tk_root, monkeypatch, orientation):
     import tkinter
+    import time
     import customtkinter as ctk
 
-    try:
-        root = ctk.CTk()
-    except tkinter.TclError as exc:
-        pytest.skip(f"Tk display unavailable: {exc}")
+    # Keep one Tcl interpreter across parameter cases. CustomTkinter's global
+    # font/scaling caches may retain a destroyed CTk root; that is not a missing
+    # display and must not silently skip the second orientation on Windows.
+    root = ctk.CTkToplevel(tk_root)
     old_scaling = ctk.ScalingTracker.widget_scaling
     old_appearance = ctk.get_appearance_mode()
     errors = []
     root.report_callback_exception = lambda *_args: errors.append(_args)
+    monkeypatch.setattr(tk_root, "report_callback_exception", root.report_callback_exception)
     try:
         root.title("API 切换器 — 隔离滚动回归")
         root.geometry("640x420")
@@ -139,6 +141,17 @@ def test_real_scrollbar_draw_drag_resize_theme_and_scaling(orientation):
         canvas.pack(fill="both", expand=True)
         canvas.configure(**{"yscrollcommand" if orientation == "vertical" else "xscrollcommand": bar.set})
         root.update()
+        def wait_until_mapped():
+            # CTk temporarily withdraws new Windows Toplevels to recolor their
+            # titlebar. Switching appearance before its 5 ms restore callback
+            # records "withdrawn" as the next restore state. Wait as a user
+            # necessarily would before interacting with an invisible window.
+            deadline = time.monotonic() + 2
+            while not bar._canvas.winfo_viewable() or min(bar._canvas.winfo_width(), bar._canvas.winfo_height()) <= 1:
+                assert time.monotonic() < deadline, "scrollbar was not mapped"
+                root.update()
+                time.sleep(0.01)
+        wait_until_mapped()
         idle = []
         root.after_idle(lambda: idle.append(True))
         bar.set(0.0, 0.2)
@@ -151,6 +164,7 @@ def test_real_scrollbar_draw_drag_resize_theme_and_scaling(orientation):
             ctk.set_appearance_mode(appearance)
             root.geometry("680x450")
             root.update()
+            wait_until_mapped()
             view("moveto", 0)
             root.update_idletasks()
             bar._canvas.event_generate(
@@ -158,7 +172,7 @@ def test_real_scrollbar_draw_drag_resize_theme_and_scaling(orientation):
                 y=round(bar._canvas.winfo_height() * 0.85),
             )
             root.update()
-            assert view()[0] > 0.2
+            assert view()[0] > 0.2, (orientation, scale, bar._canvas.winfo_width(), bar._canvas.winfo_height(), bar.get())
             assert 0 <= bar.get()[0] < bar.get()[1] <= 1
             bar._canvas.event_generate("<MouseWheel>", delta=120)
             root.update()
@@ -168,6 +182,7 @@ def test_real_scrollbar_draw_drag_resize_theme_and_scaling(orientation):
         ctk.set_widget_scaling(old_scaling)
         ctk.set_appearance_mode(old_appearance)
         root.destroy()
+        tk_root.update()  # Finish native teardown before the next orientation.
 
 
 class Root:
@@ -195,6 +210,9 @@ class Frame:
 
     def winfo_children(self):
         return [root for root in self.roots if not root.destroyed]
+
+    def pack_slaves(self):
+        return [root for root in self.winfo_children() if root.packed]
 
 
 def scheduler(widget):
@@ -563,6 +581,19 @@ def test_quality_update_reuses_controls_with_new_display_values(monkeypatch):
     assert not cached["row"].destroyed
     assert cached["presentation"] != previous
     assert picker._rendered_signature is not None
+
+
+def test_checkbox_scheduler_failure_finishes_paint_without_losing_selection(monkeypatch):
+    picker, _, _, drain = picker_widget(monkeypatch)
+    picker.set_nodes([node(i) for i in range(12)])
+    drain()
+    install_row_cache(picker)
+    picker._checked_keys.update(picker._visible_checkboxes)
+    picker.after = lambda *_args: (_ for _ in ()).throw(RuntimeError("synthetic scheduling failure"))
+    picker._sync_visible_checkboxes()
+    assert picker._checkbox_sync_after_id is None
+    assert len(picker._checked_keys) == 12
+    assert all(variable.get() for _, variable in picker._visible_checkboxes.values())
 
 
 def test_bad_signature_does_not_skip_healthy_rows(monkeypatch):

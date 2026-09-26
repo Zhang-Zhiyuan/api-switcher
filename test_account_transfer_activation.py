@@ -374,7 +374,8 @@ def test_selected_export_uses_rotated_tokens_when_stable_account_email_changes(t
     selected_credentials["email"] = "before@example.test"
     _set_workspace(kind, selected_credentials, "synthetic-same-workspace")
     if kind == "codex":
-        selected_credentials["tokens"].pop("id_token")
+        claims = base64.urlsafe_b64encode(b'{"synthetic":true}').decode().rstrip("=")
+        selected_credentials["tokens"]["id_token"] = "synthetic." + claims + ".signature"
         selected_credentials["tokens"]["access_token"] = "synthetic-opaque-old"
     else:
         selected_credentials["claudeAiOauth"]["accessToken"] = "synthetic-opaque-old"
@@ -437,3 +438,133 @@ def test_passwordless_cross_machine_transfer_preserves_existing_login_until_swit
                for profile in _saved(kind))
     assert {key: os.environ.get(key) for key in proxies} == proxies
     assert transfer_machine.registry == registry
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+def test_imported_account_keeps_rotated_tokens_across_repeated_switches(transfer_machine, kind):
+    from core.account_transfer import import_account_login
+
+    package, _ = transfer_machine.exported(kind)
+    transfer_machine.live(kind, _credentials(kind, revision="destination-old"))
+    imported = import_account_login(package, PASSWORD, expected_type=kind)
+    other_credentials = _credentials(kind, identity="different-person", revision="other")
+    other = _save_current(kind, other_credentials)
+    _activate(kind, imported.account_name)
+
+    for revision in ("rotated-once", "rotated-twice", "rotated-again"):
+        rotated = _credentials(kind, revision=revision)
+        transfer_machine.live(kind, rotated)
+        _activate(kind, other.name)
+        saved_import = next(item for item in _saved(kind) if item.name == imported.account_name)
+        assert _token_pair(kind, _saved_value(kind, saved_import)) == _token_pair(kind, rotated)
+        _activate(kind, imported.account_name)
+        assert _token_pair(kind, _read_live(kind)) == _token_pair(kind, rotated)
+        current_name = (profile_manager.get_current_codex_account_name() if kind == "codex"
+                        else profile_manager.get_current_claude_account_name())
+        assert current_name == imported.account_name
+
+
+def test_switch_codex_does_not_replace_newer_snapshot_with_older_live_tokens(transfer_machine):
+    transfer_machine.use("destination")
+    newer = _credentials("codex", revision="newer")
+    newer["last_refresh"] = "2026-09-21T10:00:00Z"
+    selected = _save_current("codex", newer)
+    older = _credentials("codex", revision="older")
+    older["last_refresh"] = "2026-09-20T10:00:00Z"
+    transfer_machine.live("codex", older)
+    _activate("codex", selected.name)
+    assert _token_pair("codex", _read_live("codex")) == _token_pair("codex", newer)
+
+
+def test_import_codex_older_bundle_retains_newer_local_credentials(transfer_machine):
+    from core.account_transfer import import_account_login
+
+    package, _ = transfer_machine.exported("codex")
+    newer = _credentials("codex", revision="destination-newer")
+    newer["last_refresh"] = "2026-09-22T00:00:00Z"
+    transfer_machine.live("codex", newer)
+    imported = import_account_login(package, PASSWORD, expected_type="codex")
+    assert imported.warnings
+    _activate("codex", imported.account_name)
+    assert _token_pair("codex", _read_live("codex")) == _token_pair("codex", newer)
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+def test_refresh_named_duplicate_updates_that_exact_snapshot(transfer_machine, kind):
+    from core.account_transfer import import_account_login
+
+    package, _ = transfer_machine.exported(kind)
+    old = _credentials(kind, revision="destination-old")
+    transfer_machine.live(kind, old)
+    imported = import_account_login(package, PASSWORD, expected_type=kind)
+    prior = next(profile for profile in _saved(kind) if profile.name != imported.account_name)
+    _activate(kind, imported.account_name)
+    rotated = _credentials(kind, revision="newest-before-sync")
+    transfer_machine.live(kind, rotated)
+    refresh = (profile_manager.refresh_codex_account_snapshot_if_current if kind == "codex"
+               else profile_manager.refresh_claude_account_snapshot_if_current)
+    assert refresh(prior.name)
+    updated = next(profile for profile in _saved(kind) if profile.name == prior.name)
+    assert _token_pair(kind, _saved_value(kind, updated)) == _token_pair(kind, rotated)
+    assert _token_pair(kind, _read_live(kind)) == _token_pair(kind, rotated)
+
+
+def test_refresh_named_codex_does_not_overwrite_newer_saved_snapshot(transfer_machine):
+    transfer_machine.use("destination")
+    newer = _credentials("codex", revision="newer")
+    newer["last_refresh"] = "2026-09-21T10:00:00Z"
+    selected = _save_current("codex", newer)
+    older = _credentials("codex", revision="older")
+    older["last_refresh"] = "2026-09-20T10:00:00Z"
+    transfer_machine.live("codex", older)
+    assert not profile_manager.refresh_codex_account_snapshot_if_current(selected.name)
+    assert _saved_value("codex", selected) == newer
+
+
+def test_switch_legacy_duplicate_uses_newer_complete_bundle_for_same_account(transfer_machine):
+    from models.profile import CodexAccountProfile
+
+    transfer_machine.use("destination")
+    older = _credentials("codex", revision="legacy-old")
+    older["last_refresh"] = "2026-09-20T10:00:00Z"
+    target = _save_current("codex", older)
+    newer = _credentials("codex", revision="legacy-new")
+    newer["last_refresh"] = "2026-09-21T10:00:00Z"
+    duplicate = CodexAccountProfile("newer duplicate", "codex-account:newer duplicate:auth_json", target.identity)
+    profile_manager.save_codex_account_profile_with_auth(duplicate, newer)
+    transfer_machine.live("codex", _credentials("codex", identity="unrelated", revision="live-other"))
+    _activate("codex", target.name)
+    assert _token_pair("codex", _read_live("codex")) == _token_pair("codex", newer)
+    assert profile_manager.get_active_codex_account_name() == target.name
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+@pytest.mark.parametrize("workers", [1, 6])
+def test_repeat_import_with_other_live_account_is_idempotent(transfer_machine, kind, workers):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from core.account_transfer import import_account_login
+
+    package, incoming = transfer_machine.exported(kind)
+    original = _credentials(kind, identity="another-user", revision="already-logged-in")
+    transfer_machine.live(kind, original)
+    before = _file_snapshot(_runtime_files())
+    barrier = Barrier(workers)
+
+    def run(_index):
+        barrier.wait(timeout=10)
+        return import_account_login(package, PASSWORD, expected_type=kind)
+
+    if workers == 1:
+        results = [run(index) for index in range(4)]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(run, range(workers)))
+    assert len({result.account_name for result in results}) == 1
+    assert sum(result.created_new for result in results) == 1
+    assert len(_saved(kind)) == 2
+    assert _file_snapshot(_runtime_files()) == before
+    _activate(kind, results[0].account_name)
+    assert _token_pair(kind, _read_live(kind)) == _token_pair(kind, incoming)
+    assert any(_token_pair(kind, _saved_value(kind, item)) == _token_pair(kind, original)
+               for item in _saved(kind))

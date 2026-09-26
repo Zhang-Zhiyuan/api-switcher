@@ -29,6 +29,8 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
         self._cancelled = threading.Event()
         self._original = {}
         self._combos = {}
+        self._identities = {}
+        self._narrow_rows = None
         self._label_types = {label: value for value, label in remote_proxy.PROXY_SUBSCRIPTION_NETWORK_TYPE_LABELS.items()}
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
@@ -37,15 +39,6 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
         header.pack(fill="x", padx=18, pady=(16, 10))
         ctk.CTkLabel(header, text="为订阅标记线路类型", font=font(18, "bold"),
                      text_color=COLORS["text"], anchor="w").pack(fill="x")
-        notice = ctk.CTkLabel(
-            header, text="按订阅实际用途手动分类；标记不代表出口 IP 已经过质量验证。\n"
-                         "打开目标分流后，AI 服务优先家宽，其余内置网站（含 X/Reddit）优先非家宽。\n"
-                         "仅补齐未配置目标，手动选择优先；标记保存不切换线路，分流需另点“保存并应用”。",
-            font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
-        )
-        notice.pack(fill="x", pady=(8, 0))
-        bind_wraplength(header, notice, padding=8)
-
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
         self._save_button = ctk.CTkButton(footer, text="保存标记", command=self._save,
@@ -61,14 +54,25 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
         self._rows = ctk.CTkScrollableFrame(self, fg_color=COLORS["surface"], corner_radius=8)
         self._rows.pack(fill="both", expand=True, padx=18)
         self._rows.grid_columnconfigure(0, weight=1)
+        # Long instructions must scroll with the rows: at high widget scaling
+        # a fixed header can consume the entire short window and unmap the list.
+        notice = ctk.CTkLabel(
+            self._rows, text="按订阅实际用途手动分类；标记不代表出口 IP 已经过质量验证。\n"
+                             "打开目标分流后，AI 服务优先家宽，其余内置网站（含 X/Reddit）优先非家宽。\n"
+                             "仅补齐未配置目标，手动选择优先；标记保存不切换线路，分流需另点“保存并应用”。",
+            font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
+        )
+        notice.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(12, 6))
+        bind_wraplength(self._rows, notice, padding=28)
         for entry in catalog:
             profile_id = str(entry.get("id") or "").strip()
             if not profile_id or profile_id in self._original:
                 continue
             network_type = remote_proxy.normalize_proxy_subscription_network_type(entry.get("network_type"))
             self._original[profile_id] = network_type
-            row = len(self._original) - 1
+            row = len(self._original)
             identity = ctk.CTkFrame(self._rows, fg_color="transparent")
+            self._identities[profile_id] = identity
             identity.grid(row=row, column=0, sticky="ew", padx=(10, 14), pady=10)
             name = ctk.CTkLabel(identity, text=safe_feedback_text(str(entry.get("name") or "未命名订阅")),
                                 font=font(13, "bold"), text_color=COLORS["text"], anchor="w", justify="left")
@@ -83,10 +87,28 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
             self._combos[profile_id] = combo
         if not self._original:
             ctk.CTkLabel(self._rows, text="暂无订阅，请先添加订阅链接或导入节点。", font=font(13),
-                         text_color=COLORS["muted"]).grid(row=0, column=0, padx=12, pady=28)
+                         text_color=COLORS["muted"]).grid(row=1, column=0, columnspan=2, padx=12, pady=28)
             self._save_button.configure(state="disabled")
+        self._rows.bind("<Configure>", self._layout_rows, add="+")
         center_window(self, master)
+        self._layout_rows()
         self.grab_set()
+
+    def _layout_rows(self, _event=None):
+        if self._closed:
+            return
+        narrow = self._rows.winfo_width() / self._rows._get_widget_scaling() < 360
+        if narrow == self._narrow_rows:
+            return
+        self._narrow_rows = narrow
+        for index, (profile_id, identity) in enumerate(self._identities.items()):
+            combo = self._combos[profile_id]
+            if narrow:
+                identity.grid(row=2 * index + 1, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 0))
+                combo.grid(row=2 * index + 2, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 10))
+            else:
+                identity.grid(row=index + 1, column=0, columnspan=1, sticky="ew", padx=(10, 14), pady=10)
+                combo.grid(row=index + 1, column=1, columnspan=1, sticky="", padx=(0, 10), pady=10)
 
     def _set_busy(self, busy):
         self._busy = busy

@@ -5265,6 +5265,8 @@ def test_local_reload_controller_explicitly_bypasses_environment_proxy(
 
 def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
     writes = []
+    old_config = remote_proxy.build_mihomo_config(
+        {"name": "old", "type": "http", "server": "old.example.test", "port": 8080})
     reload_results = iter(
         [
             (7, "", "connection refused"),
@@ -5285,7 +5287,7 @@ def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
     )
     monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name: (None, fake_client))
     monkeypatch.setattr(remote_proxy.remote_config, "_remote_home", lambda _client: "/home/me")
-    monkeypatch.setattr(remote_proxy.ssh_manager, "read_remote_file", lambda *_args, **_kwargs: "old config")
+    monkeypatch.setattr(remote_proxy.ssh_manager, "read_remote_file", lambda *_args, **_kwargs: old_config)
     monkeypatch.setattr(remote_proxy.ssh_manager, "write_remote_file", lambda _client, _path, content, **_kwargs: writes.append(content))
     monkeypatch.setattr(
         remote_proxy.ssh_manager,
@@ -5294,7 +5296,7 @@ def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="已强制重载旧配置"):
-        remote_proxy.reload_ai_proxy("server", "{ name: node, type: vless, server: example.com, port: 443 }")
+        remote_proxy.reload_ai_proxy("server", "{ name: node, type: vless, server: example.com, port: 443 }", fallback_nodes=())
 
     assert writes == [
         remote_proxy.build_mihomo_config(
@@ -5306,7 +5308,7 @@ def test_reload_ai_proxy_restores_config_when_controller_fails(monkeypatch):
             resilient_transport=True,
             mainland_dns=True,
         ),
-        "old config",
+        old_config,
     ]
 
 
@@ -5422,6 +5424,8 @@ def test_reload_ai_proxy_reports_integration_repair_failure_without_hiding_live_
 def test_reload_ai_proxy_reports_incomplete_runtime_rollback(monkeypatch):
     fake_client = object()
     writes = []
+    old_config = remote_proxy.build_mihomo_config(
+        {"name": "old", "type": "http", "server": "old.example.test", "port": 8080})
     reload_results = iter(
         [
             (7, "", "new reload response lost"),
@@ -5443,7 +5447,7 @@ def test_reload_ai_proxy_reports_incomplete_runtime_rollback(monkeypatch):
     monkeypatch.setattr(
         remote_proxy.ssh_manager,
         "read_remote_file",
-        lambda *_args, **_kwargs: "old config",
+        lambda *_args, **_kwargs: old_config,
     )
     monkeypatch.setattr(
         remote_proxy.ssh_manager,
@@ -5462,7 +5466,7 @@ def test_reload_ai_proxy_reports_incomplete_runtime_rollback(monkeypatch):
             "{ name: node, type: vless, server: example.com, port: 443 }",
         )
 
-    assert writes[-1] == "old config"
+    assert writes[-1] == old_config
 
 
 @pytest.mark.parametrize(

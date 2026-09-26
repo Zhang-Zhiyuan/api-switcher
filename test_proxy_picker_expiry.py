@@ -48,6 +48,8 @@ def picker(records):
     obj._metadata_next_expiry = None
     obj._filter_cache_key = None
     obj._filter_cache_nodes = ()
+    obj._visible_checkboxes = {}
+    obj._summary_label = None
     obj._search_entry = obj._region_combo = obj._quality_combo = None
     mode = {"value": "全部"}
     obj._filter_combo = SimpleNamespace(get=lambda: mode["value"])

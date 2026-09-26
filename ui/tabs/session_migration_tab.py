@@ -402,7 +402,11 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
 
-        self._stats_label = ctk.CTkLabel(self._filter_bar, text="", text_color=COLORS["muted"], font=font(12))
+        self._stats_label = ctk.CTkLabel(
+            self._filter_bar, text="", text_color=COLORS["muted"], font=font(12),
+            width=1, anchor="w", justify="left",
+        )
+        bind_wraplength(self._filter_bar, self._stats_label, padding=24, min_width=100)
 
         warning = ctk.CTkLabel(
             self,
@@ -529,8 +533,9 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
                 group.grid(row=0, column=index, sticky="ew", padx=(12 if index == 0 else 10, 0), pady=9)
             self._select_visible_button.grid(row=0, column=3, sticky="ew", padx=(12, 0), pady=9)
             self._clear_selection_button.grid(row=0, column=4, sticky="ew", padx=(8, 0), pady=9)
-            self._filter_bar.grid_columnconfigure(5, weight=1)
-            self._stats_label.grid(row=0, column=5, sticky="e", padx=12, pady=9)
+            # Keep counters separate from fixed-width controls. In particular,
+            # large selections and DPI scaling must not squeeze or clip them.
+            self._stats_label.grid(row=1, column=0, columnspan=5, sticky="ew", padx=12, pady=(0, 9))
             return
 
         for column in range(filter_columns):
@@ -550,7 +555,7 @@ class SessionMigrationTab(ctk.CTkScrollableFrame):
             row=stats_row,
             column=0,
             columnspan=filter_columns,
-            sticky="w",
+            sticky="ew",
             padx=12,
             pady=(0, 9),
         )

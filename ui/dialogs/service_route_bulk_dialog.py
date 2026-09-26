@@ -14,9 +14,10 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo
 SET_ROUTE = "设置订阅与节点"
 TAGGED = "按用途重新分配"
 FOLLOW = "跟随默认线路"
+DIRECT = "直连（不经过代理）"
 ENABLE = "启用目标"
 DISABLE = "停用目标"
-OPERATIONS = (SET_ROUTE, TAGGED, FOLLOW, ENABLE, DISABLE)
+OPERATIONS = (SET_ROUTE, DIRECT, TAGGED, FOLLOW, ENABLE, DISABLE)
 
 
 def apply_route_batch(preferences, catalog, services, operation, *, profile_id="", node_key="", node_keys=()):
@@ -59,8 +60,15 @@ def apply_route_batch(preferences, catalog, services, operation, *, profile_id="
         candidate["service_node_bindings"].pop(service, None)
         candidate.setdefault("service_node_pools", {}).pop(service, None)
         candidate["service_route_modes"].pop(service, None)
-        if operation == FOLLOW:
-            candidate["service_route_modes"][service] = "default"
+        if operation in (FOLLOW, DIRECT):
+            candidate["service_route_modes"][service] = "direct" if operation == DIRECT else "default"
+            if operation == DIRECT and not row["always"]:
+                if service.startswith("custom:"):
+                    for item in candidate["custom_targets"]:
+                        if f"custom:{item['id']}" == service:
+                            item["enabled"] = True
+                else:
+                    candidate["builtin_sites"][service] = True
         elif operation == SET_ROUTE:
             candidate["service_profile_bindings"][service] = profile_id
             if node_key:
@@ -113,7 +121,7 @@ class RouteBulkDialog(DraftChoiceDialog):
         self._apply_button = ctk.CTkButton(footer, text="写入所选目标草稿", command=self._commit,
                                          state="disabled", **button_style("accent"))
         self._apply_button.pack(side="right")
-        heading = ctk.CTkLabel(self, text="一次设置多个业务的订阅和节点策略", font=font(18, "bold"), anchor="w")
+        heading = ctk.CTkLabel(self, text="一次设置多个业务的访问线路", font=font(18, "bold"), anchor="w")
         heading.pack(fill="x", padx=18, pady=(16, 8))
         note = ctk.CTkLabel(self, text="只修改当前位置的勾选目标，其他位置不变。\n关闭后可在修改清单预览，统一“保存并应用”才生效。",
                             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left")
@@ -178,6 +186,11 @@ class RouteBulkDialog(DraftChoiceDialog):
         enabled = operation == SET_ROUTE
         self._profile.configure(state="readonly" if enabled else "disabled")
         self._node_button.configure(state="normal" if enabled and self._profile_id else "disabled")
+        self._status.configure(
+            text=("直连会启用所选目标，使用目标设备自身网络，不自动回退代理；严格隐私模式下不可启用。"
+                  if operation == DIRECT else "先勾选目标；设置线路不会改变原有启用状态。"),
+            text_color=COLORS["muted"],
+        )
 
     def _select_profile(self, label):
         selected = self._profiles.get(label, "")

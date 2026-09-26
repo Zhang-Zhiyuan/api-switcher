@@ -1,6 +1,7 @@
 """Native UI regressions for tagged routing drafts and persistent opt-outs."""
 
 import copy
+import os
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -262,6 +263,127 @@ def test_mode_only_change_is_visible_in_preview_and_saved(route_harness):
     dialog._apply()
     _wait(harness.root, lambda: not dialog._busy)
     assert harness.saved[0][1]["service_route_modes"]["claude"] == "default"
+
+
+def test_direct_choice_clears_pool_enables_target_and_survives_save_reopen(route_harness):
+    harness = route_harness(preferences={
+        "builtin_sites": {"youtube": False},
+        "service_profile_bindings": {"youtube": "dc"},
+        "service_node_pools": {"youtube": ["dc-one"]},
+    })
+    dialog = harness.open()
+    scope = dialog._scope
+    assert routes_ui.DIRECT_PROFILE in dialog._rows["youtube"]["profile"].cget("values")
+    dialog._select_profile("youtube", routes_ui.DIRECT_PROFILE)
+    draft = dialog._drafts[scope]
+    assert draft["service_route_modes"]["youtube"] == "direct"
+    assert draft["builtin_sites"]["youtube"] is True
+    assert "youtube" not in draft["service_profile_bindings"]
+    assert "youtube" not in draft["service_node_pools"]
+    assert dialog._rows["youtube"]["node"].cget("state") == "disabled"
+    assert dialog._rows["youtube"]["node"].get() == "无需代理节点"
+    assert not harness.saved
+    dialog._reload_catalog()
+    _wait(harness.root, lambda: not dialog._busy)
+    assert dialog._rows["youtube"]["profile"].get() == routes_ui.DIRECT_PROFILE
+    dialog._apply()
+    _wait(harness.root, lambda: not dialog._busy)
+    dialog.destroy()
+    reopened = harness.open()
+    assert reopened._drafts[scope]["service_route_modes"]["youtube"] == "direct"
+    assert "youtube" not in reopened._drafts[scope]["service_profile_bindings"]
+    assert reopened._rows["youtube"]["profile"].get() == routes_ui.DIRECT_PROFILE
+    # Switching back to a subscription or default removes DIRECT authority.
+    label = next(label for label, key in reopened._profile_values("youtube").items() if key == "dc")
+    reopened._select_profile("youtube", label)
+    assert "youtube" not in reopened._drafts[scope]["service_route_modes"]
+    reopened._select_profile("youtube", routes_ui.DIRECT_PROFILE)
+    reopened._select_profile("youtube", routes_ui.DEFAULT_PROFILE)
+    assert reopened._drafts[scope]["service_route_modes"]["youtube"] == "default"
+
+
+def test_direct_option_works_without_subscriptions_and_does_not_shadow_a_subscription_name(route_harness):
+    catalog = [{"id": "named-direct", "name": routes_ui.DIRECT_PROFILE,
+                "network_type": "unknown", "nodes": [{"key": "one", "label": "node"}]}]
+    harness = route_harness(catalog=catalog)
+    dialog = harness.open()
+    labels = dialog._profile_values("youtube")
+    label = next(label for label, key in labels.items() if key == "named-direct")
+    assert label != routes_ui.DIRECT_PROFILE
+    dialog._select_profile("youtube", label)
+    assert dialog._drafts[dialog._scope]["service_profile_bindings"]["youtube"] == "named-direct"
+    harness.catalog.clear()
+    dialog._reload_catalog()
+    _wait(harness.root, lambda: not dialog._busy)
+    dialog._select_profile("youtube", routes_ui.DIRECT_PROFILE)
+    assert dialog._drafts[dialog._scope]["service_route_modes"]["youtube"] == "direct"
+    assert not dialog._rows["youtube"]["description"]["warning"]
+
+
+def test_bulk_direct_ui_needs_no_subscription_and_scopes_are_independent(route_harness):
+    from ui.dialogs import service_route_bulk_dialog as bulk
+
+    harness = route_harness(catalog=[])
+    dialog = harness.open()
+    original_second = copy.deepcopy(dialog._drafts[harness.scopes[1]])
+    dialog._open_bulk_dialog()
+    editor = dialog._bulk_dialog
+    editor._operation.set(bulk.DIRECT)
+    editor._operation_changed(bulk.DIRECT)
+    assert editor._profile.cget("state") == "disabled"
+    assert editor._node_button.cget("state") == "disabled"
+    assert "启用所选目标" in editor._status.cget("text")
+    for service in ("youtube", "google"):
+        editor._vars[service].set(True)
+    editor._changed()
+    editor._commit()
+    assert dialog._drafts[dialog._scope]["service_route_modes"] == {"youtube": "direct", "google": "direct"}
+    assert dialog._drafts[harness.scopes[1]] == original_second
+    assert not harness.saved
+
+
+@pytest.mark.parametrize("geometry,scale", [("1040x760", 1.0), ("720x680", 1.0), ("860x720", 1.25)])
+def test_direct_choices_remain_visible_in_responsive_layout(route_harness, geometry, scale):
+    import customtkinter as ctk
+
+    harness = route_harness()
+    dialog = harness.open()
+    try:
+        ctk.set_widget_scaling(scale)
+        # CTk restores its initial geometry asynchronously on Windows. Set the
+        # requested test viewport after that callback, then assert its size.
+        settle = time.monotonic() + 0.35
+        while time.monotonic() < settle:
+            harness.root.update()
+            time.sleep(0.02)
+        dialog.geometry(geometry)
+        dialog._set_category("网站")
+        for service in ("youtube", "google"):
+            dialog._select_profile(service, routes_ui.DIRECT_PROFILE)
+        dialog.lift()
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            harness.root.update()
+            time.sleep(0.02)
+        width, height = (int(value) for value in geometry.split("x"))
+        assert abs(dialog.winfo_width() - width * dialog._get_window_scaling()) <= 2
+        assert abs(dialog.winfo_height() - height * dialog._get_window_scaling()) <= 2
+        row = dialog._rows["youtube"]
+        for widget in (row["profile"], row["node"], dialog._save_button, dialog._bulk_button):
+            assert widget.winfo_ismapped()
+            assert widget.winfo_rootx() >= dialog.winfo_rootx()
+            assert widget.winfo_rootx() + widget.winfo_width() <= dialog.winfo_rootx() + dialog.winfo_width()
+            assert widget.winfo_rooty() + widget.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+        assert row["profile"].get() == routes_ui.DIRECT_PROFILE
+        if destination := os.environ.get("API_SWITCHER_DIRECT_UI_CAPTURE_DIR"):
+            from tools.ui_visual_audit import capture_window_image
+
+            directory = Path(destination).resolve()
+            assert directory.is_relative_to(Path(__file__).resolve().parent / "dist")
+            directory.mkdir(parents=True, exist_ok=True)
+            capture_window_image(dialog).save(directory / f"direct-{geometry}-{scale}.png")
+    finally:
+        ctk.set_widget_scaling(1.0)
 
 
 @pytest.mark.parametrize("unavailable", ["no-tag", "ambiguous"])

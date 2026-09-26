@@ -76,6 +76,7 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._export_encrypted = False
         self._password_var = ctk.StringVar(master=self, value="")
         self._password_trace = None
+        self._show_after_id = None
 
         product = "Claude" if profile_type == "claude" else "Codex"
         self._title = f"{'导出' if exporting else '导入'} {product} 登录包"
@@ -83,7 +84,9 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self.geometry("600x520" if exporting else "600x470")
         self.minsize(430, 340)
         self.configure(fg_color=COLORS["app_bg"])
-        self.transient(master)
+        # center_window sets the transient owner after constructing the body.
+        # Doing it during CTk's initial Windows titlebar withdraw/redraw can
+        # leave a newly opened child permanently hidden with an active grab.
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.bind("<Destroy>", self._on_destroy, add="+")
@@ -115,7 +118,14 @@ class AccountTransferDialog(ctk.CTkToplevel):
                 "\n导入后先保存为独立账号，再由你点击“切换到此账号”确认使用。"
                 "\n请只导入你自己的账号，不要接收不可信来源的登录包。"
             )
-        detail += "\n登录过期或被撤销仍需重新登录；多台电脑刷新同一凭据可能使旧副本失效。"
+        if profile_type == "codex":
+            detail += (
+                "\n迁移后请停止源端使用这份登录；多机长期使用请分别登录。"
+                "\n切换前结束任务并退出 Codex / VS Code，完成后再打开。"
+                "\n凭据过期或已使用时须重新登录，再导出新包；重复导入旧包无效。"
+            )
+        else:
+            detail += "\n登录过期或被撤销仍需重新登录；多台电脑刷新同一凭据可能使旧副本失效。"
         label = ctk.CTkLabel(body, text=detail, anchor="w", justify="left",
                              font=font(12), text_color=COLORS["muted"])
         label.pack(fill="x", pady=(0, 12))
@@ -140,10 +150,11 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._browse = ctk.CTkButton(file_row, text="选择文件", width=82, command=self._choose_path,
                                     **button_style("secondary"))
         self._browse.grid(row=0, column=1, padx=(8, 0))
-        ctk.CTkLabel(body, text="迁移密码（可留空；加密导出至少 8 字符）", anchor="w",
+        password_label = "迁移密码（可留空；加密导出至少 8 字符）" if exporting else "迁移密码（无密码包请留空）"
+        ctk.CTkLabel(body, text=password_label, anchor="w",
                      font=font(12), text_color=COLORS["muted"]).pack(fill="x", pady=(0, 4))
         self._password = ctk.CTkEntry(body, width=1, show="*", textvariable=self._password_var,
-                                     placeholder_text="迁移密码（可留空；加密导出至少 8 字符）", **input_style())
+                                     placeholder_text=password_label, **input_style())
         self._password.pack(fill="x", pady=(0, 8))
         self._confirmation = None
         if exporting:
@@ -159,6 +170,18 @@ class AccountTransferDialog(ctk.CTkToplevel):
         self._password_trace = self._password_var.trace_add("write", self._update_action_label)
         center_window(self, master)
         self.grab_set()
+        # CTk temporarily withdraws native Windows windows to repaint their
+        # titlebar. A new transient can inherit that hidden state from its
+        # owner. Reveal it once the initial callbacks have settled, so an
+        # invisible dialog cannot keep the application grabbed.
+        self._show_after_id = self.after(50, self._reveal_after_initial_layout)
+
+    def _reveal_after_initial_layout(self):
+        self._show_after_id = None
+        if (not self._destroyed and self.winfo_exists() and self._owner.winfo_exists()
+                and self._owner.winfo_viewable() and self.state() == "withdrawn"):
+            self.deiconify()
+            self.lift()
 
     def _choose_path(self):
         if self._busy or self._result is not None:
@@ -329,6 +352,12 @@ class AccountTransferDialog(ctk.CTkToplevel):
                     self._on_imported()
                 except Exception:
                     self._set_status("登录包已保存，账号列表未能刷新；关闭后可重新刷新列表再切换。")
+        warnings = tuple(getattr(result, "warnings", ()) or ())
+        if self._profile_type == "codex":
+            warnings += ("未验证服务端登录。若 refresh token 过期 / 已使用，请重新登录；重复导入旧包无效。",)
+        if warnings:
+            self._set_status(str(self._status.cget("text")) + "\n" + "\n".join(warnings))
+            self._status.configure(text_color=COLORS["warning"])
 
     def _activate(self):
         if self._busy or self._destroyed or self._exporting or self._result is None:
@@ -357,6 +386,13 @@ class AccountTransferDialog(ctk.CTkToplevel):
     def _on_destroy(self, event):
         if event.widget is self:
             self._destroyed = True
+            show_after_id = self.__dict__.get("_show_after_id")
+            if show_after_id is not None:
+                try:
+                    self.after_cancel(show_after_id)
+                except Exception:
+                    pass
+                self._show_after_id = None
             trace = getattr(self, "_password_trace", None)
             if trace is not None:
                 try:

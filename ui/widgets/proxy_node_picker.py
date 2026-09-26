@@ -1,3 +1,4 @@
+import math
 import time
 from datetime import datetime, timezone
 
@@ -5,7 +6,7 @@ import customtkinter as ctk
 
 from core.lazy_imports import LazyModule
 from ui.tabs.tab_visibility import is_active_tab
-from ui.theme import COLORS, button_style, combo_style, font, input_style, recent_user_scroll
+from ui.theme import COLORS, bind_wraplength, button_style, combo_style, font, input_style, recent_user_scroll
 
 
 remote_proxy = LazyModule("core.remote_proxy")
@@ -76,6 +77,8 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_after_id = None
         self._render_batch_after_id = None
         self._render_generation = 0
+        self._checkbox_sync_after_id = None
+        self._checkbox_sync_generation = 0
         self._render_plan_pending = False
         self._render_deferred = False
         self._rendered_signature = None
@@ -218,8 +221,10 @@ class ProxyNodePicker(ctk.CTkFrame):
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
+            justify="left",
         )
         self._summary_label.pack(fill="x", pady=(6, 5))
+        bind_wraplength(self, self._summary_label, padding=8, max_width=1600)
 
         self._list_frame = ctk.CTkScrollableFrame(
             self,
@@ -332,6 +337,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_nodes()
 
     def destroy(self):
+        self._cancel_checkbox_sync()
         self._cancel_pending_render()
         self._cancel_incremental_render()
         if self._responsive_after_id is not None:
@@ -344,6 +350,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         super().destroy()
 
     def _suspend_background_work(self):
+        self._cancel_checkbox_sync()
         if self._render_after_id or self._render_batch_after_id or self._render_plan_pending:
             self._render_deferred = True
         self._cancel_pending_render()
@@ -352,6 +359,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._update_summary_label()
 
     def _resume_background_work(self):
+        self._sync_visible_checkboxes()
         expired = self._ensure_temporal_metadata()
         if not self._render_deferred and not expired:
             return
@@ -516,7 +524,10 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._update_summary_label(match_count=len(matches), visible_count=len(visible))
             self._emit_scope_change()
             return
-        previous_signature = getattr(self, "_rendered_signature", None)
+        # A cancelled filter can reuse fully built cached rows. The actual
+        # pack order below, not a half-finished signature, is authoritative.
+        previous_signature = (getattr(self, "_rendered_signature", None)
+                              or getattr(self, "_pending_render_signature", None))
         self._rendered_signature = None
         self._pending_render_signature = signature
         if self._reuse_rendered_rows(previous_signature, signature, visible, generation):
@@ -565,9 +576,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         """Reuse existing controls across filters and latency/quality updates.
 
         The cache is bounded by the current subscription, never by search
-        history. A changed node scope, failed or interrupted generation takes
-        the normal teardown path so no stale commands or half-built rows live
-        on as a supposedly complete view.
+        history. A changed node scope or missing rows takes the normal teardown
+        path. An interrupted filter can resume from the actual packed widgets,
+        without treating a half-finished layout as a completed view.
         """
         if previous is None or current is None:
             return False
@@ -582,23 +593,44 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not rows:
             return False
 
-        old_visible = tuple(item[0] for item in previous[2])
-        new_visible = tuple(item[0] for item in current[2])
-        layout_changed = old_visible != new_visible
+        groups = self._group_visible_nodes(visible)
+        desired = []
+        for region, items in groups:
+            desired.append((headers[region]["frame"], {"fill": "x", "padx": 5, "pady": (6, 0)}))
+            desired.extend((rows[self._node_key(item)]["row"], {"fill": "x", "padx": 5, "pady": (4, 0)}) for item in items)
+        if not visible and self._empty_label is not None:
+            desired.append((self._empty_label, {"fill": "x", "padx": 12, "pady": 16}))
+        packed = list(self._list_frame.pack_slaves())
+        wanted = {widget for widget, _options in desired}
         plan = []
-        if layout_changed:
-            for root in self._list_frame.winfo_children():
-                root.pack_forget()
-            self._visible_group_headers = []
-            self._visible_checkboxes = {}
-            self._visible_node_rows = {}
-        for region, items in self._group_visible_nodes(visible):
-            plan.append(("reuse_header", region, layout_changed))
+        # Work from the bottom upwards: removing the first row repeatedly would
+        # reposition every following native child window at each yielded batch.
+        plan.extend(("hide", widget, None) for widget in reversed(packed) if widget not in wanted)
+        order = [widget for widget in packed if widget in wanted]
+        for index, (widget, options) in enumerate(desired):
+            if index < len(order) and order[index] is widget:
+                continue
+            if widget in order:
+                order.remove(widget)
+            if index < len(order):
+                options = {**options, "before": order[index]}
+            plan.append(("place_cached", widget, options))
+            order.insert(index, widget)
+        self._visible_group_headers = [headers[region] for region, _items in groups]
+        self._visible_checkboxes = {}
+        self._visible_node_rows = {}
+        for region, items in groups:
+            plan.append(("reuse_header", region, False))
             for item in items:
                 key = self._node_key(item)
+                cached = rows[key]
+                self._visible_checkboxes[key] = (cached["checkbox"], cached["variable"])
+                self._visible_node_rows[key] = (cached["row"], cached["button"])
                 presentation = self._row_presentation(item)
-                if layout_changed or rows[key]["presentation"] != presentation:
-                    plan.append(("reuse_row", presentation, layout_changed))
+                if (cached["presentation"] != presentation or cached["enabled"] != self._enabled
+                        or cached["selected"] != (key == self._selected_key)
+                        or bool(cached["variable"].get()) != (key in self._checked_keys)):
+                    plan.append(("reuse_row", presentation, False))
         if not visible:
             plan.append(("reuse_empty", current[0], None))
         self._render_plan_batch(generation, plan, 0)
@@ -759,7 +791,11 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._finish_render_plan_synchronously(generation, render_plan, end_index)
 
     def _render_plan_item(self, kind: str, payload, extra) -> None:
-        if kind == "header":
+        if kind == "hide":
+            payload.pack_forget()
+        elif kind == "place_cached":
+            payload.pack(**extra)
+        elif kind == "header":
             self._render_group_header(payload, extra)
         elif kind == "row":
             self._render_row(payload)
@@ -825,8 +861,10 @@ class ProxyNodePicker(ctk.CTkFrame):
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="w",
+            justify="left",
         )
         label.grid(row=0, column=0, sticky="ew", padx=(9, 8), pady=4)
+        bind_wraplength(header, label, padding=186 if self._on_group_quality else 102)
         header_entry = {
             "frame": header,
             "label": label,
@@ -993,7 +1031,55 @@ class ProxyNodePicker(ctk.CTkFrame):
             "labels": (title_label, meta_label, latency_widget, quality_widget),
             "presentation": (node_key, title, meta_text, latency_label, latency_color, quality_badge, quality_color),
             "selected": selected, "enabled": self._enabled,
+            "layout": (False, 680),  # Matches the initial wide-row geometry above.
         }
+        cached = self._row_cache[node_key]
+        row.bind("<Configure>", lambda event: self._layout_node_row(cached, event.width), add="+")
+        self._layout_node_row(cached)
+
+    def _layout_node_row(self, cached, width=None):
+        """Keep long names and result badges readable, including narrow/high-DPI panes."""
+        row = cached["row"]
+        if width is None:
+            width = row.winfo_width()
+            parent = row.master
+            while width <= 1 and parent is not None:
+                width = parent.winfo_width()
+                parent = getattr(parent, "master", None)
+        scale = row._get_widget_scaling()
+        width = round(width / scale)
+        compact = width < 600
+        title, detail, latency, quality = cached["labels"]
+        controls = [cached["checkbox"], cached["button"]]
+        if not compact:
+            controls.extend((latency, quality))
+        # Native font metrics can make controls slightly wider than CTk's
+        # requested logical widths. Include grid padding and a rounding margin.
+        padding = math.ceil(sum(control.winfo_reqwidth() for control in controls) / scale)
+        padding += 36 if compact else 51
+        wrap = max(1, min(680, width - padding))
+        state = (compact, wrap)
+        if cached.get("layout") == state:
+            return
+        previous = cached.get("layout")
+        cached["layout"] = state
+        title.configure(wraplength=wrap)
+        detail.configure(wraplength=wrap)
+        if previous is not None and previous[0] == compact:
+            return
+        title.grid(columnspan=3 if compact else 1)
+        detail.grid(columnspan=3 if compact else 1)
+        latency.configure(width=0 if compact else 58)
+        quality.configure(width=0 if compact else 92)
+        # At high widget scaling the detail column can be narrower than both
+        # badges combined. Give the result line the full row, not just the
+        # space remaining after the checkbox and action button.
+        latency.grid(row=2 if compact else 0, column=0 if compact else 3,
+                     columnspan=3 if compact else 1, rowspan=1 if compact else 2,
+                     sticky="w" if compact else "e", padx=(7, 8), pady=(0, 6) if compact else 0)
+        quality.grid(row=2 if compact else 0, column=3 if compact else 4,
+                     columnspan=2 if compact else 1, rowspan=1 if compact else 2,
+                     sticky="e", padx=(0, 8), pady=(0, 6) if compact else 0)
 
     def _reuse_row(self, presentation, *, relayout: bool):
         key, title, detail, latency, latency_color, quality, quality_color = presentation
@@ -1116,16 +1202,80 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._emit_scope_change()
 
     def _sync_visible_checkboxes(self, keys=None):
-        targets = set(keys) if keys is not None else set(self._visible_checkboxes)
+        # Selection is already updated synchronously in _checked_keys. Only
+        # expensive Tk traces/paint are batched; test scope remains complete.
+        self._cancel_checkbox_sync()
+        # Paint top-to-bottom, while retaining work from an interrupted earlier
+        # selection rather than updating only the most recently changed group.
+        targets = dict.fromkeys([*self._visible_checkboxes, *(keys or ())])
+        pending = []
         for key in targets:
             entry = self._visible_checkboxes.get(key)
             if not entry:
                 continue
             _checkbox, variable = entry
             try:
-                variable.set(key in self._checked_keys)
+                if bool(variable.get()) != (key in self._checked_keys):
+                    pending.append(key)
             except Exception:
                 pass
+        if pending:
+            self._sync_checkbox_batch(pending, 0, self._checkbox_sync_generation)
+        self._update_summary_label()
+
+    def _cancel_checkbox_sync(self):
+        self._checkbox_sync_generation = self.__dict__.get("_checkbox_sync_generation", 0) + 1
+        token = self.__dict__.get("_checkbox_sync_after_id")
+        if token is not None:
+            try:
+                self.after_cancel(token)
+            except Exception:
+                pass
+        self._checkbox_sync_after_id = None
+
+    def _sync_checkbox_batch(self, keys, start, generation):
+        if generation != self._checkbox_sync_generation:
+            return
+        self._checkbox_sync_after_id = None
+        if not is_active_tab(self):
+            return
+        deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
+        end = start
+        while end < len(keys) and end - start < self.RENDER_BATCH_SIZE:
+            if generation != self._checkbox_sync_generation:
+                return
+            self._paint_checkbox(keys[end])
+            end += 1
+            if time.perf_counter() >= deadline:
+                break
+        if generation != self._checkbox_sync_generation:
+            return
+        if end < len(keys):
+            try:
+                self._checkbox_sync_after_id = self.after(
+                    self.RENDER_BATCH_DELAY_MS, lambda: self._sync_checkbox_batch(keys, end, generation),
+                )
+            except Exception:
+                self._checkbox_sync_after_id = None
+                # Exceptional scheduling failure must not leave successful
+                # logical selection looking only partially checked forever.
+                for key in keys[end:]:
+                    if generation != self._checkbox_sync_generation:
+                        return
+                    self._paint_checkbox(key)
+        if self._checkbox_sync_after_id is None:
+            self._update_summary_label()
+
+    def _paint_checkbox(self, key):
+        entry = self._visible_checkboxes.get(key)
+        if entry:
+            try:
+                variable = entry[1]
+                checked = key in self._checked_keys
+                if bool(variable.get()) != checked:
+                    variable.set(checked)
+            except Exception:
+                pass  # A cancelled render may already have destroyed this row.
 
     def _request_render_nodes(self, delay_ms: int = 60):
         self._cancel_pending_render()
@@ -1185,7 +1335,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         if expired_count:
             suffix += f"；已过期 {expired_count}"
         if self._render_plan_pending:
-            suffix += "；正在分批渲染"
+            suffix += "；正在加载节点列表"
+        if self.__dict__.get("_checkbox_sync_after_id") is not None:
+            suffix += "；正在更新勾选显示"
         self._summary_label.configure(
             text=(
                 f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"

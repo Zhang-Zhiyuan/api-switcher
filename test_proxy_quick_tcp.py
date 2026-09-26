@@ -232,7 +232,7 @@ def test_cancelled_cache_is_not_explicitly_unreachable(monkeypatch):
         assert not remote_proxy.proxy_node_latency_explicitly_unreachable(value)
 
 
-def test_ssh_quick_batches_unique_endpoints_progress_and_cancel(monkeypatch):
+def test_ssh_quick_streams_unique_endpoints_progress_and_cancel(monkeypatch):
     cancel = threading.Event()
     sent, progress = [], []
     monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name, **_kwargs: (None, object()))
@@ -241,34 +241,40 @@ def test_ssh_quick_batches_unique_endpoints_progress_and_cancel(monkeypatch):
         batch = json.loads(kwargs["input_data"])
         sent.append(batch)
         assert "QUICK = True" in command and "ATTEMPTS = 1" in command
-        assert kwargs["timeout"] <= 12 and kwargs["log_command"] is False
+        assert kwargs["timeout"] <= 15 and kwargs["log_command"] is False
+        assert kwargs["cancel_event"] is cancel
+        kwargs["stdout_callback"]("".join(
+            f"latency\t{item['key']}\t1\t20\tTCP 快速检查\t1\n" for item in batch[:2]
+        ))
+        assert len(progress) == 6  # Results arrived before the command returns.
         cancel.set()
-        return 0, "".join(f"latency\t{item['key']}\t1\t20\tTCP 快速检查\t1\n" for item in batch), ""
+        raise InterruptedError("synthetic cancellation")
 
     monkeypatch.setattr(remote_proxy, "ssh_manager", SimpleNamespace(execute_command_with_status=execute))
     results = remote_proxy.measure_proxy_node_latencies_on_server(
         "synthetic", [_node(index, port=10000 + index % 4) for index in range(12)],
         quick=True, max_workers=2, cancel_event=cancel, progress_callback=lambda *args: progress.append(args),
     )
-    assert len(sent) == 1 and len(sent[0]) == 2
+    assert len(sent) == 1 and len(sent[0]) == 4
     assert len(results) == len(progress) == 12
     assert sum(value.ok for value in results.values()) == 6
     assert sum(value.cancelled for value in results.values()) == 6
 
 
 @pytest.mark.parametrize("failure", ["command", "missing"])
-def test_ssh_quick_keeps_prior_batch_and_terminalizes_every_remaining_key(monkeypatch, failure):
+def test_ssh_quick_keeps_streamed_results_and_terminalizes_every_remaining_key(monkeypatch, failure):
     sent = []
     monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda _name, **_kwargs: (None, object()))
 
     def execute(_client, _command, **kwargs):
         batch = json.loads(kwargs["input_data"])
         sent.append(batch)
-        if len(sent) == 2:
-            if failure == "command":
-                raise TimeoutError()
-            return 0, "", ""
-        return 0, "".join(f"latency\t{item['key']}\t1\t20\t\t1\n" for item in batch), ""
+        kwargs["stdout_callback"]("".join(
+            f"latency\t{item['key']}\t1\t20\t\t1\n" for item in batch[:2]
+        ))
+        if failure == "command":
+            raise TimeoutError()
+        return 0, "", ""
 
     monkeypatch.setattr(remote_proxy, "ssh_manager", SimpleNamespace(execute_command_with_status=execute))
     nodes = [_node(index, port=10000 + index) for index in range(5)]
@@ -283,7 +289,8 @@ def test_ssh_quick_keeps_prior_batch_and_terminalizes_every_remaining_key(monkey
     else:
         results = remote_proxy.measure_proxy_node_latencies_on_server("synthetic", nodes, quick=True, max_workers=2)
     assert len(results) == 5
-    assert sum(value.ok for value in results.values()) == (2 if failure == "command" else 3)
+    assert len(sent) == 1 and len(sent[0]) == 5
+    assert sum(value.ok for value in results.values()) == 2
     assert all(value.ok or value.detail for value in results.values())
 
 

@@ -34,7 +34,7 @@ from config.paths import STORAGE_DIR
 from core import proxy_routing
 from core.subscription_transport import SubscriptionRedirectHandler, subscription_error_message
 from core.lazy_imports import LazyAttribute, LazyModule
-from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES
+from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES, LOCAL_PROXY_BUILTIN_SITES
 
 
 network_diagnostic_settings = LazyModule("core.network_diagnostic_settings")
@@ -112,6 +112,7 @@ SERVICE_PROXY_MAX_GROUPS = 64
 AI_PROXY_HEALTH_CHECK_URL = "https://api.openai.com/v1/models"
 AI_PROXY_HEALTH_CHECK_EXPECTED_STATUS = "200/401"
 AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 10
+WEBSITE_PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 30
 AI_PROXY_HEALTH_CHECK_TIMEOUT_MS = 5000
 AI_PROXY_HEALTH_CHECK_MAX_FAILURES = 1
 AI_PROXY_DISPLAY_NAME_MARKER = "# API-Switcher-Node-Name-B64:"
@@ -122,13 +123,20 @@ AI_PROXY_ADDITIONAL_HEALTH_CHECKS = frozenset(
             str(service.get("health_check_url") or ""),
             str(service.get("health_check_expected_status") or ""),
         )
-        for service in LOCAL_PROXY_AI_SERVICES
+        for service in (*LOCAL_PROXY_AI_SERVICES, *LOCAL_PROXY_BUILTIN_SITES)
     }
     | {
         ("https://www.youtube.com/generate_204", "204"),
         ("https://www.gstatic.com/generate_204", "204"),
     }
 )
+# Recognition only: a previously generated config does not lose ownership or
+# its strict-routing guarantees just because its HTTP health policy is older.
+# New configs must use AI_PROXY_ADDITIONAL_HEALTH_CHECKS, never this legacy set.
+AI_PROXY_LEGACY_HEALTH_CHECKS = frozenset({
+    ("https://api.anthropic.com/v1/models", "200-499"),
+    ("https://generativelanguage.googleapis.com/v1beta/models", "200-499"),
+})
 PRIVATE_DIRECT_IP_RULES = (
     "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
     "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
@@ -244,13 +252,20 @@ def _proxy_doh_nameservers(proxy_route: str) -> list[str]:
     ]
 
 
-def _normalized_domain_route_map(domain_routes) -> dict[str, str]:
+def _managed_rule_route_name(value: object) -> str:
+    # Only an explicit rule target may use DIRECT. Node/group names and strict
+    # DNS routes still reject all built-in outbounds via the original validator.
+    return "DIRECT" if value == "DIRECT" else _managed_proxy_route_name(value)
+
+
+def _normalized_domain_route_map(domain_routes, *, allow_direct: bool = False) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for raw_domain, raw_route in (domain_routes or {}).items():
         domain = _normalized_proxy_domain(raw_domain)
         if not domain:
             continue
-        normalized[domain] = _managed_proxy_route_name(raw_route)
+        normalized[domain] = (_managed_rule_route_name(raw_route) if allow_direct
+                              else _managed_proxy_route_name(raw_route))
     return normalized
 
 
@@ -316,14 +331,15 @@ def _mainland_compatible_dns_config(proxy_domains, domain_routes=None) -> dict:
         "https://doh.pub/dns-query#DIRECT",
         "https://dns.alidns.com/dns-query#DIRECT",
     ]
-    normalized_routes = _normalized_domain_route_map(domain_routes)
+    normalized_routes = _normalized_domain_route_map(domain_routes, allow_direct=True)
     policy = {}
     for value in proxy_domains or ():
         domain = _normalized_proxy_domain(value)
         if domain:
-            policy[f"+.{domain}"] = _proxy_doh_nameservers(
-                normalized_routes.get(domain, "AI-PROXY")
-            )
+            route = normalized_routes.get(domain, "AI-PROXY")
+            # Keep a specific policy even for DIRECT: simply omitting it lets
+            # a proxied parent-domain policy capture a direct child domain.
+            policy[f"+.{domain}"] = ["system"] if route == "DIRECT" else _proxy_doh_nameservers(route)
     return {
         "enable": True,
         "ipv6": True,
@@ -3222,32 +3238,50 @@ def _measure_quick_tcp_on_server(ssh_name, items, timeout, max_workers, cancel_e
     if cancel_event is not None and cancel_event.is_set():
         finish_remaining("已取消远端 TCP 快速检查", cancelled=True)
         return results
+    groups_by_key = {group[0]["key"]: group for group in grouped}
+    line_buffer = ""
+    streamed = False
+
+    def publish(text):
+        for key, result in _parse_remote_latency_output(text).items():
+            group = groups_by_key.get(key)
+            if group is not None:
+                record(group, result)
+
+    def receive(chunk):
+        nonlocal line_buffer, streamed
+        streamed = True
+        lines = (line_buffer + chunk).split("\n")
+        line_buffer = lines.pop()
+        # Node records are short; bound even malformed output with no newline.
+        if len(line_buffer) > 4096 or any(len(line) > 4096 for line in lines):
+            raise ValueError("远端快测输出行超过长度上限")
+        publish("\n".join(lines))
+
     try:
         _profile, client = _connect_ssh(ssh_name, timeout=5, max_retries=1)
         command = _build_remote_latency_command(timeout, 1, workers, quick=True)
-        for offset in range(0, len(grouped), workers):
-            if cancel_event is not None and cancel_event.is_set():
-                finish_remaining("已取消远端 TCP 快速检查（未启动后续批次）", cancelled=True)
-                break
-            batch = grouped[offset:offset + workers]
-            status, stdout, stderr = ssh_manager.execute_command_with_status(
-                client, command, timeout=max(10, int(timeout + 9)),
-                input_data=json.dumps([group[0] for group in batch], ensure_ascii=False),
-                log_command=False,
-            )
-            parsed = _parse_remote_latency_output(stdout)
-            for group in batch:
-                result = parsed.get(group[0]["key"])
-                if result is not None:
-                    record(group, result)
-                elif status == 0:
-                    record(group, ProxyNodeLatencyResult(
-                        group[0]["key"], False, detail="远端未返回该节点的快测结果，请重试", attempts=0,
-                        incomplete=True,
-                    ))
-            if status != 0:
-                detail = (str(stderr or stdout).strip() or f"退出状态 {status}").splitlines()[0][:140]
-                raise RuntimeError(f"{ssh_name}: 远端快测失败: {detail}")
+        waves = (len(grouped) + workers - 1) // workers
+        command_timeout = max(10, min(300, int(waves * timeout + 9)))
+        # One remote worker pool continuously refills free slots. Streaming
+        # results avoids both SSH/Python startup per batch and slow-batch gates.
+        status, stdout, stderr = ssh_manager.execute_command_with_status(
+            client, command, timeout=command_timeout,
+            input_data=json.dumps([group[0] for group in grouped], ensure_ascii=False),
+            log_command=False, stdout_callback=receive, cancel_event=cancel_event,
+        )
+        if not streamed:
+            # Simple command adapters may return only the completed output.
+            publish(stdout)
+        elif status == 0 and line_buffer:
+            publish(line_buffer)
+        if cancel_event is not None and cancel_event.is_set():
+            finish_remaining("已取消远端 TCP 快速检查", cancelled=True)
+        elif status != 0:
+            detail = (str(stderr or stdout).strip() or f"退出状态 {status}").splitlines()[0][:140]
+            raise RuntimeError(f"{ssh_name}: 远端快测失败: {detail}")
+        else:
+            finish_remaining("远端未返回该节点的快测结果，请重试")
     except Exception as exc:
         if cancel_event is not None and cancel_event.is_set():
             finish_remaining("已取消远端 TCP 快速检查", cancelled=True)
@@ -3714,6 +3748,7 @@ def build_mihomo_config(
     extra_proxy_ip_cidrs: tuple[str, ...] | list[str] | None = None,
     proxy_domain_routes: dict[str, str] | None = None,
     proxy_ip_cidr_routes: dict[str, str] | None = None,
+    service_route_preferences: dict | None = None,
     proxy_non_cn: bool = False,
     strict_privacy: bool = False,
     resilient_transport: bool = False,
@@ -3730,7 +3765,7 @@ def build_mihomo_config(
     additional_nodes, additional_groups = _managed_additional_proxy_groups(
         additional_proxy_groups
     )
-    allowed_routes = {"AI-PROXY", *(str(group["name"]) for group in additional_groups)}
+    allowed_routes = {"AI-PROXY", "DIRECT", *(str(group["name"]) for group in additional_groups)}
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     # The first matching rule wins. More specific custom domains must precede
     # built-in parent domains (e.g. api.openai.com before openai.com).
@@ -3738,9 +3773,9 @@ def build_mihomo_config(
         _unique_clean_values(AI_PROXY_DOMAINS, extra_proxy_domains),
         key=lambda domain: (-str(domain).count("."), -len(str(domain))),
     ))
-    normalized_domain_routes = _normalized_domain_route_map(proxy_domain_routes)
+    normalized_domain_routes = _normalized_domain_route_map(proxy_domain_routes, allow_direct=True)
     normalized_ip_routes = {
-        str(cidr or "").strip(): _managed_proxy_route_name(route)
+        str(cidr or "").strip(): _managed_rule_route_name(route)
         for cidr, route in (proxy_ip_cidr_routes or {}).items()
         if str(cidr or "").strip()
     }
@@ -3752,6 +3787,10 @@ def build_mihomo_config(
         raise ValueError(
             "代理规则引用了未定义的策略组: " + "、".join(sorted(unknown_routes))
         )
+    proxy_routing.validate_outbound_privacy(
+        {*normalized_domain_routes.values(), *normalized_ip_routes.values()},
+        strict_privacy=strict_privacy,
+    )
     known_domains = {
         normalized
         for domain in proxy_domains
@@ -3793,8 +3832,8 @@ def build_mihomo_config(
     referenced_additional_routes = {
         *resolved_domain_routes.values(),
         *(normalized_ip_routes.get(cidr, "AI-PROXY") for cidr in proxy_ip_cidrs),
-    } - {"AI-PROXY"}
-    defined_additional_routes = allowed_routes - {"AI-PROXY"}
+    } - {"AI-PROXY", "DIRECT"}
+    defined_additional_routes = allowed_routes - {"AI-PROXY", "DIRECT"}
     if referenced_additional_routes != defined_additional_routes:
         unused = defined_additional_routes - referenced_additional_routes
         raise ValueError(
@@ -3872,6 +3911,8 @@ def build_mihomo_config(
         markers.append(AI_PROXY_STRICT_PRIVACY_MARKER)
     if managed_lan_allowed_ips:
         markers.append(AI_PROXY_WSL_SHARE_MARKER)
+    if service_route_preferences is not None and any(proxy_routing.normalize_routes(service_route_preferences).values()):
+        markers.append(proxy_routing.route_snapshot_marker(service_route_preferences, rules))
     return "\n".join(markers) + "\n" + _dump_yaml(config)
 
 
@@ -4193,7 +4234,11 @@ def _managed_proxy_group(
         "type": "fallback",
         "proxies": names,
         "url": str(health_check_url),
-        "interval": AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS,
+        "interval": (
+            AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS
+            if health_check_url in {service["health_check_url"] for service in LOCAL_PROXY_AI_SERVICES}
+            else WEBSITE_PROXY_HEALTH_CHECK_INTERVAL_SECONDS
+        ),
         "lazy": False,
         "timeout": AI_PROXY_HEALTH_CHECK_TIMEOUT_MS,
         "max-failed-times": AI_PROXY_HEALTH_CHECK_MAX_FAILURES,
@@ -4300,7 +4345,7 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
                 f"{fallback_prefix}{index}"
                 for index in range(1, len(member_names))
             )
-            allowed_health_checks = AI_PROXY_ADDITIONAL_HEALTH_CHECKS
+            allowed_health_checks = AI_PROXY_ADDITIONAL_HEALTH_CHECKS | AI_PROXY_LEGACY_HEALTH_CHECKS
         if member_names != expected_names or any(name not in node_by_name for name in member_names):
             return False
         select_group = _managed_proxy_group(
@@ -4313,15 +4358,21 @@ def _managed_config_strict_privacy_enabled(content: str) -> bool:
         valid_group_contract = group == select_group
         if not valid_group_contract:
             valid_group_contract = any(
-                group
-                == _managed_proxy_group(
+                group == {**_managed_proxy_group(
                     group_name,
                     member_names,
                     health_checked=True,
                     health_check_url=health_url,
                     expected_status=expected_status,
-                )
+                ), "interval": interval}
                 for health_url, expected_status in allowed_health_checks
+                # Previous versions probed websites every 10 seconds. Retain
+                # ownership recognition without accepting arbitrary contracts.
+                for interval in (
+                    (AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS,)
+                    if health_url in {service["health_check_url"] for service in LOCAL_PROXY_AI_SERVICES}
+                    else (AI_PROXY_HEALTH_CHECK_INTERVAL_SECONDS, WEBSITE_PROXY_HEALTH_CHECK_INTERVAL_SECONDS)
+                )
             )
         if not valid_group_contract:
             return False
@@ -4481,7 +4532,7 @@ def _unique_clean_values(*groups) -> tuple[str, ...]:
 def _ip_cidr_rule(cidr: str, proxy_route: str = "AI-PROXY") -> str:
     text = str(cidr or "").strip()
     rule_type = "IP-CIDR6" if ":" in text else "IP-CIDR"
-    route = _managed_proxy_route_name(proxy_route)
+    route = _managed_rule_route_name(proxy_route)
     return f"{rule_type},{text},{route},no-resolve"
 
 
@@ -5169,7 +5220,24 @@ def reload_ai_proxy(
         strict_privacy=effective_strict_privacy,
         **proxy_routing.ssh_config_options(ssh_name, old_config, routing_preferences),
     )
-    if old_config.strip() == new_config.strip():
+    def runtime_text(content):
+        return "\n".join(line for line in content.splitlines()
+                         if not line.startswith(proxy_routing.ROUTE_SNAPSHOT_MARKER)).strip()
+    if runtime_text(old_config) == runtime_text(new_config):
+        metadata_suffix = ""
+        if old_config.strip() != new_config.strip():
+            # Recovery comments/disabled choices are not kernel settings.
+            # Persist them without forcing existing connections through a reload.
+            try:
+                ssh_manager.write_remote_file(client, config_path, new_config, file_mode=0o600)
+            except Exception as exc:
+                rollback_suffix = ""
+                try:
+                    ssh_manager.write_remote_file(client, config_path, old_config, file_mode=0o600)
+                except Exception:
+                    rollback_suffix = "；旧文件恢复失败，请检查远端配置文件"
+                raise RuntimeError(f"{ssh_name}: 保存分流恢复记录失败，运行线路未改变{rollback_suffix}") from exc
+            metadata_suffix = "；已更新分流恢复记录"
         if persist_selection:
             if profile_id:
                 set_proxy_subscription_selected_node(proxy_node, profile_id=profile_id)
@@ -5181,7 +5249,7 @@ def reload_ai_proxy(
             mixed_port,
             status,
         )
-        return f"{ssh_name}: 运行节点已是最新配置，无需热更新{repair_suffix}"
+        return f"{ssh_name}: 运行节点已是最新配置，无需热更新{metadata_suffix}{repair_suffix}"
 
     command = _build_reload_command(config_path, mixed_port)
     try:
@@ -9468,7 +9536,11 @@ def classify(label, code, body):
             token in f"{{message}} {{error_type}}"
             for token in ("api key", "authentication", "unauthorized", "x-api-key", "anthropic-version")
         )
-        ok = code in {{400, 401}} and bool(error) and auth_error
+        policy_error = any(
+            token in f"{{message}} {{error_type}}"
+            for token in ("region", "country", "location", "not supported", "disabled", "quota", "policy", "blocked")
+        )
+        ok = code in {{400, 401}} and bool(error) and auth_error and not policy_error
         return ok, f"HTTP {{code}}" + ("，Anthropic 身份已校验" if ok else "，Anthropic 响应不合格")
     if label == "Gemini/Google AI":
         credential_error = any(
@@ -9477,9 +9549,10 @@ def classify(label, code, body):
         )
         policy_error = any(
             token in message
-            for token in ("region", "country", "location", "not supported", "blocked")
+            for token in ("region", "country", "location", "not supported", "disabled", "quota", "policy", "blocked")
         )
-        ok = code in {{400, 401, 403}} and bool(error) and credential_error and not policy_error
+        ok = (code in {{400, 401, 403}} and bool(error) and credential_error and not policy_error
+              and error_type in {{"", "permission_denied", "unauthenticated", "invalid_argument"}})
         return ok, f"HTTP {{code}}" + ("，Google AI 身份已校验" if ok else "，Google AI 响应不合格")
     return False, "未知 AI 探测目标"
 
@@ -9864,19 +9937,27 @@ def measure(item):
 
 workers = max(1, min(MAX_WORKERS, len(nodes) or 1))
 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-    futures = {{
-        executor.submit(measure, item): clean(item.get("key"))
-        for item in nodes
-        if isinstance(item, dict)
-    }}
-    for future in concurrent.futures.as_completed(futures):
-        expected_key = futures[future]
-        try:
-            key, ok, latency, detail, incomplete = future.result()
-        except Exception as exc:
-            key, ok, latency, detail, incomplete = expected_key, 0, "", clean(exc) or exc.__class__.__name__, 1
-        if key:
-            print(f"latency\\t{{key}}\\t{{ok}}\\t{{latency}}\\t{{clean(detail)}}\\t{{0 if incomplete else ATTEMPTS}}\\t{{incomplete}}", flush=True)
+    pending = iter(item for item in nodes if isinstance(item, dict))
+    futures = {{}}
+    def submit_next():
+        item = next(pending, None)
+        if item is not None:
+            futures[executor.submit(measure, item)] = clean(item.get("key"))
+    for _ in range(workers):
+        submit_next()
+    while futures:
+        ready, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+        for future in ready:
+            expected_key = futures.pop(future)
+            try:
+                key, ok, latency, detail, incomplete = future.result()
+            except Exception as exc:
+                key, ok, latency, detail, incomplete = expected_key, 0, "", clean(exc) or exc.__class__.__name__, 1
+            if key:
+                print(f"latency\\t{{key}}\\t{{ok}}\\t{{latency}}\\t{{clean(detail)}}\\t{{0 if incomplete else ATTEMPTS}}\\t{{incomplete}}", flush=True)
+            # Refill only after publishing. If SSH closes the output pipe,
+            # queued nodes never start and at most one worker window remains.
+            submit_next()
 PY
 """
 
@@ -10818,11 +10899,16 @@ def _find_matching_subscription_node(
     return None
 
 
-def _read_remote_managed_proxy_node(ssh_name: str, mixed_port: int = 7890) -> dict | None:
+def read_managed_ai_proxy_config(ssh_name: str) -> str:
+    """Read only the known deployment path; credentials never enter feedback."""
     _profile, client = _connect_ssh(ssh_name)
     home = remote_config._remote_home(client)
     config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
-    content = ssh_manager.read_remote_file(client, config_path)
+    return ssh_manager.read_remote_file(client, config_path) or ""
+
+
+def _read_remote_managed_proxy_node(ssh_name: str, mixed_port: int = 7890) -> dict | None:
+    content = read_managed_ai_proxy_config(ssh_name)
     if not content or AI_PROXY_CONFIG_MARKER not in content:
         return None
     try:

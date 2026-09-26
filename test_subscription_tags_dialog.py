@@ -175,14 +175,64 @@ def test_classification_controls_fit_narrow_window_and_scaled_dpi(dialog, tk_roo
     view, _, _ = dialog
     import customtkinter as ctk
     original_scaling = ctk.ScalingTracker.widget_scaling
+
+    def settle_native_geometry():
+        ready = []
+        tk_root.after(350, lambda: ready.append(True))
+        wait(tk_root, lambda: bool(ready))
+
     try:
+        # center_window and the Windows titlebar redraw schedule native geometry
+        # updates. Measure the requested short window, not its initial large one.
+        settle_native_geometry()
         for scaling in (1.0, 1.5, 2.0):
             ctk.set_widget_scaling(scaling)
+            # CTk temporarily locks wm min/max size for 1000 ms on scaling.
+            # Resize only when those native constraints permit the target.
+            target_size = [round(value * view._get_window_scaling()) for value in (500, 420)]
+
+            def resize_is_allowed():
+                lower = view.tk.call("wm", "minsize", view._w)
+                upper = view.tk.call("wm", "maxsize", view._w)
+                return all(int(lower[i]) <= value <= int(upper[i]) for i, value in enumerate(target_size))
+
+            wait(tk_root, resize_is_allowed)
             view.geometry("500x420")
-            tk_root.update()
+            settle_native_geometry()
+            # On Windows a native DPI/geometry change can deliver another
+            # Configure event after update() returns. Wait for the same bounds
+            # being asserted, rather than measuring the previous canvas width.
+            try:
+                wait(tk_root, lambda: view._rows.winfo_viewable() and all(
+                    widget.winfo_rootx() >= view.winfo_rootx()
+                    and widget.winfo_rootx() + widget.winfo_width() <= view.winfo_rootx() + view.winfo_width() + 2
+                    for widget in (view._save_button, *view._combos.values())
+                ))
+            except AssertionError:
+                raise AssertionError({
+                    "scale": scaling, "state": view.state(), "viewable": view.winfo_viewable(),
+                    "window": (view.winfo_rootx(), view.winfo_width(), view.winfo_height()),
+                    "rows": (view._rows.winfo_viewable(), view._rows.winfo_width(), view._rows.winfo_height()),
+                    "canvas": (view._rows._parent_canvas.winfo_width(), view._rows._parent_canvas.winfo_height()),
+                    "controls": [(widget.winfo_rootx(), widget.winfo_width(), widget.winfo_viewable())
+                                 for widget in (view._save_button, *view._combos.values())],
+                }) from None
+            assert abs(view.winfo_width() - round(500 * view._get_window_scaling())) <= 2
+            assert abs(view.winfo_height() - round(420 * view._get_window_scaling())) <= 2
+            assert view._rows._parent_canvas.winfo_height() > 20
+            if scaling == 2.0:
+                assert view._narrow_rows
+                assert all(combo.grid_info()["columnspan"] == 2 for combo in view._combos.values())
+            assert view._combos["a"].get() == "家宽" and view._combos["b"].get() == "未标记"
             for widget in (view._save_button, *view._combos.values()):
                 assert widget.winfo_rootx() >= view.winfo_rootx()
                 assert widget.winfo_rootx() + widget.winfo_width() <= view.winfo_rootx() + view.winfo_width() + 2
+            canvas = view._rows._parent_canvas
+            canvas.yview_moveto(1.0)
+            tk_root.update_idletasks()
+            last = list(view._combos.values())[-1]
+            assert last.winfo_rooty() >= canvas.winfo_rooty() - 2
+            assert last.winfo_rooty() + last.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height() + 2
     finally:
         ctk.set_widget_scaling(original_scaling)
 

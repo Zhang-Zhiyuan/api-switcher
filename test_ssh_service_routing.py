@@ -58,6 +58,34 @@ def test_normal_ssh_reload_preserves_persisted_routes(routed_ssh):
     assert f"DOMAIN-SUFFIX,anthropic.com,{local_proxy._subscription_route_group_name('home', 'claude')}" in parsed["rules"]
 
 
+def test_direct_routes_survive_ssh_reload_without_affecting_other_servers(routed_ssh):
+    configs, calls, _first, _second = routed_ssh
+    before_b = configs["ssh-b"]
+    routes = {"builtin_sites": {"youtube": True, "google": True},
+              "service_route_modes": {"youtube": "direct", "google": "direct"}}
+    proxy_routing.apply_ssh_routes("ssh-a", routes)
+    remote_proxy.reload_ai_proxy("ssh-a", remote_proxy.format_proxy_node(_node("新默认", "new-main.example.com")))
+    parsed = remote_proxy.yaml.safe_load(configs["ssh-a"])
+    assert "DOMAIN-SUFFIX,youtube.com,DIRECT" in parsed["rules"]
+    assert "DOMAIN-SUFFIX,google.com,DIRECT" in parsed["rules"]
+    assert "DOMAIN-SUFFIX,anthropic.com,AI-PROXY" in parsed["rules"]
+    assert parsed["dns"]["nameserver-policy"]["+.youtube.com"] == ["system"]
+    assert configs["ssh-b"] == before_b
+    assert proxy_routing.load_ssh_routes("ssh-a")["service_route_modes"] == routes["service_route_modes"]
+
+
+def test_strict_ssh_rejects_direct_and_rolls_back_saved_intent_without_remote_writes(routed_ssh):
+    configs, calls, _first, _second = routed_ssh
+    configs["ssh-a"] = remote_proxy.build_mihomo_config(_node("默认", "main.example.com"), strict_privacy=True)
+    before = dict(configs)
+    routes = {"builtin_sites": {"youtube": True}, "service_route_modes": {"youtube": "direct"}}
+    with pytest.raises(RuntimeError, match="直连目标与严格隐私模式冲突"):
+        proxy_routing.apply_ssh_routes("ssh-a", routes)
+    assert configs == before
+    assert not calls
+    assert not proxy_routing.load_ssh_routes("ssh-a")["service_route_modes"]
+
+
 def test_bound_subscription_refresh_never_promotes_it_to_ssh_default(monkeypatch, routed_ssh):
     configs, _calls, first, _second = routed_ssh
     proxy_routing.apply_ssh_routes("ssh-a", {"service_profile_bindings": {"claude": "home"}})

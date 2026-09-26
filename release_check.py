@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib
 import importlib.metadata
@@ -554,6 +555,50 @@ def run_command(label: str, command: list[str]) -> bool:
     return False
 
 
+def _native_pytest_modules() -> list[Path]:
+    """Find real Tk modules without importing or executing any test code.
+
+    CustomTkinter's global font/scaling caches can retain dead Tcl interpreters
+    after a module destroys its root. Give native tests a fresh process per
+    module; keep the rest in one process for fast, complete pytest collection.
+    """
+    native = []
+    for path in _iter_workspace_files({".py"}):
+        if not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+            continue
+        # These are manual scripts, not automated GUI coverage. The primary
+        # batch retains their normal collection/skip behavior.
+        if path.name in {"test_api_connection.py", "test_tray.py"}:
+            continue
+        try:
+            tree = ast.parse(path.read_bytes(), filename=str(path))
+        except (OSError, SyntaxError, ValueError):
+            continue  # Let ordinary pytest collection report the error.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.arg) and node.arg == "tk_root":
+                native.append(path)
+                break
+            if isinstance(node, ast.Call):
+                name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                        else node.func.id if isinstance(node.func, ast.Name) else "")
+                if name in {"CTk", "Tk"}:
+                    native.append(path)
+                    break
+    return sorted(native)
+
+
+def run_pytest_checks(command: list[str]) -> bool:
+    """Run every test once, isolating native GUI lifetimes from other modules."""
+    native = _native_pytest_modules()
+    primary = [*command, *(f"--ignore={path.as_posix()}" for path in native)]
+    ok = run_command("pytest", primary)
+    for index, path in enumerate(native, 1):
+        print(f"\nNative GUI batch {index}/{len(native)}: {path}", flush=True)
+        # Do not short-circuit after a failure: finish the release audit.
+        ok = run_command("pytest", [*command, path.as_posix()]) and ok
+    return ok
+
+
 def check_git_diff() -> bool:
     """Check repository whitespace when Git metadata and the executable exist."""
     if not Path(".git").exists():
@@ -665,7 +710,10 @@ def main() -> int:
         failed.append("mojibake")
     if not check_python_syntax():
         failed.append("syntax")
-    failed.extend(label for label, command in CHECKS if not run_command(label, command))
+    for label, command in CHECKS:
+        ok = run_pytest_checks(command) if label == "pytest" else run_command(label, command)
+        if not ok:
+            failed.append(label)
     if not check_git_diff():
         failed.append("diff-check")
     if failed:

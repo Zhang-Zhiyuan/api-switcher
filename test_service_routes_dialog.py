@@ -70,6 +70,36 @@ def test_editor_changes_are_drafts_until_explicit_apply(editor):
     assert dialog._originals[dialog._scope] == dialog._drafts[dialog._scope]
 
 
+def test_unchanged_route_refresh_reuses_layout_without_repainting_rows(editor, monkeypatch):
+    root, dialog, _ = editor
+    root.update()
+    calls = []
+    for row in dialog._rows.values():
+        for field in ("profile", "node", "state_label", "detail", "tile", "name"):
+            widget = row[field]
+            original = widget.configure
+            def configure(*args, _original=original, **options):
+                calls.append(options)
+                return _original(*args, **options)
+            monkeypatch.setattr(widget, "configure", configure)
+    before = dialog._table.pack_slaves()
+    dialog._render()
+    dialog._changed()
+    assert calls == []
+    assert dialog._table.pack_slaves() == before
+
+
+def test_reused_route_filter_empty_and_restore_preserves_order(editor):
+    _, dialog, _ = editor
+    before = dialog._table.pack_slaves()
+    dialog._search.set("synthetic-no-route-match")
+    dialog._filter_rows()
+    assert dialog._table.pack_slaves() == [dialog._empty]
+    dialog._search.set("")
+    dialog._filter_rows()
+    assert dialog._table.pack_slaves() == before
+
+
 def test_tagged_routes_only_fill_current_scope_and_preserve_pinned_bindings(editor):
     _root, dialog, saved = editor
     first, second = dialog._scopes
@@ -502,13 +532,15 @@ def test_custom_form_is_collapsed_until_opened_without_losing_input(editor):
 
 def capture_preview(directory):
     """Isolated visual verification; no real preferences or SSH connections."""
-    from PIL import ImageGrab
+    from tools.ui_visual_audit import capture_window_image
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
-    root.withdraw()
+    root.title("隔离分流预览（合成数据）")
+    root.geometry("320x180+30+30")
+    root.update()
     dialog = ServiceRoutesDialog(
         root, scopes=["SSH 开发服务器", "SSH 推理服务器"],
         load_preferences=lambda _scope: _preferences(), catalog_loader=_catalog,
@@ -521,9 +553,7 @@ def capture_preview(directory):
             for _ in range(15):
                 root.update()
                 time.sleep(0.03)
-            ImageGrab.grab(bbox=(dialog.winfo_rootx(), dialog.winfo_rooty(),
-                                dialog.winfo_rootx() + dialog.winfo_width(),
-                                dialog.winfo_rooty() + dialog.winfo_height())).save(directory / f"routes-{label}.png")
+            capture_window_image(dialog).save(directory / f"routes-{label}.png")
     finally:
         dialog.destroy()
         root.destroy()

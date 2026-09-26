@@ -183,10 +183,11 @@ def test_main_layout_breakpoints_are_stable():
     assert main_layout_mode(MAIN_LAYOUT_WIDE_MIN_WIDTH) == "wide"
 
 
-def test_global_action_toolbar_wraps_on_compact_windows():
+def test_global_action_toolbar_uses_available_compact_row_and_wraps_when_narrow():
     assert global_action_columns(MAIN_LAYOUT_WIDE_MIN_WIDTH) == 4
-    assert global_action_columns(MAIN_LAYOUT_WIDE_MIN_WIDTH - 1) == 2
-    assert global_action_columns(MAIN_LAYOUT_COMPACT_MIN_WIDTH) == 2
+    assert global_action_columns(MAIN_LAYOUT_WIDE_MIN_WIDTH - 1) == 4
+    assert global_action_columns(MAIN_LAYOUT_COMPACT_MIN_WIDTH) == 4
+    assert global_action_columns(MAIN_LAYOUT_COMPACT_MIN_WIDTH - 1) == 2
     assert global_action_columns(480) == 2
 
 

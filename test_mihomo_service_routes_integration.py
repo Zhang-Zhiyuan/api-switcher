@@ -264,3 +264,66 @@ def test_real_mihomo_dispatches_service_and_custom_requests_to_pinned_nodes(monk
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+def test_real_mihomo_direct_websites_bypass_proxy_and_keep_ai_on_proxy(tmp_path):
+    binary = Path(os.environ.get("API_SWITCHER_MIHOMO_TEST_CORE") or local_proxy.LOCAL_PROXY_BIN_DIR / "mihomo.exe")
+    if not binary.is_file():
+        pytest.skip("Local mihomo core is not installed")
+    with ExitStack() as stack:
+        upstream = _upstream("via-proxy", stack)
+        target = _upstream("direct-target", stack)
+        preferences = proxy_routing.normalize_routes({
+            "builtin_sites": {"youtube": True, "google": True},
+            "service_route_modes": {"youtube": "direct", "google": "direct", "custom": "direct",
+                                    "custom:override": "default"},
+            "custom_targets": [
+                {"id": "domain", "value": "direct.example.test"},
+                {"id": "ip", "value": "127.0.0.1/32"},
+                {"id": "override", "value": "api.youtube.com"},
+            ],
+        })
+        port = _port_pair()
+        parsed = yaml.safe_load(remote_proxy.build_mihomo_config(
+            upstream, port, log_level="silent", **proxy_routing.config_options(preferences),
+        ))
+        cases = (
+            ("www.youtube.com", "direct-target"), ("youtubei.googleapis.com", "direct-target"),
+            ("accounts.google.com", "direct-target"), ("direct.example.test", "direct-target"),
+            ("127.0.0.1", "direct-target"), ("api.youtube.com", "via-proxy"),
+            ("generativelanguage.googleapis.com", "via-proxy"), ("api.anthropic.com", "via-proxy"),
+        )
+        # All endpoints, DNS and upstreams are loopback-only. Static hosts let
+        # actual YouTube rules execute without accessing YouTube/the internet.
+        parsed["hosts"] = {host: "127.0.0.1" for host, _expected in cases if host != "127.0.0.1"}
+        parsed["dns"] = {"enable": True, "ipv6": False, "use-hosts": True, "use-system-hosts": False,
+                         "enhanced-mode": "redir-host", "nameserver": ["127.0.0.1:9"],
+                         "default-nameserver": ["127.0.0.1"]}
+        parsed["ipv6"] = False
+        parsed["rules"] = ["MATCH,REJECT" if rule.startswith("MATCH,") else rule for rule in parsed["rules"]]
+        assert all(group["type"] == "select" for group in parsed["proxy-groups"])
+        assert not parsed.get("proxy-providers") and not parsed.get("rule-providers")
+        config_path = tmp_path / "direct-config.yaml"
+        config_path.write_text(yaml.safe_dump(parsed), encoding="utf-8")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        checked = subprocess.run([str(binary), "-t", "-d", str(tmp_path), "-f", str(config_path)],
+                                 capture_output=True, timeout=15, creationflags=flags)
+        assert checked.returncode == 0, checked.stdout.decode("utf-8", errors="replace")
+        process = subprocess.Popen([str(binary), "-d", str(tmp_path), "-f", str(config_path)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+        try:
+            _wait_for_mihomo_ready(process, port)
+            opener = request.build_opener(remote_proxy._NoBypassProxyHandler({"http": f"http://127.0.0.1:{port}"}))
+            runtime = proxy_route_diagnostics._read_controller(remote_proxy.mihomo_controller_port(port), expected_mixed_port=port)
+            for host, expected in cases:
+                result = proxy_route_diagnostics.match_rules(host, runtime["rules"])
+                assert result.certain and result.route == ("DIRECT" if expected == "direct-target" else "AI-PROXY")
+                with opener.open(f"http://{host}:{target['port']}/explicit-direct-test", timeout=4) as response:
+                    assert response.read().decode("ascii") == expected
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)

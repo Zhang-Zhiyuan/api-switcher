@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 APP_NAME = "API切换器"
-APP_VERSION = "2.4.49"
+APP_VERSION = "2.4.58"
 SPEC_PATH = Path(f"{APP_NAME}.spec")
 VERSION_INFO_PATH = Path("version_info.txt")
 RELEASE_REQUIREMENTS_PATH = Path("requirements-release.txt")
@@ -406,6 +406,8 @@ def _is_windows() -> bool:
 
 def _isolated_smoke_test_env(root: Path) -> dict[str, str]:
     """Return an environment that keeps smoke-test state below *root*."""
+    from release_check import PYTEST_REMOVED_ENV_NAMES
+
     root = root.resolve()
     isolated_paths = {
         "CODEX_HOME": root / "codex",
@@ -424,7 +426,10 @@ def _isolated_smoke_test_env(root: Path) -> dict[str, str]:
     for path in set(isolated_paths.values()):
         path.mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
+    # Match the regression runner's isolation: an empty home alone does not
+    # stop startup diagnostics from inheriting real API keys or dead proxies.
+    excluded = {name.casefold() for name in PYTEST_REMOVED_ENV_NAMES}
+    env = {name: value for name, value in os.environ.items() if name.casefold() not in excluded}
     env.update({name: str(path) for name, path in isolated_paths.items()})
     env["API_SWITCHER_PORTABLE"] = "0"
     env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"

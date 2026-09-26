@@ -15,6 +15,7 @@ from core.local_proxy_constants import (
 from ui.async_progress import CoalescedProgress
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import infer_feedback_severity, safe_feedback_text
+from ui.proxy_lifecycle import PROXY_MAINTENANCE_NOTICE
 from ui.tabs.tab_visibility import is_active_tab
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
@@ -220,7 +221,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         start_on_login_check.grid(row=0, column=0, sticky="w", padx=(0, 16))
         keep_running_check = ctk.CTkCheckBox(
             startup_box,
-            text="退出程序后继续运行",
+            text="退出后仅保留代理内核",
             variable=self._keep_running_on_exit_var,
             command=self._on_keep_running_on_exit_toggle,
             checkbox_width=18,
@@ -304,6 +305,13 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         privacy_notice.pack(anchor="w", fill="x", pady=(5, 0))
         bind_wraplength(privacy_box, privacy_notice, padding=8, min_width=240, max_width=920)
+
+        self._maintenance_notice = ctk.CTkLabel(
+            policy, text=PROXY_MAINTENANCE_NOTICE, text_color=COLORS["muted"],
+            font=font(11), anchor="w", justify="left", width=1,
+        )
+        self._maintenance_notice.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        bind_wraplength(policy, self._maintenance_notice, padding=8, min_width=180, max_width=920)
 
         routing_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         routing_frame.pack(fill="x", padx=14, pady=(0, 12), before=policy_frame)
@@ -1428,7 +1436,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         if enabled:
-            self._set_routing_status("已设置为退出程序后继续保持 Win11 本机代理运行。", "success")
+            self._set_routing_status(
+                "已设置为退出后保留代理内核；订阅定时刷新和程序巡检会暂停。需要持续维护时请选择最小化到托盘。",
+                "success",
+            )
         else:
             self._set_routing_status("已设置为退出程序时停止 Win11 本机代理并恢复启动前代理设置。", "warning")
 

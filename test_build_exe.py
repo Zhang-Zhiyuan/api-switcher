@@ -386,6 +386,23 @@ def test_smoke_test_cleans_isolated_environment_when_launch_fails(monkeypatch, t
     assert not captured["root"].exists()
 
 
+def test_smoke_environment_excludes_live_api_and_proxy_settings(monkeypatch, tmp_path):
+    from release_check import PYTEST_REMOVED_ENV_NAMES
+
+    for name in PYTEST_REMOVED_ENV_NAMES:
+        monkeypatch.setenv(name, "synthetic-live-value")
+        monkeypatch.setenv(name.lower(), "synthetic-live-value")
+    monkeypatch.setenv("SMOKE_UNRELATED_SETTING", "keep")
+    original = dict(build_exe.os.environ)
+
+    env = build_exe._isolated_smoke_test_env(tmp_path / "isolated")
+
+    excluded = {name.casefold() for name in PYTEST_REMOVED_ENV_NAMES}
+    assert not ({name.casefold() for name in env} & excluded)
+    assert env["SMOKE_UNRELATED_SETTING"] == "keep"
+    assert dict(build_exe.os.environ) == original
+
+
 def test_smoke_test_cleans_isolated_environment_after_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(build_exe, "_is_windows", lambda: True)
     captured = {}

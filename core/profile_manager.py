@@ -1173,6 +1173,8 @@ def _claude_api_override_active(settings: dict, config: dict) -> bool:
 
 def _pick_claude_account_import_name(identity: str, preferred_name: str | None = None, credentials: dict | None = None) -> str:
     profiles = list_claude_account_profiles()
+    active = get_active_claude_account_name()
+    profiles.sort(key=lambda profile: profile.name != active)
     for profile in profiles:
         if (_claude_account_matches_credentials(profile, credentials) if credentials
                 else profile.identity == identity):
@@ -1255,9 +1257,10 @@ def refresh_claude_account_snapshot_if_current(name: str) -> bool:
     ok, _reason = _validate_claude_account_credentials(credentials)
     if not ok or not _claude_account_matches_credentials(target, credentials):
         return False
-    refreshed = _save_current_claude_account_credentials(credentials)
-    if refreshed.name != name:
-        raise RuntimeError("Claude 当前登录匹配账号，但刷新后账号名称发生变化")
+    refreshed = copy.copy(target)
+    refreshed.identity = _claude_account_identity_from_credentials(credentials)
+    refreshed.created_at = _now_iso()
+    save_claude_account_profile_with_credentials(refreshed, credentials)
     return True
 
 
@@ -1280,7 +1283,10 @@ def get_current_claude_account_name() -> str | None:
     if not ok or _claude_api_override_active(settings, config):
         return None
 
-    for profile in list_claude_account_profiles():
+    profiles = list_claude_account_profiles()
+    active = get_active_claude_account_name()
+    profiles.sort(key=lambda profile: profile.name != active)
+    for profile in profiles:
         if _claude_account_matches_credentials(profile, credentials):
             return profile.name
     return None
@@ -1297,7 +1303,10 @@ def get_claude_account_runtime_summary() -> dict:
     identity = _claude_account_identity_from_credentials(credentials) if credentials_ok else "no-login"
     profile_name = None
     if credentials_ok and not override_active:
-        for profile in list_claude_account_profiles():
+        profiles = list_claude_account_profiles()
+        active = get_active_claude_account_name()
+        profiles.sort(key=lambda profile: profile.name != active)
+        for profile in profiles:
             if _claude_account_matches_credentials(profile, credentials):
                 profile_name = profile.name
                 break
@@ -2215,7 +2224,9 @@ def _normalize_codex_official_auth(auth: dict) -> dict:
     if not _codex_official_auth_available(auth):
         raise ValueError("Codex 账号快照里没有可用 ChatGPT 登录 token")
 
-    normalized = dict(auth)
+    from core.auth_parser import normalize_codex_token_fields
+
+    normalized = normalize_codex_token_fields(auth)
     normalized["auth_mode"] = "chatgpt"
     normalized.pop("OPENAI_API_KEY", None)
     return normalized
@@ -2227,7 +2238,7 @@ def _validate_codex_account_auth(auth: object) -> tuple[bool, str]:
         return ok, reason
     if not _codex_official_auth_available(auth):
         return False, "Codex 账号快照里没有可用 ChatGPT 登录 token"
-    return True, "可用"
+    return True, "本地快照可读取，服务端有效性未验证"
 
 
 def validate_codex_account_snapshot(profile: CodexAccountProfile) -> tuple[bool, str]:
@@ -2279,6 +2290,8 @@ def _codex_account_override_active(config: dict, auth: dict) -> bool:
 
 def _pick_codex_account_import_name(identity: str, preferred_name: str | None = None, auth: dict | None = None) -> str:
     profiles = list_codex_account_profiles()
+    active = get_active_codex_account_name()
+    profiles.sort(key=lambda profile: profile.name != active)
     for profile in profiles:
         if (_codex_account_matches_auth(profile, auth) if auth
                 else profile.identity == identity):
@@ -2325,6 +2338,15 @@ def _save_current_codex_account_auth(auth: dict) -> CodexAccountProfile:
     identity = _codex_account_identity_from_auth(auth)
     preferred_name = _codex_account_preferred_name(auth)
     name = _pick_codex_account_import_name(identity, preferred_name, auth)
+    existing = next((profile for profile in list_codex_account_profiles() if profile.name == name), None)
+    if existing is not None:
+        from core.auth_parser import codex_auth_is_newer
+
+        saved = get_codex_account_auth(existing)
+        if isinstance(saved, dict) and _account_snapshots_match(saved, auth, "codex-login") and codex_auth_is_newer(saved, auth):
+            # A stale file restored by another tool must not destroy the newer
+            # refresh token we already saved for this account.
+            return existing
     ref = f"codex-account:{name}:auth_json"
     profile = CodexAccountProfile(
         name=name,
@@ -2399,9 +2421,15 @@ def refresh_codex_account_snapshot_if_current(name: str) -> bool:
     ok, _reason = _validate_codex_account_auth(auth)
     if not ok or not _codex_account_matches_auth(target, auth):
         return False
-    refreshed = _save_current_codex_account_auth(auth)
-    if refreshed.name != name:
-        raise RuntimeError("Codex 当前登录匹配账号，但刷新后账号名称发生变化")
+    from core.auth_parser import codex_auth_is_newer
+
+    saved = get_codex_account_auth(target)
+    if isinstance(saved, dict) and codex_auth_is_newer(saved, auth):
+        return False
+    refreshed = copy.copy(target)
+    refreshed.identity = _codex_account_identity_from_auth(auth)
+    refreshed.created_at = _now_iso()
+    save_codex_account_profile_with_auth(refreshed, _normalize_codex_official_auth(auth))
     return True
 
 
@@ -2425,7 +2453,10 @@ def get_current_codex_account_name() -> str | None:
     if not _codex_official_auth_available(auth) or _codex_account_override_active(config, auth):
         return None
 
-    for profile in list_codex_account_profiles():
+    profiles = list_codex_account_profiles()
+    active = get_active_codex_account_name()
+    profiles.sort(key=lambda profile: profile.name != active)
+    for profile in profiles:
         if _codex_account_matches_auth(profile, auth):
             return profile.name
     return None
@@ -2443,7 +2474,10 @@ def get_codex_account_runtime_summary() -> dict:
     identity = _codex_account_identity_from_auth(auth) if has_official_auth else "no-login"
     profile_name = None
     if has_official_auth and not override_active:
-        for profile in list_codex_account_profiles():
+        profiles = list_codex_account_profiles()
+        active = get_active_codex_account_name()
+        profiles.sort(key=lambda profile: profile.name != active)
+        for profile in profiles:
             if _codex_account_matches_auth(profile, auth):
                 profile_name = profile.name
                 break
