@@ -1,0 +1,342 @@
+{
+  "scenario": "nodes",
+  "count": 300,
+  "width": 740,
+  "long_names": true,
+  "phases": [
+    {
+      "phase": "open",
+      "action_ms": 80.0,
+      "ready_ms": 8295.6,
+      "max_gap_ms": 80.1,
+      "p95_gap_ms": 58.9,
+      "slow_callbacks": [
+        [
+          "ProxyNodePicker._render_plan_batch.<locals>.<lambda>",
+          [
+            165,
+            2166.8,
+            17.6
+          ]
+        ],
+        [
+          "CTkBaseClass._update_dimensions_event",
+          [
+            2728,
+            535.3,
+            5.2
+          ]
+        ],
+        [
+          "ProxyNodePicker._render_row.<locals>.<lambda>",
+          [
+            599,
+            235.4,
+            8.0
+          ]
+        ],
+        [
+          "main.<locals>.run_phase",
+          [
+            1,
+            80.1,
+            80.1
+          ]
+        ],
+        [
+          "CTkScrollbar.set",
+          [
+            86,
+            36.2,
+            0.6
+          ]
+        ],
+        [
+          "ProxyNodePicker._schedule_render_plan.<locals>.<lambda>",
+          [
+            1,
+            13.3,
+            13.3
+          ]
+        ],
+        [
+          "CTkScrollableFrame.__init__.<locals>.<lambda>",
+          [
+            168,
+            12.0,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            180,
+            3.8,
+            0.1
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "same_nodes",
+      "action_ms": 14.7,
+      "ready_ms": 46.4,
+      "max_gap_ms": 30.7,
+      "p95_gap_ms": 30.7,
+      "slow_callbacks": [
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            14.8,
+            14.8
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            17,
+            1.0,
+            0.1
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            11,
+            0.6,
+            0.2
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            3,
+            0.5,
+            0.2
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            1,
+            0.1,
+            0.1
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "filter",
+      "action_ms": 10.3,
+      "ready_ms": 1012.6,
+      "max_gap_ms": 30.6,
+      "p95_gap_ms": 30.0,
+      "slow_callbacks": [
+        [
+          "ProxyNodePicker._render_plan_batch.<locals>.<lambda>",
+          [
+            56,
+            488.2,
+            10.4
+          ]
+        ],
+        [
+          "CTkScrollbar.set",
+          [
+            42,
+            18.9,
+            0.8
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            10.3,
+            10.3
+          ]
+        ],
+        [
+          "CTkScrollableFrame.__init__.<locals>.<lambda>",
+          [
+            57,
+            4.4,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            71,
+            2.3,
+            0.1
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            39,
+            1.1,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            39,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            12,
+            1.0,
+            0.2
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "clear_filter",
+      "action_ms": 4.5,
+      "ready_ms": 1205.1,
+      "max_gap_ms": 65.5,
+      "p95_gap_ms": 65.1,
+      "slow_callbacks": [
+        [
+          "CTkScrollbar.set",
+          [
+            13,
+            5.6,
+            0.6
+          ]
+        ],
+        [
+          "ProxyNodePicker._render_plan_batch.<locals>.<lambda>",
+          [
+            24,
+            5.4,
+            1.3
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            4.5,
+            4.5
+          ]
+        ],
+        [
+          "CTkScrollableFrame.__init__.<locals>.<lambda>",
+          [
+            25,
+            2.1,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            39,
+            1.2,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            13,
+            0.9,
+            0.1
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            32,
+            0.5,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            24,
+            0.2,
+            0.0
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "check_all",
+      "action_ms": 9.8,
+      "ready_ms": 1195.3,
+      "max_gap_ms": 32.0,
+      "p95_gap_ms": 31.8,
+      "slow_callbacks": [
+        [
+          "CTkCheckBox._variable_callback",
+          [
+            300,
+            374.5,
+            2.9
+          ]
+        ],
+        [
+          "ProxyNodePicker._sync_checkbox_batch.<locals>.<lambda>",
+          [
+            44,
+            372.1,
+            9.7
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            9.8,
+            9.8
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            60,
+            1.9,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            14,
+            1.2,
+            0.3
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            43,
+            0.8,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            44,
+            0.7,
+            0.1
+          ]
+        ]
+      ]
+    }
+  ],
+  "errors": []
+}

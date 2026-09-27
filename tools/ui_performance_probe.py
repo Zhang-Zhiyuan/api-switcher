@@ -204,13 +204,9 @@ def main():
             "width": args.width, "long_names": args.long_names,
             "phases": results, "errors": errors}, ensure_ascii=False, indent=2), encoding="utf-8")
         if args.screenshot:
-            import ctypes
-            from PIL import ImageGrab
-            get_parent = ctypes.windll.user32.GetParent
-            get_parent.argtypes = (ctypes.c_void_p,)
-            get_parent.restype = ctypes.c_void_p
+            from tools.ui_visual_audit import capture_window_image
             window = widget if args.scenario == "routes" else root
-            ImageGrab.grab(window=get_parent(window.winfo_id())).save(output.with_suffix(".png"))
+            capture_window_image(window).save(output.with_suffix(".png"))
         print("CALLBACK_ERRORS", errors, flush=True)
         root.destroy()
 

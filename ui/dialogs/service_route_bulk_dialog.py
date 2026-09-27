@@ -10,6 +10,7 @@ from core.subscription_routing_policy import preferred_network_type, route_candi
 from ui.dialogs.route_selection_dialogs import DraftChoiceDialog, RouteNodeDialog
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font
+from ui.widgets.action_group import wrap_action_group
 
 SET_ROUTE = "设置订阅与节点"
 TAGGED = "按用途重新分配"
@@ -121,14 +122,18 @@ class RouteBulkDialog(DraftChoiceDialog):
         self._apply_button = ctk.CTkButton(footer, text="写入所选目标草稿", command=self._commit,
                                          state="disabled", **button_style("accent"))
         self._apply_button.pack(side="right")
-        heading = ctk.CTkLabel(self, text="一次设置多个业务的访问线路", font=font(18, "bold"), anchor="w")
-        heading.pack(fill="x", padx=18, pady=(16, 8))
-        note = ctk.CTkLabel(self, text="只修改当前位置的勾选目标，其他位置不变。\n关闭后可在修改清单预览，统一“保存并应用”才生效。",
+        # Keep only the confirmation footer fixed. At high DPI, fixed settings
+        # used to consume the entire height and hide every target checkbox.
+        body = self._body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        body.pack(fill="both", expand=True, padx=12, pady=(12, 0))
+        heading = ctk.CTkLabel(body, text="批量设置目标分流", font=font(18, "bold"), anchor="w")
+        heading.pack(fill="x", padx=6, pady=(4, 8))
+        note = ctk.CTkLabel(body, text="只修改当前位置的勾选目标。写入草稿后核对，保存并应用才生效。",
                             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left")
-        note.pack(fill="x", padx=18, pady=(0, 10))
-        bind_wraplength(self, note, padding=40)
-        settings = ctk.CTkFrame(self, fg_color=COLORS["surface"])
-        settings.pack(fill="x", padx=18)
+        note.pack(fill="x", padx=6, pady=(0, 10))
+        bind_wraplength(body, note, padding=12)
+        settings = ctk.CTkFrame(body, fg_color=COLORS["surface"])
+        settings.pack(fill="x", padx=6)
         settings.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(settings, text="批量操作", font=font(12)).grid(row=0, column=0, padx=10, pady=10)
         self._operation = ctk.CTkComboBox(settings, values=list(OPERATIONS), state="readonly",
@@ -155,13 +160,12 @@ class RouteBulkDialog(DraftChoiceDialog):
         self._node_button = ctk.CTkButton(settings, text="先选择订阅，再设置节点", command=self._open_nodes,
                                         state="disabled", **button_style("secondary"))
         self._node_button.grid(row=2, column=1, sticky="ew", padx=10, pady=10)
-        toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        toolbar.pack(fill="x", padx=18, pady=10)
+        toolbar = ctk.CTkFrame(body, fg_color="transparent")
+        toolbar.pack(fill="x", padx=6, pady=10)
         for label, group in (("全选", "all"), ("AI 服务", "ai"), ("网站", "sites"), ("清空选择", "none")):
             ctk.CTkButton(toolbar, text=label, width=100, command=lambda group=group: self._select_group(group),
                           **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
-        body = ctk.CTkScrollableFrame(self, fg_color=COLORS["surface"])
-        body.pack(fill="both", expand=True, padx=18)
+        wrap_action_group(toolbar, wide_columns=4)
         for row in rows:
             var = ctk.BooleanVar(value=False)
             self._vars[row["id"]] = var

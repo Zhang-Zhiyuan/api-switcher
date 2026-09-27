@@ -438,6 +438,52 @@ def test_bulk_cancel_does_not_apply_selection(bulk):
     assert not bulk.applied
 
 
+def test_bulk_small_high_dpi_keeps_target_selection_reachable(bulk):
+    import customtkinter as ctk
+    from tools.ui_visual_audit import capture_window_image
+
+    dialog, root = bulk.dialog, bulk.root
+    previous = ctk.ScalingTracker.widget_scaling
+    try:
+        _wait(root, lambda: dialog.winfo_viewable())
+        ctk.set_widget_scaling(1.5)
+        deadline = time.monotonic() + 1.1
+        while time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        dialog.geometry("560x520")
+        root.update()
+        pending, checkboxes = [dialog], []
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, ctk.CTkCheckBox):
+                checkboxes.append(widget)
+        assert len(checkboxes) == len(dialog._vars)
+        viewport = checkboxes[0].master._parent_canvas
+        output = Path("dist/route-bulk-ui")
+        output.mkdir(parents=True, exist_ok=True)
+        capture_window_image(dialog).save(output / "bulk-small-high-dpi.png")
+        assert viewport.winfo_height() >= 100 * dialog._get_widget_scaling()
+        assert dialog._apply_button.winfo_rooty() + dialog._apply_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+        last = max(checkboxes, key=lambda widget: widget.winfo_y())
+        viewport.yview_moveto(1)
+        root.update()
+        assert last.winfo_viewable()
+        assert last.winfo_rooty() >= viewport.winfo_rooty()
+        assert last.winfo_rooty() + last.winfo_height() <= viewport.winfo_rooty() + viewport.winfo_height()
+        last._canvas.event_generate("<Button-1>", x=8, y=8)
+        root.update()
+        assert sum(var.get() for var in dialog._vars.values()) == 1
+        capture_window_image(dialog).save(output / "bulk-small-high-dpi-targets.png")
+        dialog._select_group("ai")
+        assert {key for key, var in dialog._vars.items() if var.get()} == {"openai", "claude", "google_ai"}
+        assert not bulk.applied
+    finally:
+        ctk.set_widget_scaling(previous)
+        root.update()
+
+
 def capture_preview(directory):
     """Capture synthetic batch choices without opening the app or persisting."""
     import customtkinter as ctk

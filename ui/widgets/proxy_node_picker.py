@@ -48,6 +48,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     REGION_ALL = "全部地区"
     QUALITY_OPTIONS = ("全部质量", "家宽高质", "家宽/运营商", "低风险", "机房/商宽", "代理风险", "未测质量")
     RENDER_BATCH_SIZE = 3
+    REUSE_BATCH_SIZE = 12
     RENDER_BATCH_DELAY_MS = 8
     UI_BATCH_BUDGET_SECONDS = 0.008
     TEARDOWN_BATCH_SIZE = 16
@@ -764,17 +765,28 @@ class ProxyNodePicker(ctk.CTkFrame):
                 return
         deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
         end_index = start_index
-        while end_index < len(render_plan) and end_index - start_index < self.RENDER_BATCH_SIZE:
+        created = 0
+        while end_index < len(render_plan) and end_index - start_index < self.REUSE_BATCH_SIZE:
             if generation != self._render_generation:
                 return
             kind, payload, extra = render_plan[end_index]
+            # Cached packing/paint is much cheaper than creating native rows.
+            # Coalesce it within the same time budget instead of paying a
+            # Windows timer tick for every three inexpensive operations.
+            if kind not in {"hide", "place_cached", "reuse_row", "reuse_header"}:
+                if created >= self.RENDER_BATCH_SIZE:
+                    break
+                created += 1
             try:
                 self._render_plan_item(kind, payload, extra)
             except Exception:
-                self._pending_render_signature = None
+                if generation == self._render_generation:
+                    self._pending_render_signature = None
             end_index += 1
             if time.perf_counter() >= deadline:
                 break
+        if generation != self._render_generation:
+            return
         if end_index >= len(render_plan):
             self._rendered_signature = getattr(self, "_pending_render_signature", None)
             self._render_batch_after_id = None
@@ -1241,7 +1253,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             return
         deadline = time.perf_counter() + self.UI_BATCH_BUDGET_SECONDS
         end = start
-        while end < len(keys) and end - start < self.RENDER_BATCH_SIZE:
+        while end < len(keys) and end - start < self.REUSE_BATCH_SIZE:
             if generation != self._checkbox_sync_generation:
                 return
             self._paint_checkbox(keys[end])

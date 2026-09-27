@@ -6,8 +6,8 @@ import customtkinter as ctk
 from ui.theme import bind_wraplength
 
 
-def wrap_action_group(container, *, hint=None):
-    """Turn a packed sidebar into up to three columns when it gets a full row.
+def wrap_action_group(container, *, hint=None, wide_columns=3):
+    """Turn a packed sidebar into a bounded column group when it gets a full row.
 
     Labels delimit groups; controls retain their order, enabled state and command.
     The container must be width-constrained by its parent (e.g. sticky="ew").
@@ -25,11 +25,11 @@ def wrap_action_group(container, *, hint=None):
     def layout(event=None):
         nonlocal columns_before
         width = (event.width if event else container.winfo_width()) / container._get_widget_scaling()
-        columns = 3 if width >= 520 else 2 if width >= 300 else 1
+        columns = wide_columns if width >= 520 else 2 if width >= 300 else 1
         if columns == columns_before:
             return
         columns_before = columns
-        for col in range(3):
+        for col in range(max(3, wide_columns)):
             container.grid_columnconfigure(col, weight=1 if col < columns else 0,
                                            uniform="action-group" if col < columns else "")
         row = col = 0

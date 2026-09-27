@@ -113,6 +113,62 @@ def test_nested_close_does_not_run_timer_callbacks(picker):
     root.after_cancel(timer)
 
 
+def test_closing_stale_selector_does_not_steal_a_newer_dialog_grab(picker):
+    import customtkinter as ctk
+    root, dialog, selected = picker
+    newer = ctk.CTkToplevel(root)
+    try:
+        root.update_idletasks()
+        newer.grab_set()
+        dialog.destroy()
+        assert root.grab_current() is newer
+        assert not selected
+    finally:
+        newer.destroy()
+        root.update()
+
+
+def test_closing_standalone_selector_does_not_make_the_main_window_modal(picker):
+    root, dialog, selected = picker
+    dialog.destroy()
+    assert root.grab_current() is None
+    assert not selected
+
+
+def test_cancel_nested_confirmation_restores_editor_grab_without_confirmation(picker):
+    from ui.dialogs.confirm_dialog import ConfirmDialog
+    root, editor, _ = picker
+    confirmed = []
+    confirmation = ConfirmDialog(editor, message="仅合成确认", on_confirm=lambda: confirmed.append(True))
+    assert root.grab_current() is confirmation
+    confirmation.destroy()
+    assert root.grab_current() is editor and not confirmed
+    confirmation.destroy()  # Closing the same native window twice is harmless.
+    assert root.grab_current() is editor
+
+
+def test_confirmation_closes_cleanly_when_callback_destroys_owner(picker):
+    from ui.dialogs.confirm_dialog import ConfirmDialog
+    root, editor, _ = picker
+    confirmation = ConfirmDialog(editor, message="仅合成确认", on_confirm=editor.destroy)
+    confirmation._confirm()
+    assert not editor.winfo_exists() and root.grab_current() is None
+
+
+def test_confirmation_does_not_steal_grab_from_dialog_opened_by_callback(picker):
+    from ui.dialogs.confirm_dialog import ConfirmDialog
+    import customtkinter as ctk
+    root, editor, _ = picker
+    newer = ctk.CTkToplevel(root)
+    confirmation = ConfirmDialog(editor, message="仅合成确认", on_confirm=newer.grab_set)
+    try:
+        confirmation._confirm()
+        assert root.grab_current() is newer
+    finally:
+        newer.destroy()
+        root.update()
+
+
 def test_change_preview_includes_custom_inheritance_and_removals_without_mutation():
     original = _preferences()
     original["custom_targets"] = [{"id": "x", "value": "api.example.com", "enabled": True}]

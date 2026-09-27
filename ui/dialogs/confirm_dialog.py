@@ -1,5 +1,6 @@
 import customtkinter as ctk
 
+from ui.dialogs.modal_dialog import RestoreGrabDialog
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font
 
 
@@ -38,7 +39,7 @@ def _bind_two_button_footer(frame, primary_button, secondary_button) -> None:
     apply_layout()
 
 
-class ConfirmDialog(ctk.CTkToplevel):
+class ConfirmDialog(RestoreGrabDialog):
     """A simple confirmation dialog with Yes/No buttons."""
 
     def __init__(self, master, title="确认", message="确定要执行此操作吗？", on_confirm=None):
@@ -51,6 +52,8 @@ class ConfirmDialog(ctk.CTkToplevel):
         self.grab_set()
 
         self._on_confirm = on_confirm
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _event: self.destroy())
 
         # Reserve the footer before the body.  When the monitor is extremely
         # short, Tk's packer can then shrink the scrollable body without

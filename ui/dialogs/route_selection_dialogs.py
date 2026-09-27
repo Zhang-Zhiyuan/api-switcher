@@ -7,6 +7,7 @@ import customtkinter as ctk
 
 from core.proxy_routing import MAX_SERVICE_NODE_POOL_SIZE
 from core.subscription_routing_policy import route_candidate_count
+from ui.dialogs.modal_dialog import RestoreGrabDialog
 from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, font, input_style
 
@@ -34,25 +35,8 @@ class NodeListFrame(ctk.CTkFrame):
             self.listbox.configure(font=font(13).create_scaled_tuple(self._get_widget_scaling()))
 
 
-class DraftChoiceDialog(ctk.CTkToplevel):
+class DraftChoiceDialog(RestoreGrabDialog):
     """Restore the draft editor's grab when a nested selector closes."""
-
-    def destroy(self):
-        if getattr(self, "_choice_destroyed", False):
-            return
-        self._choice_destroyed = True
-        parent = self.master
-        # Native Tk on Windows can crash if a just-laid-out nested window and
-        # its parent are destroyed before queued geometry work completes.
-        # Flush layout only, never timers/input via a reentrant update().
-        self.update_idletasks()
-        self.grab_release()
-        super().destroy()
-        try:
-            if parent.winfo_exists() and not getattr(parent, "_closed", False):
-                parent.grab_set()
-        except tk.TclError:
-            pass
 
 
 class RouteNodeDialog(DraftChoiceDialog):

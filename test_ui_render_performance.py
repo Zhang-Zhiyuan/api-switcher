@@ -385,6 +385,63 @@ def picker_widget(monkeypatch):
     return picker, rendered, pending, drain
 
 
+def test_cached_node_layout_groups_cheap_operations_without_expanding_new_widget_batches(monkeypatch):
+    picker, rendered, pending, drain = picker_widget(monkeypatch)
+    monkeypatch.setattr(proxy_node_picker.time, "perf_counter", lambda: 0.0)
+    picker._last_match_count = picker._last_visible_count = 40
+    picker._render_plan_batch(0, [("place_cached", i, {}) for i in range(40)], 0)
+    assert len(rendered) == 12
+    assert pending
+    drain()
+    assert len(rendered) == 40
+    rendered.clear()
+    picker._render_plan_batch(0, [("row", i, None) for i in range(20)], 0)
+    assert len(rendered) == picker.RENDER_BATCH_SIZE
+    drain()
+
+
+def test_cached_node_layout_still_yields_when_paint_budget_is_used(monkeypatch):
+    picker, rendered, pending, _ = picker_widget(monkeypatch)
+    times = iter([0.0, 0.005, 0.009])
+    monkeypatch.setattr(proxy_node_picker.time, "perf_counter", lambda: next(times))
+    picker._render_plan_batch(0, [("place_cached", i, {}) for i in range(40)], 0)
+    assert len(rendered) == 2 and pending
+
+
+def test_reentrant_last_node_paint_cannot_complete_a_newer_render_generation(monkeypatch):
+    picker, _, _, _ = picker_widget(monkeypatch)
+    picker._last_match_count = picker._last_visible_count = 1
+
+    def new_generation(*_args):
+        picker._render_generation = 1
+        picker._render_batch_after_id = "newer-render"
+        picker._render_plan_pending = True
+        picker._pending_render_signature = "newer-pending-signature"
+
+    picker._render_plan_item = new_generation
+    picker._render_plan_batch(0, [("reuse_row", "synthetic", False)], 0)
+    assert picker._render_batch_after_id == "newer-render"
+    assert picker._render_plan_pending
+    assert picker._rendered_signature is None
+
+
+def test_checkbox_repaint_groups_cheap_updates_but_respects_latest_generation(monkeypatch):
+    picker, _, pending, drain = picker_widget(monkeypatch)
+    picker._checkbox_sync_generation = 0
+    picker._checkbox_sync_after_id = None
+    painted = []
+    picker._paint_checkbox = painted.append
+    monkeypatch.setattr(proxy_node_picker.time, "perf_counter", lambda: 0.0)
+    keys = list(range(40))
+    picker._sync_checkbox_batch(keys, 0, 0)
+    assert painted == keys[:12] and pending
+    drain()
+    assert painted == keys
+    picker._checkbox_sync_generation = 1
+    picker._sync_checkbox_batch(keys, 0, 0)
+    assert painted == keys
+
+
 def test_identical_nodes_reuse_completed_rows_and_preserve_checks(monkeypatch):
     picker, rendered, pending, drain = picker_widget(monkeypatch)
     picker.set_nodes([node(1), node(2)])

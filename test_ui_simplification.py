@@ -158,7 +158,8 @@ def test_disclosure_controls_and_save_remain_visible_in_small_windows(editor, tk
 
 
 @pytest.mark.parametrize("scale", [1, 1.5])
-def test_action_groups_wrap_without_losing_callbacks_states_or_recreating_controls(tk_root, scale):
+@pytest.mark.parametrize("wide_columns", [3, 4])
+def test_action_groups_wrap_without_losing_callbacks_states_or_recreating_controls(tk_root, scale, wide_columns):
     window = ctk.CTkToplevel(tk_root)
     group = ctk.CTkFrame(window)
     group.pack(fill="x", padx=10, pady=10)
@@ -172,7 +173,7 @@ def test_action_groups_wrap_without_losing_callbacks_states_or_recreating_contro
     hint = ctk.CTkLabel(group, text="仅合成布局；此处不代表实际连通。" * 4, width=120)
     hint.pack()
     buttons[1].configure(state="disabled")
-    wrap_action_group(group, hint=hint)
+    wrap_action_group(group, hint=hint, wide_columns=wide_columns)
     try:
         _wait(tk_root, lambda: window.winfo_viewable())
         ctk.set_widget_scaling(scale)
@@ -182,7 +183,7 @@ def test_action_groups_wrap_without_losing_callbacks_states_or_recreating_contro
             window.geometry(f"{width}x650")
             settle(tk_root)
             available = group.winfo_width() / group._get_widget_scaling()
-            columns = 3 if available >= 520 else 2 if available >= 300 else 1
+            columns = wide_columns if available >= 520 else 2 if available >= 300 else 1
             assert len({button.grid_info()["column"] for button in buttons}) == columns
             for button in buttons:
                 assert button.winfo_viewable()
