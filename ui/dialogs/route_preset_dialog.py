@@ -1,4 +1,4 @@
-"""Preview offline presets; the caller owns the draft and explicit live apply."""
+"""Two-step, draft-only routing setup with explicit before/after review."""
 from __future__ import annotations
 
 import copy
@@ -13,9 +13,15 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo
 from ui.widgets.service_route_overview import route_description
 
 
+def _configure_changed(widget, **options):
+    changed = {key: value for key, value in options.items() if widget.cget(key) != value}
+    if changed:
+        widget.configure(**changed)
+
+
 class RoutePresetDialog(RestoreGrabDialog):
     def __init__(self, master, *, scope, preferences, catalog, on_accept,
-                 protected_services=(), strict_privacy=False):
+                 protected_services=(), strict_privacy=False, on_manage_sources=None):
         super().__init__(master)
         self.title("智能分流预设")
         self.geometry("800x740")
@@ -26,47 +32,70 @@ class RoutePresetDialog(RestoreGrabDialog):
         self._protected = set(protected_services)
         self._strict_privacy = strict_privacy
         self._on_accept = on_accept
+        self._on_manage_sources = on_manage_sources
         self._plan = None
-        self._options = {}
-        self._source_combos = {}
-        self._preview_rows = {}
+        self._view = "setup"
+        self._reviewed_choices = None
+        self._last_choices = None
+        self._accept_error = False
+        self._options, self._source_combos, self._source_rows = {}, {}, {}
+        self._preview_rows, self._before = {}, {}
+        self._counts = (0, 0, 0)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
 
+        # Reserve navigation/actions before the scrollable body. Neither long
+        # subscription names nor validation errors may push actions off screen.
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.pack(side="bottom", fill="x", padx=18, pady=12)
-        self._status = ctk.CTkLabel(footer, text="", font=font(12), anchor="w", justify="left", height=22)
+        footer.pack(side="bottom", fill="x", padx=18, pady=(8, 12))
+        self._status = ctk.CTkLabel(footer, text="", font=font(11), anchor="w", justify="left", height=20)
         self._status.pack(fill="x", pady=(0, 6))
         bind_wraplength(footer, self._status, padding=4)
         actions = ctk.CTkFrame(footer, fg_color="transparent")
         actions.pack(fill="x")
         actions.grid_columnconfigure((0, 1), weight=1, uniform="preset-actions")
-        ctk.CTkButton(actions, text="取消", command=self.destroy, **button_style("secondary")).grid(
-            row=0, column=0, sticky="ew", padx=(0, 8))
-        self._accept_button = ctk.CTkButton(actions, text="使用预设草稿", command=self._accept,
+        self._back_button = ctk.CTkButton(actions, text="取消", command=self._back, **button_style("secondary"))
+        self._back_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self._accept_button = ctk.CTkButton(actions, text="核对分流", command=self._primary_action,
                                            state="disabled", **button_style("accent"))
         self._accept_button.grid(row=0, column=1, sticky="ew")
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=18, pady=(10, 6))
+        ctk.CTkLabel(header, text="智能分流预设", font=font(18, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
+        steps = ctk.CTkFrame(header, fg_color="transparent")
+        steps.pack(fill="x")
+        steps.grid_columnconfigure((0, 1), weight=1, uniform="preset-steps")
+        self._setup_tab = ctk.CTkButton(steps, text="1  设置方案", command=lambda: self._show_view("setup"),
+                                       **button_style("primary", compact=True))
+        self._setup_tab.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._preview_tab = ctk.CTkButton(steps, text="2  核对分流", command=lambda: self._show_view("preview"),
+                                         **button_style("secondary", compact=True))
+        self._preview_tab.grid(row=0, column=1, sticky="ew")
 
         body = self._body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
-        body.pack(fill="both", expand=True, padx=12, pady=(12, 0))
-        ctk.CTkLabel(body, text="按用途，一次规划好线路", font=font(18, "bold"), anchor="w").pack(fill="x", padx=6)
-        scope_label = ctk.CTkLabel(body, text="应用位置：" + safe_feedback_text(scope), font=font(12),
+        body.pack(fill="both", expand=True, padx=12)
+        self._error_detail = ctk.CTkLabel(body, text="", font=font(12), text_color=COLORS["warning"],
+                                         anchor="w", justify="left")
+        bind_wraplength(body, self._error_detail, padding=16)
+        setup = self._setup = ctk.CTkFrame(body, fg_color="transparent")
+        setup.pack(fill="x")
+        self._preview = ctk.CTkFrame(body, fg_color="transparent")
+        self._pages = {"setup": setup, "preview": self._preview}
+        scope_label = ctk.CTkLabel(setup, text="当前位置：" + safe_feedback_text(scope), font=font(12),
                                    text_color=COLORS["muted"], anchor="w", justify="left")
-        scope_label.pack(fill="x", padx=6, pady=(2, 10))
-        bind_wraplength(body, scope_label, padding=16)
+        scope_label.pack(fill="x", padx=6, pady=(4, 10))
+        bind_wraplength(setup, scope_label, padding=16)
         self._scheme_labels = {item["label"]: key for key, item in ROUTE_PRESETS.items()}
-        self._scheme = ctk.CTkComboBox(body, values=list(self._scheme_labels), state="readonly",
+        self._scheme = ctk.CTkComboBox(setup, values=list(self._scheme_labels), state="readonly",
                                       command=lambda _value: self._refresh(), **combo_style())
         self._scheme.set(ROUTE_PRESETS["balanced"]["label"])
         self._scheme.pack(fill="x", padx=6)
-        self._description = ctk.CTkLabel(body, text="", font=font(12), anchor="w", justify="left", text_color=COLORS["muted"])
+        self._description = ctk.CTkLabel(setup, text="", font=font(12), anchor="w", justify="left", text_color=COLORS["muted"])
         self._description.pack(fill="x", padx=6, pady=(4, 10))
-        bind_wraplength(body, self._description, padding=16)
-
-        sources_box = ctk.CTkFrame(body, fg_color=COLORS["surface"])
-        sources_box.pack(fill="x", padx=6, pady=(0, 8))
-        sources_box.grid_columnconfigure(1, weight=1)
-        for index, (network_type, label) in enumerate(NETWORK_LABELS.items()):
+        bind_wraplength(setup, self._description, padding=16)
+        self._sources_box = ctk.CTkFrame(setup, fg_color="transparent")
+        self._sources_box.pack(fill="x", padx=6)
+        for network_type, label in NETWORK_LABELS.items():
             options = {"自动推荐": ""}
             for item in preset_sources(self._catalog, network_type):
                 text = " ".join(safe_feedback_text(str(item.get("name") or "未命名订阅")).split())
@@ -76,30 +105,43 @@ class RoutePresetDialog(RestoreGrabDialog):
                     suffix += 1
                 options[text] = item["id"]
             self._options[network_type] = options
-            ctk.CTkLabel(sources_box, text=label + "订阅", font=font(12)).grid(row=index, column=0, padx=10, pady=8)
-            combo = ctk.CTkComboBox(sources_box, values=list(options), state="readonly",
+            card = ctk.CTkFrame(self._sources_box, fg_color=COLORS["surface"])
+            card.pack(fill="x", pady=(0, 8))
+            ctk.CTkLabel(card, text=label + "订阅", font=font(12, "bold"), anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+            combo = ctk.CTkComboBox(card, values=list(options), state="readonly",
                                    command=lambda _value: self._refresh(), **combo_style())
             combo.set("自动推荐")
-            combo.grid(row=index, column=1, sticky="ew", padx=10, pady=8)
+            combo.pack(fill="x", padx=10)
+            hint = ctk.CTkLabel(card, text="", font=font(11), anchor="w", justify="left", text_color=COLORS["muted"])
+            hint.pack(fill="x", padx=10, pady=(4, 8))
+            bind_wraplength(card, hint, padding=24)
             self._source_combos[network_type] = combo
+            self._source_rows[network_type] = (card, hint)
         self._replace = ctk.BooleanVar(value=False)
         self._replace_checkbox = ctk.CTkCheckBox(
-            body, text="重新规划已有分流（仍保留关闭的目标）", variable=self._replace,
+            setup, text="重新规划已有分流", variable=self._replace,
             command=self._refresh, font=font(12), checkbox_width=18, checkbox_height=18)
-        self._replace_checkbox.pack(fill="x", padx=6, pady=(4, 8))
-        note = ctk.CTkLabel(body, text="默认保留手动选择；自定义和全局代理范围不变。\n"
-                            "推荐仅依据标记与缓存，未验证出口质量和实时连通性。",
+        self._replace_checkbox.pack(fill="x", padx=6, pady=(4, 6))
+        note = ctk.CTkLabel(setup, text="默认保留手动线路。重新规划会重设固定节点和候选池；\n"
+                            "已关闭目标、自定义和全局代理范围仍不变。\n"
+                            "推荐仅依据标记与缓存，不代表实时连通或出口质量。",
                             font=font(11), anchor="w", justify="left", text_color=COLORS["muted"])
         note.pack(fill="x", padx=6)
-        bind_wraplength(body, note, padding=16)
-        self._source_summary = ctk.CTkLabel(body, text="", font=font(12), anchor="w", justify="left")
-        self._source_summary.pack(fill="x", padx=6, pady=(10, 4))
-        bind_wraplength(body, self._source_summary, padding=16)
-        ctk.CTkLabel(body, text="目标预览 · 未保存、未应用", font=font(14, "bold"), anchor="w").pack(fill="x", padx=6, pady=(8, 4))
+        bind_wraplength(setup, note, padding=16)
+        self._source_help = ctk.CTkLabel(setup, text="", font=font(12), anchor="w", justify="left",
+                                        text_color=COLORS["warning"])
+        bind_wraplength(setup, self._source_help, padding=16)
+        self._manage_sources_button = ctk.CTkButton(setup, text="返回设置订阅标记", command=self._manage_sources,
+                                                   **button_style("secondary", compact=True))
+        self._preview_note = ctk.CTkLabel(self._preview, text="核对原线路与新线路；写入后仍需保存并应用。",
+                                         font=font(12), anchor="w", justify="left", text_color=COLORS["muted"])
+        self._preview_note.pack(fill="x", padx=6, pady=(4, 10))
+        bind_wraplength(self._preview, self._preview_note, padding=16)
         for row in proxy_routing.route_rows(self._preferences):
             if row["id"] == "custom" or row["id"].startswith("custom:"):
                 continue
-            tile = ctk.CTkFrame(body, fg_color=COLORS["surface"], corner_radius=6)
+            self._before[row["id"]] = route_description(row, self._preferences, self._catalog)
+            tile = ctk.CTkFrame(self._preview, fg_color=COLORS["surface"], corner_radius=6)
             tile.pack(fill="x", padx=6, pady=(0, 6))
             heading = ctk.CTkLabel(tile, text=row["label"], font=font(12, "bold"), anchor="w")
             heading.pack(fill="x", padx=10, pady=(6, 0))
@@ -116,60 +158,172 @@ class RoutePresetDialog(RestoreGrabDialog):
                 "sources": {key: self._options[key][combo.get()] for key, combo in self._source_combos.items()},
                 "replace_existing": bool(self._replace.get())}
 
+    def _show_view(self, view):
+        if self._modal_destroyed or view not in self._pages:
+            return
+        if view == "preview":
+            if self._choices() != self._last_choices:
+                self._refresh()
+            if self._plan is None:
+                return
+        if view != self._view:
+            self._pages[self._view].pack_forget()
+            self._view = view
+            self._pages[view].pack(fill="x")
+            self._body._parent_canvas.yview_moveto(0)
+        if view == "preview":
+            self._reviewed_choices = copy.deepcopy(self._choices())
+        self._update_actions()
+
+    def _update_actions(self):
+        changes, kept, missing = self._counts
+        preview = self._view == "preview"
+        for tab, active in ((self._setup_tab, not preview), (self._preview_tab, preview)):
+            _configure_changed(tab, fg_color=COLORS["primary" if active else "secondary"],
+                               hover_color=COLORS["primary_hover" if active else "secondary_hover"])
+        _configure_changed(self._preview_tab, state="normal" if self._plan is not None else "disabled")
+        _configure_changed(self._back_button, text="返回设置" if preview else "取消")
+        if self._plan is None:
+            text, state, status = "先调整方案", "disabled", "无法生成预设；请查看上方原因。"
+        elif self._accept_error:
+            text, state, status = "请重新打开预设", "disabled", "未写入草稿；请查看上方提示。"
+        else:
+            state = "normal" if not preview or changes else "disabled"
+            text = (f"写入 {changes} 项草稿" if changes else "先处理订阅问题" if missing else "无需修改") if preview else "核对分流"
+            status = f"{changes} 项修改 · {kept} 项保留 · {missing} 项待处理"
+            if not changes and not missing:
+                if not self._replace.get():
+                    status += "\n需重新分配？" + ("返回设置，" if preview else "") + "勾选重新规划。"
+                else:
+                    status += "\n已符合预设；关闭的目标仍保留。"
+            else:
+                status += "\n只生成草稿，保存并应用后生效。"
+        _configure_changed(self._status, text=status,
+                           text_color=COLORS["warning"] if missing or self._plan is None or self._accept_error else COLORS["muted"])
+        _configure_changed(self._accept_button, text=text, state=state)
+
     def _refresh(self):
+        if self._modal_destroyed:
+            return
         choices = self._choices()
+        if self._last_choices is not None and choices != self._last_choices:
+            self._show_view("setup")
+            self._reviewed_choices = None
+        self._last_choices = copy.deepcopy(choices)
+        self._accept_error = False
+        self._error_detail.pack_forget()
         preset_id = choices["preset_id"]
-        self._description.configure(text=ROUTE_PRESETS[preset_id]["description"])
+        _configure_changed(self._description, text=ROUTE_PRESETS[preset_id]["description"])
         for key, combo in self._source_combos.items():
             used = preset_id == "balanced" or (key == "residential" if preset_id == "ai_only" else key == "datacenter")
-            combo.configure(state="readonly" if used else "disabled")
+            _configure_changed(combo, state="readonly" if used else "disabled")
+            card = self._source_rows[key][0]
+            if used and not card.winfo_manager():
+                card.pack(fill="x", pady=(0, 8))
+            elif not used:
+                card.pack_forget()
+        # Restore canonical order when switching back from a single-source preset.
+        siblings = self._sources_box.pack_slaves()
+        ordered = [self._source_rows[key][0] for key in NETWORK_LABELS if self._source_rows[key][0] in siblings]
+        if siblings != ordered:
+            for card in reversed(ordered):
+                if self._sources_box.pack_slaves()[0] is not card:
+                    card.pack(before=self._sources_box.pack_slaves()[0])
         try:
             plan = plan_route_preset(self._preferences, self._catalog, **choices,
                                      protected_services=self._protected, strict_privacy=self._strict_privacy)
         except ValueError as exc:
-            self._plan = None
-            self._status.configure(text=safe_feedback_text(str(exc)), text_color=COLORS["warning"])
-            self._accept_button.configure(state="disabled", text="无法生成此预设")
-            self._source_summary.configure(text="原草稿和当前网络均未改变。", text_color=COLORS["warning"])
-            for heading, detail in self._preview_rows.values():
-                heading.configure(text=heading.cget("text").split(" · ")[0])
-                detail.configure(text="未生成修改，请选择其他预设。", text_color=COLORS["muted"])
+            self._plan, self._reviewed_choices = None, None
+            self._show_view("setup")
+            self._error_detail.configure(text=safe_feedback_text(str(exc)))
+            self._error_detail.pack(fill="x", padx=6, pady=(6, 10), before=self._pages[self._view])
+            self._counts = (0, 0, 0)
+            self._source_help.pack_forget()
+            self._manage_sources_button.pack_forget()
+            self._update_actions()
             return
         self._plan = plan
         labels = {item["id"]: " ".join(safe_feedback_text(str(item.get("name") or "未命名订阅")).split())
                   for item in self._catalog if isinstance(item, dict) and isinstance(item.get("id"), str)}
-        summary = []
+        needs_sources = False
         for key, source in plan["sources"].items():
-            summary.append(f"{NETWORK_LABELS[key]} → {labels.get(source['id'], '暂未分配')}\n{source['reason']}")
-        self._source_summary.configure(text="\n".join(summary), text_color=COLORS["muted"])
+            needs_sources |= not bool(source["id"])
+            hint = self._source_rows[key][1]
+            prefix = "已指定" if choices["sources"].get(key) else "推荐来源"
+            _configure_changed(hint, text=f"{prefix}：{labels.get(source['id'], '暂未分配')}\n{source['reason']}",
+                               text_color=COLORS["muted"] if source["id"] else COLORS["warning"])
+        if needs_sources:
+            text = ("还没有订阅：请先返回代理页添加链接或导入节点。" if not self._catalog else
+                    "先设置家宽 / 非家宽标记；无节点缓存时，返回代理页拉取订阅。")
+            _configure_changed(self._source_help, text=text)
+            if not self._source_help.winfo_manager():
+                self._source_help.pack(fill="x", padx=6, pady=(10, 6))
+            if self._catalog and self._on_manage_sources and not self._manage_sources_button.winfo_manager():
+                self._manage_sources_button.pack(fill="x", padx=6, pady=(0, 8))
+        else:
+            self._source_help.pack_forget()
+            self._manage_sources_button.pack_forget()
         rows = {row["id"]: row for row in proxy_routing.route_rows(plan["draft"])}
         statuses = {"changed": "将修改", "kept": "保留", "unavailable": "待处理", "unchanged": "无需修改"}
+        kept = missing = 0
         for decision in plan["decisions"]:
-            service = decision["service"]
+            service, status = decision["service"], decision["status"]
             description = route_description(rows[service], plan["draft"], self._catalog)
+            before = self._before[service]
+            warning = status == "unavailable" or description["warning"]
+            missing += int(bool(warning))
+            kept += int(status in {"kept", "unchanged"})
             heading, detail = self._preview_rows[service]
-            heading.configure(text=decision["label"] + " · " + statuses[decision["status"]])
-            destination = description["profile"]
-            if decision["status"] in {"kept", "unavailable"}:
-                destination += " → " + description["node"]
-            detail.configure(text=f"{destination}\n{decision['reason']}",
-                              text_color=COLORS["warning"] if decision["status"] == "unavailable" else COLORS["muted"])
-        count = len(plan["changed_services"])
-        missing = sum(item["status"] == "unavailable" for item in plan["decisions"])
-        self._status.configure(text=f"{count} 项修改 · {missing} 项待处理\n仅生成草稿，保存并应用后生效。",
-                               text_color=COLORS["warning"] if missing else COLORS["muted"])
-        if not count and not missing:
-            self._status.configure(text="已有线路已保留；需要重新分配请勾选“重新规划”。"
-                                   if not choices["replace_existing"] else "当前线路已符合预设，无需修改；已关闭的目标不变。")
-        self._accept_button.configure(state="normal" if count else "disabled",
-                                      text=f"使用预设草稿（{count}）" if count else "无需修改")
+            state = statuses[status] + (" · 需检查" if description["warning"] and status != "unavailable" else "")
+            color = COLORS["warning" if warning else "accent" if status == "changed" else "muted"]
+            _configure_changed(heading, text=decision["label"] + " · " + state, text_color=color)
+            destination = description["profile"] + " → " + description["node"]
+            if status == "changed":
+                text = f"原：{before['profile']} → {before['node']}\n新：{destination}"
+            elif status == "kept" and not warning:
+                text = destination + ("\n未启用 · 不新增专属规则" if not rows[service]["enabled"] else "\n保留已有选择")
+            else:
+                text = destination + "\n" + (description["hint"] if description["warning"] else decision["reason"])
+            _configure_changed(detail, text=text, text_color=COLORS["warning"] if warning else COLORS["muted"])
+        self._counts = (len(plan["changed_services"]), kept, missing)
+        self._update_actions()
+
+    def _back(self):
+        if self._view == "preview":
+            self._show_view("setup")
+        else:
+            self.destroy()
+
+    def _primary_action(self):
+        if self._view == "setup":
+            self._show_view("preview")
+        else:
+            self._accept()
+
+    def _manage_sources(self):
+        if self._modal_destroyed or not self._on_manage_sources:
+            return
+        # Restore the editor's grab before opening another modal. Opening the
+        # tag editor does not itself persist anything or accept this preview.
+        callback = self._on_manage_sources
+        self.destroy()
+        callback()
 
     def _accept(self):
-        if self._modal_destroyed or self._plan is None or not self._plan["changed_services"]:
+        if (self._modal_destroyed or self._view != "preview" or self._plan is None
+                or not self._plan["changed_services"] or self._accept_error):
+            return
+        if self._reviewed_choices != self._choices():
+            self._refresh()
+            self._show_view("setup")
             return
         try:
             self._on_accept(**self._choices(), expected_plan=copy.deepcopy(self._plan))
         except Exception as exc:
-            self._status.configure(text=safe_feedback_text(str(exc)), text_color=COLORS["warning"])
+            self._accept_error = True
+            self._error_detail.configure(text=safe_feedback_text(str(exc)))
+            self._error_detail.pack(fill="x", padx=6, pady=(6, 10), before=self._pages[self._view])
+            self._body._parent_canvas.yview_moveto(0)
+            self._update_actions()
             return
         self.destroy()

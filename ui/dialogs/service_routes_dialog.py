@@ -1160,6 +1160,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             protected_services=self._manually_edited[scope],
             strict_privacy=self._contexts.get(scope, {}).get("strict_privacy"),
             on_accept=lambda **choices: self._accept_preset(scope, original, **choices),
+            on_manage_sources=self._open_subscription_tags,
         )
 
     def _accept_preset(self, scope, original, *, expected_plan, **choices):
