@@ -17,6 +17,7 @@ from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import infer_feedback_severity, safe_feedback_text
 from ui.proxy_lifecycle import PROXY_MAINTENANCE_NOTICE
 from ui.tabs.tab_visibility import is_active_tab
+from ui.ui_dispatch import dispatch_ui_callback
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.action_group import wrap_action_group
@@ -1022,16 +1023,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         return dispatch if callable(dispatch) else None
 
     def _run_on_ui_thread(self, callback):
-        if getattr(self, "_destroyed", False):
-            return
-        dispatch = getattr(self, "_ui_dispatch", None)
-        if callable(dispatch):
-            dispatch(callback)
-            return
-        try:
-            self.after(0, callback)
-        except Exception:
-            pass
+        return dispatch_ui_callback(self, callback, self.__dict__.get("_ui_dispatch"))
 
     def _cancel_deferred_widget_builds(self):
         for attr in ("_subscription_picker_after_id", "_node_text_after_id"):

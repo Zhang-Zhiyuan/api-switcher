@@ -128,7 +128,7 @@ def test_social_default_change_preserves_saved_home_route_until_explicit_realloc
     draft = dialog._drafts[dialog._scope]
     assert draft["service_profile_bindings"][service] == "home"
     assert draft["service_node_bindings"][service] == "home-one"
-    assert "默认非家宽" in dialog._rows[service]["state_label"].cget("text")
+    assert "建议非家宽" in dialog._rows[service]["state_label"].cget("text")
     assert "建议非家宽" in dialog._rows[service]["description"]["hint"]
     dialog._select_profile(service, routes_ui.AUTO_PROFILE)
     assert dialog._drafts[dialog._scope]["service_profile_bindings"][service] == "dc"

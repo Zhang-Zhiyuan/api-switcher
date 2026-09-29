@@ -89,13 +89,16 @@ def test_closing_progress_discards_queued_updates_before_final_results():
     assert not queued and not painted and not progress._values
 
 
-def test_failed_dispatch_can_retry_without_losing_completed_values():
+@pytest.mark.parametrize("failure", ["exception", "rejected"])
+def test_failed_dispatch_can_retry_without_losing_completed_values(failure):
     queued, painted = [], []
     attempts = []
 
     def dispatch(callback):
         attempts.append(1)
         if len(attempts) == 1:
+            if failure == "rejected":
+                return False
             raise RuntimeError("synthetic dispatch unavailable")
         queued.append(callback)
 
@@ -104,6 +107,32 @@ def test_failed_dispatch_can_retry_without_losing_completed_values():
     progress.update("two", 2)
     queued.pop()()
     assert painted == [{"one": 1, "two": 2}]
+
+
+def test_rejected_trailing_refresh_does_not_block_subsequent_results():
+    queued, painted, timers = [], [], []
+    reject = [False]
+    def dispatch(callback):
+        if reject[0]:
+            return False
+        queued.append(callback)
+    def timer_factory(*args):
+        timers.append(_Timer(*args))
+        return timers[-1]
+    progress = CoalescedProgress(dispatch, painted.append, clock=lambda: 0, timer_factory=timer_factory)
+    progress.update("first", 1)
+    queued.pop()()
+    progress.update("second", 2)
+    queued.pop()()
+    reject[0] = True
+    timers[0].callback()
+    assert not progress._pending and not queued
+    reject[0] = False
+    progress.update("third", 3)
+    queued.pop()()
+    progress._flush(force=True)
+    assert painted[-1] == {"first": 1, "second": 2, "third": 3}
+    progress.close()
 
 
 @pytest.mark.parametrize("transport", ["tcp", "data"])

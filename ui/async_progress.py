@@ -34,8 +34,10 @@ class CoalescedProgress:
                 self._pending = False
                 return
         try:
-            self._dispatch(self._flush)
+            accepted = self._dispatch(self._flush)
         except Exception:
+            accepted = False
+        if accepted is False:
             with self._lock:
                 self._pending = False
 

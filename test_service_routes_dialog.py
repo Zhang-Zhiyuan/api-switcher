@@ -70,6 +70,18 @@ def test_editor_changes_are_drafts_until_explicit_apply(editor):
     assert dialog._originals[dialog._scope] == dialog._drafts[dialog._scope]
 
 
+def test_network_type_hint_is_a_recommendation_not_current_route(editor):
+    _root, dialog, saved = editor
+    assert dialog._rows["google_ai"]["profile"].get() == DEFAULT_PROFILE
+    assert "建议家宽" in dialog._rows["google_ai"]["state_label"].cget("text")
+    assert "建议非家宽" in dialog._rows["youtube"]["state_label"].cget("text")
+    from ui.dialogs.service_routes_dialog import DIRECT_PROFILE
+    dialog._select_profile("youtube", DIRECT_PROFILE)
+    state = dialog._rows["youtube"]["state_label"].cget("text")
+    assert "手动直连" in state and "建议" not in state
+    assert saved == []
+
+
 def test_unchanged_route_refresh_reuses_layout_without_repainting_rows(editor, monkeypatch):
     root, dialog, _ = editor
     root.update()

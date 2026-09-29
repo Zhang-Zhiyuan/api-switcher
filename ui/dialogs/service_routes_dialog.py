@@ -843,7 +843,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if mode == "direct":
             state += " · 手动直连"
         elif preferred:
-            state += " · 默认" + ("家宽" if preferred == "residential" else "非家宽")
+            state += " · 建议" + ("家宽" if preferred == "residential" else "非家宽")
         _configure_changed(row["state_label"], text=state + (" · 未保存" if dirty else ""),
                                       text_color=COLORS["accent"] if dirty else COLORS["muted"])
         # Full names stay visible here when the dropdown entry is too narrow.

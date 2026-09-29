@@ -981,7 +981,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 result = TestResult(False, f"测试失败: {type(exc).__name__}", error_details=str(exc)[:400])
 
             # Show result dialog in main thread
-            self._safe_after(lambda: self._apply_test_result(result, data.get("name", "")))
+            self._safe_after(lambda: self._apply_test_result(result, data.get("name", ""), expected_data=data))
 
         try:
             thread = threading.Thread(target=run_test, name="api-profile-test", daemon=True)
@@ -1043,10 +1043,24 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def _apply_test_result(self, result, profile_name: str):
-        if not self.winfo_exists():
+    def _request_matches_form(self, expected_data: dict | None) -> bool:
+        """Compare only on the UI thread; never persist/log the credential snapshot."""
+        if expected_data is None:
+            return True
+        try:
+            if self._collect_data() == expected_data:
+                return True
+        except Exception:
+            pass
+        self._show_status("配置已变化，旧请求结果已忽略；请对当前配置重新测试或刷新模型。", "warning")
+        return False
+
+    def _apply_test_result(self, result, profile_name: str, *, expected_data: dict | None = None):
+        if self.__dict__.get("_destroyed", False) or not self.winfo_exists():
             return
         self._set_test_busy(False)
+        if not self._request_matches_form(expected_data):
+            return
         if getattr(result, "selected_model", None) and "model" in self._fields:
             self._fields["model"][0].set(result.selected_model)
             self._on_model_change()
@@ -1136,7 +1150,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                     message=f"刷新失败: {type(exc).__name__}",
                     error_details=str(exc)[:400],
                 )
-            self._safe_after(lambda: self._handle_model_refresh_result(result, fallback_models, provider))
+            self._safe_after(lambda: self._handle_model_refresh_result(
+                result, fallback_models, provider, expected_data=data,
+            ))
 
         try:
             threading.Thread(target=run_refresh, name="api-model-refresh", daemon=True).start()
@@ -1183,10 +1199,13 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         suffix = f"；已选择推荐模型 {recommended}" if recommended else ""
         self._show_error(message + suffix) if is_error else self._show_status(message + suffix, "success")
 
-    def _handle_model_refresh_result(self, result, fallback_models: list[str], provider):
-        if not self.winfo_exists():
+    def _handle_model_refresh_result(self, result, fallback_models: list[str], provider,
+                                     *, expected_data: dict | None = None):
+        if self.__dict__.get("_destroyed", False) or not self.winfo_exists():
             return
         self._set_refresh_busy(False)
+        if not self._request_matches_form(expected_data):
+            return
         proxy_warning = str(getattr(result, "proxy_warning", "") or "").strip()
         warning_suffix = f"；{proxy_warning}" if proxy_warning else ""
         if result.success and result.models:

@@ -1,0 +1,310 @@
+{
+  "scenario": "profiles",
+  "count": 20,
+  "width": 1040,
+  "long_names": false,
+  "phases": [
+    {
+      "phase": "open",
+      "action_ms": 70.8,
+      "ready_ms": 3162.1,
+      "max_gap_ms": 238.1,
+      "p95_gap_ms": 129.3,
+      "slow_callbacks": [
+        [
+          "ProfileCardList._schedule.<locals>.<lambda>",
+          [
+            42,
+            756.9,
+            30.3
+          ]
+        ],
+        [
+          "CTkBaseClass._update_dimensions_event",
+          [
+            967,
+            335.6,
+            3.5
+          ]
+        ],
+        [
+          "main.<locals>.run_phase",
+          [
+            1,
+            70.8,
+            70.8
+          ]
+        ],
+        [
+          "bind_wraplength.<locals>.update",
+          [
+            195,
+            30.6,
+            1.3
+          ]
+        ],
+        [
+          "CTkScrollbar.set",
+          [
+            47,
+            24.4,
+            1.0
+          ]
+        ],
+        [
+          "CTkScrollableFrame.__init__.<locals>.<lambda>",
+          [
+            91,
+            7.4,
+            0.2
+          ]
+        ],
+        [
+          "bind_wraplength.<locals>.schedule_update",
+          [
+            110,
+            5.6,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            87,
+            3.0,
+            0.5
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "unchanged_refresh",
+      "action_ms": 0.8,
+      "ready_ms": 176.9,
+      "max_gap_ms": 175.9,
+      "p95_gap_ms": 175.9,
+      "slow_callbacks": [
+        [
+          "main.<locals>.tick",
+          [
+            15,
+            1.9,
+            1.0
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            0.8,
+            0.8
+          ]
+        ],
+        [
+          "bind_wraplength.<locals>.update",
+          [
+            20,
+            0.6,
+            0.0
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            10,
+            0.5,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            3,
+            0.3,
+            0.2
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            1,
+            0.0,
+            0.0
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "single_edit",
+      "action_ms": 0.6,
+      "ready_ms": 101.8,
+      "max_gap_ms": 63.2,
+      "p95_gap_ms": 63.2,
+      "slow_callbacks": [
+        [
+          "ProfileCardList._schedule.<locals>.<lambda>",
+          [
+            2,
+            41.0,
+            22.6
+          ]
+        ],
+        [
+          "CTkBaseClass._update_dimensions_event",
+          [
+            71,
+            13.3,
+            1.6
+          ]
+        ],
+        [
+          "CTkScrollbar.set",
+          [
+            3,
+            1.9,
+            0.7
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            16,
+            1.1,
+            0.4
+          ]
+        ],
+        [
+          "bind_wraplength.<locals>.update",
+          [
+            6,
+            0.8,
+            0.2
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            0.7,
+            0.7
+          ]
+        ],
+        [
+          "CTkScrollableFrame.__init__.<locals>.<lambda>",
+          [
+            4,
+            0.5,
+            0.3
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            10,
+            0.3,
+            0.1
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "refresh_burst",
+      "action_ms": 1.1,
+      "ready_ms": 30.9,
+      "max_gap_ms": 30.9,
+      "p95_gap_ms": 30.9,
+      "slow_callbacks": [
+        [
+          "main.<locals>.tick",
+          [
+            16,
+            2.2,
+            1.3
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            1.1,
+            1.1
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            10,
+            0.5,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            3,
+            0.4,
+            0.2
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            1,
+            0.0,
+            0.0
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "tab_return",
+      "action_ms": 7.3,
+      "ready_ms": 45.8,
+      "max_gap_ms": 83.9,
+      "p95_gap_ms": 83.9,
+      "slow_callbacks": [
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            7.4,
+            7.4
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            8,
+            0.3,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            3,
+            0.2,
+            0.1
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            5,
+            0.1,
+            0.1
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            1,
+            0.1,
+            0.1
+          ]
+        ]
+      ]
+    }
+  ],
+  "errors": []
+}

@@ -37,6 +37,18 @@ def run_on_ui_thread(widget, callback, logger=None, context: str = "UI callback"
             dispatch = _safe_attribute(top, "_run_on_ui_thread")
         except Exception:
             dispatch = None
+    return dispatch_ui_callback(widget, callback, dispatch, logger, context)
+
+
+def dispatch_ui_callback(widget, callback, dispatch, logger=None, context: str = "UI callback") -> bool:
+    """Use a known Python dispatcher; only the main thread may fall back to Tk.
+
+    Wrappers with a cached dispatcher use this directly, avoiding discovery of
+    their own _run_on_ui_thread method and recursive scheduling.
+    """
+    if bool(_safe_attribute(widget, "_destroyed", False)):
+        return False
+    on_main_thread = threading.current_thread() is threading.main_thread()
     if callable(dispatch):
         try:
             result = dispatch(callback)
