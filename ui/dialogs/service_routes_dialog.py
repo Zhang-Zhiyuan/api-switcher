@@ -96,6 +96,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._node_dialog = None
         self._scope_copy_dialog = None
         self._bulk_dialog = None
+        self._preset_dialog = None
         self._tags_dialog = None
         self._manually_edited = {scope: set() for scope in self._scopes}
         self._auto_seeded = set()
@@ -110,10 +111,15 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(12, 8))
-        ctk.CTkLabel(header, text="目标分流", font=font(20, "bold"),
-                     text_color=COLORS["text"]).pack(anchor="w")
+        title_row = ctk.CTkFrame(header, fg_color="transparent")
+        title_row.pack(fill="x")
+        ctk.CTkLabel(title_row, text="目标分流", font=font(20, "bold"),
+                     text_color=COLORS["text"]).pack(side="left")
+        self._preset_button = ctk.CTkButton(title_row, text="智能预设", width=110, state="disabled",
+                                           command=self._open_preset_dialog, **button_style("primary", compact=True))
+        self._preset_button.pack(side="right")
         notice = ctk.CTkLabel(
-            header, text="为每个网站选择订阅、节点或直连。修改先保留为草稿，保存并应用后生效。",
+            header, text="可用智能预设快速分配，也可逐项选择订阅、节点或直连。保存并应用后生效。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(2, 6))
@@ -1139,6 +1145,44 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             on_apply=lambda services, operation, **choices: self._accept_bulk_edit(scope, services, operation, **choices),
         )
 
+    def _open_preset_dialog(self):
+        if self._busy or self._closed or self._scope not in self._drafts:
+            return
+        if self._preset_dialog and self._preset_dialog.winfo_exists():
+            self._preset_dialog.lift()
+            return
+        from ui.dialogs.route_preset_dialog import RoutePresetDialog
+
+        scope = self._scope
+        original = copy.deepcopy(self._drafts[scope])
+        self._preset_dialog = RoutePresetDialog(
+            self, scope=scope, preferences=original, catalog=self._catalog,
+            protected_services=self._manually_edited[scope],
+            strict_privacy=self._contexts.get(scope, {}).get("strict_privacy"),
+            on_accept=lambda **choices: self._accept_preset(scope, original, **choices),
+        )
+
+    def _accept_preset(self, scope, original, *, expected_plan, **choices):
+        if self._busy or self._closed or scope != self._scope or self._drafts.get(scope) != original:
+            raise ValueError("位置或草稿已变化，请重新打开智能预设；未覆盖修改。")
+        from core.route_presets import plan_route_preset
+
+        plan = plan_route_preset(
+            self._drafts[scope], self._catalog, **choices, protected_services=self._manually_edited[scope],
+            strict_privacy=self._contexts.get(scope, {}).get("strict_privacy"),
+        )
+        if plan != expected_plan:
+            raise ValueError("订阅缓存或分流策略已变化，请重新打开预设核对；原草稿未修改。")
+        self._drafts[scope] = plan["draft"]
+        self._manually_edited[scope].update(plan["changed_services"])
+        self._default_notices[scope] = plan["notices"]
+        self._preview_open, self._results_open = True, False
+        self._clear_filters()
+        self._render()
+        self._changed()
+        self._status.configure(text=f"已生成 {len(plan['changed_services'])} 项预设草稿；可继续手动调整，保存并应用后生效。",
+                               text_color=COLORS["accent"])
+
     def _accept_bulk_edit(self, scope, services, operation, **choices):
         if self._busy or self._closed or scope != self._scope:
             raise ValueError("当前位置已变化，请重新打开批量设置")
@@ -1215,7 +1259,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
     def _set_editable(self, enabled):
         state = "normal" if enabled else "disabled"
         for button in (self._copy_button, self._add_button, self._reset_button, self._save_button, self._reload_button,
-                       self._tags_button, self._tag_routes_button, self._bulk_button, self._legacy_cleanup_button,
+                       self._tags_button, self._tag_routes_button, self._bulk_button, self._preset_button, self._legacy_cleanup_button,
                        self._recovery_button, self._preview_toggle):
             if button:
                 button.configure(state=state)
@@ -1279,7 +1323,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._closed = True
-        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog, self._bulk_dialog):
+        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog, self._bulk_dialog, self._preset_dialog):
             if dialog and dialog.winfo_exists():
                 dialog.destroy()
         if self._filter_after_id:

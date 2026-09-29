@@ -48,7 +48,7 @@ def route_candidate_count(profile: dict) -> int:
                 if isinstance(node, dict) and isinstance(node.get("key"), str) and node["key"]})
 
 
-def _unavailable_reason(profile: dict) -> str:
+def auto_route_unavailable_reason(profile: dict) -> str:
     if not isinstance(profile.get("id"), str) or not profile["id"].strip():
         return "订阅标识无效"
     nodes = profile.get("nodes")
@@ -124,7 +124,7 @@ def suggest_tagged_routes(
         eligible = {}
         reasons = {}
         for profile in tagged:
-            reason = _unavailable_reason(profile)
+            reason = auto_route_unavailable_reason(profile)
             if reason:
                 reasons[reason] = reasons.get(reason, 0) + 1
             else:
@@ -153,8 +153,8 @@ def suggest_tagged_routes(
 _LEGACY_SOCIAL_TARGETS = (("x_twitter", "X / Twitter"), ("reddit", "Reddit"))
 
 
-def _legacy_cleanup_authority_valid(preferences: dict) -> bool:
-    """Cleanup is not a configuration repair path; ambiguous authority wins."""
+def route_draft_authority_valid(preferences: dict) -> bool:
+    """Draft planners are not repair paths; ambiguous authority must not be lost."""
     fields = ("service_profile_bindings", "service_node_bindings", "builtin_sites",
               "service_route_modes", "service_node_pools")
     if any(key in preferences and not isinstance(preferences[key], dict) for key in fields):
@@ -189,7 +189,7 @@ def _legacy_cleanup_authority_valid(preferences: dict) -> bool:
     return True
 
 
-def _legacy_catalog_groups(catalog) -> dict[str, list[dict]]:
+def route_catalog_groups(catalog) -> dict[str, list[dict]]:
     groups = {}
     for row in catalog if isinstance(catalog, (list, tuple)) else ():
         if not isinstance(row, dict):
@@ -212,7 +212,7 @@ def legacy_social_route_candidates(
     """
     if not isinstance(preferences, dict):
         raise ValueError("服务分流草稿必须是对象")
-    if not _legacy_cleanup_authority_valid(preferences):
+    if not route_draft_authority_valid(preferences):
         return ()
     protected = ({protected_services} if isinstance(protected_services, str)
                  else set(protected_services or ()))
@@ -221,7 +221,7 @@ def legacy_social_route_candidates(
     pools = preferences.get("service_node_pools", {})
     modes = preferences.get("service_route_modes", {})
     sites = preferences.get("builtin_sites", {})
-    groups = _legacy_catalog_groups(catalog)
+    groups = route_catalog_groups(catalog)
     candidates = []
     for service, _label in _LEGACY_SOCIAL_TARGETS:
         if (service in protected or service in pins or service in pools or service in modes
@@ -246,13 +246,13 @@ def cleanup_legacy_social_routes(
         raise ValueError("服务分流草稿必须是对象")
     draft = copy.deepcopy(preferences)
     notices = ["旧版未记录来源，可能是手动选择；这里只识别旧版 X / Reddit 家宽默认分流，不代表家宽线路无效。"]
-    if not _legacy_cleanup_authority_valid(draft):
+    if not route_draft_authority_valid(draft):
         return draft, [*notices, "服务分流草稿格式无效，未清理；请先修正已有配置。"]
     candidates = legacy_social_route_candidates(draft, catalog, protected_services)
     if not candidates:
         return draft, [*notices, "没有符合清理条件的旧版社交分流；已有手动策略、保护项及启用状态均保持不变。"]
-    eligible = {profile_id for profile_id, rows in _legacy_catalog_groups(catalog).items()
-                if all(row.get("network_type") == "datacenter" and not _unavailable_reason(row) for row in rows)}
+    eligible = {profile_id for profile_id, rows in route_catalog_groups(catalog).items()
+                if all(row.get("network_type") == "datacenter" and not auto_route_unavailable_reason(row) for row in rows)}
     labels = "、".join(label for service, label in _LEGACY_SOCIAL_TARGETS if service in candidates)
     if not eligible:
         return draft, [*notices, f"{labels} 未清理：没有可用的非家宽订阅，请先标记并拉取缓存；已保留原分流。"]
