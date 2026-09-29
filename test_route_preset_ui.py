@@ -6,7 +6,7 @@ import time
 import customtkinter as ctk
 import pytest
 
-from core.route_presets import ROUTE_PRESETS
+from core.route_presets import AI_NODE_STRATEGIES, ROUTE_PRESETS
 from test_route_presets import catalog, preferences
 from test_service_routes_dialog import _wait
 from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
@@ -120,7 +120,7 @@ def test_unchanged_preview_refresh_avoids_repainting_and_repacking_sources(edito
     tk_root.update()
     calls = []
     widgets = [child._status, child._accept_button, child._back_button, child._setup_tab, child._preview_tab,
-               child._description, *child._source_combos.values(),
+               child._description, child._ai_hint, *child._source_combos.values(),
                *(row[1] for row in child._source_rows.values()),
                *(widget for pair in child._preview_rows.values() for widget in pair)]
     for widget in widgets:
@@ -307,7 +307,7 @@ def test_preset_changes_enable_only_needed_selectors_and_allow_manual_source(edi
     assert not saved
 
 
-@pytest.mark.parametrize("race", ["scope", "draft", "catalog", "busy", "privacy"])
+@pytest.mark.parametrize("race", ["scope", "draft", "catalog", "primary", "busy", "privacy"])
 def test_stale_preview_never_overwrites_new_context(editor, tk_root, race):
     parent, child, saved = open_preset(editor, tk_root)
     if race == "scope":
@@ -316,6 +316,8 @@ def test_stale_preview_never_overwrites_new_context(editor, tk_root, race):
         parent._drafts[parent._scope]["service_route_modes"]["youtube"] = "direct"
     elif race == "catalog":
         parent._catalog[0]["nodes"] = []
+    elif race == "primary":
+        parent._catalog[0]["selected_node_key"] = "h2"
     elif race == "busy":
         parent._busy = True
     else:
@@ -396,4 +398,99 @@ def test_preset_real_scroll_and_small_high_dpi_footer_reachable(editor, tk_root,
         assert not saved
     finally:
         ctk.set_widget_scaling(original_scale)
+        tk_root.update()
+
+
+def test_preset_ui_defaults_to_fixed_ai_without_touching_saved_routes(editor, tk_root):
+    parent, child, saved = open_preset(editor, tk_root)
+    assert child._choices()["ai_strategy"] == "fixed"
+    assert child._plan["draft"]["service_node_bindings"] == dict.fromkeys(("openai", "claude", "google_ai"), "h1")
+    assert "不保证" in child._ai_hint.cget("text")
+    assert not parent._drafts[parent._scope]["service_node_bindings"] and not saved
+    review(child, tk_root)
+    assert "固定节点" in child._preview_rows["claude"][1].cget("text")
+    assert not child._auto_ack_checkbox.winfo_manager()
+
+
+def test_automatic_ai_requires_explicit_review_acknowledgement(editor, tk_root):
+    parent, child, saved = open_preset(editor, tk_root)
+    original = copy.deepcopy(parent._drafts)
+    child._ai_strategy.set(AI_NODE_STRATEGIES["auto"])
+    child._refresh()
+    review(child, tk_root)
+    assert child._auto_ack_checkbox.winfo_viewable()
+    assert child._accept_button.cget("state") == "disabled"
+    child._accept()  # A direct callback cannot bypass acknowledgement.
+    assert parent._drafts == original and not saved
+    capture(child, "preset-ai-auto-warning.png")
+    child._auto_ack_checkbox._canvas.event_generate("<Button-1>", x=8, y=8)
+    tk_root.update()
+    assert child._accept_button.cget("state") == "normal"
+    child._accept_button.invoke()
+    assert not parent._drafts[parent._scope]["service_node_bindings"] and not saved
+
+
+@pytest.mark.parametrize("change", ["scheme", "source", "strategy"])
+def test_auto_ack_is_invalidated_when_preset_choices_change(editor, tk_root, change):
+    parent, child, _ = open_preset(editor, tk_root)
+    child._ai_strategy.set(AI_NODE_STRATEGIES["auto"])
+    child._refresh()
+    review(child, tk_root)
+    child._auto_ack_checkbox.toggle()
+    child._back_button.invoke()
+    if change == "scheme":
+        child._scheme.set(ROUTE_PRESETS["datacenter"]["label"])
+    elif change == "source":
+        choice = next(label for label, key in child._options["residential"].items() if key)
+        child._source_combos["residential"].set(choice)
+    else:
+        child._ai_strategy.set(AI_NODE_STRATEGIES["fixed"])
+    child._refresh()
+    assert not child._auto_ack.get() and child._reviewed_choices is None
+    assert not parent._drafts[parent._scope]["service_profile_bindings"]
+
+
+def test_preset_kept_ai_choices_do_not_require_auto_ack_for_website_changes(editor, tk_root):
+    parent, _ = editor
+    parent._drafts[parent._scope]["service_profile_bindings"] = dict.fromkeys(("openai", "claude", "google_ai"), "home")
+    _, child, _ = open_preset(editor, tk_root)
+    assert not child._plan["draft"]["service_node_bindings"]
+    child._ai_strategy.set(AI_NODE_STRATEGIES["auto"])
+    child._refresh()
+    review(child, tk_root)
+    assert child._accept_button.cget("state") == "normal" and not child._auto_ack_checkbox.winfo_manager()
+
+
+def test_fixed_preset_missing_primary_is_not_disguised_as_available(editor, tk_root):
+    parent, _ = editor
+    parent._catalog[0]["selected_node_key"] = "vanished"
+    _, child, saved = open_preset(editor, tk_root)
+    review(child, tk_root)
+    assert "3 项待处理" in child._status.cget("text")
+    assert "首选节点已失效" in child._preview_rows["claude"][1].cget("text")
+    assert not child._plan["draft"]["service_node_bindings"] and not saved
+
+
+def test_preseeded_automatic_ai_is_explicitly_preserved_not_claimed_fixed(tk_root):
+    saved = []
+    parent = ServiceRoutesDialog(
+        tk_root, scopes=["合成已有标记"], load_preferences=lambda _: preferences(), catalog_loader=catalog,
+        apply_preferences=lambda *args: saved.append(args))
+    try:
+        _wait(tk_root, lambda: not parent._busy and parent.winfo_viewable())
+        before = copy.deepcopy(parent._drafts)
+        assert before[parent._scope]["service_profile_bindings"]["claude"] == "home"
+        assert not before[parent._scope]["service_node_bindings"]
+        parent._open_preset_dialog()
+        child = parent._preset_dialog
+        _wait(tk_root, child.winfo_viewable)
+        assert "仍保留 3 项已有 AI 自动切换线路" in child._ai_hint.cget("text")
+        assert not child._plan["draft"]["service_node_bindings"]
+        child._replace_checkbox.toggle()
+        tk_root.update()
+        assert "仍保留" not in child._ai_hint.cget("text")
+        assert child._plan["draft"]["service_node_bindings"] == dict.fromkeys(("openai", "claude", "google_ai"), "h1")
+        assert parent._drafts == before and not saved
+    finally:
+        parent.destroy()
         tk_root.update()

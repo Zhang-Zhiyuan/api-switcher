@@ -236,11 +236,13 @@ def test_failed_apply_preserves_draft_and_successful_servers_are_not_reapplied(e
         return "已应用"
     dialog._applier = apply
     dialog._apply()
+    dialog._scope_confirm_dialog._confirm()
     _wait(root, lambda: not dialog._busy)
     assert saved == [first]
     assert dialog._originals[first] == dialog._drafts[first]
     assert dialog._originals[second] != dialog._drafts[second]
     dialog._apply()
+    dialog._scope_confirm_dialog._confirm()
     _wait(root, lambda: not dialog._busy)
     assert saved == [first]
     assert "服务器暂时无法连接" in dialog._details.get("1.0", "end")
@@ -409,12 +411,16 @@ def test_worker_start_failure_preserves_draft_and_allows_retry(editor, monkeypat
         else:
             patch.setattr(service_routes_dialog.threading.Thread, "start", unavailable)
         getattr(dialog, operation)()
+        if operation == "_apply":
+            dialog._scope_confirm_dialog._confirm()
     assert not dialog._busy and dialog._poll_id is None
     assert dialog._originals == original and dialog._drafts == draft
     assert dialog._save_button.cget("state") == "normal"
     assert "任务未启动" in dialog._status.cget("text")
     assert not saved
     getattr(dialog, operation)()
+    if operation == "_apply":
+        dialog._scope_confirm_dialog._confirm()
     _wait(root, lambda: not dialog._busy)
     assert len(saved) == (1 if operation == "_apply" else 0)
 

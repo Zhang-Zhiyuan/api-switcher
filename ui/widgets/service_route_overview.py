@@ -55,10 +55,10 @@ def route_description(row, preferences, catalog):
         node_text = "沿用默认节点策略"
         if (preferences.get("service_route_modes") or {}).get(service) == "default":
             profile_text = "默认线路（手动指定）"
-    strategy = "固定节点 · 不自动换出口" if node_key else ("自动切换 · 仅限此订阅，备用按服务策略筛选" if profile_id else "跟随默认线路")
+    strategy = "固定节点 · 不自动换节点；不保证固定 IP / 国家" if node_key else ("自动切换 · 仅限此订阅，备用按服务策略筛选；未锁定国家" if profile_id else "跟随默认线路")
     if pool:
         node_text = f"自选 {len(pool)} 个候选：" + " → ".join(pool_names.get(key, "已失效") for key in pool)
-        strategy = "按候选优先顺序和服务连通性切换 · 不使用未选节点"
+        strategy = "按候选优先顺序和服务连通性切换 · 不使用未选节点；未验证出口国家"
         if len(pool) - missing == 1:
             strategy += " · 当前仅 1 个可用候选，暂无备用"
     if profile_id and not node_key and not pool and profile and not warning:

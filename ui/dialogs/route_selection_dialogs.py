@@ -34,6 +34,28 @@ class NodeListFrame(ctk.CTkFrame):
         if hasattr(self, "listbox"):
             self.listbox.configure(font=font(13).create_scaled_tuple(self._get_widget_scaling()))
 
+    def attach_list(self, listbox):
+        self.listbox = listbox
+        self.sync_font()
+        # A native Listbox and CTk's bind_all wheel handler would otherwise
+        # scroll together. Consume movement inside the list; only vertical
+        # boundary events should reach the surrounding scrollable page.
+        listbox.bind("<MouseWheel>", self._scroll_list)
+        listbox.bind("<Shift-MouseWheel>", self._scroll_list)
+
+    def _scroll_list(self, event):
+        delta = event.delta
+        if not delta:
+            return
+        horizontal = bool(event.state & 0x0001)
+        view = self.listbox.xview if horizontal else self.listbox.yview
+        first, last = view()
+        if (delta > 0 and first <= 0) or (delta < 0 and last >= 1):
+            return "break" if horizontal else None
+        units = -int(delta / 120) * 3 or (-1 if delta > 0 else 1)
+        view("scroll", units, "units")
+        return "break"
+
 
 class DraftChoiceDialog(RestoreGrabDialog):
     """Restore the draft editor's grab when a nested selector closes."""
@@ -59,6 +81,7 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._on_select = on_select
         source_keys = [selected_keys] if isinstance(selected_keys, str) else (selected_keys or ())
         self._selected_keys = list(dict.fromkeys(key for key in source_keys if isinstance(key, str) and key))
+        self._original_limited = bool(selected_key or self._selected_keys)
         self._on_select_pool = on_select_pool
         self._pool_enabled = callable(on_select_pool) or bool(self._selected_keys)
         self._pool_feedback = ""
@@ -72,7 +95,9 @@ class RouteNodeDialog(DraftChoiceDialog):
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=18, pady=(6, 16))
-        self._pool_frame = ctk.CTkFrame(footer, fg_color=COLORS["surface"])
+        body = self._body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        body.pack(fill="both", expand=True, padx=12, pady=(8, 0))
+        self._pool_frame = ctk.CTkFrame(body, fg_color=COLORS["surface"])
         self._pool_caption = ctk.CTkLabel(self._pool_frame, text="已选候选 · 从上到下为故障切换优先顺序",
                                          font=font(11), anchor="w")
         self._pool_caption.pack(fill="x", padx=8, pady=(5, 2))
@@ -90,8 +115,7 @@ class RouteNodeDialog(DraftChoiceDialog):
             bg=COLORS["field_bg"], fg=COLORS["text"], selectbackground=COLORS["primary"],
             selectforeground=COLORS["text"], borderwidth=0, highlightthickness=0,
         )
-        pool_body.listbox = self._pool_list
-        pool_body.sync_font()
+        pool_body.attach_list(self._pool_list)
         pool_scroll = ctk.CTkScrollbar(pool_body, command=self._pool_list.yview, height=80)
         pool_scroll.pack(side="right", fill="y")
         self._pool_list.configure(yscrollcommand=pool_scroll.set)
@@ -108,44 +132,44 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._choose = ctk.CTkButton(actions, text="使用此选择", command=self._commit, **button_style("accent"))
         self._choose.grid(row=0, column=1, sticky="ew")
 
-        heading = ctk.CTkLabel(self, text=safe_feedback_text(f"{service_label} · {profile_name}"),
+        heading = ctk.CTkLabel(body, text=safe_feedback_text(f"{service_label} · {profile_name}"),
                               font=font(17, "bold"), text_color=COLORS["text"], anchor="w", justify="left")
-        heading.pack(fill="x", padx=18, pady=(16, 8))
-        bind_wraplength(self, heading, padding=40)
+        heading.pack(fill="x", padx=6, pady=(4, 8))
+        bind_wraplength(body, heading, padding=16)
         modes = [AUTO_MODE, POOL_MODE, FIXED_MODE] if self._pool_enabled else [AUTO_MODE, FIXED_MODE]
-        self._modes = ctk.CTkSegmentedButton(self, values=modes, command=self._set_mode, font=font(12),
+        self._modes = ctk.CTkSegmentedButton(body, values=modes, command=self._set_mode, font=font(12),
                                            selected_color=COLORS["primary"], unselected_color=COLORS["secondary"])
-        self._modes.pack(fill="x", padx=18)
+        self._modes.pack(fill="x", padx=6)
         self._modes.set(self._mode)
-        note_text = ("全订阅：使用首选和订阅备用。自选：只在勾选节点间按顺序故障切换。\n"
-                     "固定：不自动换出口。列表来自本地缓存；选择仅写入草稿，保存并应用后生效。"
+        note_text = ("全订阅：候选可随刷新变化，可能跨国家。自选：只用勾选节点。\n"
+                     "固定：不自动换节点；固定节点不保证固定 IP / 国家。\n"
+                     "列表来自本地缓存；选择仅写入草稿，保存并应用后生效。"
                      if self._pool_enabled else
-                     "自动：只在此订阅内故障切换。固定：保持所选节点，不自动换出口。\n"
-                     "列表来自本地缓存，未执行实时测速。这里的选择只写入草稿。")
-        note = ctk.CTkLabel(self, text=note_text,
+                     "自动：仅限此订阅，可能跨国家。固定：不自动换节点。\n"
+                     "固定节点不保证固定 IP / 国家；选择仅写入草稿，保存并应用后生效。")
+        note = ctk.CTkLabel(body, text=note_text,
                            text_color=COLORS["muted"], font=font(11), anchor="w", justify="left")
-        note.pack(fill="x", padx=18, pady=8)
-        bind_wraplength(self, note, padding=40)
-        self._search = ctk.CTkEntry(self, placeholder_text="搜索候选节点：名称 / 地区关键词，可用空格组合", **input_style())
-        self._search.pack(fill="x", padx=18)
+        note.pack(fill="x", padx=6, pady=8)
+        bind_wraplength(body, note, padding=16)
+        self._search = ctk.CTkEntry(body, placeholder_text="搜索名称 / 地区关键词（不代表实测出口）", **input_style())
+        self._search.pack(fill="x", padx=6)
         self._search.bind("<KeyRelease>", self._schedule_filter)
         self._search.bind("<<Paste>>", self._schedule_filter, add="+")
         self._search.bind("<<Cut>>", self._schedule_filter, add="+")
         self._search.bind("<Down>", self._focus_list)
-        self._count = ctk.CTkLabel(self, text="", font=font(11), text_color=COLORS["muted"], anchor="w", height=20)
-        self._count.pack(fill="x", padx=18, pady=(4, 0))
-        bind_wraplength(self, self._count, padding=40)
+        self._count = ctk.CTkLabel(body, text="", font=font(11), text_color=COLORS["muted"], anchor="w", height=20)
+        self._count.pack(fill="x", padx=6, pady=(4, 0))
+        bind_wraplength(body, self._count, padding=16)
 
         # One native list rather than one Tk frame per node: large subscriptions
         # stay searchable without constructing thousands of widgets.
-        body = NodeListFrame(self, fg_color=COLORS["field_bg"])
-        body.pack(fill="both", expand=True, padx=18, pady=(4, 0))
+        body = self._list_frame = NodeListFrame(body, fg_color=COLORS["field_bg"])
+        body.pack(fill="x", padx=6, pady=(4, 8))
         self._list = tk.Listbox(body, exportselection=False, activestyle="dotbox", height=6,
                                bg=COLORS["field_bg"], fg=COLORS["text"], font=font(12),
                                selectbackground=COLORS["primary"], selectforeground=COLORS["text"],
                                borderwidth=0, highlightthickness=0)
-        body.listbox = self._list
-        body.sync_font()
+        body.attach_list(self._list)
         scrollbar = ctk.CTkScrollbar(body, command=self._list.yview)
         scrollbar.pack(side="right", fill="y")
         horizontal = ctk.CTkScrollbar(body, orientation="horizontal", command=self._list.xview, height=12)
@@ -199,9 +223,9 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._count.configure(text=f"显示 {len(self._visible)} / {len(self._nodes)} 个节点"
                               + (" · 无匹配结果，请更换关键词" if not self._visible else
                                  " · 点击勾选/取消，搜索不会丢失已选项" if self._mode == POOL_MODE else
-                                 " · 点击节点即可选择固定出口"))
+                                 " · 点击节点即可固定该节点"))
         if self._mode == POOL_MODE:
-            self._pool_frame.pack(fill="x", pady=(0, 6), before=self._selection)
+            self._pool_frame.pack(fill="x", padx=6, pady=(4, 6), before=self._list_frame)
             self._render_pool()
         else:
             self._pool_frame.pack_forget()
@@ -274,8 +298,9 @@ class RouteNodeDialog(DraftChoiceDialog):
 
     def _update_selection(self):
         label = self._node_labels.get(self._selected_key)
+        widening = self._mode == AUTO_MODE and self._original_limited
         if self._mode == AUTO_MODE:
-            text = "使用订阅首选；备用按服务策略筛选，仅在此订阅内故障切换。"
+            text = "使用订阅首选；备用按服务策略筛选，仅在此订阅内故障切换；未锁定国家。"
             valid = bool(self._nodes) and self._auto_route_usable
             if not self._nodes or not self._candidate_count:
                 text = "该订阅暂无可用缓存，请返回编辑器重读缓存或先拉取订阅。"
@@ -283,6 +308,8 @@ class RouteNodeDialog(DraftChoiceDialog):
                 text = "当前订阅首选无法独立运行，请选择固定节点，或返回订阅区更换首选后重读缓存。"
             elif self._candidate_count == 1:
                 text = "仅 1 个独立候选节点，暂无备用可切换；将使用订阅首选。"
+            if widening:
+                text += "\n原固定节点 / 自选名单将被解除，刷新后可能跨国家。"
         elif self._mode == POOL_MODE:
             missing = sum(key not in self._keys for key in self._selected_keys)
             valid = bool(self._selected_keys) and not missing and len(self._selected_keys) <= MAX_POOL_NODES and callable(self._on_select_pool)
@@ -300,7 +327,7 @@ class RouteNodeDialog(DraftChoiceDialog):
         else:
             text = "已选固定节点：" + label if label is not None else "请选择一个节点；原固定节点缺失时不会自动替换。"
             valid = label is not None
-        self._selection.configure(text=text, text_color=COLORS["text"] if valid else COLORS["warning"])
+        self._selection.configure(text=text, text_color=COLORS["text"] if valid and not widening else COLORS["warning"])
         self._choose.configure(state="normal" if valid else "disabled")
 
     def _select_visible(self, _event=None):
@@ -335,6 +362,8 @@ class RouteNodeDialog(DraftChoiceDialog):
                 if self._mode != POOL_MODE:
                     self._list.selection_set(0)
                     self._select_visible()
+            self._body.update_idletasks()
+            self._body._parent_canvas.yview_moveto(1)
         return "break"
 
     def _commit_from_list(self, _event=None):
@@ -358,8 +387,10 @@ class RouteNodeDialog(DraftChoiceDialog):
             self._on_select_pool(list(self._selected_keys))
             self.destroy()
             return
-        if self._mode == AUTO_MODE and not self._auto_route_usable:
-            return
+        if self._mode == AUTO_MODE:
+            if not self._auto_route_usable:
+                self._update_selection()
+                return
         key = "" if self._mode == AUTO_MODE else self._selected_key
         if self._mode == FIXED_MODE and key not in self._keys:
             return

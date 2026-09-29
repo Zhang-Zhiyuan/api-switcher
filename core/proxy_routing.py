@@ -177,6 +177,32 @@ def node_pool_warnings(preferences: dict, *, profile_id: str = "", active_only: 
     return tuple(notices)
 
 
+def automatic_scope_expansions(original: dict, draft: dict) -> list[str]:
+    """Find active targets losing a fixed/list restriction, including inheritance.
+
+    This is an offline UI safety check, not a country/IP verification. Compare
+    saved intent with the final draft so bulk edits, copied scopes and profile
+    changes cannot bypass the same save-time explanation.
+    """
+    def selection(preferences, service):
+        profiles = preferences.get("service_profile_bindings") or {}
+        modes = preferences.get("service_route_modes") or {}
+        source = ("custom" if service.startswith("custom:") and not profiles.get(service)
+                  and not modes.get(service) else service)
+        limited = bool((preferences.get("service_node_bindings") or {}).get(source)
+                       or (preferences.get("service_node_pools") or {}).get(source))
+        return limited, modes.get(source) == "direct"
+
+    expanded = []
+    for row in route_rows(draft):
+        service = row["id"]
+        old_limited, _ = selection(original, service)
+        new_limited, direct = selection(draft, service)
+        if row["enabled"] and old_limited and not new_limited and not direct:
+            expanded.append(service)
+    return expanded
+
+
 def route_snapshot(preferences: dict) -> dict:
     return {
         key: copy.deepcopy(preferences.get(key, [] if key == "custom_targets" else {}))

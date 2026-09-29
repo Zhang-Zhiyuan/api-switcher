@@ -15,10 +15,10 @@ def _describe(service, preferences):
 
 def test_overview_distinguishes_fixed_automatic_default_and_disabled_routes():
     prefs = _preferences()
-    assert _describe("claude", prefs)["hint"] == "固定节点 · 不自动换出口"
+    assert _describe("claude", prefs)["hint"] == "固定节点 · 不自动换节点；不保证固定 IP / 国家"
     assert _describe("google_ai", prefs)["node"] == "沿用默认节点策略"
     prefs["service_node_bindings"].pop("claude")
-    assert _describe("claude", prefs)["hint"] == "自动切换 · 仅限此订阅，备用按服务策略筛选"
+    assert _describe("claude", prefs)["hint"] == "自动切换 · 仅限此订阅，备用按服务策略筛选；未锁定国家"
     prefs["builtin_sites"]["youtube"] = False
     description = _describe("youtube", prefs)
     assert description["profile"] == "机房订阅 B"

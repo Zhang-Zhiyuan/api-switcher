@@ -98,6 +98,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._bulk_dialog = None
         self._preset_dialog = None
         self._tags_dialog = None
+        self._scope_confirm_dialog = None
         self._manually_edited = {scope: set() for scope in self._scopes}
         self._auto_seeded = set()
         self._default_notices = {}
@@ -1276,14 +1277,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if self._drafts:
             self._update_legacy_cleanup()
 
-    def _apply(self, *, allow_missing=False):
-        if self._busy or not self._drafts:
+    def _apply(self, *, allow_missing=False, approved_scope_change=None):
+        if self._closed or self._busy or not self._drafts:
             return
         pending = {scope: copy.deepcopy(value) for scope, value in self._drafts.items()
                    if value != self._originals[scope]}
         if not pending:
             # Allow explicitly reapplying refreshed subscription caches.
             pending[self._scope] = copy.deepcopy(self._drafts[self._scope])
+        originals = copy.deepcopy(self._originals)
+        signature = (pending, originals)
+        if approved_scope_change is not None and approved_scope_change != signature:
+            self._status.configure(text="草稿或原配置已变化，旧的范围确认已失效；请重新核对并保存。", text_color=COLORS["warning"])
+            return
         conflicts = [scope for scope in pending if self._preflight(scope)["privacy_conflict"]]
         if conflicts:
             self._preview_open = True
@@ -1291,14 +1297,31 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._status.configure(text="未应用：以下位置的直连与严格隐私冲突：" + "、".join(conflicts),
                                    text_color=COLORS["danger"])
             return
+        expansions = []
+        for scope, draft in pending.items():
+            labels = {row["id"]: row["label"] for row in proxy_routing.route_rows(draft)}
+            expansions.extend(f"{scope} · {labels[service]}" for service in
+                              proxy_routing.automatic_scope_expansions(originals[scope], draft))
+        if expansions and approved_scope_change is None:
+            if self._scope_confirm_dialog and self._scope_confirm_dialog.winfo_exists():
+                self._scope_confirm_dialog.lift()
+                return
+            self._scope_confirm_dialog = ConfirmDialog(
+                self, title="确认放宽节点切换范围", message=safe_feedback_text(
+                    "以下目标将解除固定节点或自选候选限制，改用订阅自动或默认线路，可能跨国家；"
+                    "订阅刷新也可能引入新候选。\n\n" + "\n".join(expansions)
+                    + "\n\n不接受范围扩大，请取消并选择固定节点或自选候选。此确认不会验证出口国家。"),
+                on_confirm=lambda: self._apply(allow_missing=allow_missing, approved_scope_change=signature))
+            self._scope_confirm_dialog.geometry("560x400")
+            center_window(self._scope_confirm_dialog, self)
+            return
         missing = [scope for scope in pending if self._contexts.get(scope, {}).get("_authority_missing")]
         if missing and not allow_missing:
             ConfirmDialog(self, title="确认重建分流规则", message=safe_feedback_text(
                 "本机尚无这些服务器的分流记录：" + "、".join(missing)
                 + "。若远端已有分流，建议取消并先恢复记录。继续将按当前草稿重建远端规则，而不是合并未知旧规则。"),
-                on_confirm=lambda: self._apply(allow_missing=True))
+                on_confirm=lambda: self._apply(allow_missing=True, approved_scope_change=signature))
             return
-        originals = copy.deepcopy(self._originals)
         self._busy = True
         self._set_editable(False)
         self._status.configure(text="正在校验并应用线路，请稍候…", text_color=COLORS["muted"])
@@ -1324,7 +1347,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._closed = True
-        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog, self._bulk_dialog, self._preset_dialog):
+        for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog, self._bulk_dialog,
+                       self._preset_dialog, self._scope_confirm_dialog):
             if dialog and dialog.winfo_exists():
                 dialog.destroy()
         if self._filter_after_id:
