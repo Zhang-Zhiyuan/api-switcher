@@ -124,7 +124,7 @@ def test_rule_preview_layout_and_capture(editor_factory, tk_root, geometry, scal
         text = dialog._preview.get("1.0", "end")
         assert "youtube.com：覆盖" in text and "googleapis.com" in text
         assert "本机尚无此服务器" in text and "非运行态" in text
-        for widget in (dialog._recovery_button, dialog._save_button, dialog._preview_toggle, dialog._preview):
+        for widget in (dialog._recovery_button, dialog._save_button, dialog._back_button, dialog._preview):
             assert widget.winfo_ismapped()
             assert widget.winfo_rootx() >= dialog.winfo_rootx()
             assert widget.winfo_rootx() + widget.winfo_width() <= dialog.winfo_rootx() + dialog.winfo_width()

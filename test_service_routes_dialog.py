@@ -106,7 +106,7 @@ def test_reused_route_filter_empty_and_restore_preserves_order(editor):
     before = dialog._table.pack_slaves()
     dialog._search.set("synthetic-no-route-match")
     dialog._filter_rows()
-    assert dialog._table.pack_slaves() == [dialog._header, dialog._filters, dialog._empty]
+    assert dialog._table.pack_slaves() == [dialog._header, dialog._filters, dialog._tools_row, dialog._empty]
     dialog._search.set("")
     dialog._filter_rows()
     assert dialog._table.pack_slaves() == before
@@ -380,12 +380,15 @@ def test_footer_reserves_space_and_actions_wrap_using_widget_scaling(editor):
     scale = dialog._actions._get_widget_scaling()
     assert dialog.pack_slaves()[0] is dialog._actions.master
     assert dialog._actions.master.pack_info()["side"] == "bottom"
+    dialog._select_node("claude", "日本 · 家宽 01")
     dialog._layout_actions(SimpleNamespace(width=310 * scale))
     assert dialog._save_button.grid_info()["row"] == 1
     assert dialog._save_button.grid_info()["column"] == 0
+    assert dialog._save_button.grid_info()["columnspan"] == 2
     dialog._layout_actions(SimpleNamespace(width=560 * scale))
     assert dialog._save_button.grid_info()["row"] == 0
     assert dialog._save_button.grid_info()["column"] == 2
+    assert dialog._save_button.grid_info()["columnspan"] == 1
     dialog._layout_actions(SimpleNamespace(width=900 * scale))
     assert dialog._save_button.grid_info()["row"] == 0
     assert dialog._save_button.grid_info()["column"] == 2

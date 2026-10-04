@@ -178,7 +178,7 @@ def test_filtered_editor_and_batch_screenshots_preserve_drafts(editor, tk_root, 
             root.update()
             time.sleep(0.01)
         assert _selected(bulk) == {"openai", "claude", "google_ai"}
-        assert "已带入主列表筛选" in bulk._selection_note.cget("text")
+        assert "已带入筛选" in bulk._selection_note.cget("text")
         assert bulk._apply_button.winfo_rooty() + bulk._apply_button.winfo_height() <= bulk.winfo_rooty() + bulk.winfo_height()
         assert dialog._drafts == before and not saved
         capture_window_image(bulk, onscreen=True).save(folder / f"filtered-bulk-{int(scale * 100)}.png")

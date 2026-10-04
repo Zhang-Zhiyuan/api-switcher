@@ -70,7 +70,7 @@ def test_filtered_initial_selection_is_explicit_and_intersected_with_current_tar
                                 on_apply=lambda *a, **kw: calls.append((a, kw)))
     try:
         assert [key for key, var in dialog._vars.items() if var.get()] == ["youtube"]
-        assert "已带入主列表筛选" in dialog._selection_note.cget("text")
+        assert "已带入筛选" in dialog._selection_note.cget("text")
         assert dialog._apply_button.cget("state") == "disabled"
         assert not calls
         dialog._select_route(ui.DIRECT)

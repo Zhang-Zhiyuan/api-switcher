@@ -156,9 +156,10 @@ def test_real_mihomo_pool_fails_over_only_within_authorized_candidates(
 
         # Change only the test environment's health endpoint/timing. The actual
         # generated rules, outbound membership and fallback types stay intact.
+        health_url = f"http://127.0.0.1:{direct.node['port']}/health"
         for group in groups.values():
             if "url" in group:
-                group.update({"url": f"http://127.0.0.1:{direct.node['port']}/health",
+                group.update({"url": health_url,
                               "expected-status": "204", "interval": 1,
                               "timeout": 500, "lazy": False})
         config["dns"] = {"enable": False}
@@ -187,6 +188,32 @@ def test_real_mihomo_pool_fails_over_only_within_authorized_candidates(
                     return response.read(1024).decode("ascii")
 
             if not primary_dead_at_start:
+                def primary_ready():
+                    current = _proxies(controller)
+                    for group, (first, secondary) in aliases.items():
+                        if current[group]["now"] != first:
+                            return False
+                        for name in (first, secondary):
+                            node = current[name]
+                            health = node.get("extra", {}).get(health_url, node)
+                            history = health.get("history", [])
+                            if (health.get("alive") is not True or not history
+                                    or history[-1].get("delay", 0) <= 0):
+                                return False
+                    return True
+
+                # Listening/SOCKS readiness does not mean fallback health tests
+                # have completed. Under load the startup probe can transiently
+                # time out before the loopback HTTP threads are scheduled. Wait
+                # for real successful probes of both authorized candidates and
+                # selection of the preferred node; do not accept a backup as
+                # equivalent or weaken the traffic/fail-closed assertions below.
+                _wait_until(primary_ready, lambda: "initial primary health did not converge: " + repr({
+                    "proxies": {key: value for key, value in _proxies(controller).items()
+                                if key in aliases or any(key in names for names in aliases.values())},
+                    "primary_hits": primary.hits,
+                    "backup_hits": backup.hits,
+                }))
                 for host in service_hosts.values():
                     assert fetch(host) == "dc-primary"
                 primary.stop()

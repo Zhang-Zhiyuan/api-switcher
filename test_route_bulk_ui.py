@@ -460,7 +460,7 @@ def test_bulk_small_high_dpi_keeps_target_selection_reachable(bulk):
             if isinstance(widget, ctk.CTkCheckBox):
                 checkboxes.append(widget)
         assert len(checkboxes) == len(dialog._vars)
-        viewport = checkboxes[0].master._parent_canvas
+        viewport = dialog._body._parent_canvas
         output = Path("dist/route-bulk-ui")
         output.mkdir(parents=True, exist_ok=True)
         capture_window_image(dialog).save(output / "bulk-small-high-dpi.png")

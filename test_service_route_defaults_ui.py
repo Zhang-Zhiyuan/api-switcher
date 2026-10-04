@@ -398,7 +398,8 @@ def test_bulk_direct_ui_needs_no_subscription_and_scopes_are_independent(route_h
     assert editor._profile.cget("state") == "readonly"
     assert editor._profile.get() == bulk.DIRECT
     assert editor._node_button.cget("state") == "disabled"
-    assert "启用所选目标" in editor._status.cget("text")
+    assert "直连" in editor._status.cget("text")
+    assert "不自动回退代理" in editor._status.cget("text")
     for service in ("youtube", "google"):
         editor._vars[service].set(True)
     editor._changed()

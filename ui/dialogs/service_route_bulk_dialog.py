@@ -115,11 +115,16 @@ class RouteBulkDialog(DraftChoiceDialog):
         self._profile_id = ""
         self._operation = ctk.StringVar(value=SET_ROUTE)
         self._vars = {}
+        self._status_error = ""
+        self._status_error_source = ""
+        self._status_signature = None
+        self._target_columns = 0
+        self._layout_after_id = None
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=18, pady=16)
-        self._status = ctk.CTkLabel(footer, text="选择目标和线路；所选线路会启用，保存并应用后生效。", anchor="w",
+        self._status = ctk.CTkLabel(footer, text="", anchor="w",
                                    justify="left", font=font(12), text_color=COLORS["muted"])
         self._status.pack(fill="x", pady=(0, 8))
         bind_wraplength(footer, self._status, padding=8)
@@ -131,13 +136,13 @@ class RouteBulkDialog(DraftChoiceDialog):
         # used to consume the entire height and hide every target checkbox.
         body = self._body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
         body.pack(fill="both", expand=True, padx=12, pady=(12, 0))
-        heading = ctk.CTkLabel(body, text="为多个目标选择同一线路", font=font(18, "bold"), anchor="w")
+        heading = ctk.CTkLabel(body, text="批量设置线路", font=font(18, "bold"), anchor="w")
         heading.pack(fill="x", padx=6, pady=(4, 8))
-        note = ctk.CTkLabel(body, text=(f"位置：{safe_feedback_text(scope_label)}\n" if scope_label else "")
-                            + "只修改勾选目标；确认后返回编辑，保存并应用才生效。",
-                            font=font(12), text_color=COLORS["muted"], anchor="w", justify="left")
-        note.pack(fill="x", padx=6, pady=(0, 10))
-        bind_wraplength(body, note, padding=12)
+        if scope_label:
+            note = ctk.CTkLabel(body, text=f"位置：{safe_feedback_text(scope_label)}",
+                               font=font(12), text_color=COLORS["muted"], anchor="w", justify="left")
+            note.pack(fill="x", padx=6, pady=(0, 8))
+            bind_wraplength(body, note, padding=12)
         settings = ctk.CTkFrame(body, fg_color=COLORS["surface"])
         settings.pack(fill="x", padx=6)
         settings.grid_columnconfigure(1, weight=1)
@@ -173,13 +178,24 @@ class RouteBulkDialog(DraftChoiceDialog):
             ctk.CTkButton(toolbar, text=label, width=100, command=lambda group=group: self._select_group(group),
                           **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
         wrap_action_group(toolbar, wide_columns=4)
+        self._targets = ctk.CTkFrame(body, fg_color="transparent")
+        self._targets.pack(fill="x", padx=6, pady=(0, 6))
+        self._target_checks = {}
+        self._target_labels = {}
         initial = set(initial_services)
         for row in rows:
             var = ctk.BooleanVar(value=row["id"] in initial)
             self._vars[row["id"]] = var
-            text = safe_feedback_text(row["label"]) + (" · 专用线路" if row["enabled"] else " · 沿用原规则")
-            ctk.CTkCheckBox(body, text=text, variable=var, command=self._changed,
-                            font=font(12), checkbox_width=18, checkbox_height=18).pack(fill="x", padx=10, pady=8)
+            check = ctk.CTkCheckBox(self._targets, text="", variable=var, command=self._changed,
+                                   width=22, checkbox_width=18, checkbox_height=18)
+            label = ctk.CTkLabel(self._targets, text=safe_feedback_text(row["label"]),
+                                 font=font(12), anchor="w", justify="left", width=1, height=24)
+            label.bind("<Button-1>", lambda _event, button=check: button.toggle())
+            bind_wraplength(label, label, padding=4, min_width=1)
+            self._target_checks[row["id"]] = check
+            self._target_labels[row["id"]] = label
+        self._targets.bind("<Configure>", self._schedule_target_layout, add="+")
+        self._layout_targets()
         self._initial_selection = bool(initial & self._vars.keys())
         self._changed()
         center_window(self, master)
@@ -196,8 +212,70 @@ class RouteBulkDialog(DraftChoiceDialog):
         count = sum(var.get() for var in self._vars.values())
         ready = self._operation.get() != SET_ROUTE or bool(self._profile_id)
         self._apply_button.configure(state="normal" if count and ready else "disabled", text=f"确认 {count} 项，返回编辑")
-        prefix = "已带入主列表筛选；" if self._initial_selection else ""
-        self._selection_note.configure(text=f"{prefix}已选 {count} / {len(self._vars)} 个目标，可继续调整勾选。")
+        prefix = "已带入筛选 · " if self._initial_selection else ""
+        self._selection_note.configure(text=f"{prefix}勾选要修改的目标 · {count} / {len(self._vars)}")
+        self._update_status(count=count, ready=ready)
+
+    def _schedule_target_layout(self, event=None):
+        # CTkFrame.bind delegates to its canvas, so real Configure events use
+        # that widget as their source rather than the public frame object.
+        sources = (self._targets, self._targets._canvas)
+        if self._closed or event is not None and event.widget not in sources:
+            return
+        if self._layout_after_id is None:
+            self._layout_after_id = self.after_idle(self._layout_targets)
+
+    def _layout_targets(self):
+        self._layout_after_id = None
+        if self._closed:
+            return
+        width = self._targets.winfo_width() / self._targets._get_widget_scaling()
+        columns = 2 if width >= 600 else 1
+        if columns == self._target_columns:
+            return
+        self._target_columns = columns
+        for column in range(4):
+            self._targets.grid_columnconfigure(column, weight=1 if column % 2 and column < columns * 2 else 0,
+                                               uniform="target-label" if column % 2 and column < columns * 2 else "")
+        for index, service in enumerate(self._vars):
+            row, column = divmod(index, columns)
+            self._target_checks[service].grid(row=row, column=column * 2, sticky="nw", padx=(4, 4), pady=5)
+            self._target_labels[service].grid(row=row, column=column * 2 + 1, sticky="ew", padx=(0, 12), pady=5)
+
+    def _update_status(self, *, count=None, ready=None):
+        count = sum(var.get() for var in self._vars.values()) if count is None else count
+        if ready is None:
+            ready = self._operation.get() != SET_ROUTE or bool(self._profile_id)
+        if self._status_error:
+            text = self._status_error
+        elif not count:
+            text = "请勾选目标并选择访问线路。" if not ready else "请勾选要修改的目标。"
+        elif not ready:
+            text = f"已选 {count} 项，请选择访问线路。"
+        else:
+            text = f"已选 {count} 项，确认后返回编辑。"
+        detail = {
+            DIRECT: "直连使用设备网络，不自动回退代理；不能与严格隐私同时启用。",
+            DISABLE: "暂停网站专属规则，保留原线路，不等于直连；AI 服务保持启用。",
+            ENABLE: "恢复之前的线路与节点。",
+            TAGGED: "按用途分配并启用；没有合适订阅时保留原设置。",
+        }.get(self._operation.get(), "")
+        text = "\n".join(part for part in (text + " 保存并应用后生效。", detail) if part)
+        signature = (text, COLORS["warning"] if self._status_error else COLORS["muted"])
+        if signature != self._status_signature:
+            self._status.configure(text=signature[0], text_color=signature[1])
+            self._status_signature = signature
+
+    def _show_error(self, text, *, source="validation"):
+        self._status_error = safe_feedback_text(text)
+        self._status_error_source = source
+        self._update_status()
+
+    def _clear_node_choice_error(self):
+        if self._status_error_source == "node_choice":
+            self._status_error = ""
+            self._status_error_source = ""
+            self._update_status()
 
     def _select_route(self, label):
         if label in self._profiles:
@@ -216,15 +294,8 @@ class RouteBulkDialog(DraftChoiceDialog):
             else:
                 widget.grid_forget()
         self._node_button.configure(state="normal" if enabled else "disabled")
-        self._status.configure(
-            text={
-                DIRECT: "直连会启用所选目标，使用设备自身网络，不自动回退代理；不能与严格隐私同时启用。",
-                DISABLE: "暂停所选网站的单独分流，原订阅和节点保留；不等于直连。AI 服务保持启用。",
-                ENABLE: "恢复所选网站之前的线路与节点；保存并应用后生效。",
-                TAGGED: "为所选目标按用途分配并启用；没有合适订阅时保留原设置。",
-            }.get(operation, "选择目标和线路；所选线路会启用，保存并应用后生效。"),
-            text_color=COLORS["muted"],
-        )
+        self._status_error = ""
+        self._status_error_source = ""
         self._changed()
 
     def _select_profile(self, label):
@@ -267,8 +338,7 @@ class RouteBulkDialog(DraftChoiceDialog):
         available = {item["key"] for item in (profile or {}).get("nodes", [])}
         if (profile is None or profile_id is not None and profile_id != self._profile_id
                 or any(key not in available for key in keys)):
-            self._status.configure(text="订阅或节点列表已变化，原批量选择已保留，请重新选择节点。",
-                                   text_color=COLORS["warning"])
+            self._show_error("订阅或节点列表已变化，原批量选择已保留，请重新选择节点。", source="node_choice")
             return False
         return True
 
@@ -277,6 +347,7 @@ class RouteBulkDialog(DraftChoiceDialog):
             return
         self._node_key, self._node_keys = key, []
         self._update_node_label()
+        self._clear_node_choice_error()
 
     def _choose_pool(self, keys, *, profile_id=None):
         if (not keys or len(keys) > proxy_routing.MAX_SERVICE_NODE_POOL_SIZE or len(set(keys)) != len(keys)
@@ -284,6 +355,7 @@ class RouteBulkDialog(DraftChoiceDialog):
             return
         self._node_key, self._node_keys = "", list(keys)
         self._update_node_label()
+        self._clear_node_choice_error()
 
     def _commit(self):
         if self._closed:
@@ -292,13 +364,13 @@ class RouteBulkDialog(DraftChoiceDialog):
         if not chosen:
             return
         if self._operation.get() == SET_ROUTE and not self._profile_id:
-            self._status.configure(text="请选择访问线路；指定订阅时需有可用缓存。", text_color=COLORS["warning"])
+            self._show_error("请选择访问线路；指定订阅时需有可用缓存。")
             return
         try:
             self._on_apply(chosen, self._operation.get(), profile_id=self._profile_id,
                            node_key=self._node_key, node_keys=self._node_keys)
         except Exception as exc:
-            self._status.configure(text=safe_feedback_text(str(exc)), text_color=COLORS["warning"])
+            self._show_error(str(exc))
             return
         self.destroy()
 
@@ -306,6 +378,9 @@ class RouteBulkDialog(DraftChoiceDialog):
         if self._closed:
             return
         self._closed = True
+        if self._layout_after_id is not None:
+            self.after_cancel(self._layout_after_id)
+            self._layout_after_id = None
         if self._node_dialog and self._node_dialog.winfo_exists():
             self._node_dialog.destroy()
         super().destroy()

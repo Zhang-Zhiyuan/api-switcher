@@ -128,7 +128,7 @@ def test_compact_editor_layout_and_visible_actions_at_multiple_scales(editor, tk
         capture_window_image(dialog).save(folder / f"editor-{int(scale * 100)}.png")
         dialog._more_toggle.invoke()
         root.update()
-        assert dialog._table.pack_slaves()[:3] == [dialog._header, dialog._filters, dialog._more_tools]
+        assert dialog._table.pack_slaves()[:4] == [dialog._header, dialog._filters, dialog._tools_row, dialog._more_tools]
         assert dialog._more_tools.winfo_rooty() >= viewport.winfo_rooty() - 2
         assert dialog._more_tools.winfo_rooty() + dialog._more_tools.winfo_height() <= viewport.winfo_rooty() + viewport.winfo_height() + 2
         assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
