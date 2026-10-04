@@ -222,7 +222,26 @@ def test_disappeared_checkbox_variable_is_ignored_without_changing_scope(view):
     assert not picker._checked_keys
 
 
-@pytest.mark.parametrize("temporary_scope", ["replacement", "empty", "reordered"])
+@pytest.mark.parametrize("kind", ["select", "check", "group", "quality"])
+def test_reordered_scope_keeps_existing_callbacks_and_resolves_latest_items(view, kind):
+    action = old_action(view, kind)
+    picker = view.picker
+    generation = picker._node_scope_generation
+    refreshed = deepcopy(list(reversed(view.original)))
+    picker.set_nodes(refreshed)
+    assert picker._node_scope_generation == generation
+    action()
+    if kind == "select":
+        assert view.selected == [refreshed[-1]]
+        assert view.selected[0] is refreshed[-1]
+    elif kind == "quality":
+        assert view.quality == [("美国", tuple(refreshed))]
+        assert view.quality[0][1][0] is refreshed[0]
+    else:
+        assert picker.checked_items() == ([refreshed[-1]] if kind == "check" else refreshed)
+
+
+@pytest.mark.parametrize("temporary_scope", ["replacement", "empty"])
 def test_hidden_scope_round_trip_rebuilds_controls_with_current_generation(monkeypatch, temporary_scope):
     # Use the real render coordinator, rather than the callback fixture's
     # no-op renderer. Identical displayed data is not sufficient for reuse
@@ -240,9 +259,7 @@ def test_hidden_scope_round_trip_rebuilds_controls_with_current_generation(monke
     old_roots = list(picker._list_frame.roots)
     original_generation = picker._node_scope_generation
     monkeypatch.setattr(module, "is_active_tab", lambda _widget: False)
-    temporary = {
-        "replacement": [node(11)], "empty": [], "reordered": list(reversed(original)),
-    }[temporary_scope]
+    temporary = {"replacement": [node(11)], "empty": []}[temporary_scope]
     picker.set_nodes(temporary)
     picker.set_nodes(deepcopy(original))
     assert picker._node_scope_generation > original_generation

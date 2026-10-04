@@ -5,8 +5,13 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 from core.lazy_imports import LazyAttribute, LazyModule
+from core.proxy_update_result import ProxyUpdateResult, with_update_message
 from ui.async_progress import CoalescedProgress
-from ui.feedback import safe_feedback_text
+from ui.feedback import infer_feedback_severity, safe_feedback_text
+from ui.proxy_node_draft import (
+    discard_generated_node, forget_generated_node, has_manual_node_draft, remember_generated_node,
+    switch_node_draft_source,
+)
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.toast import show_toast
 from ui.dialogs.ssh_editor import SSHEditorDialog
@@ -49,9 +54,51 @@ def _ssh_proxy_form_stacked(width: int) -> bool:
 
 def _format_server_batch_item(server_name: str, result) -> str:
     text = str(result or "操作完成")
-    if text.startswith(f"{server_name}:") or text.startswith(f"{server_name}："):
-        return text
-    return f"{server_name}: {text}"
+    if not text.startswith((f"{server_name}:", f"{server_name}：")):
+        text = f"{server_name}: {text}"
+    # Deployment can reuse the existing core via a typed automatic update.
+    # Keep its outcome; a failed result may still mention a successful probe.
+    return with_update_message(result, text) if isinstance(result, ProxyUpdateResult) else text
+
+
+def _proxy_deployment_feedback(payload) -> tuple[str, str]:
+    if not payload.get("ok"):
+        return f"AI 代理部署失败: {payload.get('error') or '任务未完成'}", "error"
+    batch = payload.get("result") or {}
+    results = list(batch.get("results") or ())
+    failures = list(batch.get("failures") or ())
+    applied = 0
+    warning = False
+    failed = bool(failures)
+    for result in results:
+        if isinstance(result, ProxyUpdateResult):
+            applied += result.applied
+            warning = warning or result.warning or not result.applied
+            failed = failed or result.outcome == "failed"
+            continue
+        # First-time deployment still has a legacy string contract. Require
+        # evidence of both a committed deployment and successful validation;
+        # unknown/retained text must never become a green completion notice.
+        text = str(result)
+        committed = "已部署到" in text or "已自动切换到" in text
+        retained = any(marker in text for marker in (
+            "未修改正式代理", "已保留当前运行节点", "已恢复更新前", "已恢复原节点", "跳过",
+        ))
+        severity = infer_feedback_severity(text)
+        confirmed = committed and "验证通过" in text and not retained
+        applied += confirmed
+        warning = warning or not confirmed or severity in {"warning", "error"}
+        failed = failed or (not confirmed and severity == "error")
+    count = max(len(batch.get("server_names") or ()), len(results) + len(failures))
+    if applied and applied < count:
+        summary, severity = f"AI 代理部署部分完成（确认 {applied}/{count} 台）", "warning"
+    elif applied:
+        summary = f"AI 代理部署{'已应用，但需检查' if warning else '完成'}（{applied} 台）"
+        severity = "warning" if warning else "success"
+    else:
+        summary, severity = "AI 代理部署未完成", "error" if failed else "warning"
+    details = " | ".join(str(item) for item in (*results, *failures))
+    return summary + (f": {details}" if details else "；未收到可确认的目标结果，请检查状态"), severity
 
 
 def _run_parallel_server_actions(
@@ -1294,7 +1341,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_quality_cancel_button.pack(anchor="e", pady=(0, 6))
         ctk.CTkLabel(
             proxy_node_actions,
-            text="当前节点",
+            text="所选节点",
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="e",
@@ -2853,6 +2900,10 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _apply_proxy_subscription_profile_inputs(self, state: dict):
         active_id = str(state.get("active_profile_id") or "")
+        switch_node_draft_source(
+            self, self.__dict__.get("_proxy_node_text"), active_id,
+            self._set_proxy_selected_summary, "待部署节点",
+        )
         profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
         profile = dict(profiles.get(active_id) or {})
         if not profile and active_id:
@@ -3012,6 +3063,9 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_subscription_profile_loading = False
 
     def _enter_new_proxy_subscription_profile(self, *, announce: bool = True):
+        switch_node_draft_source(
+            self, self.__dict__.get("_proxy_node_text"), "", self._set_proxy_selected_summary, "待部署节点",
+        )
         had_loaded_form = self._proxy_subscription_form_snapshot is not None
         combo = getattr(self, "_proxy_subscription_profile_combo", None)
         if combo:
@@ -3478,7 +3532,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                     selected_key = str(state.get("selected_node_key") or "")
                     self._set_proxy_subscription_nodes(cached_result.nodes, preserve_key=selected_key)
                     self._select_proxy_subscription_node_by_key(selected_key)
-                    self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+                    self._use_selected_proxy_subscription_node(
+                        show_message=False, persist_selection=False, preserve_manual=True,
+                    )
                     source_label = "本地 YAML" if state.get("source_path") and not url else "订阅"
                     updated_at = state.get("last_fetched_at") or "-"
                     self._set_proxy_cache_status(
@@ -4278,6 +4334,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                         self._use_selected_proxy_subscription_node(
                             show_message=False,
                             persist_selection=False,
+                            preserve_manual=True,
                         )
                     retain_in_memory = (
                         previous_active_id == profile_id and bool(self._proxy_subscription_options)
@@ -4309,9 +4366,10 @@ class SSHTab(ctk.CTkScrollableFrame):
                     self._use_selected_proxy_subscription_node(
                         show_message=False,
                         profile_id=profile_id,
+                        preserve_manual=True,
                     )
                 else:
-                    self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False)
+                    self._use_selected_proxy_subscription_node(show_message=False, persist_selection=False, preserve_manual=True)
                 self._set_proxy_cache_status(
                     f"本机缓存: 已保存 {len(result.nodes)} 个节点；刚刚拉取",
                     "success",
@@ -4974,11 +5032,19 @@ class SSHTab(ctk.CTkScrollableFrame):
         show_message: bool = True,
         persist_selection: bool = True,
         profile_id: str = "",
+        preserve_manual: bool = False,
     ):
-        if not self._proxy_subscription_picker:
+        if preserve_manual and has_manual_node_draft(self, self.__dict__.get("_proxy_node_text")):
+            self._set_proxy_selected_summary("待部署节点: 手工配置已保留（优先于订阅选择）", "warning")
+            return
+        if not self.__dict__.get("_proxy_subscription_picker"):
+            if preserve_manual:
+                discard_generated_node(self, self.__dict__.get("_proxy_node_text"), self._set_proxy_selected_summary, "待部署节点")
             return
         item = self._proxy_subscription_picker.selected_item()
         if not item:
+            if preserve_manual:
+                discard_generated_node(self, self.__dict__.get("_proxy_node_text"), self._set_proxy_selected_summary, "待部署节点")
             message = "请先拉取订阅并选择一个节点"
             self._set_proxy_status(message, "warning")
             if show_message:
@@ -4989,6 +5055,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_node_text:
             self._proxy_node_text.delete("1.0", "end")
             self._proxy_node_text.insert("1.0", node_text)
+        remember_generated_node(self, node_text, profile_id or self._current_proxy_subscription_profile_id())
         selection_save_error = ""
         if persist_selection:
             target_profile_id = profile_id or self._current_proxy_subscription_profile_id()
@@ -5164,9 +5231,18 @@ class SSHTab(ctk.CTkScrollableFrame):
         return "跳过" in text or "未运行" in text
 
     def _proxy_node_input(self) -> str:
-        if not self._proxy_node_text:
+        if self._proxy_node_text:
+            text = self._proxy_node_text.get("1.0", "end").strip()
+            if text:
+                return text
+        picker = self.__dict__.get("_proxy_subscription_picker")
+        item = picker.selected_item() if picker else None
+        if not item:
             return ""
-        return self._proxy_node_text.get("1.0", "end").strip()
+        try:
+            return remote_proxy.format_proxy_node(item.node)
+        except Exception:
+            return ""
 
     def _load_proxy_node_file(self):
         path = filedialog.askopenfilename(
@@ -5186,6 +5262,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_node_text:
             self._proxy_node_text.delete("1.0", "end")
             self._proxy_node_text.insert("1.0", content.strip())
+            forget_generated_node(self)
         try:
             node_summary = remote_proxy.describe_proxy_node(remote_proxy.parse_proxy_node(content))
             self._set_proxy_selected_summary(f"待部署节点: {node_summary}", "success")
@@ -5228,12 +5305,10 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         def do_deploy():
             def done(payload):
-                self._show_server_batch_result(payload, "AI 代理部署完成")
-                if payload["ok"]:
-                    result = payload.get("result") or {}
-                    failures = result.get("failures", [])
-                    severity = "warning" if failures and result.get("results") else "error" if failures else "success"
-                    self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+                message, severity = _proxy_deployment_feedback(payload)
+                self._set_sync_status(message, severity)
+                self._set_proxy_status(message, severity)
+                show_toast(self.winfo_toplevel(), message, severity=severity)
 
             self._run_proxy_ssh_task(
                 f"正在部署 AI 代理到 {target_label}，并验证 GPT/Claude/Gemini 连通性...",

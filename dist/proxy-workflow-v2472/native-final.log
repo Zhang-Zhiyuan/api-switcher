@@ -1,0 +1,8 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_picker_scope_reorder_ui.py test_proxy_picker_responsiveness.py test_ui_render_performance.py test_dpi_layout_ui.py test_proxy_page_disclosure_ui.py test_ssh_compact_layout_ui.py
+........................................................................ [ 76%]
+......................                                                   [100%]
+94 passed in 126.03s (0:02:06)
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-29864
+pytest: OK

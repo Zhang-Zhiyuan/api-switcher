@@ -92,6 +92,7 @@ def cache_restore(request, monkeypatch):
     setattr(tab, nodes_method, set_nodes)
     setattr(tab, select_method, select)
     tab._use_selected_proxy_subscription_node = use_selected
+    tab._use_selected_subscription_node = use_selected
     setattr(tab, f"_set{prefix}_cache_status", lambda *args: ui_record(harness.cache, *args))
     setattr(tab, f"_set{prefix}_status", lambda *args: ui_record(harness.status, *args))
     setattr(tab, f"_schedule{prefix}_startup_refresh", lambda: ui_record(harness.startup))
@@ -187,11 +188,10 @@ def test_cache_restore_success_finishes_on_ui_and_schedules_once(cache_restore):
     assert getattr(harness.tab, f"{harness.prefix}_quality_results") is harness.new_qualities
     if harness.backend == "local":
         assert harness.tab._latency_results is harness.new_latencies
-        assert not harness.used
     else:
         assert harness.tab._proxy_latency_results == {}
         assert harness.tab._proxy_latency_server_count == 0
-        assert harness.used == [({"show_message": False, "persist_selection": False},)]
+    assert harness.used == [({"show_message": False, "persist_selection": False, "preserve_manual": True},)]
     assert harness.startup == [()]
     assert harness.periodic == [({"initial": True},)]
 

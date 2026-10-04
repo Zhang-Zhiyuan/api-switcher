@@ -1356,7 +1356,7 @@ def test_ssh_subscription_fetch_failure_restores_target_cache_when_ui_is_empty(m
     tab._fetch_proxy_subscription()
 
     assert calls["nodes"] == [((cached_node,), "")]
-    assert calls["used"] == [{"show_message": False, "persist_selection": False}]
+    assert calls["used"] == [{"show_message": False, "persist_selection": False, "preserve_manual": True}]
     assert "继续使用已有节点" in calls["cache"][-1][0]
 
 
@@ -3029,7 +3029,7 @@ def test_local_latency_results_use_profile_captured_before_worker(monkeypatch):
         ({remote_proxy.proxy_subscription_node_key(node): result}, "captured-profile")
     ]
     assert calls["used"] == [
-        {"show_message": False, "profile_id": "captured-profile"}
+        {"show_message": False, "profile_id": "captured-profile", "preserve_manual": True}
     ]
 
 
@@ -3103,7 +3103,7 @@ def test_local_latency_gate_skips_first_unstable_and_selects_second_stable(monke
         "require_all": True,
     }
     assert calls["selected"] == [selected_key]
-    assert calls["used"] == [{"show_message": False, "profile_id": "profile-a"}]
+    assert calls["used"] == [{"show_message": False, "profile_id": "profile-a", "preserve_manual": True}]
     assert calls["saved"][0][1] == "profile-a"
     assert "3 轮 AI 短探针" in statuses[-1][0]
     assert "Codex 长会话网络近似 2/2 轮完整传输" in statuses[-1][0]

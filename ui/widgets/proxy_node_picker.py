@@ -204,7 +204,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         self._scope_label = ctk.CTkLabel(
             self._scope_bar,
-            text="批量范围: 全部 0 个节点",
+            text="检测范围: 全部 0 个节点",
             text_color=COLORS["muted_soft"],
             font=font(11, "bold"),
             anchor="w",
@@ -327,7 +327,10 @@ class ProxyNodePicker(ctk.CTkFrame):
         # must never act on a replacement subscription, even when it has a
         # group with the same region name. Identical result refreshes keep the
         # generation so retained row/header controls remain usable.
-        scope = tuple((self._node_key(item), self._node_region(item)) for item in self._nodes)
+        # Latency/quality progress changes display order, not subscription
+        # membership. Keep callback scope stable for a pure ranking change;
+        # sorting (rather than a set) still detects duplicate-count changes.
+        scope = tuple(sorted((self._node_key(item), self._node_region(item)) for item in self._nodes))
         if scope != self.__dict__.get("_node_scope_signature"):
             self._node_scope_generation = self.__dict__.get("_node_scope_generation", 0) + 1
             # Hidden tabs can visit A -> B -> A without painting B. The old A
@@ -611,8 +614,10 @@ class ProxyNodePicker(ctk.CTkFrame):
         """
         if previous is None or current is None:
             return False
-        old_scope = tuple(item[:2] for item in previous[1])
-        new_scope = tuple(item[:2] for item in current[1])
+        # The view signature retains order so the desired pack order below is
+        # updated, while ownership/reuse depends only on complete membership.
+        old_scope = tuple(sorted(item[:2] for item in previous[1]))
+        new_scope = tuple(sorted(item[:2] for item in current[1]))
         if old_scope != new_scope or len({item[0] for item in new_scope}) != len(new_scope):
             return False
         rows = getattr(self, "_row_cache", {})
@@ -1040,7 +1045,7 @@ class ProxyNodePicker(ctk.CTkFrame):
 
         select_button = ctk.CTkButton(
             row,
-            text="当前" if selected else "使用",
+            text="已选" if selected else "选择",
             width=50,
             state="normal" if self._enabled else "disabled",
             command=lambda key=node_key, scope=scope: self._select(key, scope=scope),
@@ -1162,7 +1167,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if cached["selected"] != selected:
             cached["row"].configure(fg_color=COLORS["surface_alt"] if selected else COLORS["field_bg"])
             cached["button"].configure(
-                text="当前" if selected else "使用",
+                text="已选" if selected else "选择",
                 **_node_selection_button_style(selected),
             )
         if cached["enabled"] != self._enabled:
@@ -1235,7 +1240,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             try:
                 row.configure(fg_color=COLORS["surface_alt"] if selected else COLORS["field_bg"])
                 button.configure(
-                    text="当前" if selected else "使用",
+                    text="已选" if selected else "选择",
                     **_node_selection_button_style(selected),
                 )
                 cached = getattr(self, "_row_cache", {}).get(key)
@@ -1411,7 +1416,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         if not self._scope_label:
             return
         color = COLORS["accent"] if self._checked_keys else COLORS["warning"] if self._has_active_filters() else COLORS["muted_soft"]
-        self._scope_label.configure(text=f"批量范围: {self.batch_scope_label()}", text_color=color)
+        self._scope_label.configure(text=f"检测范围: {self.batch_scope_label()}", text_color=color)
 
     def _update_summary_label(self, match_count: int | None = None, visible_count: int | None = None):
         if not self._summary_label:
@@ -1439,17 +1444,21 @@ class ProxyNodePicker(ctk.CTkFrame):
             suffix += "；正在加载节点列表"
         if self.__dict__.get("_checkbox_sync_after_id") is not None:
             suffix += "；正在更新勾选显示"
-        self._summary_label.configure(
-            text=(
-                f"节点 {total} 个；可连 {ok_count}；延迟 {measured_count}；"
-                f"质量 {quality_count}；高质 {high_quality_count}；"
-                f"缓存 {cached_quality_count}；"
-                f"勾选 {checked_count}；匹配 {match_count} 个{suffix}"
-            )
-        )
+        parts = [f"共 {total} 个", f"测速记录 {measured_count}/{total}", f"可连 {ok_count}"]
+        if quality_count:
+            parts.append(f"质量记录 {quality_count}")
+        if high_quality_count:
+            parts.append(f"高质 {high_quality_count}")
+        if cached_quality_count:
+            parts.append(f"质量缓存 {cached_quality_count}")
+        if checked_count:
+            parts.append(f"勾选 {checked_count}")
+        if match_count != total:
+            parts.append(f"匹配 {match_count}")
+        self._summary_label.configure(text="；".join(parts) + suffix)
 
     def _group_header_text(self, region: str, total: int, ok_count: int, high_count: int, checked: int) -> str:
-        return f"{region or '其他'} · 全组 {total} 个 · 可连 {ok_count} · 高质 {high_count} · 已选 {checked}"
+        return f"{region or '其他'} · 全组 {total} 个 · 可连 {ok_count} · 高质 {high_count} · 勾选 {checked}"
 
     def _update_group_headers(self):
         alive_headers = []
@@ -1548,7 +1557,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             return "暂无节点，请先拉取订阅"
         mode = self._quality_combo.get() if self._quality_combo else "全部质量"
         if mode and mode != "全部质量" and quality_count <= 0:
-            return "暂无质量结果，可先点击“质量选优”"
+            return "暂无质量结果，请先点击“IP 质量检测”"
         return "没有匹配的节点"
 
     def _search_text(self) -> str:

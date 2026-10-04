@@ -16,6 +16,10 @@ from ui.async_progress import CoalescedProgress
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import infer_feedback_severity, safe_feedback_text
 from ui.proxy_lifecycle import PROXY_MAINTENANCE_NOTICE
+from ui.proxy_node_draft import (
+    discard_generated_node, forget_generated_node, has_manual_node_draft, remember_generated_node,
+    switch_node_draft_source,
+)
 from ui.tabs.tab_visibility import is_active_tab
 from ui.ui_dispatch import dispatch_ui_callback
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
@@ -610,7 +614,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._quality_cancel_button.pack(anchor="e", pady=(0, 6))
         ctk.CTkLabel(
             node_actions,
-            text="当前节点",
+            text="所选节点",
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="e",
@@ -1928,6 +1932,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _apply_subscription_profile_inputs(self, state: dict):
         active_id = str(state.get("active_profile_id") or "")
+        switch_node_draft_source(
+            self, self.__dict__.get("_node_text"), active_id,
+            self._set_selected_summary, "待启动节点",
+        )
         profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
         profile = dict(profiles.get(active_id) or {})
         if not profile and active_id:
@@ -2069,6 +2077,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._subscription_profile_loading = False
 
     def _enter_new_subscription_profile(self, *, announce: bool = True):
+        switch_node_draft_source(
+            self, self.__dict__.get("_node_text"), "", self._set_selected_summary, "待启动节点",
+        )
         had_loaded_form = self._subscription_form_snapshot is not None
         combo = getattr(self, "_subscription_profile_combo", None)
         if combo:
@@ -2564,6 +2575,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     selected_key = str(state.get("selected_node_key") or "")
                     self._set_subscription_nodes(cached_result.nodes, preserve_key=selected_key)
                     self._select_subscription_node_by_key(selected_key)
+                    self._use_selected_subscription_node(
+                        show_message=False, persist_selection=False, preserve_manual=True,
+                    )
                     source_label = "本地 YAML" if state.get("source_path") and not url else "订阅"
                     updated_at = state.get("last_fetched_at") or "-"
                     self._set_cache_status(
@@ -3296,6 +3310,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                         self._use_selected_subscription_node(
                             show_message=False,
                             persist_selection=False,
+                            preserve_manual=True,
                         )
                     retain_in_memory = previous_active_id == profile_id and bool(self._subscription_options)
                     if (cached and cached.nodes) or retain_in_memory:
@@ -3322,9 +3337,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 selected_key = str(state.get("selected_node_key") or "")
                 self._set_subscription_nodes(result.nodes, preserve_key=selected_key)
                 if not self._select_subscription_node_by_key(selected_key):
-                    self._use_selected_subscription_node(show_message=False, profile_id=profile_id)
+                    self._use_selected_subscription_node(show_message=False, profile_id=profile_id, preserve_manual=True)
                 else:
-                    self._use_selected_subscription_node(show_message=False, persist_selection=False)
+                    self._use_selected_subscription_node(show_message=False, persist_selection=False, preserve_manual=True)
                 self._set_cache_status(
                     f"本机缓存: 已保存 {len(result.nodes)} 个节点；刚刚拉取",
                     "success",
@@ -3469,9 +3484,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     self._use_selected_subscription_node(
                         show_message=False,
                         profile_id=imported_profile_id,
+                        preserve_manual=True,
                     )
                 else:
-                    self._use_selected_subscription_node(show_message=False, persist_selection=False)
+                    self._use_selected_subscription_node(show_message=False, persist_selection=False, preserve_manual=True)
                 self._set_cache_status(
                     f"本机缓存: 已导入 {len(result.nodes)} 个节点；重启后仍可使用",
                     "success",
@@ -4004,6 +4020,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 self._use_selected_subscription_node(
                     show_message=False,
                     profile_id=profile_id,
+                    preserve_manual=True,
                 )
                 latency = remote_proxy.proxy_node_latency_label(captured_latency_results.get(stable_key))
                 region = remote_proxy.proxy_node_region(stable_node.node)
@@ -4374,11 +4391,19 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         show_message: bool = True,
         persist_selection: bool = True,
         profile_id: str = "",
+        preserve_manual: bool = False,
     ):
-        if not self._subscription_picker:
+        if preserve_manual and has_manual_node_draft(self, self.__dict__.get("_node_text")):
+            self._set_selected_summary("待启动节点: 手工配置已保留（优先于订阅选择）", "warning")
+            return
+        if not self.__dict__.get("_subscription_picker"):
+            if preserve_manual:
+                discard_generated_node(self, self.__dict__.get("_node_text"), self._set_selected_summary, "待启动节点")
             return
         item = self._subscription_picker.selected_item()
         if not item:
+            if preserve_manual:
+                discard_generated_node(self, self.__dict__.get("_node_text"), self._set_selected_summary, "待启动节点")
             message = "请先拉取订阅并选择一个节点"
             self._set_status(message, "warning")
             if show_message:
@@ -4389,6 +4414,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if self._node_text:
             self._node_text.delete("1.0", "end")
             self._node_text.insert("1.0", node_text)
+        remember_generated_node(self, node_text, profile_id or self._current_subscription_profile_id())
         selection_save_error = ""
         target_profile_id = ""
         if persist_selection:
@@ -4528,6 +4554,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                                     self._use_selected_subscription_node(
                                         show_message=False,
                                         persist_selection=False,
+                                        preserve_manual=True,
                                     )
                             except Exception:
                                 pass
@@ -4598,6 +4625,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if self._node_text:
             self._node_text.delete("1.0", "end")
             self._node_text.insert("1.0", content.strip())
+            forget_generated_node(self)
         try:
             node_summary = remote_proxy.describe_proxy_node(remote_proxy.parse_proxy_node(content))
             self._set_selected_summary(f"待启动节点: {node_summary}", "success")
@@ -4694,7 +4722,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             def sync_started_node(_result):
                 key = local_proxy.current_local_ai_proxy_node_key()
                 if key and self._select_subscription_node_by_key(key):
-                    self._use_selected_subscription_node(show_message=False)
+                    self._use_selected_subscription_node(show_message=False, preserve_manual=True)
 
             self._run_local_task(
                 "正在启动 Windows 本机 AI 代理，优先验证 Codex/OpenAI 并等待内核故障切换...",
