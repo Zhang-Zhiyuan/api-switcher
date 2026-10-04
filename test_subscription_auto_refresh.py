@@ -106,7 +106,10 @@ def test_source_changed_while_other_subscription_downloads_is_not_overwritten(sa
     result = saved_scope.run()
     assert set(result["results"]) == {"a"}
     assert any("来源" in error for error in result["errors"])
-    assert [event[1] for event in saved_scope.events if event[0] == "fetch"] == ["a"]
+    # With two download slots, b may start before a changes its source. Its
+    # result must still be rejected rather than reaching runtime/UI consumers.
+    assert "a" in [event[1] for event in saved_scope.events if event[0] == "fetch"]
+    assert saved_scope.events[-1][:2] == ("routes", "a")
 
 
 def test_background_refresh_rejects_missing_ssh_allowlist_before_io(monkeypatch):
@@ -222,6 +225,7 @@ def test_replacement_schedule_failure_keeps_existing_timer(timer):
 def test_background_timer_runs_with_saved_targets_and_preserves_dirty_editor(timer):
     timer.calls.dirty = True
     timer.start()
+    assert callable(timer.calls.worker[0][1].pop("on_progress"))
     assert timer.calls.worker == [(timer.kind, {
         "server_names": () if timer.kind == "local" else ("confirmed",), "interval_seconds": 1800,
     })]

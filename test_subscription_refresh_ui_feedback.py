@@ -29,6 +29,7 @@ def test_saved_interval_is_sent_to_worker_without_reading_dirty_editor(timer):
     setattr(timer.tab, timer.prefix + "periodic_update_entry", Draft())
     setattr(timer.tab, timer.prefix + "periodic_update_interval_saved", 45)
     timer.start()
+    assert callable(timer.calls.worker[0][1].pop("on_progress"))
     assert timer.calls.worker == [(timer.kind, {
         "server_names": () if timer.kind == "local" else ("confirmed",), "interval_seconds": 2700,
     })]

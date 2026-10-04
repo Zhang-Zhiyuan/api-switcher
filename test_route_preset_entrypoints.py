@@ -27,10 +27,15 @@ def forbidden(*_args, **_kwargs):
 @pytest.fixture(params=["local", "ssh"])
 def entrypoint(request, monkeypatch):
     kind = request.param
-    events, operations, dialogs, toasts = [], [], [], []
+    events, operations, dialogs, toasts, invalidations = [], [], [], [], []
     master = object()
-    tab = SimpleNamespace(_busy=False, _proxy_busy=False, _ssh_busy=False,
+    tab = SimpleNamespace(_busy=False, _proxy_busy=False, _ssh_busy=False, _destroyed=False,
                           winfo_toplevel=lambda: master)
+    runtime = SimpleNamespace(invalidate_runtime=lambda message="": invalidations.append(message))
+    tab._route_overview = tab._proxy_runtime_overview = runtime
+    tab._service_routes_saved = MethodType(LocalProxyTab._service_routes_saved, tab)
+    tab._invalidate_proxy_runtime = MethodType(SSHTab._invalidate_proxy_runtime, tab)
+    tab._proxy_routes_saved = MethodType(SSHTab._proxy_routes_saved, tab)
     tab._set_routing_status = tab._set_proxy_status = lambda *args: events.append(args)
     tab._load_proxy_preferences_ui = lambda: events.append("preferences")
     tab._refresh_subscription_profile_options = tab._refresh_proxy_subscription_profile_options = (
@@ -86,7 +91,8 @@ def entrypoint(request, monkeypatch):
     monkeypatch.setattr(service_routes_dialog, "ServiceRoutesDialog", Dialog)
     return SimpleNamespace(kind=kind, tab=tab, master=master, attribute=attribute, scopes=scopes,
                            selected=selected, manage=manage, preset=MethodType(preset_method, tab),
-                           events=events, operations=operations, dialogs=dialogs, toasts=toasts)
+                           events=events, operations=operations, dialogs=dialogs, toasts=toasts,
+                           invalidations=invalidations)
 
 
 @pytest.mark.parametrize("preset", [False, True])
@@ -101,6 +107,7 @@ def test_new_route_window_passes_explicit_mode_without_doing_io(entrypoint, pres
     assert dialog.preset_requests == 0  # Async load completion, not the tab, opens the child.
     assert form.operations == []
     assert form.events == []
+    assert len(form.invalidations) == 1  # Invalidate display only; never read/apply a proxy.
 
 
 def test_callbacks_keep_original_device_scope_and_expected_snapshot(entrypoint):
@@ -123,11 +130,26 @@ def test_callbacks_keep_original_device_scope_and_expected_snapshot(entrypoint):
     assert form.events[-1] == ("subscriptions", {"preserve_editor": True})
 
 
+def test_save_callback_invalidates_old_snapshot_without_starting_runtime_io(entrypoint):
+    form = entrypoint
+    form.manage()
+    before = len(form.invalidations)
+    form.dialogs[0].kwargs["on_saved"]()
+    assert len(form.invalidations) == before + 1
+    assert not form.operations
+    if form.kind == "local":
+        assert form.events == ["preferences"]
+    else:
+        assert form.events[-1][1] == "success"
+        assert "各服务器结果" in form.events[-1][0]
+
+
 @pytest.mark.parametrize("preset", [False, True])
 def test_existing_window_reuses_original_unsaved_drafts_without_reloading(entrypoint, preset):
     form = entrypoint
     form.manage()
     dialog = form.dialogs[0]
+    invalidations = list(form.invalidations)
     before = copy.deepcopy(dialog._drafts)
     drafts, scope = dialog._drafts, dialog._scope
     for _ in range(3):
@@ -138,6 +160,7 @@ def test_existing_window_reuses_original_unsaved_drafts_without_reloading(entryp
     assert dialog.lifts == dialog.focuses == 3
     assert dialog.preset_requests == (3 if preset else 0)
     assert not form.operations
+    assert form.invalidations == invalidations
 
 
 @pytest.mark.parametrize("preset", [False, True])
@@ -223,8 +246,10 @@ def test_ssh_same_scope_set_in_different_order_preserves_current_scope(entrypoin
 
 def test_local_busy_state_disables_the_new_overview_preset_and_its_callback():
     calls = []
+    invalidations = []
     overview = SimpleNamespace(_enabled=True, _preset=Control(), _manage=Control(), _inspect=Control(),
-                               _rows={}, _preset_command=lambda: calls.append("preset"))
+                               _rows={}, _preset_command=lambda: calls.append("preset"),
+                               invalidate_runtime=invalidations.append)
     overview.set_enabled = MethodType(ServiceRouteOverview.set_enabled, overview)
     names = ("fetch_button", "latency_button", "quality_button", "use_node_button", "hot_update_node_button",
              "quality_settings_button", "ping0_button", "load_file_button", "start_button", "inspect_button",
@@ -240,6 +265,7 @@ def test_local_busy_state_disables_the_new_overview_preset_and_its_callback():
         assert overview._preset.options["state"] == expected
         ServiceRouteOverview._open_preset(overview)
     assert calls == ["preset"]
+    assert len(invalidations) == 2
 
 
 def test_ssh_proxy_busy_state_disables_the_new_preset_button_without_needing_nodes():
@@ -252,7 +278,12 @@ def test_ssh_proxy_busy_state_disables_the_new_preset_button_without_needing_nod
     tab = SimpleNamespace(**{"_proxy_" + name: None for name in names})
     tab._proxy_route_preset_button = Control()
     tab._proxy_subscription_options = {}
+    invalidations = []
+    tab._destroyed = False
+    tab._proxy_runtime_overview = SimpleNamespace(invalidate_runtime=invalidations.append)
+    tab._invalidate_proxy_runtime = MethodType(SSHTab._invalidate_proxy_runtime, tab)
     tab._update_proxy_subscription_profile_form_controls = lambda: None
     for busy, expected in ((True, "disabled"), (False, "normal"), (True, "disabled")):
         SSHTab._set_proxy_busy(tab, busy)
         assert tab._proxy_route_preset_button.options["state"] == expected
+    assert len(invalidations) == 2

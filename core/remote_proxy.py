@@ -5253,7 +5253,7 @@ def reload_ai_proxy(
         **proxy_routing.ssh_config_options(ssh_name, old_config, routing_preferences),
     )
     if _config_snapshot is not None:
-        _config_snapshot.update(old_config=old_config, new_config=new_config, client=client)
+        _config_snapshot.update(old_config=old_config, new_config=new_config, client=client, config_path=config_path)
     if _remote_proxy_runtime_text(old_config) == _remote_proxy_runtime_text(new_config):
         metadata_suffix = ""
         if _config_snapshot is not None and old_config.strip() == new_config.strip():
@@ -5830,6 +5830,39 @@ def reload_ai_proxy_verified(
     return f"{reload_message}；验证失败: {_compact_probe_summary(probe_message)}；自动尝试 {attempts} 个节点仍未 3/3 可达{restore_suffix}"
 
 
+def _verify_remote_bound_route_refresh(ssh_name, mixed_port, result, routes, snapshot):
+    """Anonymous observations outside the host lock; never repair or roll back."""
+    from core import service_route_verification as verification
+
+    targets = verification.bound_route_targets(routes)
+    if not targets or getattr(result, "outcome", "unknown") == "unknown":
+        return result
+    if getattr(result, "outcome", "unknown") != "applied":
+        return verification.attach_verification(result, verification.unverified(targets, "本轮配置未变或未加载，未重复探测", warning=False))
+    client = snapshot.get("client")
+    expected = snapshot.get("new_config")
+    path = snapshot.get("config_path")
+    if client is None or not expected or not path:
+        return verification.attach_verification(result, verification.unverified(targets, "未取得本轮配置快照，未执行探测"))
+    try:
+        def still_current():
+            return proxy_routing.load_ssh_routes(ssh_name) == routes
+
+        if not still_current():
+            records = verification.unverified(targets, "运行配置已变化，未执行本轮探测")
+        else:
+            code, stdout, _stderr = ssh_manager.execute_command_with_status(
+                client, verification.build_remote_command(targets, mixed_port, config_path=path, expected_config=expected),
+                timeout=verification.DEADLINE + 3, log_command=False,
+            )
+            records = verification.parse_remote_records(targets, code, stdout)
+            if not still_current():
+                records = verification.unverified(targets, "探测期间运行配置已变化，结果已作废")
+    except Exception:
+        records = verification.unverified(targets, "远端探测未完成或连接已退出")
+    return verification.attach_verification(result, records)
+
+
 def refresh_running_ai_proxy_from_subscription(
     ssh_name: str,
     nodes,
@@ -5842,6 +5875,7 @@ def refresh_running_ai_proxy_from_subscription(
     expected_source: tuple | None = None,
     require_service_binding: bool = False,
 ) -> str:
+    bound_refresh = None
     # Reading the default and reloading its bound service pools is one host
     # operation. Otherwise a concurrent manual node change can be overwritten
     # by the stale default snapshot. Long isolated candidate probes below stay
@@ -5875,19 +5909,21 @@ def refresh_running_ai_proxy_from_subscription(
             current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
             if not current_node:
                 raise RuntimeError(f"{ssh_name}: 无法读取默认节点，已停止分流订阅热更新")
+            snapshot = {}
             message = reload_ai_proxy(
                 ssh_name, format_proxy_node(current_node), mixed_port,
                 persist_selection=False, routing_preferences=routes,
+                _config_snapshot=snapshot,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
             detail = str(message)
-            if getattr(message, "outcome", "unknown") != "unknown":
-                detail += "；该操作仅处理绑定分流配置，未逐目标执行连通性验证"
             if warnings:
                 detail += "；" + "；".join(warnings)
             result = with_update_message(message, detail)
-            return update_result(result, result.outcome, retryable=result.retryable,
-                                 warning=result.warning or bool(warnings))
+            bound_refresh = (update_result(result, result.outcome, retryable=result.retryable,
+                                           warning=result.warning or bool(warnings)), routes, snapshot)
+    if bound_refresh is not None:
+        return _verify_remote_bound_route_refresh(ssh_name, mixed_port, *bound_refresh)
     candidates = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
     if not candidates:
         return update_result(f"{ssh_name}: 订阅里没有可用节点，已跳过热更新", "retained",

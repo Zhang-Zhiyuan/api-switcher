@@ -52,6 +52,9 @@ class _View:
         self._scopes = {"A": "a", "B": "b"}
         self._scope = "A"
         self._loader = loader or (lambda _scope: snapshot())
+        self._on_read_started = None
+        self._on_loaded = None
+        self._read_context = None
         self._snapshot = None
         self._closed = False
         self._busy = False
@@ -73,7 +76,7 @@ class _View:
         for name in ("_report", "_refresh", "_query", "_copy", "_overview", "_scope_combo", "_status", "_entry"):
             setattr(self, name, _Widget())
         for name in ("_set_report", "_install_report", "_copy_report", "_set_busy", "_switch_scope", "refresh",
-                     "_start_operation", "_poll", "_show_failure", "_render", "_show_query", "_show_overview"):
+                     "_start_operation", "_poll", "_show_failure", "_publish_overview", "_render", "_show_query", "_show_overview"):
             setattr(self, name, MethodType(getattr(module.RouteDiagnosticsDialog, name), self))
 
     def after(self, _delay, callback):

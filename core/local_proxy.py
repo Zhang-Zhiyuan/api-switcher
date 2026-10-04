@@ -2609,11 +2609,61 @@ def refresh_running_local_ai_proxy_from_subscription(
     )
 
 
+def refresh_running_local_service_routes_from_subscription(nodes, *, profile_id: str) -> str:
+    """Commit under the operation lock, then observe without blocking edits."""
+    from core import service_route_verification as verification
+
+    snapshot = {}
+    result = _reload_bound_local_service_routes(nodes, profile_id=profile_id, _snapshot=snapshot)
+    targets = verification.bound_route_targets(snapshot.get("preferences", {}))
+    if not targets or getattr(result, "outcome", "unknown") == "unknown":
+        return result
+    if getattr(result, "outcome", "unknown") != "applied":
+        return verification.attach_verification(result, verification.unverified(targets, "本轮配置未变或未加载，未重复探测", warning=False))
+
+    def still_current():
+        try:
+            state = _load_state()
+            return (not _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set()
+                    and _managed_local_proxy_is_running(state)
+                    and (state.get("pid"), state.get("mixed_port")) == snapshot["identity"]
+                    and _load_local_proxy_routing_preferences_strict() == snapshot["preferences"]
+                    and _local_config_sha256(_managed_local_config_path(state)) == snapshot["fingerprint"])
+        except Exception:
+            return False
+
+    if not snapshot.get("fingerprint") or not still_current():
+        records = verification.unverified(targets, "运行配置已变化、已退出或归属未确认")
+    else:
+        records = verification.verify_targets(
+            targets, lambda target, timeout: verification.probe_target(target, snapshot["port"], timeout),
+            cancelled=_ISOLATED_MIHOMO_SHUTTING_DOWN.is_set,
+        )
+        if not still_current():
+            records = verification.unverified(targets, "探测期间运行配置已变化，结果已作废")
+    return verification.attach_verification(result, records)
+
+
+def _snapshot_local_bound_routes(result, preferences, snapshot):
+    if snapshot is not None:
+        snapshot["preferences"] = copy.deepcopy(preferences)
+        if getattr(result, "outcome", "unknown") == "applied":
+            try:
+                state = _load_state()
+                snapshot.update(identity=(state.get("pid"), state.get("mixed_port")),
+                                port=int(state.get("mixed_port") or DEFAULT_LOCAL_MIXED_PORT),
+                                fingerprint=_local_config_sha256(_managed_local_config_path(state)))
+            except Exception:
+                snapshot["fingerprint"] = ""
+    return result
+
+
 @_serialized_local_proxy_operation("刷新服务订阅线路")
-def refresh_running_local_service_routes_from_subscription(
+def _reload_bound_local_service_routes(
     nodes,
     *,
     profile_id: str,
+    _snapshot: dict | None = None,
 ) -> str:
     """Refresh a bound profile without promoting it to the global main node."""
 
@@ -2638,7 +2688,8 @@ def refresh_running_local_service_routes_from_subscription(
     if all(service in pools or service in pinned for service in bound_services):
         apply_message = apply_local_proxy_routing_to_running()
         labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
-        return with_update_message(apply_message, f"已刷新 {labels} 的独立订阅节点池；{apply_message}")
+        return _snapshot_local_bound_routes(
+            with_update_message(apply_message, f"已刷新 {labels} 的独立订阅节点池；{apply_message}"), preferences, _snapshot)
     state = remote_proxy.load_proxy_subscription_state()
     profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
     profile = profiles.get(clean_id)
@@ -2693,7 +2744,8 @@ def refresh_running_local_service_routes_from_subscription(
         raise RuntimeError(f"独立订阅线路更新失败: {exc}；{suffix}") from exc
     labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
     selection_note = "；原选择已失效，已改用订阅中的首个独立节点" if selection_changed else ""
-    return with_update_message(apply_message, f"已刷新 {labels} 的独立订阅节点池{selection_note}；{apply_message}")
+    return _snapshot_local_bound_routes(
+        with_update_message(apply_message, f"已刷新 {labels} 的独立订阅节点池{selection_note}；{apply_message}"), preferences, _snapshot)
 
 
 def current_local_ai_proxy_node_key() -> str:

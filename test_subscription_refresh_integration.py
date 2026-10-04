@@ -69,8 +69,8 @@ def test_win_and_ssh_share_download_but_apply_independently(scenario):
     assert local["downloaded_count"] == 2
     assert remote["downloaded_count"] == 0
     assert remote["reused_count"] == 2
-    assert scenario.events == [("fetch", "a"), ("fetch", "b"),
-                               ("apply", "local", "a"), ("apply", "server", "a")]
+    assert sorted(scenario.events[:2]) == [("fetch", "a"), ("fetch", "b")]
+    assert scenario.events[2:] == [("apply", "local", "a"), ("apply", "server", "a")]
     assert remote["next_delay_seconds"] == 1800
 
 
@@ -125,7 +125,8 @@ def test_due_download_failure_does_not_starve_pending_cached_apply(scenario):
     scenario.clock.now = 300
     scenario.events.clear()
     result = scenario.run(period=300)
-    assert scenario.events == [("fetch", "a"), ("fetch", "b"), ("apply", "local", "a")]
+    assert sorted(scenario.events[:2]) == [("fetch", "a"), ("fetch", "b")]
+    assert scenario.events[2:] == [("apply", "local", "a")]
     assert result["errors"] and result["reused_count"] == 2
     assert result["next_delay_seconds"] == 60
 
@@ -148,7 +149,8 @@ def test_unchanged_subscription_still_checks_runtime_at_next_period(scenario):
     scenario.clock.now = 300
     scenario.events.clear()
     scenario.run(period=300)
-    assert scenario.events == [("fetch", "a"), ("fetch", "b"), ("apply", "local", "a")]
+    assert sorted(scenario.events[:2]) == [("fetch", "a"), ("fetch", "b")]
+    assert scenario.events[2:] == [("apply", "local", "a")]
 
 
 def test_short_win_download_period_does_not_starve_ssh_health_check(scenario):
@@ -185,7 +187,7 @@ def test_direct_fallback_policy_changes_partition_download_reuse(scenario, monke
     monkeypatch.setattr(local_proxy, "local_proxy_subscription_direct_fallback_allowed", lambda: True)
     scenario.events.clear()
     scenario.run("ssh")
-    assert scenario.events[:2] == [("fetch", "a"), ("fetch", "b")]
+    assert sorted(scenario.events[:2]) == [("fetch", "a"), ("fetch", "b")]
 
 
 def test_missing_shared_cache_never_counts_as_applied_and_recovers(scenario):
@@ -317,5 +319,5 @@ def test_unscheduled_calls_keep_manual_fresh_download_behavior(scenario):
     scenario.run()
     scenario.events.clear()
     result = worker.refresh_saved_subscriptions("local")
-    assert scenario.events[:2] == [("fetch", "a"), ("fetch", "b")]
+    assert sorted(scenario.events[:2]) == [("fetch", "a"), ("fetch", "b")]
     assert "next_delay_seconds" not in result

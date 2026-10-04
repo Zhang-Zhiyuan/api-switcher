@@ -10,6 +10,8 @@ import copy
 import hashlib
 import json
 import math
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 
 from core.lazy_imports import LazyModule
 from core.proxy_update_result import ProxyUpdateResult, update_result
@@ -20,6 +22,19 @@ remote_proxy = LazyModule("core.remote_proxy")
 proxy_routing = LazyModule("core.proxy_routing")
 _SCHEDULE = SubscriptionRefreshSchedule()
 _SOURCE_FIELDS = ("url", "source_path", "source_revision")
+
+
+@dataclass
+class _RefreshDownload:
+    profile_id: str
+    profile: dict
+    url: str
+    key: str
+    interested: list
+    index: int
+    token: object = None
+    current: dict | None = None
+    decisions: dict = field(default_factory=dict)
 
 
 def subscription_source_identity(profile_id: str, profile: dict) -> str:
@@ -82,7 +97,8 @@ def _cached_node_keys(profile: dict) -> set[str]:
         return set()
 
 
-def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds=None, schedule=None) -> dict:
+def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds=None, schedule=None,
+                                on_progress=None) -> dict:
     if scope not in {"local", "ssh"}:
         raise ValueError("未知订阅刷新范围")
     names = saved_server_names(server_names)
@@ -136,6 +152,7 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
             scheduler.cancel(decision.token)
         return decision
 
+    downloads = []
     for profile_id in profile_ids:
         profile = profiles.get(profile_id)
         if not isinstance(profile, dict):
@@ -153,23 +170,41 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
                               source_revision=profile.get("source_revision", ""),
                               privacy_policy={"allow_direct_fallback": allow_direct})
         contexts[profile_id] = (key, interested)
-        token = None
+        downloads.append(_RefreshDownload(profile_id, profile, url, key, interested, len(downloads) + 1))
+
+    completed_downloads = 0
+
+    def progress(stage, completed, total, *, index=0, outcome="running"):
+        # Fixed fields only: names, URLs, nodes and exception text can all carry
+        # credentials. Observers are advisory and never control the transaction.
+        if callable(on_progress):
+            try:
+                on_progress(dict(stage=stage, completed=completed, total=total,
+                                 index=index, outcome=outcome))
+            except Exception:
+                pass
+
+    def fetch(item):
+        # Recheck immediately before starting I/O, including jobs whose slot
+        # became available after an earlier source finished.
+        _current_source(item.profile_id, item.profile)
+        return remote_proxy.fetch_proxy_subscription(
+            item.url, profile_id=item.profile_id, activate=False,
+            allow_direct_fallback=allow_direct,
+            recovery_proxy_provider=local_proxy.local_proxy_subscription_recovery_session,
+        )
+
+    def complete(item, future=None, error=None):
+        nonlocal completed_downloads
+        profile_id, profile = item.profile_id, item.profile
+        key, interested, token = item.key, item.interested, item.token
+        decisions, current = item.decisions, item.current
+        outcome = "waiting"
         try:
-            current = _current_source(profile_id, profile)
-            decisions = {}
-            if scheduled:
-                for name in interested:
-                    decision = scheduler.begin(key, consumers[name], interval_seconds)
-                    decisions[name] = decision
-                    if decision.action == "fetch":
-                        token = decision.token
-                        break  # Finish this reservation before considering other consumers.
+            if error is not None:
+                raise error
             if not scheduled or token is not None:
-                fetched = remote_proxy.fetch_proxy_subscription(
-                    url, profile_id=profile_id, activate=False,
-                    allow_direct_fallback=allow_direct,
-                    recovery_proxy_provider=local_proxy.local_proxy_subscription_recovery_session,
-                )
+                fetched = future.result()
                 _current_source(profile_id, profile)
                 results[profile_id] = fetched
                 counts["downloaded_count"] += 1
@@ -183,6 +218,7 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
                     decisions = {name: cache_decision(key, name)
                                  for name in interested}
                 steps.append(_step("download", update_result("订阅已下载并保存缓存", "applied"), profile_id=profile_id))
+                outcome = "downloaded"
             elif any(item.action == "cached" for item in decisions.values()):
                 cached = remote_proxy.load_cached_proxy_subscription(current)
                 revision = _content_revision(cached) if cached else ""
@@ -196,6 +232,7 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
                 revisions[profile_id] = (revision, matching[0].version)
                 counts["reused_count"] += 1
                 steps.append(_step("cache", update_result("复用已下载缓存", "unchanged"), profile_id=profile_id))
+                outcome = "cached"
             else:
                 counts["waiting_count"] += 1
             for name in interested:
@@ -203,6 +240,7 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
                                      and decisions[name].revision == revisions.get(profile_id, (None,))[0]):
                     ready[name].add(profile_id)
         except Exception as exc:
+            outcome = "failed"
             failed_fetch = token is not None
             if token is not None:
                 scheduler.finish_failure(token)
@@ -234,6 +272,46 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
                                                                   warning=True), profile_id=profile_id))
                 except Exception:
                     pass  # Original download error remains visible; no stale apply.
+        finally:
+            completed_downloads += 1
+            progress("download", completed_downloads, len(downloads),
+                     index=item.index, outcome=outcome)
+
+    progress("download", 0, len(downloads))
+    # Only downloads run concurrently. Scheduler reservations/acknowledgements,
+    # result ownership and runtime application stay on this coordinator thread.
+    # Recovery sessions retain their existing binary lock and total deadline:
+    # two ordinary downloads overlap, but disposable mihomo recovery is serialized.
+    if downloads:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="subscription-download") as executor:
+            pending = {}
+            remaining = iter(downloads)
+            exhausted = False
+            while pending or not exhausted:
+                while len(pending) < 2 and not exhausted:
+                    item = next(remaining, None)
+                    if item is None:
+                        exhausted = True
+                        break
+                    try:
+                        item.current = _current_source(item.profile_id, item.profile)
+                        if scheduled:
+                            for name in item.interested:
+                                decision = scheduler.begin(item.key, consumers[name], interval_seconds)
+                                item.decisions[name] = decision
+                                if decision.action == "fetch":
+                                    item.token = decision.token
+                                    break
+                        if not scheduled or item.token is not None:
+                            pending[executor.submit(fetch, item)] = item
+                        else:
+                            complete(item)
+                    except Exception as exc:
+                        complete(item, error=exc)
+                if pending:
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        complete(pending.pop(future), future=future)
 
     def origin_matches(name, current_key):
         if not current_key:
@@ -251,6 +329,10 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
             )
         return False
 
+    apply_total = sum(bool(ready[name] & results.keys()) for name in scopes)
+    completed_applies = 0
+    if apply_total:
+        progress("apply", 0, apply_total)
     for name, previously_bound in scopes.items():
         available = ready[name] & results.keys()
         if not available:
@@ -322,6 +404,9 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
             message = update_result(errors[-1], "failed", retryable=True, warning=True)
         apply_messages.append(message)
         steps.append(_step("apply", message, scope=scope, target=name))
+        completed_applies += 1
+        progress("apply", completed_applies, apply_total,
+                 index=completed_applies, outcome=getattr(message, "outcome", "unknown"))
         if scheduled:
             for profile_id in available:
                 key = contexts[profile_id][0]

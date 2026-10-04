@@ -54,6 +54,27 @@ def _feedback_count(value):
         return 0
 
 
+def _progress_message(event, label):
+    """Render fixed progress fields only, never worker-supplied URLs or text."""
+    if not isinstance(event, dict):
+        return ""
+    completed, total, index = (event.get(key) for key in ("completed", "total", "index"))
+    if not all(type(value) is int and 0 <= value <= 100000 for value in (completed, total, index)):
+        return ""
+    if completed > total or index > total:
+        return ""
+    if event.get("stage") == "apply":
+        return f"{label} 定时刷新：下载处理完成，正在逐项核对并应用线路 {completed}/{total}。"
+    if event.get("stage") != "download":
+        return ""
+    outcome = event.get("outcome")
+    detail = ({"downloaded": "下载完成", "cached": "复用缓存", "waiting": "等待下次刷新",
+               "failed": "本次未更新，保留已有缓存"}.get(outcome)
+              if isinstance(outcome, str) else None)
+    suffix = f"；订阅 {index} {detail}" if index and detail else ""
+    return f"{label} 定时刷新：已处理订阅 {completed}/{total}（最多 2 路同时下载）{suffix}。"
+
+
 def start_saved_refresh(tab, *, scope: str, thread_factory):
     prefix = "_" if scope == "local" else "_proxy_"
     running_attr = prefix + "periodic_update_running"
@@ -82,6 +103,7 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
         schedule(retry=True)
         return
     channel = queue.SimpleQueue()
+    progress_channel = queue.SimpleQueue()
     lock_owned = True
     release_guard = threading.Lock()
     start_guard = threading.Lock()
@@ -194,6 +216,21 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
         try:
             payload = channel.get_nowait()
         except queue.Empty:
+            # Drain/coalesce bounded progress on Tk's thread. A slow sibling
+            # cannot hide completed items; progress never replaces node lists
+            # or releases the reservation before the final source validation.
+            latest_progress = ""
+            for _ in range(64):
+                try:
+                    event = progress_channel.get_nowait()
+                except queue.Empty:
+                    break
+                latest_progress = _progress_message(event, label) or latest_progress
+            if latest_progress:
+                try:
+                    status(latest_progress, "info")
+                except Exception:
+                    pass  # Advisory feedback must not strand the worker lock.
             try:
                 setattr(tab, poll_attr, tab.after(150, poll))
             except Exception:
@@ -225,6 +262,7 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
         try:
             payload = subscription_auto_refresh.refresh_saved_subscriptions(
                 scope, server_names=names, interval_seconds=interval_seconds,
+                on_progress=progress_channel.put,
             )
         except Exception as exc:
             payload = {"errors": [str(exc)], "results": {}}

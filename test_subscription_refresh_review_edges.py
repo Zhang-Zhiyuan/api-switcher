@@ -24,7 +24,7 @@ def test_transient_apply_preflight_read_retries_cache_at_backoff_not_full_period
 
     monkeypatch.setattr(module, attribute, transient_read)
     first = scenario.run(scope, period=1800)
-    assert scenario.events == [("fetch", "a"), ("fetch", "b")]
+    assert sorted(scenario.events) == [("fetch", "a"), ("fetch", "b")]
     assert first["retryable"] and first["next_delay_seconds"] == 60
 
     scenario.clock.now = 60

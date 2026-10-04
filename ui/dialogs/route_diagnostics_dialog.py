@@ -24,6 +24,7 @@ class _ReportPresentation:
     stale: bool = False
     status: str = ""
     warning: bool = False
+    overview: diagnostics.RouteOverviewSnapshot | None = None
 
 
 def _prepare_text(text):
@@ -52,11 +53,12 @@ def _prepare_report(snapshot, query_host):
     stale = snapshot.stale(now)
     status = ("快照已过期，请刷新后再判断线路。" if stale else
               (snapshot.error or "已读取内核运行规则；历史探针通过不等于账号可用，未测试真实出口 IP。"))
-    return _ReportPresentation(text, tags, stale, safe_feedback_text(status), bool(stale or snapshot.error))
+    return _ReportPresentation(text, tags, stale, safe_feedback_text(status), bool(stale or snapshot.error),
+                               diagnostics.snapshot_overview(snapshot, now=now))
 
 
 class RouteDiagnosticsDialog(ctk.CTkToplevel):
-    def __init__(self, master, *, scopes=None, loader=None):
+    def __init__(self, master, *, scopes=None, loader=None, on_read_started=None, on_loaded=None):
         super().__init__(master)
         self.title("分流检查 · 运行状态与网址去向")
         self.geometry("960x740")
@@ -66,6 +68,9 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
         self._scopes = scopes or {"Win11 本机（含共享 WSL）": None}
         self._scope = next(iter(self._scopes))
         self._loader = loader or diagnostics.load_snapshot
+        self._on_read_started = on_read_started
+        self._on_loaded = on_loaded
+        self._read_context = None
         self._snapshot = None
         self._closed = False
         self._busy = False
@@ -191,6 +196,13 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
     def _start_operation(self, *, read=False):
         self._generation += 1
         generation, scope = self._generation, self._scopes[self._scope]
+        if read:
+            self._read_context = None
+            if self._on_read_started is not None:
+                try:
+                    self._read_context = self._on_read_started(scope)
+                except Exception:
+                    pass  # Overview integration must never prevent read-only diagnostics.
         self._set_busy(True)
         results, loader, cancelled = self._queue, self._loader, self._cancelled
         current_snapshot, query_host = self._snapshot, self._query_host
@@ -233,6 +245,7 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
                         self._install_report(presentation)
                         self._status.configure(text=presentation.status,
                                                text_color=COLORS["warning"] if presentation.warning else COLORS["muted"])
+                        self._publish_overview(presentation.overview)
                     except Exception as exc:
                         self._show_failure(exc)
         try:
@@ -244,10 +257,22 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
             self._poll_id = self.after(80 if self._busy else 1000, self._poll)
 
     def _show_failure(self, error):
+        self._publish_overview(None)
         self._snapshot = None
         self._set_busy(False)
         self._status.configure(text="诊断读取失败；未修改运行配置，可刷新重试。", text_color=COLORS["warning"])
         self._set_report(_error_text(error))
+
+    def _publish_overview(self, summary):
+        # Local URL queries/expiry renders must not republish an old snapshot.
+        if not self._reading:
+            return
+        self._reading = False
+        if self._on_loaded is not None:
+            try:
+                self._on_loaded(self._scopes[self._scope], summary, self._read_context)
+            except Exception:
+                self._status.configure(text="诊断已完成；概览回填失败，可重新检查。", text_color=COLORS["warning"])
 
     def _render(self):
         if self._closed or self._busy or not self._snapshot:
@@ -278,6 +303,7 @@ class RouteDiagnosticsDialog(ctk.CTkToplevel):
     def destroy(self):
         if self._closed:
             return
+        self._publish_overview(None)
         self._closed = True
         self._cancelled.set()
         self._snapshot = None

@@ -1723,10 +1723,33 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
         from ui.dialogs.route_diagnostics_dialog import RouteDiagnosticsDialog
 
-        self._route_diagnostics_dialog = RouteDiagnosticsDialog(self.winfo_toplevel())
+        self._route_diagnostics_dialog = RouteDiagnosticsDialog(
+            self.winfo_toplevel(), on_read_started=self._begin_route_runtime_read,
+            on_loaded=self._accept_route_runtime_summary,
+        )
+
+    def _begin_route_runtime_read(self, scope):
+        overview = self.__dict__.get("_route_overview")
+        if scope is not None or self._destroyed or self._busy or overview is None:
+            return None
+        return overview.begin_runtime_read()
+
+    def _accept_route_runtime_summary(self, scope, summary, token):
+        overview = self.__dict__.get("_route_overview")
+        if scope is not None or token is None or self._destroyed or self._busy or overview is None:
+            return
+        if summary is not None and summary.scope != "Win11 本机（含共享 WSL）":
+            return
+        overview.set_runtime_summary(summary, token)
 
     def _open_route_preset(self):
         self._open_service_routes(preset=True)
+
+    def _service_routes_saved(self):
+        overview = self.__dict__.get("_route_overview")
+        if overview is not None:
+            overview.invalidate_runtime("分流已保存或应用，请重新检查运行状态")
+        self._load_proxy_preferences_ui()
 
     def _open_service_routes(self, service_id="", *, preset=False):
         if self._busy:
@@ -1741,13 +1764,16 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             return
         from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
 
+        overview = self.__dict__.get("_route_overview")
+        if overview is not None:
+            overview.invalidate_runtime("正在编辑分流，保存后可重新检查运行状态")
         self._service_routes_dialog = ServiceRoutesDialog(
             self.winfo_toplevel(), scopes=["Win11 本机（含共享 WSL）"],
             load_preferences=lambda _scope: local_proxy._load_local_proxy_routing_preferences_strict(),
             apply_preferences=lambda _scope, preferences, expected: local_proxy.set_local_proxy_service_routes_and_apply(
                 preferences, expected=expected,
             ),
-            on_saved=self._load_proxy_preferences_ui, initial_service=service_id,
+            on_saved=self._service_routes_saved, initial_service=service_id,
             on_tags_saved=lambda: self._refresh_subscription_profile_options(preserve_editor=True),
             initial_preset=preset,
         )

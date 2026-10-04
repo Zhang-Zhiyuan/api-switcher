@@ -1,9 +1,12 @@
 """Read-only route summaries. Opening or browsing these never applies routing."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import customtkinter as ctk
 
 from core import proxy_routing
+from core.proxy_route_diagnostics import RouteOverviewSnapshot, SNAPSHOT_TTL, routing_preferences_fingerprint
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICE_IDS
 from core.subscription_routing_policy import (
     ai_route_candidate_count, ai_route_candidate_nodes, preferred_network_type, route_candidate_count,
@@ -142,7 +145,130 @@ def route_changes(originals, drafts, catalog):
     return changes
 
 
-class ServiceRouteOverview(ctk.CTkFrame):
+class _RuntimeOverview:
+    """One-shot snapshot expiry only. This widget never reads controllers or SSH."""
+
+    def _init_runtime(self):
+        self._runtime_generation = 0
+        self._runtime_snapshot = None
+        self._runtime_after_id = None
+        self._runtime_closed = False
+
+    def invalidate_runtime(self, message="运行状态待检查 · 点击“检查网址去向”读取"):
+        self._runtime_generation += 1
+        self._runtime_snapshot = None
+        if self._runtime_after_id is not None:
+            self.after_cancel(self._runtime_after_id)
+            self._runtime_after_id = None
+        if self._runtime_closed:
+            return self._runtime_generation
+        _configure_changed(self._runtime_status, text=message, text_color=COLORS["muted"])
+        for label in self._runtime_labels().values():
+            label.pack_forget()
+        return self._runtime_generation
+
+    def begin_runtime_read(self):
+        return self.invalidate_runtime("正在读取运行状态；不会测速或切换节点…")
+
+    def set_runtime_summary(self, summary, token):
+        if self._runtime_closed or token != self._runtime_generation:
+            return False
+        if not isinstance(summary, RouteOverviewSnapshot):
+            self.invalidate_runtime("本次运行状态未读取完成，请点击“检查网址去向”重试")
+            return False
+        expected = self.__dict__.get("_runtime_preferences_fingerprint")
+        if expected is not None and expected != summary.preferences_fingerprint:
+            self.invalidate_runtime("已保存分流发生变化，请重新检查运行状态")
+            return False
+        if self._runtime_after_id is not None:
+            self.after_cancel(self._runtime_after_id)
+            self._runtime_after_id = None
+        self._runtime_snapshot = summary
+        self._prepare_runtime_rows(summary)
+        self._render_runtime_summary()
+        if not summary.stale():
+            remaining = SNAPSHOT_TTL - (datetime.now(timezone.utc) - summary.captured_at).total_seconds()
+            self._runtime_after_id = self.after(max(1, int(remaining * 1000) + 1), self._expire_runtime_summary)
+        return True
+
+    def _expire_runtime_summary(self):
+        self._runtime_after_id = None
+        if not self._runtime_closed and self._runtime_snapshot is not None:
+            self._render_runtime_summary(expired=True)
+
+    def _render_runtime_summary(self, *, expired=False):
+        summary = self._runtime_snapshot
+        stale = expired or summary.stale()
+        status = f"{summary.scope} · 读取于 {summary.captured_at.astimezone():%H:%M:%S} · "
+        status += "快照已过期，请重新检查" if stale else "60 秒内快照，节点仍可能变化"
+        if summary.error:
+            status += " · " + summary.error
+        _configure_changed(self._runtime_status, text=status,
+                           text_color=COLORS["warning"] if stale or summary.error else COLORS["muted"])
+        labels = self._runtime_labels()
+        for item in summary.rows:
+            label = labels.get(item.service)
+            if label is not None:
+                prefix = "历史内核选择（已过期）：" if stale else "内核当前选择（读取时）："
+                text = self._runtime_row_text(item, prefix)
+                _configure_changed(label, text=text,
+                                   text_color=COLORS["warning"] if stale or item.warning else COLORS["muted"])
+                if not label.winfo_manager():
+                    label.pack(fill="x", pady=(3, 0))
+
+    def _runtime_row_text(self, item, prefix):
+        return prefix + item.current
+
+    def _prepare_runtime_rows(self, summary):
+        pass
+
+    def _dispose_runtime(self):
+        self.invalidate_runtime()
+        self._runtime_closed = True
+
+
+class RuntimeRouteOverview(_RuntimeOverview, ctk.CTkFrame):
+    """SSH summary of the one host explicitly inspected by the user."""
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self._init_runtime()
+        self._labels = {}
+        self._runtime_status = ctk.CTkLabel(
+            self, text="未读取运行状态；检查时只连接诊断窗口当前所选的一台服务器。",
+            font=font(11), text_color=COLORS["muted"], anchor="w", justify="left", width=1)
+        self._runtime_status.pack(fill="x")
+        bind_wraplength(self, self._runtime_status, padding=8)
+        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        self._body.pack(fill="x")
+        note = ctk.CTkLabel(self, text="以下每项目标仅核对一个代表域名/IP，不代表真实出口 IP、国家或账号可用性。",
+                           font=font(11), text_color=COLORS["muted_soft"], anchor="w", justify="left", width=1)
+        note.pack(fill="x", pady=(4, 0))
+        bind_wraplength(self, note, padding=8)
+
+    def _runtime_labels(self):
+        return self._labels
+
+    def _prepare_runtime_rows(self, summary):
+        keys = {item.service for item in summary.rows}
+        for key in self._labels.keys() - keys:
+            self._labels.pop(key).destroy()
+        for item in summary.rows:
+            if item.service not in self._labels:
+                label = ctk.CTkLabel(self._body, text="", font=font(11), anchor="w", justify="left", width=1)
+                bind_wraplength(self._body, label, padding=8)
+                self._labels[item.service] = label
+        self._labels = {item.service: self._labels[item.service] for item in summary.rows}
+
+    def _runtime_row_text(self, item, prefix):
+        return f"{item.label} · 已保存：{item.saved}\n{prefix}{item.current}"
+
+    def destroy(self):
+        self._dispose_runtime()
+        super().destroy()
+
+
+class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
     """Compact overview; all edits live in the shared draft editor."""
 
     def __init__(self, master, *, command, inspect_command=None, preset_command=None, **kwargs):
@@ -155,6 +281,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._narrow = None
         self._layout_scale = None
         self._signature = None
+        self._init_runtime()
+        self._runtime_preferences_fingerprint = None
         self._header = ctk.CTkFrame(self, fg_color="transparent")
         self._header.pack(fill="x")
         self._title = ctk.CTkLabel(self._header, text="目标分流", font=font(15, "bold"), text_color=COLORS["text"], anchor="w")
@@ -182,6 +310,12 @@ class ServiceRouteOverview(ctk.CTkFrame):
                                     text_color=COLORS["muted"], anchor="w", justify="left")
         self._summary.pack(fill="x", pady=(4, 8))
         bind_wraplength(self, self._summary, padding=8)
+        self._runtime_status = ctk.CTkLabel(
+            self, text="运行状态待检查 · 点击“检查网址去向”读取", font=font(11),
+            text_color=COLORS["muted"], anchor="w", justify="left", width=1)
+        if inspect_command:
+            self._runtime_status.pack(fill="x", pady=(0, 6))
+        bind_wraplength(self, self._runtime_status, padding=8)
         self._heading = ctk.CTkFrame(self, fg_color=COLORS["surface_alt"], corner_radius=6)
         self._heading.pack(fill="x", pady=(0, 4))
         for column, text in enumerate(("访问目标", "访问线路", "节点策略")):
@@ -194,7 +328,7 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._more = ctk.CTkButton(self, text="查看未启用目标", command=self._toggle_inactive,
                                    **button_style("secondary", compact=True))
         self._note = ctk.CTkLabel(
-            self, text="已保存配置不代表实时连通；点“检查网址去向”核对运行状态。线路修改需在编辑窗口保存并应用。"
+            self, text="仅核对每个目标的一个代表域名/IP；内核选择不代表真实出口或实时连通。点“检查网址去向”查看详情。"
                        if inspect_command else "这里只展示已保存配置，不代表实时连通；线路修改需在编辑窗口保存并应用。",
             font=font(11), text_color=COLORS["muted_soft"], anchor="w", justify="left")
         self._note.pack(fill="x", pady=(6, 0))
@@ -214,6 +348,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         if self._enabled == bool(enabled):
             return
         self._enabled = bool(enabled)
+        if not enabled:
+            self.invalidate_runtime("代理操作进行中；完成后可重新检查运行状态")
         state = "normal" if enabled else "disabled"
         if self._preset:
             self._preset.configure(state=state)
@@ -225,6 +361,10 @@ class ServiceRouteOverview(ctk.CTkFrame):
 
     def set_routes(self, preferences, catalog):
         # Only non-secret presentation data is retained; equal refreshes do not redraw.
+        fingerprint = routing_preferences_fingerprint(preferences)
+        if fingerprint != self._runtime_preferences_fingerprint:
+            self._runtime_preferences_fingerprint = fingerprint
+            self.invalidate_runtime()
         descriptions = [(row, route_description(row, preferences, catalog)) for row in proxy_routing.route_rows(preferences)
                         if row["id"] != "custom" or preferences.get("custom_targets")
                         or (preferences.get("service_profile_bindings") or {}).get("custom")
@@ -232,6 +372,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
         signature = repr(descriptions)
         if signature == self._signature:
             return
+        if self._signature is not None:
+            self.invalidate_runtime("已保存线路或订阅信息发生变化，请重新检查运行状态")
         keys = {row["id"] for row, _ in descriptions}
         for key in self._rows.keys() - keys:
             self._rows.pop(key)["tile"].destroy()
@@ -261,6 +403,13 @@ class ServiceRouteOverview(ctk.CTkFrame):
         self._filter()
         self._signature = signature
 
+    def _runtime_labels(self):
+        return {key: row["runtime"] for key, row in self._rows.items()}
+
+    def destroy(self):
+        self._dispose_runtime()
+        super().destroy()
+
     def _build_row(self, key):
         tile = ctk.CTkFrame(self._body, fg_color=COLORS["surface_alt"], corner_radius=6)
         target_box = ctk.CTkFrame(tile, fg_color="transparent")
@@ -275,6 +424,9 @@ class ServiceRouteOverview(ctk.CTkFrame):
                 label.pack(fill="x")
             bind_wraplength(label, label, padding=4, min_width=80)
             row[name] = label
+        row["runtime"] = ctk.CTkLabel(node_box, text="", font=font(10), text_color=COLORS["muted"],
+                                       anchor="w", justify="left", width=1, height=16)
+        bind_wraplength(row["runtime"], row["runtime"], padding=4, min_width=80)
         row["edit"] = ctk.CTkButton(tile, text="设置", width=56, command=lambda: self._open(key),
                                      state="normal" if self._enabled else "disabled", **button_style("secondary", compact=True))
         return row

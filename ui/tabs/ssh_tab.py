@@ -16,6 +16,7 @@ from ui.ui_dispatch import dispatch_ui_callback
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.action_group import wrap_action_group
+from ui.widgets.service_route_overview import RuntimeRouteOverview
 
 
 profile_manager = LazyModule("core.profile_manager")
@@ -1044,6 +1045,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_route_diagnostics_button.pack(anchor="w", padx=14, pady=(0, 12))
+        self._proxy_runtime_overview = RuntimeRouteOverview(routes_card)
+        self._proxy_runtime_overview.pack(fill="x", padx=14, pady=(0, 12))
 
         proxy_frame = ctk.CTkFrame(deployment_parent, **card_frame_kwargs())
         proxy_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -2359,6 +2362,12 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _update_target_context_ui(self, selected: list[str] | None = None):
         selected = selected if selected is not None else self._ordered_server_names(self._selected_server_names)
         self._sync_proxy_latency_target_context(selected)
+        overview = self.__dict__.get("_proxy_runtime_overview")
+        if overview is not None:
+            signature = self._proxy_latency_source_signature(selected)
+            if signature != self.__dict__.get("_proxy_runtime_target_signature"):
+                self._proxy_runtime_target_signature = signature
+                overview.invalidate_runtime("目标服务器已变化，请重新检查；不会自动连接其他服务器")
         if selected:
             summary = f"已选目标: {self._format_server_target(selected)}"
             hint = "所有写入/部署操作使用已选目标；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。"
@@ -2596,6 +2605,8 @@ class SSHTab(ctk.CTkScrollableFrame):
 
     def _set_proxy_busy(self, busy: bool):
         self._proxy_busy = busy
+        if busy:
+            self._invalidate_proxy_runtime("代理操作进行中，完成后请重新检查运行状态")
         state = "disabled" if busy else "normal"
         for button in (
             self._proxy_fetch_button,
@@ -5236,7 +5247,36 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         self._proxy_route_diagnostics_dialog = RouteDiagnosticsDialog(
             self.winfo_toplevel(), scopes={name: name for name in server_names},
+            on_read_started=self._begin_proxy_runtime_read, on_loaded=self._accept_proxy_runtime_summary,
         )
+
+    def _invalidate_proxy_runtime(self, message="已保存分流可能变化，请重新检查运行状态"):
+        overview = self.__dict__.get("_proxy_runtime_overview")
+        if overview is not None and not self._destroyed:
+            overview.invalidate_runtime(message)
+
+    def _begin_proxy_runtime_read(self, scope):
+        overview = self.__dict__.get("_proxy_runtime_overview")
+        selected = self._selected_sync_server_names()
+        if self._destroyed or self._proxy_busy or self._ssh_busy or overview is None or scope not in selected:
+            return None
+        return (overview.begin_runtime_read(), scope, self._proxy_latency_source_signature(selected))
+
+    def _accept_proxy_runtime_summary(self, scope, summary, context):
+        overview = self.__dict__.get("_proxy_runtime_overview")
+        if self._destroyed or self._proxy_busy or self._ssh_busy or overview is None or context is None:
+            return
+        token, requested_scope, signature = context
+        selected = self._selected_sync_server_names()
+        if (scope != requested_scope or scope not in selected
+                or signature != self._proxy_latency_source_signature(selected)
+                or (summary is not None and summary.scope != scope)):
+            return
+        overview.set_runtime_summary(summary, token)
+
+    def _proxy_routes_saved(self):
+        self._invalidate_proxy_runtime()
+        self._set_proxy_status("SSH 目标分流处理完成，各服务器结果请查看编辑窗口。", "success")
 
     def _open_proxy_route_preset(self):
         self._open_proxy_service_routes(preset=True)
@@ -5263,6 +5303,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         from core import proxy_routing
         from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
 
+        self._invalidate_proxy_runtime()
         self._proxy_service_routes_dialog = ServiceRoutesDialog(
             self.winfo_toplevel(), scopes=server_names,
             load_preferences=proxy_routing.load_ssh_route_editor_preferences,
@@ -5270,7 +5311,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             apply_preferences=lambda scope, preferences, expected: proxy_routing.apply_ssh_routes(
                 scope, preferences, expected=expected,
             ),
-            on_saved=lambda: self._set_proxy_status("SSH 目标分流处理完成，各服务器结果请查看编辑窗口。", "success"),
+            on_saved=self._proxy_routes_saved,
             on_tags_saved=lambda: self._refresh_proxy_subscription_profile_options(preserve_editor=True),
             initial_preset=preset,
         )

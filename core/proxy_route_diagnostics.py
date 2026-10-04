@@ -328,6 +328,61 @@ def snapshot_report(snapshot: RouteSnapshot, now=None) -> str:
     return clean_lines(lines)
 
 
+def routing_preferences_fingerprint(preferences: dict) -> str:
+    """Identity of routing intent only; never retain credentials or cache contents."""
+    data = proxy_routing.route_snapshot(preferences)
+    data.update({key: preferences.get(key, False) for key in ("strict_privacy", "proxy_non_cn")})
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class RouteOverviewRow:
+    service: str
+    label: str
+    saved: str
+    current: str
+    warning: bool = False
+
+
+@dataclass(frozen=True)
+class RouteOverviewSnapshot:
+    """Small, redacted presentation data, without raw controller/config payloads."""
+    scope: str
+    preferences_fingerprint: str
+    captured_at: datetime
+    rows: tuple[RouteOverviewRow, ...]
+    error: str = ""
+
+    def stale(self, now=None) -> bool:
+        age = ((now or datetime.now(timezone.utc)) - self.captured_at).total_seconds()
+        return age < 0 or age >= SNAPSHOT_TTL
+
+
+def snapshot_overview(snapshot: RouteSnapshot, now=None) -> RouteOverviewSnapshot:
+    """Worker-only rule interpretation shared by overview and diagnostics dialog."""
+    rows = []
+    for service, label, host in service_examples(snapshot.preferences):
+        intended = match_rules(target_host(host), snapshot.saved)
+        saved = snapshot.route_label(intended.route) if intended.route else intended.reason
+        current, warning = "未确认运行状态；不是节点故障结论", bool(snapshot.error)
+        if snapshot.runtime:
+            actual = match_rules(target_host(host), snapshot.runtime["rules"], snapshot.runtime["mode"])
+            if actual.certain:
+                # Keep the row compact. Detailed probe evidence and timestamps
+                # remain in the existing diagnostics report.
+                current = snapshot.selected(actual.route, now).split("\n", 1)[0]
+                if intended.certain and intended.route != actual.route:
+                    current += " · 与已保存策略组不同，可能尚未应用或已被其他配置覆盖"
+                    warning = True
+            else:
+                current, warning = "无法确定：" + actual.reason, True
+        rows.append(RouteOverviewRow(service, clean(label), clean(saved), clean(current), warning))
+    return RouteOverviewSnapshot(
+        clean(snapshot.scope), routing_preferences_fingerprint(snapshot.preferences), snapshot.captured_at,
+        tuple(rows), clean(snapshot.error),
+    )
+
+
 def _validate_runtime(data: dict) -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("rules"), list) or not isinstance(data.get("proxies"), dict):
         raise ValueError("内核响应格式不完整")
@@ -471,4 +526,12 @@ def load_snapshot(ssh_name: str | None = None) -> RouteSnapshot:
                                for alias, name in snapshot.labels.items()}
     except Exception:
         pass
+    try:
+        current_preferences = (proxy_routing.load_ssh_routes(ssh_name) if ssh_name is not None else
+                               local_proxy._load_local_proxy_routing_preferences_strict())
+        if routing_preferences_fingerprint(current_preferences) != routing_preferences_fingerprint(preferences):
+            raise RuntimeError("saved routes changed during inspection")
+    except Exception:
+        snapshot.runtime = {}
+        snapshot.error = "已保存分流在检查期间发生变化或无法复核，请重新检查；原代理未改动。"
     return snapshot

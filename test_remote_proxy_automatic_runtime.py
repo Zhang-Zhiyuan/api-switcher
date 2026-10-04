@@ -362,14 +362,20 @@ def test_metadata_only_update_failed_probe_restores_metadata_without_reloading(d
 
 
 def test_bound_routes_keep_underlying_outcome_and_do_not_test_unrelated_targets(deployment, monkeypatch):
+    from core import service_route_verification as verification
+
     deployment.state["routes"] = {"service_profile_bindings": {"claude": "bound"}}
     monkeypatch.setattr(remote_proxy.proxy_routing, "node_pool_warnings", lambda *_a, **_k: ["synthetic pool warning"])
     monkeypatch.setattr(remote_proxy, "reload_ai_proxy", lambda *_a, **_k: update_result("synthetic retained", "retained", retryable=True))
+    monkeypatch.setattr(verification, "build_remote_command", lambda *_a, **_k: pytest.fail("retained config must not be probed"))
     result = remote_proxy.refresh_running_ai_proxy_from_subscription(
         "synthetic-server", [], profile_id="bound",
     )
     assert result.outcome == "retained" and result.retryable and result.warning
-    assert "未逐目标执行连通性验证" in result
+    assert len(result.route_verification) == 1
+    row = result.route_verification[0]
+    assert row["service"] == "claude" and row["status"] == "unverified"
+    assert "本轮配置未变或未加载，未重复探测" in row["detail"]
     assert not deployment.state["events"]
 
 

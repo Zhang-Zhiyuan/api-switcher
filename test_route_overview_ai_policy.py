@@ -117,12 +117,18 @@ class Label:
     def configure(self, **options):
         self.options.update(options)
 
+    def pack_forget(self):
+        pass
+
 
 def test_overview_summary_counts_policy_warning_as_needs_check_without_native_widgets():
     widget = object.__new__(ServiceRouteOverview)
     widget._signature, widget._narrow, widget._rows = None, False, {}
+    widget._init_runtime()
+    widget._runtime_preferences_fingerprint = None
+    widget._runtime_status = Label()
     widget._summary = Label()
-    widget._build_row = lambda _key: {name: Label() for name in ("target", "state", "profile", "node", "hint")}
+    widget._build_row = lambda _key: {name: Label() for name in ("target", "state", "profile", "node", "hint", "runtime")}
     widget._layout = lambda *_args: None
     widget._filter = lambda: None
     prefs, sources = preferences(pin="blocked"), catalog()
