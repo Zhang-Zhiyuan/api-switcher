@@ -18,6 +18,7 @@ def isolated_refresh(monkeypatch):
     monkeypatch.setattr(local_proxy, "_is_port_listening", lambda _port: True)
     monkeypatch.setattr(local_proxy, "_read_local_managed_proxy_node", lambda: original)
     monkeypatch.setattr(remote_proxy, "load_proxy_subscription_state", lambda: {"active_profile_id": "home"})
+    monkeypatch.setattr(local_proxy, "_load_local_proxy_routing_preferences_strict", lambda: {})
     monkeypatch.setattr(local_proxy, "reload_local_ai_proxy", lambda *_args, **_kwargs: pytest.fail("stale timer cannot write live config"))
     monkeypatch.setattr(local_proxy, "_select_stable_automatic_local_candidate", lambda *_args, **_kwargs: pytest.fail("stale origin must not launch probes"))
     return original, replacement, candidate
@@ -96,3 +97,44 @@ def test_missing_expected_origin_fails_closed_without_reading_real_preferences(i
         remote_proxy.format_proxy_node(original), _expected_current_key="", profile_id="home",
     )
     assert "已保留当前运行节点" in result
+
+
+@pytest.mark.parametrize("changed", ["url", "source_revision", "binding"])
+def test_isolated_probe_rejects_changed_source_or_new_service_binding(monkeypatch, isolated_refresh, changed):
+    original, _replacement, candidate = isolated_refresh
+    profile = {"url": "https://original.example/sub", "source_revision": "original"}
+    routes = {}
+    monkeypatch.setattr(remote_proxy, "load_proxy_subscription_state",
+                        lambda: {"active_profile_id": "home", "profiles": {"home": profile}})
+    monkeypatch.setattr(local_proxy, "_load_local_proxy_routing_preferences_strict", lambda: routes)
+    monkeypatch.setattr(local_proxy, "_prevalidated_local_candidate_matches", lambda *_args: True)
+
+    def probe(*_args, **_kwargs):
+        if changed == "binding":
+            routes["service_profile_bindings"] = {"claude": "home"}
+        else:
+            profile[changed] = "changed"
+        return remote_proxy.ProxySubscriptionNode(1, candidate), "synthetic proof", (), {}
+
+    monkeypatch.setattr(local_proxy, "_select_stable_automatic_local_candidate", probe)
+    result = local_proxy.refresh_running_local_ai_proxy_from_subscription(
+        [remote_proxy.ProxySubscriptionNode(1, candidate)], profile_id="home",
+        expected_current_key=remote_proxy.proxy_node_key(original),
+        expected_source=("https://original.example/sub", "", "original"),
+    )
+    assert result.outcome == "skipped" and result.warning
+
+
+def test_exact_current_forwards_source_guard(monkeypatch, isolated_refresh):
+    original, _replacement, _candidate = isolated_refresh
+    source = ("https://original.example/sub", "", "v1")
+    monkeypatch.setattr(remote_proxy, "load_proxy_subscription_state", lambda: {
+        "active_profile_id": "home", "profiles": {"home": {"url": source[0], "source_revision": "v1"}},
+    })
+    commit = Mock(return_value="synthetic committed")
+    monkeypatch.setattr(local_proxy, "reload_local_ai_proxy_verified", commit)
+    local_proxy.refresh_running_local_ai_proxy_from_subscription(
+        [remote_proxy.ProxySubscriptionNode(1, original)], profile_id="home",
+        expected_current_key=remote_proxy.proxy_node_key(original), expected_source=source,
+    )
+    assert commit.call_args.kwargs["_expected_source"] == source

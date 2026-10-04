@@ -195,6 +195,89 @@ def test_subscription_change_during_pending_paint_discards_old_widgets(view):
     assert_layout(picker)
 
 
+def test_hidden_scope_round_trip_rebuilds_live_commands_and_keeps_later_reuse(view):
+    picker = view.picker
+    selected = []
+    picker._on_select = selected.append
+    key = picker._node_key(view.nodes[1])
+    old_rows = picker._row_cache.copy()
+    old_header = picker._header_cache["美国"]
+    old_row = old_rows[key]
+    old_commands = (
+        # CTk 5.2.2's checkbox toggle() invokes _command, but unlike its
+        # button cget() implementation, checkbox cget() does not expose it.
+        old_row["checkbox"]._command,
+        old_row["button"].cget("command"),
+        old_header["toggle"].cget("command"),
+    )
+    assert all(callable(command) for command in old_commands)
+    # Mimic a checkbox event queued just before the tab stopped being active.
+    old_row["variable"].set(True)
+    view.active[0] = False
+    picker._suspend_background_work()
+    picker.set_nodes([node(30), node(31)])
+    replacement_selection = picker.selected_key()
+    for command in old_commands:
+        command()
+    assert picker.selected_key() == replacement_selection
+    assert not picker._checked_keys and not selected
+    assert all(cached["row"].winfo_exists() for cached in old_rows.values())
+
+    returned_nodes = [node(i) for i in range(24)]
+    picker.set_nodes(returned_nodes)
+    returned_selection = picker.selected_key()
+    for command in old_commands:
+        command()
+    assert picker.selected_key() == returned_selection
+    assert not picker._checked_keys and not selected
+
+    view.active[0] = True
+    picker._resume_background_work()
+    drain(view.root, picker)
+    assert not any(cached["row"].winfo_exists() for cached in old_rows.values())
+    assert not old_header["frame"].winfo_exists()
+    assert_layout(picker)
+    live_row = picker._row_cache[key]
+    live_header = picker._header_cache["美国"]
+    assert live_row["row"] is not old_row["row"]
+    live_row["checkbox"].toggle()
+    assert picker._checked_keys == {key}
+    live_row["button"].invoke()
+    assert picker.selected_key() == key
+    assert selected[-1] is returned_nodes[1]
+    live_header["toggle"].invoke()
+    drain(view.root, picker)
+    group_keys = {picker._node_key(item) for item in returned_nodes[:12]}
+    assert picker._checked_keys == group_keys
+
+    # Even after native widgets have been destroyed, saved commands are safe
+    # and cannot act on the replacement controls with identical node keys.
+    for command in old_commands:
+        command()
+    assert picker.selected_key() == key
+    assert picker._checked_keys == group_keys
+    assert len(selected) == 1
+
+    retained_rows = picker._row_cache.copy()
+    refreshed_nodes = [node(i) for i in range(24)]
+    picker.set_nodes(refreshed_nodes)
+    drain(view.root, picker)
+    assert all(picker._row_cache[key]["row"] is value["row"] for key, value in retained_rows.items())
+    assert picker._header_cache["美国"]["frame"] is live_header["frame"]
+    live_row["checkbox"].toggle()
+    assert picker._checked_keys == group_keys - {key}
+    live_row["button"].invoke()
+    assert selected[-1] is refreshed_nodes[1]
+    live_header["toggle"].invoke()
+    drain(view.root, picker)
+    assert picker._checked_keys == group_keys
+    live_header["toggle"].invoke()
+    drain(view.root, picker)
+    assert not picker._checked_keys
+    assert not any(variable.get() for _checkbox, variable in picker._visible_checkboxes.values())
+    assert_layout(picker)
+
+
 def test_picker_summary_wraps_on_narrow_scaled_window(view):
     old = ctk.ScalingTracker.widget_scaling
     try:

@@ -114,6 +114,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_profiles_loaded = False
         self._server_profiles = []
         self._server_profile_map = {}
+        self._server_selection_vars = {}
         self._proxy_saved_subscription_after_id = None
         self._destroyed = False
         self._deployment_sections_frame = None
@@ -308,37 +309,22 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("primary"),
         ).pack(side="right")
 
-        overview = ctk.CTkFrame(self, **card_frame_kwargs(COLORS["border_soft"]))
-        overview.pack(fill="x", padx=14, pady=(0, 10))
-        self._overview_content = ctk.CTkFrame(overview, fg_color="transparent")
-        self._overview_content.pack(fill="x", padx=14, pady=12)
-        for column in range(3):
-            self._overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
-        overview_items = [
-            ("1 勾选目标", "在服务器卡片选择 1 台或多台目标", "primary"),
-            ("2 同步配置", "推送/拉取 API、账号和 Git 登录", "accent"),
-            ("3 部署能力", "远端 AI 代理与自动续跑", "success"),
-        ]
-        self._overview_items = []
-        for column, (title, body, color_key) in enumerate(overview_items):
-            item = ctk.CTkFrame(self._overview_content, fg_color=COLORS["surface_alt"], corner_radius=8)
-            item.grid(row=0, column=column, sticky="ew", padx=(0, 8) if column < 2 else 0)
-            self._overview_items.append(item)
-            ctk.CTkLabel(
-                item,
-                text=title,
-                text_color=COLORS[color_key],
-                font=font(12, "bold"),
-                anchor="w",
-            ).pack(anchor="w", padx=12, pady=(9, 2))
-            ctk.CTkLabel(
-                item,
-                text=body,
-                text_color=COLORS["muted"],
-                font=font(12),
-                anchor="w",
-                justify="left",
-            ).pack(anchor="w", fill="x", padx=12, pady=(0, 9))
+        self._workflow_hint = ctk.CTkLabel(
+            self,
+            text="使用顺序：勾选服务器 → 同步 API / 账号 / Git 登录 → 按需部署代理与自动续跑",
+            fg_color=COLORS["surface_alt"],
+            text_color=COLORS["muted"],
+            corner_radius=6,
+            font=font(12),
+            width=1,
+            height=28,
+            padx=10,
+            pady=6,
+            anchor="w",
+            justify="left",
+        )
+        self._workflow_hint.pack(fill="x", padx=14, pady=(0, 10))
+        bind_wraplength(self, self._workflow_hint, padding=52, min_width=80)
 
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.pack(fill="x", padx=14, pady=(0, 8))
@@ -358,7 +344,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12, "bold"),
         )
         self._batch_target_label.pack(side="left", padx=(12, 0))
-        ctk.CTkFrame(sync_header, fg_color="transparent").pack(side="left", fill="x", expand=True)
+        ctk.CTkFrame(sync_header, width=1, height=1, fg_color="transparent").pack(side="left", fill="x", expand=True)
         self._batch_select_all_button = ctk.CTkButton(
             sync_header,
             text="全选目标",
@@ -660,18 +646,6 @@ class SSHTab(ctk.CTkScrollableFrame):
             return
         self._responsive_state = responsive_state
 
-        for column in range(3):
-            self._overview_content.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
-        if stacked:
-            self._overview_content.grid_columnconfigure(0, weight=1)
-            for row, item in enumerate(self._overview_items):
-                item.grid(row=row, column=0, sticky="ew", padx=0, pady=(0, 8) if row < 2 else 0)
-        else:
-            for column in range(3):
-                self._overview_content.grid_columnconfigure(column, weight=1, uniform="ssh_overview")
-            for column, item in enumerate(self._overview_items):
-                item.grid(row=0, column=column, sticky="ew", padx=(0, 8) if column < 2 else 0, pady=0)
-
         widgets = (
             self._target_summary_label,
             self._target_hint_label,
@@ -916,7 +890,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_header_subtitle.pack(side="left", padx=(10, 0))
         bind_wraplength(self._proxy_header, self._proxy_header_subtitle, padding=220, min_width=220, max_width=680)
-        self._proxy_header_spacer = ctk.CTkFrame(self._proxy_header, fg_color="transparent")
+        self._proxy_header_spacer = ctk.CTkFrame(self._proxy_header, width=1, height=1, fg_color="transparent")
         self._proxy_header_spacer.pack(side="left", fill="x", expand=True)
         self._proxy_target_label = ctk.CTkLabel(
             self._proxy_header,
@@ -1696,6 +1670,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if self._proxy_quality_cancel_event is not None:
             self._proxy_quality_cancel_event.set()
         self._server_refresh_generation += 1
+        self.__dict__.get("_server_selection_vars", {}).clear()
         if self._responsive_after_id is not None:
             try:
                 self.after_cancel(self._responsive_after_id)
@@ -1922,8 +1897,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._deferred_server_payload = None
         self._deferred_server_cards = None
 
-        for w in self._cards_frame.winfo_children():
-            w.destroy()
+        self._clear_server_cards()
         ctk.CTkLabel(
             self._cards_frame,
             text="正在后台读取 SSH 服务器...",
@@ -1978,8 +1952,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._deferred_server_payload = (payload, generation)
             self._deferred_server_cards = None
             return
-        for w in self._cards_frame.winfo_children():
-            w.destroy()
+        self._clear_server_cards()
         if not payload.get("ok"):
             ctk.CTkLabel(
                 self._cards_frame,
@@ -2024,6 +1997,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._server_profiles_loaded = True
         self._server_profiles = list(profiles or [])
         self._server_profile_map = {profile.name: profile for profile in self._server_profiles}
+
+    def _clear_server_cards(self):
+        # Drop Tk variables with their widgets; a later batch creates fresh
+        # variables from the latest selection, including mid-render changes.
+        self._server_selection_vars.clear()
+        for widget in self._cards_frame.winfo_children():
+            widget.destroy()
 
     def _render_server_cards_batch(self, profile_items: list[dict], generation: int, start: int = 0):
         if generation != self._server_refresh_generation or not self._is_alive():
@@ -2080,7 +2060,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         row.pack(fill="x", padx=10, pady=8)
         row.grid_columnconfigure(2, weight=1)
 
-        selected_var = ctk.BooleanVar(value=p.name in self._selected_server_names)
+        selected_var = ctk.BooleanVar(master=self, value=p.name in self._selected_server_names)
+        self._server_selection_vars[p.name] = selected_var
         ctk.CTkCheckBox(
             row,
             text="目标",
@@ -2299,6 +2280,7 @@ class SSHTab(ctk.CTkScrollableFrame):
     def _update_batch_target_label(self, server_names: list[str] | None = None):
         all_names = server_names if server_names is not None else self._profile_server_names()
         self._selected_server_names.intersection_update(all_names)
+        self._sync_server_selection_vars()
         selected = [name for name in all_names if name in self._selected_server_names]
         if self._batch_target_label:
             if selected:
@@ -2320,6 +2302,14 @@ class SSHTab(ctk.CTkScrollableFrame):
                     pass
         self._update_target_context_ui(selected)
 
+    def _sync_server_selection_vars(self):
+        # Selection is UI-only: avoid rereading profiles and rebuilding every
+        # card (including connection actions) for a select-all/clear operation.
+        for name, variable in self._server_selection_vars.items():
+            selected = name in self._selected_server_names
+            if bool(variable.get()) != selected:
+                variable.set(selected)
+
     def _toggle_batch_server(self, server_name: str, selected: bool):
         if selected:
             self._selected_server_names.add(server_name)
@@ -2334,14 +2324,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
         self._update_batch_target_label()
         self._on_remote_auto_provider_change()
-        self.refresh()
 
     def _clear_batch_servers(self):
         self._selected_server_names.clear()
         self._reset_remote_pull_options("目标服务器已变化，请重新读取远端配置。")
         self._update_batch_target_label()
         self._on_remote_auto_provider_change()
-        self.refresh()
 
     def _selected_sync_server_names(self) -> list[str]:
         return self._ordered_server_names(self._selected_server_names)
@@ -3531,7 +3519,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._schedule_proxy_periodic_update(initial=True)
         self._subscription_timer_restored = True
 
-    def _schedule_proxy_periodic_update(self, initial: bool = False, *, retry: bool = False):
+    def _schedule_proxy_periodic_update(self, initial: bool = False, *, retry: bool = False, delay_seconds=None):
         if getattr(self, "_destroyed", False) or not bool(self._proxy_periodic_update_var.get()):
             self._cancel_proxy_periodic_update()
             return
@@ -3541,7 +3529,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         except (AttributeError, TypeError, ValueError, OverflowError):
             interval_minutes = 60
         delay_minutes = 1 if initial or retry else interval_minutes
-        replacement = self.after(delay_minutes * 60 * 1000, self._run_proxy_periodic_update)
+        from ui.subscription_auto_refresh import periodic_refresh_delay_ms
+
+        replacement = self.after(periodic_refresh_delay_ms(delay_minutes * 60, delay_seconds), self._run_proxy_periodic_update)
         # A scheduling error must not discard a still-valid earlier timer.
         self._cancel_proxy_periodic_update()
         self._proxy_periodic_update_after_id = replacement

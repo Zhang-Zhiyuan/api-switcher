@@ -75,6 +75,10 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._selected_key = ""
         self._checked_keys = set()
         self._enabled = True
+        self._destroyed = False
+        self._node_scope_generation = 0
+        self._node_scope_signature = ()
+        self._node_scope_keys = set()
         self._render_after_id = None
         self._render_batch_after_id = None
         self._render_generation = 0
@@ -310,8 +314,22 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._latency_results = latency_results if isinstance(latency_results, dict) else {}
         self._quality_results = quality_results if isinstance(quality_results, dict) else {}
         self._build_node_metadata()
+        # Old controls survive until batched teardown finishes. Their commands
+        # must never act on a replacement subscription, even when it has a
+        # group with the same region name. Identical result refreshes keep the
+        # generation so retained row/header controls remain usable.
+        scope = tuple((self._node_key(item), self._node_region(item)) for item in self._nodes)
+        if scope != self.__dict__.get("_node_scope_signature"):
+            self._node_scope_generation = self.__dict__.get("_node_scope_generation", 0) + 1
+            # Hidden tabs can visit A -> B -> A without painting B. The old A
+            # signature may match again, but its callbacks now carry an expired
+            # scope generation, so those controls must be rebuilt on activation.
+            self._rendered_signature = None
+            self._pending_render_signature = None
+        self._node_scope_signature = scope
+        self._node_scope_keys = {key for key, _region in scope}
         self._update_region_options()
-        available_keys = {self._node_key(item) for item in self._nodes}
+        available_keys = self._node_scope_keys
         if selected_key and selected_key in available_keys:
             self._selected_key = selected_key
         elif self._selected_key and self._selected_key not in available_keys:
@@ -338,6 +356,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._render_nodes()
 
     def destroy(self):
+        self._destroyed = True
         self._cancel_checkbox_sync()
         self._cancel_pending_render()
         self._cancel_incremental_render()
@@ -802,6 +821,28 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._render_batch_after_id = None
             self._finish_render_plan_synchronously(generation, render_plan, end_index)
 
+    def _schedule_idle_batch(self, slot: str, callback):
+        """Schedule cheap checkbox paint without a timer tick per small batch.
+
+        Idle only queues a normal timer callback. Running widget creation in
+        the idle handler itself could be reentered by update_idletasks() and
+        drain the whole subscription synchronously. The slot always contains
+        the currently cancellable stage, including during tab hide/destruction.
+        Native row creation intentionally keeps its ordinary timer schedule:
+        waiting for the much busier creation/layout idle queue is slower.
+        """
+        def ready():
+            if self.__dict__.get(slot) != token:
+                return
+            try:
+                self.__dict__[slot] = self.after(0, callback)
+            except Exception:
+                self.__dict__[slot] = None
+                callback()
+
+        token = self.after_idle(ready)
+        return token
+
     def _render_plan_item(self, kind: str, payload, extra) -> None:
         if kind == "hide":
             payload.pack_forget()
@@ -858,6 +899,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         return render_plan
 
     def _render_group_header(self, region: str, items):
+        scope = self.__dict__.get("_node_scope_generation", 0)
         group_items = self.group_items(region)
         metas = [self._metadata_for(item) for item in group_items]
         keys = [str(meta.get("key") or "") for meta in metas]
@@ -895,7 +937,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                 text="检测家宽",
                 width=78,
                 state="normal" if self._enabled else "disabled",
-                command=lambda group_region=region: self._emit_group_quality(group_region),
+                command=lambda group_region=region, scope=scope: self._emit_group_quality(group_region, scope=scope),
                 **button_style("accent", compact=True),
             )
             quality_button.grid(row=0, column=action_column, sticky="e", padx=(0, 6), pady=5)
@@ -906,7 +948,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             text="取消全选" if keys and checked == len(keys) else "全选本组",
             width=72,
             state="normal" if self._enabled else "disabled",
-            command=lambda group_keys=tuple(keys): self._toggle_group_checked(group_keys),
+            command=lambda group_keys=tuple(keys), scope=scope: self._toggle_group_checked(group_keys, scope=scope),
             **button_style("secondary", compact=True),
         )
         toggle_button.grid(row=0, column=action_column, sticky="e", padx=(0, 6), pady=5)
@@ -959,6 +1001,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             return None
 
     def _render_row(self, item):
+        scope = self.__dict__.get("_node_scope_generation", 0)
         node_key, title, meta_text, latency_label, latency_color, quality_badge, quality_color = self._row_presentation(item)
         selected = node_key == self._selected_key
 
@@ -979,7 +1022,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             checkbox_height=16,
             variable=checked_var,
             state="normal" if self._enabled else "disabled",
-            command=lambda key=node_key, var=checked_var: self._toggle_checked(key, var.get()),
+            command=lambda key=node_key, var=checked_var, scope=scope: self._toggle_checkbox_from_control(key, var, scope=scope),
             text_color=COLORS["muted"],
             font=font(11),
         )
@@ -991,7 +1034,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             text="当前" if selected else "使用",
             width=50,
             state="normal" if self._enabled else "disabled",
-            command=lambda key=node_key: self._select(key),
+            command=lambda key=node_key, scope=scope: self._select(key, scope=scope),
             **button_style("primary" if selected else "secondary", compact=True),
         )
         select_button.grid(row=0, column=1, rowspan=2, sticky="w", padx=(3, 7), pady=6)
@@ -1146,7 +1189,24 @@ class ProxyNodePicker(ctk.CTkFrame):
             header["frame"].pack(fill="x", padx=5, pady=(6, 0))
             self._visible_group_headers.append(header)
 
-    def _select(self, node_key: str):
+    def _node_action_is_current(self, scope=None, keys=()) -> bool:
+        if self.__dict__.get("_destroyed", False) or not self.__dict__.get("_enabled", True):
+            return False
+        if scope is not None and scope != self.__dict__.get("_node_scope_generation", 0):
+            return False
+        if keys:
+            available = self.__dict__.get("_node_scope_keys")
+            if available is None:
+                available = {self._node_key(item) for item in self._nodes}
+            # Reject the whole group instead of silently changing the batch
+            # scope to its surviving subset.
+            if any(key not in available for key in keys):
+                return False
+        return True
+
+    def _select(self, node_key: str, *, scope=None):
+        if not self._node_action_is_current(scope, (node_key,)):
+            return
         previous_key = self._selected_key
         self._selected_key = node_key
         item = self.selected_item()
@@ -1173,7 +1233,20 @@ class ProxyNodePicker(ctk.CTkFrame):
             except Exception:
                 pass
 
-    def _toggle_checked(self, node_key: str, checked: bool):
+    def _toggle_checkbox_from_control(self, node_key: str, variable, *, scope=None):
+        # Scope/lifecycle validation must precede the Tcl variable read. A
+        # queued native command can outlive its widget and Tk interpreter.
+        if not self._node_action_is_current(scope, (node_key,)):
+            return
+        try:
+            checked = bool(variable.get())
+        except Exception:
+            return
+        self._toggle_checked(node_key, checked, scope=scope)
+
+    def _toggle_checked(self, node_key: str, checked: bool, *, scope=None):
+        if not self._node_action_is_current(scope, (node_key,)):
+            return
         if checked:
             self._checked_keys.add(node_key)
         else:
@@ -1183,7 +1256,10 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._update_group_headers()
         self._emit_scope_change()
 
-    def _set_group_checked(self, keys, checked: bool):
+    def _set_group_checked(self, keys, checked: bool, *, scope=None):
+        keys = tuple(keys or ())
+        if not keys or not self._node_action_is_current(scope, keys):
+            return
         if checked:
             self._checked_keys.update(keys)
         else:
@@ -1195,12 +1271,14 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._update_group_headers()
         self._emit_scope_change()
 
-    def _toggle_group_checked(self, keys):
+    def _toggle_group_checked(self, keys, *, scope=None):
         group_keys = tuple(keys or ())
         should_check = not group_keys or any(key not in self._checked_keys for key in group_keys)
-        self._set_group_checked(group_keys, should_check)
+        self._set_group_checked(group_keys, should_check, scope=scope)
 
     def _set_matching_checked(self, checked: bool):
+        if not self._node_action_is_current():
+            return
         keys = [self._node_key(item) for item in self._filtered_nodes()]
         if checked:
             self._checked_keys.update(keys)
@@ -1264,8 +1342,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             return
         if end < len(keys):
             try:
-                self._checkbox_sync_after_id = self.after(
-                    self.RENDER_BATCH_DELAY_MS, lambda: self._sync_checkbox_batch(keys, end, generation),
+                self._checkbox_sync_after_id = self._schedule_idle_batch(
+                    "_checkbox_sync_after_id", lambda: self._sync_checkbox_batch(keys, end, generation),
                 )
             except Exception:
                 self._checkbox_sync_after_id = None
@@ -1396,7 +1474,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         except Exception:
             pass
 
-    def _emit_group_quality(self, region: str):
+    def _emit_group_quality(self, region: str, *, scope=None):
+        if not self._node_action_is_current(scope):
+            return
         if not self._on_group_quality:
             return
         items = tuple(self.group_items(region))

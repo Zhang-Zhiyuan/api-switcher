@@ -3,11 +3,55 @@ from __future__ import annotations
 
 import queue
 import threading
+import math
 
 from core import subscription_auto_refresh
 from core.lazy_imports import LazyModule
 
 remote_proxy = LazyModule("core.remote_proxy")
+
+
+def normalized_refresh_delay_seconds(value):
+    """Accept bounded positive timer hints, never NaN/inf or Boolean flags."""
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    return min(86400.0, max(1.0, seconds))
+
+
+def periodic_refresh_delay_ms(default_seconds, delay_seconds=None):
+    hint = normalized_refresh_delay_seconds(delay_seconds)
+    return round((default_seconds if hint is None else hint) * 1000)
+
+
+def _saved_interval_seconds(value):
+    try:
+        minutes = min(max(int(value), 5), 1440) if not isinstance(value, bool) else 60
+    except (TypeError, ValueError, OverflowError):
+        minutes = 60
+    return minutes * 60
+
+
+def _feedback_messages(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("订阅刷新反馈格式无效")
+    return [str(item) for item in value if item]
+
+
+def _feedback_count(value):
+    try:
+        return max(0, int(value)) if not isinstance(value, bool) else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def start_saved_refresh(tab, *, scope: str, thread_factory):
@@ -30,6 +74,9 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
         status("SSH 定时刷新未保存目标；请勾选服务器后重新开启定时热更新。", "warning")
         schedule()
         return
+    # Snapshot only the confirmed interval; neither the worker nor completion
+    # reads or submits whatever the user is currently typing in the entry.
+    interval_seconds = _saved_interval_seconds(getattr(tab, prefix + "periodic_update_interval_saved", 60))
     if not remote_proxy.try_acquire_proxy_subscription_hot_update():
         status("另一项订阅刷新正在进行，定时任务将在 1 分钟后重试。", "info")
         schedule(retry=True)
@@ -58,10 +105,28 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
         setattr(tab, running_attr, False)
         if getattr(tab, "_destroyed", False):
             return
-        errors = list(payload.get("errors") or ())
-        results = payload.get("results") or {}
+        retry = True
+        schedule_options = {}
         try:
             set_busy(False)
+            if not isinstance(payload, dict):
+                raise ValueError("订阅刷新结果格式无效")
+            errors = _feedback_messages(payload.get("errors"))
+            results = payload.get("results") or {}
+            if not isinstance(results, dict):
+                raise ValueError("订阅刷新缓存结果格式无效")
+            steps = payload.get("steps")
+            structured = isinstance(steps, list) and all(isinstance(step, dict) for step in steps)
+            if steps is not None and not structured:
+                raise ValueError("订阅刷新步骤格式无效")
+            retryable = payload.get("retryable")
+            retry = retryable if isinstance(retryable, bool) else bool(
+                errors or (structured and any(step.get("retryable") for step in steps))
+            )
+            hint = normalized_refresh_delay_seconds(payload.get("next_delay_seconds"))
+            current_interval = _saved_interval_seconds(getattr(tab, prefix + "periodic_update_interval_saved", 60))
+            if hint is not None and current_interval == interval_seconds:
+                schedule_options["delay_seconds"] = hint
             if results:
                 refresh = tab._refresh_subscription_profile_options if scope == "local" else tab._refresh_proxy_subscription_profile_options
                 refresh(preserve_editor=True)
@@ -75,19 +140,31 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
                         tab._set_subscription_nodes(results[current_id].nodes, preserve_key=selected)
                     else:
                         tab._set_proxy_subscription_nodes(results[current_id].nodes, preserve_key=selected)
-            details = [*errors, *(payload.get("apply_messages") or ())]
-            message = f"{label} 定时刷新：已更新 {len(results)} 个已保存订阅"
+            apply_messages = _feedback_messages(payload.get("apply_messages"))
+            warnings = [str(step.get("message") or "") for step in (steps or ()) if step.get("warning")]
+            details = list(dict.fromkeys(message for message in [*errors, *warnings, *apply_messages] if message))
+            if structured:
+                message = (
+                    f"{label} 定时刷新：下载 {_feedback_count(payload.get('downloaded_count'))} 个，"
+                    f"复用缓存 {_feedback_count(payload.get('reused_count'))} 个，"
+                    f"等待 {_feedback_count(payload.get('waiting_count'))} 个"
+                )
+            else:
+                message = f"{label} 定时刷新：已处理 {len(results)} 个已保存订阅"
             if details:
                 message += "；" + "；".join(details)
-            elif not results:
-                message += "；当前没有可下载的订阅链接"
-            incomplete = any(any(marker in detail for marker in ("失败", "未运行", "跳过", "无法", "未执行")) for detail in details)
-            status(message, "warning" if errors or incomplete else "info")
+            elif not structured and not results:
+                message += "；本轮没有更新订阅缓存"
+            # Old workers did not expose an apply verdict. Show their text
+            # conservatively without guessing success from Chinese keywords.
+            warning = bool(errors) or (any(step.get("warning") for step in steps) if structured else bool(apply_messages))
+            status(message, "warning" if warning else "info")
         except Exception as exc:
-            errors.append(str(exc))
+            retry = True
+            schedule_options.clear()
             status(f"{label} 定时刷新界面同步失败，任务会继续重试：{exc}", "warning")
         finally:
-            schedule(retry=bool(errors))
+            schedule(retry=retry, **schedule_options)
 
     def poll():
         setattr(tab, poll_attr, None)
@@ -125,14 +202,24 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
                 return
             worker_started = True
         try:
-            payload = subscription_auto_refresh.refresh_saved_subscriptions(scope, server_names=names)
+            payload = subscription_auto_refresh.refresh_saved_subscriptions(
+                scope, server_names=names, interval_seconds=interval_seconds,
+            )
         except Exception as exc:
             payload = {"errors": [str(exc)], "results": {}}
         finally:
             try:
                 release()
             except Exception as exc:
-                payload.setdefault("errors", []).append(f"订阅刷新锁释放失败：{exc}")
+                if not isinstance(payload, dict):
+                    payload = {"results": {}, "errors": []}
+                try:
+                    errors = _feedback_messages(payload.get("errors"))
+                except ValueError:
+                    errors = ["订阅刷新错误反馈格式无效"]
+                payload["errors"] = [*errors, f"订阅刷新锁释放失败：{exc}"]
+                payload["retryable"] = True
+                payload.pop("next_delay_seconds", None)
         channel.put(payload)
 
     try:

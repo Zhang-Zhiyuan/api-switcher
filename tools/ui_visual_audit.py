@@ -24,7 +24,7 @@ sys.path.insert(0, str(WORKSPACE))
 
 
 def capture_window_image(window, *, onscreen=False):
-    """Capture only a mapped native HWND; never fall back to desktop pixels."""
+    """Capture a mapped HWND; explicit screen mode stays within its client area."""
     from PIL import ImageGrab
 
     if os.name != "nt":
@@ -32,32 +32,79 @@ def capture_window_image(window, *, onscreen=False):
     window.update_idletasks()
     if not window.winfo_ismapped():
         raise RuntimeError("refusing to capture an unmapped preview window")
-    get_parent = ctypes.windll.user32.GetParent
-    get_parent.argtypes, get_parent.restype = (ctypes.c_void_p,), ctypes.c_void_p
-    hwnd = get_parent(window.winfo_id())
-    if not hwnd:
-        raise RuntimeError("preview has no native window handle")
+    user32 = ctypes.windll.user32
+    get_ancestor = user32.GetAncestor
+    get_ancestor.argtypes, get_ancestor.restype = (ctypes.c_void_p, ctypes.c_uint), ctypes.c_void_p
+
+    def preview_handle():
+        if not window.winfo_ismapped():
+            raise RuntimeError("refusing to capture an unmapped preview window")
+        # Tk owns an inner HWND and a native wrapper. Walk parents, not owners:
+        # a different dialog owned by this window is not the same preview.
+        handle = get_ancestor(window.winfo_id(), 2)  # GA_ROOT
+        if not handle:
+            raise RuntimeError("preview has no native window handle")
+        return handle
+
+    def prepare_native():
+        hwnd = preview_handle()
+        redraw = user32.RedrawWindow
+        redraw.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint)
+        redraw.restype = ctypes.c_int
+        if not redraw(hwnd, None, None, 0x1 | 0x4 | 0x80 | 0x100):
+            raise RuntimeError("preview repaint failed")
+        # WM_PAINT can queue Tk canvas work; finish that before synchronizing
+        # DWM. Pillow's window capture uses GetDC/BitBlt, not PrintWindow.
+        window.update_idletasks()
+        flush = ctypes.windll.dwmapi.DwmFlush
+        flush.argtypes, flush.restype = (), ctypes.c_long
+        if flush() != 0:
+            raise RuntimeError("preview compositor synchronization failed")
+        if preview_handle() != hwnd:
+            raise RuntimeError("preview window changed during capture")
+        return hwnd
+
     if onscreen:
-        # Explicit comparison mode for Tk/PrintWindow repaint artifacts. Never
-        # read desktop pixels unless this mapped preview owns the foreground.
+        # Explicit comparison mode: capture the verified preview's client
+        # rectangle only. This is never a fallback from native capture.
+        from ctypes import wintypes
+
+        foreground = user32.GetForegroundWindow
+        foreground.argtypes, foreground.restype = (), ctypes.c_void_p
+
+        def require_foreground(hwnd):
+            if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+                raise RuntimeError("refusing capture: preview is not the foreground window")
+
         topmost = window.attributes("-topmost")
         try:
             window.attributes("-topmost", True)
             window.lift()
             window.focus_force()
             window.update()
-            foreground = ctypes.windll.user32.GetForegroundWindow
-            foreground.argtypes, foreground.restype = (), ctypes.c_void_p
-            if foreground() != hwnd:
-                raise RuntimeError("refusing screen capture: preview is not the foreground window")
-            left, top = window.winfo_rootx(), window.winfo_rooty()
-            return ImageGrab.grab(bbox=(left, top, left + window.winfo_width(), top + window.winfo_height()), all_screens=True)
+            hwnd = preview_handle()
+            require_foreground(hwnd)
+            if prepare_native() != hwnd:
+                raise RuntimeError("preview window changed during capture")
+            get_rect = user32.GetClientRect
+            get_rect.argtypes, get_rect.restype = (ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)), ctypes.c_int
+            to_screen = user32.ClientToScreen
+            to_screen.argtypes, to_screen.restype = (ctypes.c_void_p, ctypes.POINTER(wintypes.POINT)), ctypes.c_int
+            rect, origin = wintypes.RECT(), wintypes.POINT()
+            if (not get_rect(hwnd, ctypes.byref(rect)) or not to_screen(hwnd, ctypes.byref(origin))
+                    or rect.right <= 0 or rect.bottom <= 0):
+                raise RuntimeError("preview client rectangle is unavailable")
+            require_foreground(hwnd)
+            result = ImageGrab.grab(
+                bbox=(origin.x, origin.y, origin.x + rect.right, origin.y + rect.bottom), all_screens=True,
+            )
+            # Do not save pixels if focus/window identity changed while the
+            # comparison was captured. Never substitute another foreground.
+            require_foreground(hwnd)
+            return result
         finally:
             window.attributes("-topmost", topmost)
-    redraw = ctypes.windll.user32.RedrawWindow
-    redraw.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint)
-    redraw(hwnd, None, None, 0x1 | 0x4 | 0x80 | 0x100)
-    return ImageGrab.grab(window=hwnd)
+    return ImageGrab.grab(window=prepare_native())
 
 
 def seed_data():
@@ -118,7 +165,7 @@ def main():
     parser.add_argument("--tab", help="Capture one tab by its exact display label")
     parser.add_argument("--focus-maintenance", action="store_true", help="Also capture the Win11 proxy lifecycle notice")
     parser.add_argument("--expand-shortcuts", action="store_true", help="Also exercise the optional global shortcuts")
-    parser.add_argument("--onscreen", action="store_true", help="Compare screen rendering; requires the preview to own the foreground")
+    parser.add_argument("--onscreen", action="store_true", help="Compare client-area screen rendering; requires the preview to own the foreground")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not args.child:

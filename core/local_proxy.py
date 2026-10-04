@@ -49,6 +49,7 @@ from config.paths import STORAGE_DIR
 from core import persistent_env, proxy_routing, remote_proxy, vscode_parser, wsl_proxy
 from core.atomic_io import atomic_copy_file, atomic_write_bytes, atomic_write_text, replace_with_retry
 from core.proxy_health import parse_proxy_health, proxy_health_summary
+from core.proxy_update_result import ProxyUpdateResult, update_result, with_update_message
 from core.local_proxy_constants import (
     LOCAL_PROXY_AI_SERVICE_IDS,
     LOCAL_PROXY_AI_SERVICES,
@@ -1644,17 +1645,20 @@ def apply_local_proxy_routing_to_running() -> str:
         "本机代理端口",
     )
     if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
-        return "代理范围已保存；本机代理未运行，下次启动时生效" + suffix
+        return update_result("代理范围已保存；本机代理未运行，下次启动时生效" + suffix, "skipped", warning=True)
     node = _read_local_managed_proxy_node() or _load_last_proxy_node()
     if not node:
         raise RuntimeError("未读取到当前运行节点，无法热更新代理范围")
     # This is a routing-only rebuild.  Persisting ``node`` as the selected node
     # of whichever subscription happens to be active would cross-contaminate
     # otherwise independent A/B subscriptions.
-    return reload_local_ai_proxy(
+    result = reload_local_ai_proxy(
         remote_proxy.format_proxy_node(node),
         persist_subscription_selection=False,
-    ) + suffix
+    )
+    result = with_update_message(result, result + suffix)
+    return update_result(result, result.outcome, retryable=result.retryable,
+                         warning=result.warning or bool(warnings))
 
 
 @_serialized_local_proxy_operation("自动启动本机代理")
@@ -2250,10 +2254,10 @@ def reload_local_ai_proxy(
         "本机代理端口",
     )
     if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
-        return "本机 AI 代理未运行或不是本工具受管进程，已跳过热更新"
+        return update_result("本机 AI 代理未运行或不是本工具受管进程，已跳过热更新", "skipped", warning=True)
     status = inspect_local_ai_proxy(mixed_port)
     if not status.running:
-        return "本机 AI 代理未运行，已跳过热更新"
+        return update_result("本机 AI 代理未运行，已跳过热更新", "skipped", warning=True)
     proxy_node = remote_proxy.parse_proxy_node(proxy_text)
     if fallback_nodes is None:
         fallback_nodes = _existing_local_proxy_fallback_nodes(proxy_node)
@@ -2284,7 +2288,7 @@ def reload_local_ai_proxy(
     if same_config and applied_matches and not wsl_reconcile_needed:
         if persist_subscription_selection:
             _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
-        return "本机 AI 代理运行节点已是最新配置，无需热更新"
+        return update_result("本机 AI 代理运行节点已是最新配置，无需热更新", "unchanged")
     if same_config and applied_matches:
         if wsl_target is not None:
             wsl_detail, _result = _reconcile_wsl_integration_state(
@@ -2299,11 +2303,11 @@ def reload_local_ai_proxy(
         _save_state(state)
         if persist_subscription_selection:
             _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
-        return "；".join(
+        return update_result("；".join(
             item
             for item in ("本机 AI 代理配置已是最新", wsl_detail)
             if item
-        )
+        ), "unchanged")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not same_config:
@@ -2374,7 +2378,7 @@ def reload_local_ai_proxy(
     if persist_subscription_selection:
         _remember_selected_subscription_node(proxy_node, profile_id=profile_id)
     fallback_candidates = _managed_proxy_pool_size(new_config)
-    return (
+    return update_result(
         f"本机 AI 代理已热更新节点为 {remote_proxy.describe_proxy_node(proxy_node)}；"
         f"内核故障切换池 {fallback_candidates} 个节点"
         + (
@@ -2382,7 +2386,7 @@ def reload_local_ai_proxy(
             if service_route_groups
             else ""
         )
-        + (f"；{wsl_detail}" if wsl_detail else "")
+        + (f"；{wsl_detail}" if wsl_detail else ""), "applied",
     )
 
 
@@ -2398,13 +2402,14 @@ def reload_local_ai_proxy_verified(
     _prevalidated_result: LocalProxyNodeStabilityResult | None = None,
     _expected_original_node: dict | None = None,
     _expected_current_key: str | None = None,
+    _expected_source: tuple | None = None,
 ) -> str:
     requested_node = remote_proxy.parse_proxy_node(proxy_text)
     original_node = _read_local_managed_proxy_node()
     if _expected_current_key is not None and not _subscription_refresh_origin_matches(
-        original_node, _expected_current_key, profile_id,
+        original_node, _expected_current_key, profile_id, _expected_source,
     ):
-        return "订阅已刷新，但默认节点或订阅分组已变化，已保留当前运行节点"
+        return update_result("订阅已刷新，但默认节点或订阅分组已变化，已保留当前运行节点", "skipped", warning=True)
     fallback_nodes = _local_proxy_fallback_nodes(
         requested_node,
         candidate_nodes,
@@ -2414,7 +2419,8 @@ def reload_local_ai_proxy_verified(
         requested_node,
         _prevalidated_result,
     ):
-        return "本机 AI 代理自动更新候选未通过精确匹配的 Codex 长会话网络深测，已保留当前运行节点"
+        return update_result("本机 AI 代理自动更新候选未通过精确匹配的 Codex 长会话网络深测，已保留当前运行节点",
+                             "retained", retryable=True, warning=True)
     if automatic_update:
         try:
             expected_key = remote_proxy.proxy_node_key(_expected_original_node or {})
@@ -2422,7 +2428,7 @@ def reload_local_ai_proxy_verified(
         except Exception:
             expected_key = original_key = ""
         if not expected_key or original_key != expected_key:
-            return "本机 AI 代理当前运行节点在深测期间已变化，已放弃自动更新且未切换节点"
+            return update_result("本机 AI 代理当前运行节点在深测期间已变化，已放弃自动更新且未切换节点", "skipped", warning=True)
     try:
         if profile_id:
             reload_message = reload_local_ai_proxy(
@@ -2436,8 +2442,9 @@ def reload_local_ai_proxy_verified(
                 fallback_nodes=fallback_nodes,
             )
     except Exception as exc:
-        return f"本机 AI 代理自动更新跳过，{exc}"
-    if "跳过" in reload_message:
+        return update_result(f"本机 AI 代理自动更新跳过，{exc}", "failed", warning=True)
+    if (isinstance(reload_message, ProxyUpdateResult) and not reload_message.applied
+            or not isinstance(reload_message, ProxyUpdateResult) and "跳过" in reload_message):
         return reload_message
 
     try:
@@ -2448,19 +2455,19 @@ def reload_local_ai_proxy_verified(
             requested_node,
             profile_id=profile_id,
         )
-        return f"{reload_message}；热更新后验证执行失败: {exc}{restore_suffix}"
+        return update_result(f"{reload_message}；热更新后验证执行失败: {exc}{restore_suffix}", "failed", warning=True)
     retry_detail = "；已等待内核故障切换初始化并复检" if failover_retried else ""
     if remote_proxy._probe_summary_all_ok(probe_message):
         prevalidated = "；隔离环境 Codex 长会话网络深测通过" if automatic_update else ""
-        return (
+        return update_result(
             f"{reload_message}{prevalidated}{retry_detail}；"
-            f"验证通过: {remote_proxy._compact_probe_summary(probe_message)}"
+            f"验证通过: {remote_proxy._compact_probe_summary(probe_message)}", "applied",
         )
     if _local_probe_summary_codex_ready(probe_message):
         prevalidated = "；隔离环境 Codex 长会话网络深测通过" if automatic_update else ""
-        return (
+        return update_result(
             f"{reload_message}{prevalidated}{retry_detail}；Codex 核心链路已通过；"
-            f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}"
+            f"其他 AI 服务未完全可达: {remote_proxy._compact_probe_summary(probe_message)}", "applied", warning=True,
         )
 
     if automatic_update:
@@ -2469,9 +2476,9 @@ def reload_local_ai_proxy_verified(
             requested_node,
             profile_id=profile_id,
         )
-        return (
+        return update_result(
             f"{reload_message}{retry_detail}；隔离深测候选应用后验证未完全通过: "
-            f"{remote_proxy._compact_probe_summary(probe_message)}{restore_suffix}"
+            f"{remote_proxy._compact_probe_summary(probe_message)}{restore_suffix}", "failed", warning=True,
         )
 
     restore_suffix = _restore_local_proxy_node_after_failed_update(
@@ -2479,20 +2486,32 @@ def reload_local_ai_proxy_verified(
         requested_node,
         profile_id=profile_id,
     )
-    return (
+    return update_result(
         f"{reload_message}{retry_detail}；验证未完全通过: "
         f"{remote_proxy._compact_probe_summary(probe_message)}；"
-        f"为避免启动阶段长时间中断 Codex，已跳过阻塞式逐节点深测{restore_suffix}"
+        f"为避免启动阶段长时间中断 Codex，已跳过阻塞式逐节点深测{restore_suffix}", "failed", warning=True,
     )
 
 
-def _subscription_refresh_origin_matches(node: dict | None, expected_key: str, profile_id: str) -> bool:
+def _subscription_refresh_origin_matches(node: dict | None, expected_key: str, profile_id: str,
+                                         expected_source: tuple | None = None) -> bool:
     """Saved timer provenance, rechecked inside the existing commit lock."""
     try:
         if not expected_key or remote_proxy.proxy_node_key(node or {}) != expected_key:
             return False
-        if profile_id and remote_proxy.load_proxy_subscription_state().get("active_profile_id") != profile_id:
-            return False
+        if profile_id:
+            state = remote_proxy.load_proxy_subscription_state()
+            if state.get("active_profile_id") != profile_id:
+                return False
+            if expected_source is not None:
+                profile = (state.get("profiles") or {}).get(profile_id)
+                if not isinstance(profile, dict) or tuple(profile.get(key, "") for key in (
+                    "url", "source_path", "source_revision",
+                )) != expected_source:
+                    return False
+            routes = _load_local_proxy_routing_preferences_strict()
+            if profile_id in (routes.get("service_profile_bindings") or {}).values():
+                return False
     except Exception:
         return False
     return True
@@ -2504,6 +2523,7 @@ def refresh_running_local_ai_proxy_from_subscription(
     profile_id: str = "",
     *,
     expected_current_key: str | None = None,
+    expected_source: tuple | None = None,
 ) -> str:
     state = _load_state()
     mixed_port = remote_proxy._normalize_port(
@@ -2511,17 +2531,18 @@ def refresh_running_local_ai_proxy_from_subscription(
         "本机代理端口",
     )
     if not _managed_local_proxy_is_running(state) or not _is_port_listening(mixed_port):
-        return "本机 AI 代理未运行，已跳过订阅热更新"
+        return update_result("本机 AI 代理未运行，已跳过订阅热更新", "skipped", warning=True)
     candidates = tuple(item for item in (nodes or []) if isinstance(item, remote_proxy.ProxySubscriptionNode))
     if not candidates:
-        return "订阅里没有可用节点，已跳过本机热更新"
+        return update_result("订阅里没有可用节点，已跳过本机热更新", "retained", warning=True)
     current_node = _read_local_managed_proxy_node()
     if current_node is None:
-        return "订阅已刷新，但无法读取当前运行节点，无法保证失败回滚，已保留当前运行节点"
+        return update_result("订阅已刷新，但无法读取当前运行节点，无法保证失败回滚，已保留当前运行节点",
+                             "retained", retryable=True, warning=True)
     if expected_current_key is not None and not _subscription_refresh_origin_matches(
-        current_node, expected_current_key, profile_id,
+        current_node, expected_current_key, profile_id, expected_source,
     ):
-        return "订阅已刷新，但默认节点或订阅分组已变化，已保留当前运行节点"
+        return update_result("订阅已刷新，但默认节点或订阅分组已变化，已保留当前运行节点", "skipped", warning=True)
     current_key = ""
     if current_node:
         try:
@@ -2543,6 +2564,7 @@ def refresh_running_local_ai_proxy_from_subscription(
             quality_results=quality_results,
             profile_id=profile_id,
             **({"_expected_current_key": expected_current_key} if expected_current_key is not None else {}),
+            **({"_expected_source": expected_source} if expected_source is not None else {}),
         )
 
     automatic_candidates = remote_proxy.automatic_proxy_subscription_nodes(
@@ -2550,7 +2572,7 @@ def refresh_running_local_ai_proxy_from_subscription(
         quality_results,
     )
     if not automatic_candidates:
-        return "订阅已刷新，但仅有香港节点可候选；香港仅允许手动选择，已保留当前运行节点"
+        return update_result("订阅已刷新，但仅有香港节点可候选；香港仅允许手动选择，已保留当前运行节点", "retained", warning=True)
     try:
         chosen, selected_result, _results, _latencies = _select_stable_automatic_local_candidate(
             automatic_candidates,
@@ -2559,19 +2581,21 @@ def refresh_running_local_ai_proxy_from_subscription(
             exclude_keys=(current_key,),
         )
     except Exception as exc:
-        return f"订阅已刷新，但候选节点隔离深测失败，已保留当前运行节点: {exc}"
+        return update_result(f"订阅已刷新，但候选节点隔离深测失败，已保留当前运行节点: {exc}",
+                             "retained", retryable=True, warning=True)
     if chosen is None or not _prevalidated_local_candidate_matches(
         chosen.node,
         selected_result,
     ):
-        return "订阅已刷新，但没有候选通过 Codex 长会话网络深测，已保留当前运行节点"
+        return update_result("订阅已刷新，但没有候选通过 Codex 长会话网络深测，已保留当前运行节点",
+                             "retained", retryable=True, warning=True)
     latest_node = _read_local_managed_proxy_node()
     try:
         latest_key = remote_proxy.proxy_node_key(latest_node) if latest_node else ""
     except Exception:
         latest_key = ""
     if not latest_key or latest_key != current_key:
-        return "订阅已刷新，但深测期间当前运行节点已变化，已放弃后台结果且未切换节点"
+        return update_result("订阅已刷新，但深测期间当前运行节点已变化，已放弃后台结果且未切换节点", "skipped", warning=True)
     return reload_local_ai_proxy_verified(
         remote_proxy.format_proxy_node(chosen.node),
         candidates,
@@ -2581,6 +2605,7 @@ def refresh_running_local_ai_proxy_from_subscription(
         _prevalidated_result=selected_result,
         _expected_original_node=current_node,
         **({"_expected_current_key": expected_current_key} if expected_current_key is not None else {}),
+        **({"_expected_source": expected_source} if expected_source is not None else {}),
     )
 
 
@@ -2595,7 +2620,7 @@ def refresh_running_local_service_routes_from_subscription(
     clean_id = str(profile_id or "").strip()
     bound_services = local_proxy_service_bindings_for_profile(clean_id)
     if not bound_services:
-        return "该订阅未绑定独立服务线路，已仅更新缓存"
+        return update_result("该订阅未绑定独立服务线路，已仅更新缓存", "skipped")
     candidates = tuple(
         item
         for item in (nodes or ())
@@ -2613,7 +2638,7 @@ def refresh_running_local_service_routes_from_subscription(
     if all(service in pools or service in pinned for service in bound_services):
         apply_message = apply_local_proxy_routing_to_running()
         labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
-        return f"已刷新 {labels} 的独立订阅节点池；{apply_message}"
+        return with_update_message(apply_message, f"已刷新 {labels} 的独立订阅节点池；{apply_message}")
     state = remote_proxy.load_proxy_subscription_state()
     profiles = state.get("profiles") if isinstance(state.get("profiles"), dict) else {}
     profile = profiles.get(clean_id)
@@ -2668,7 +2693,7 @@ def refresh_running_local_service_routes_from_subscription(
         raise RuntimeError(f"独立订阅线路更新失败: {exc}；{suffix}") from exc
     labels = "、".join(_local_proxy_service_label(item) for item in bound_services)
     selection_note = "；原选择已失效，已改用订阅中的首个独立节点" if selection_changed else ""
-    return f"已刷新 {labels} 的独立订阅节点池{selection_note}；{apply_message}"
+    return with_update_message(apply_message, f"已刷新 {labels} 的独立订阅节点池{selection_note}；{apply_message}")
 
 
 def current_local_ai_proxy_node_key() -> str:
@@ -3574,6 +3599,14 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
     def cancelled():
         return _ISOLATED_MIHOMO_SHUTTING_DOWN.is_set() or (cancel_event is not None and cancel_event.is_set())
 
+    class FallbackCancellation:
+        def is_set(self):
+            # The legacy queue must also stop before opening a per-node
+            # session when only the application's shutdown flag was set.
+            return cancelled()
+
+    fallback_cancel = FallbackCancellation()
+
     def failure(key, error, *, incomplete=True):
         # No controller response bodies, credentials or subscription URLs are
         # included. Connection details from normalizers are not needed here.
@@ -3634,7 +3667,7 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
         )
 
     unique = list(connections.values())
-    batch_supported = True
+    batch_startup_available = True
     for start in range(0, len(unique), 64):
         batch = unique[start:start + 64]
         if cancelled():
@@ -3645,8 +3678,8 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
         started = False
         futures = {}
         try:
-            if not batch_supported:
-                raise RuntimeError("批量临时内核不可用，回退逐节点检测")
+            if not batch_startup_available:
+                raise RuntimeError("批量临时内核存在共享启动故障，回退逐节点检测")
             with _isolated_mihomo_batch_session(binary, [entry["node"] for entry in batch],
                                                 cancel_event=cancel_event) as session:
                 started = True
@@ -3672,9 +3705,23 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
                 raise
             if not started and not cancelled():
                 # One unsupported/bad node must not prevent every valid node
-                # in the batch from being tested. Preserve the old safe path.
+                # in this batch from being tested, nor disable quick probes
+                # for later independent batches. Unknown/configuration/port
+                # failures get one attempt per <=64-node batch, never a retry
+                # loop. Suppress further batch launches only when OS evidence
+                # identifies a shared executable, storage, or resource fault.
+                if isinstance(exc, (FileNotFoundError, PermissionError)) or (
+                    isinstance(exc, OSError) and (
+                        exc.errno in {
+                            errno.ENOENT, errno.EACCES, errno.EPERM, errno.ENOEXEC,
+                            errno.ENOSPC, errno.EROFS, errno.EMFILE, errno.ENFILE,
+                            errno.ENOMEM, errno.ENOBUFS, 10024, 10055,
+                        }
+                        or getattr(exc, "winerror", None) in {2, 3, 5, 8, 14, 112, 193, 1450, 10024, 10055}
+                    )
+                ):
+                    batch_startup_available = False
                 pending = [items[entry["keys"][0]] for entry in batch]
-                batch_supported = False
                 aliases = {entry["keys"][0]: entry["keys"] for entry in batch}
 
                 def fallback_progress(_done, _total, result):
@@ -3683,7 +3730,7 @@ def _measure_proxy_node_data_plane_batch_latencies(items, *, timeout, attempts, 
 
                 fallback = measure_proxy_node_data_plane_latencies(
                     pending, timeout=timeout, attempts=attempts, max_workers=min(4, max_workers),
-                    cancel_event=cancel_event, progress_callback=fallback_progress,
+                    cancel_event=fallback_cancel, progress_callback=fallback_progress,
                 )
                 for entry in batch:
                     first = entry["keys"][0]

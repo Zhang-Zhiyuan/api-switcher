@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import errno
 import http.client
 import json
 from pathlib import Path
@@ -25,6 +26,12 @@ def basics(monkeypatch):
     monkeypatch.setattr(local_proxy, "_ensure_local_dirs", lambda: None)
     monkeypatch.setattr(local_proxy, "_ensure_mihomo_binary", lambda: Path("synthetic-mihomo.exe"))
     monkeypatch.setattr(local_proxy, "_ISOLATED_MIHOMO_SHUTTING_DOWN", threading.Event())
+
+
+def windows_startup_error(code):
+    error = OSError("synthetic Windows startup failure")
+    error.winerror = code
+    return error
 
 
 def fake_batches(monkeypatch):
@@ -218,14 +225,22 @@ def test_quick_executor_faults_preserve_completed_results(monkeypatch, failure_s
         assert result.ok is not failed
 
 
-def test_failed_batch_startup_falls_back_without_repeating_failed_batch_mode(monkeypatch):
+@pytest.mark.parametrize("error", [
+    FileNotFoundError("synthetic missing executable"),
+    PermissionError("synthetic launch denied"),
+    OSError(errno.ENOSPC, "synthetic storage exhausted"),
+    OSError(errno.EMFILE, "synthetic handle exhaustion"),
+    windows_startup_error(1450),
+    windows_startup_error(10055),
+])
+def test_shared_batch_startup_failure_falls_back_without_repeating_failed_batch_mode(monkeypatch, error):
     basics(monkeypatch)
     starts, legacy, reported = [], [], []
 
     @contextmanager
     def broken(*_args, **_kwargs):
         starts.append(True)
-        raise RuntimeError("synthetic unsupported batch")
+        raise error
         yield  # pragma: no cover
 
     @contextmanager
@@ -243,6 +258,137 @@ def test_failed_batch_startup_falls_back_without_repeating_failed_batch_mode(mon
     assert len(starts) == 1 and len(legacy) == 65
     assert len(reported) == len(results) == 65
     assert all(result.ok for result in results.values())
+
+
+@pytest.mark.parametrize("failed_batches", [{0}, {1}, {0, 1}])
+@pytest.mark.parametrize("error_kind", ["configuration", "temporary_port", "windows_port"])
+def test_bad_batch_does_not_disable_later_healthy_batches(monkeypatch, failed_batches, error_kind):
+    basics(monkeypatch)
+    starts, legacy, reports, quick_calls = [], [], [], []
+
+    @contextmanager
+    def session(_binary, candidates, **_kwargs):
+        index = int(candidates[0]["server"].split(".")[0][1:]) // 64
+        starts.append(index)
+        if index in failed_batches:
+            if error_kind == "temporary_port":
+                raise OSError(errno.EADDRINUSE, "synthetic temporary port conflict")
+            if error_kind == "windows_port":
+                raise windows_startup_error(10048)
+            raise RuntimeError("synthetic node rejected by batch configuration")
+        yield local_proxy._IsolatedMihomoBatchSession(
+            1234, "synthetic", tuple(str(i) for i in range(len(candidates))),
+        )
+
+    @contextmanager
+    def old_session(_binary, candidate):
+        legacy.append(candidate["server"])
+        yield SimpleNamespace(proxy_url="http://127.0.0.1:1234")
+
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_batch_session", session)
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_session", old_session)
+    monkeypatch.setattr(local_proxy, "_probe_isolated_mihomo_batch_delay", lambda *_: quick_calls.append(True) or 23)
+    monkeypatch.setattr(local_proxy, "_probe_ai_url_through_explicit_http_proxy",
+                        lambda *_: local_proxy.LocalAIProxyProbeResult("synthetic", True, elapsed_ms=17))
+    nodes = [node(i) for i in range(200)]
+    # Duplicate connection in the first batch must still receive its own
+    # result and progress event, whether that batch uses quick or legacy mode.
+    nodes.append(node(999, server=nodes[17].node["server"]))
+    results = local_proxy.measure_proxy_node_data_plane_latencies(
+        nodes, quick=True, attempts=1, max_workers=16, progress_callback=lambda *args: reports.append(args),
+    )
+    assert starts == [0, 1, 2, 3]
+    assert set(legacy) == {f"n{i}.example.test" for i in range(200) if i // 64 in failed_batches}
+    assert len(legacy) == 64 * len(failed_batches)
+    assert len(quick_calls) == 200 - len(legacy)
+    assert len(results) == len(reports) == 201
+    assert [report[0] for report in reports] == list(range(1, 202))
+    assert all(report[1] == 201 for report in reports)
+    assert all(result.ok and key == result.node_key for key, result in results.items())
+    assert results["key-999"].measured_at == results["key-17"].measured_at
+    assert results["key-199"].latency_ms == 23
+
+
+def test_unknown_startup_failure_is_attempted_once_per_bounded_batch(monkeypatch):
+    basics(monkeypatch)
+    starts, legacy = [], []
+
+    @contextmanager
+    def broken(_binary, candidates, **_kwargs):
+        starts.append(len(candidates))
+        raise RuntimeError("synthetic unclassified startup failure")
+        yield  # pragma: no cover
+
+    @contextmanager
+    def old_session(_binary, candidate):
+        legacy.append(candidate)
+        yield SimpleNamespace(proxy_url="http://127.0.0.1:1234")
+
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_batch_session", broken)
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_session", old_session)
+    monkeypatch.setattr(local_proxy, "_probe_ai_url_through_explicit_http_proxy",
+                        lambda *_: local_proxy.LocalAIProxyProbeResult("synthetic", True, elapsed_ms=17))
+    results = local_proxy.measure_proxy_node_data_plane_latencies([node(i) for i in range(130)],
+                                                                 quick=True, attempts=1)
+    assert starts == [64, 64, 2]  # No recursive split or retry of a failing batch.
+    assert len(legacy) == len(results) == 130
+    assert all(result.ok for result in results.values())
+
+
+@pytest.mark.parametrize("cancel_stage", ["startup", "fallback"])
+@pytest.mark.parametrize("cancel_source", ["request", "shutdown"])
+def test_cancel_during_failed_batch_does_not_launch_later_batches(monkeypatch, cancel_stage, cancel_source):
+    basics(monkeypatch)
+    event = threading.Event() if cancel_source == "request" else local_proxy._ISOLATED_MIHOMO_SHUTTING_DOWN
+    starts, legacy, reports = [], [], []
+
+    @contextmanager
+    def broken(*_args, **_kwargs):
+        starts.append(True)
+        if cancel_stage == "startup":
+            event.set()
+        raise RuntimeError("synthetic bad batch")
+        yield  # pragma: no cover
+
+    @contextmanager
+    def old_session(_binary, candidate):
+        legacy.append(candidate)
+        yield SimpleNamespace(proxy_url="http://127.0.0.1:1234")
+
+    def legacy_probe(*_):
+        event.set()
+        return local_proxy.LocalAIProxyProbeResult("synthetic", True, elapsed_ms=17)
+
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_batch_session", broken)
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_session", old_session)
+    monkeypatch.setattr(local_proxy, "_probe_ai_url_through_explicit_http_proxy", legacy_probe)
+    results = local_proxy.measure_proxy_node_data_plane_latencies(
+        [node(i) for i in range(130)], quick=True, attempts=1, max_workers=1,
+        cancel_event=event if cancel_source == "request" else None,
+        progress_callback=lambda *args: reports.append(args),
+    )
+    completed = 1 if cancel_stage == "fallback" else 0
+    assert len(starts) == 1 and len(legacy) == completed
+    assert len(results) == len(reports) == 130
+    assert sum(result.ok for result in results.values()) == completed
+    assert sum(result.cancelled for result in results.values()) == 130 - completed
+
+
+def test_failed_batch_startup_cleanup_error_never_launches_fallback_or_later_batches(monkeypatch):
+    basics(monkeypatch)
+    starts = []
+
+    @contextmanager
+    def broken(*_args, **_kwargs):
+        starts.append(True)
+        raise local_proxy._IsolatedMihomoBatchCleanupError("synthetic startup cleanup failed")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_batch_session", broken)
+    monkeypatch.setattr(local_proxy, "_isolated_mihomo_session", lambda *_: pytest.fail("cleanup must not be hidden"))
+    with pytest.raises(local_proxy._IsolatedMihomoBatchCleanupError, match="startup cleanup failed"):
+        local_proxy.measure_proxy_node_data_plane_latencies([node(i) for i in range(130)], quick=True)
+    assert len(starts) == 1
 
 
 def test_cleanup_failure_is_not_swallowed_after_successful_batch_probes(monkeypatch):

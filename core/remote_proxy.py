@@ -32,6 +32,7 @@ import yaml
 
 from config.paths import STORAGE_DIR
 from core import proxy_routing
+from core.proxy_update_result import update_result, with_update_message
 from core.subscription_transport import SubscriptionRedirectHandler, subscription_error_message
 from core.lazy_imports import LazyAttribute, LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES, LOCAL_PROXY_BUILTIN_SITES
@@ -5182,6 +5183,11 @@ def install_ai_proxy_verified(
     )
 
 
+def _remote_proxy_runtime_text(content: str) -> str:
+    return "\n".join(line for line in content.splitlines()
+                     if not line.startswith(proxy_routing.ROUTE_SNAPSHOT_MARKER)).strip()
+
+
 @proxy_routing.serialized_ssh_route_operation
 def reload_ai_proxy(
     ssh_name: str,
@@ -5193,17 +5199,21 @@ def reload_ai_proxy(
     strict_privacy: bool | None = None,
     fallback_nodes: tuple[dict, ...] | list[dict] | None = None,
     routing_preferences: dict | None = None,
+    _expected_config: str | None = None,
+    _config_snapshot: dict | None = None,
 ) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     proxy_node = parse_proxy_node(proxy_text)
     status = inspect_ai_proxy(ssh_name, mixed_port)
     if not status.running:
-        return f"{ssh_name}: AI 代理未运行，已跳过热更新"
+        return update_result(f"{ssh_name}: AI 代理未运行，已跳过热更新", "skipped", warning=True)
 
     _ssh_profile, client = _connect_ssh(ssh_name)
     home = remote_config._remote_home(client)
     config_path = posixpath.join(home, ".config", "mihomo", "config.yaml")
     old_config = ssh_manager.read_remote_file(client, config_path) or ""
+    if _expected_config is not None and old_config != _expected_config:
+        raise _RemoteProxyUpdateOwnershipChanged("正式应用前完整代理配置已变化，拒绝覆盖手动更新")
     effective_strict_privacy = _resolve_managed_strict_privacy(strict_privacy, old_config)
     if fallback_nodes is None:
         fallback_nodes = _existing_remote_proxy_fallback_nodes(
@@ -5220,11 +5230,14 @@ def reload_ai_proxy(
         strict_privacy=effective_strict_privacy,
         **proxy_routing.ssh_config_options(ssh_name, old_config, routing_preferences),
     )
-    def runtime_text(content):
-        return "\n".join(line for line in content.splitlines()
-                         if not line.startswith(proxy_routing.ROUTE_SNAPSHOT_MARKER)).strip()
-    if runtime_text(old_config) == runtime_text(new_config):
+    if _config_snapshot is not None:
+        _config_snapshot.update(old_config=old_config, new_config=new_config, client=client)
+    if _remote_proxy_runtime_text(old_config) == _remote_proxy_runtime_text(new_config):
         metadata_suffix = ""
+        if _config_snapshot is not None and old_config.strip() == new_config.strip():
+            # No file write occurs below: retain its exact bytes for ownership
+            # comparisons, including harmless trailing whitespace/newlines.
+            _config_snapshot["new_config"] = old_config
         if old_config.strip() != new_config.strip():
             # Recovery comments/disabled choices are not kernel settings.
             # Persist them without forcing existing connections through a reload.
@@ -5249,7 +5262,7 @@ def reload_ai_proxy(
             mixed_port,
             status,
         )
-        return f"{ssh_name}: 运行节点已是最新配置，无需热更新{metadata_suffix}{repair_suffix}"
+        return update_result(f"{ssh_name}: 运行节点已是最新配置，无需热更新{metadata_suffix}{repair_suffix}", "unchanged")
 
     command = _build_reload_command(config_path, mixed_port)
     try:
@@ -5297,11 +5310,109 @@ def reload_ai_proxy(
         status,
     )
     privacy_label = "应用层严格隐私" if effective_strict_privacy else "兼容分流"
-    return (
+    return update_result(
         f"{ssh_name}: 已热更新远端 AI 代理节点为 {describe_proxy_node(proxy_node)}"
         f"；当前模式: {privacy_label}；内核故障切换池 {1 + len(fallback_nodes or ())} 个节点"
-        f"{repair_suffix}"
+        f"{repair_suffix}", "applied",
     )
+
+
+class _RemoteProxyUpdateOwnershipChanged(RuntimeError):
+    """The automatic operation no longer owns the remote deployment snapshot."""
+
+
+def _remote_automatic_target_identity(ssh_name):
+    profile = next((item for item in profile_manager.list_ssh_profiles() if item.name == ssh_name), None)
+    if profile is None:
+        raise _RemoteProxyUpdateOwnershipChanged("SSH 服务器已删除或改名，未继续自动更新")
+    return copy.deepcopy(profile.to_dict())
+
+
+def _remote_automatic_subscription_origin_matches(profile_id, expected_current_key, node=None, *, expected_source=None):
+    if expected_current_key is None and expected_source is None:
+        return True
+    if expected_current_key is not None and node is not None and proxy_node_key(node) != expected_current_key:
+        return False
+    state = load_proxy_subscription_state()
+    if expected_current_key is not None and profile_id and state.get("active_profile_id") != profile_id:
+        return False
+    if expected_source is not None:
+        profile = (state.get("profiles") or {}).get(profile_id)
+        if not isinstance(profile, dict) or tuple(
+            profile.get(key, "") for key in ("url", "source_path", "source_revision")
+        ) != tuple(expected_source):
+            return False
+    return True
+
+
+def _remote_automatic_probe_targets(config: str):
+    """Only gate targets whose actual rules use the changed default group."""
+    from core.proxy_route_diagnostics import match_rules
+
+    parsed = yaml.safe_load(config)
+    if not isinstance(parsed, dict) or AI_PROXY_CONFIG_MARKER not in config:
+        raise ValueError("自动更新配置不属于本工具，无法确定正式入口验证范围")
+    rules = []
+    for raw in parsed.get("rules") or ():
+        fields = str(raw).split(",")
+        if len(fields) >= 3:
+            rules.append({"type": fields[0], "payload": fields[1], "proxy": fields[2]})
+        elif len(fields) == 2:
+            rules.append({"type": fields[0], "proxy": fields[1]})
+    return tuple(
+        (label, url) for label, url in REMOTE_AI_STABILITY_TARGETS
+        if (match := match_rules(urlparse.urlsplit(url).hostname or "", rules,
+                               mode=str(parsed.get("mode") or "rule"))).certain
+        and match.route == "AI-PROXY"
+    )
+
+
+def _probe_remote_automatic_update_runtime(ssh_name: str, mixed_port: int, config: str, *, client=None):
+    """One credential-free short round through the real port, not a scratch core."""
+    targets = _remote_automatic_probe_targets(config)
+    if not targets:
+        return None, "未涉及可明确归属默认线路的 AI 目标，仅确认配置热加载；独立线路未重测"
+    if client is None:
+        _profile, client = _connect_ssh(ssh_name, timeout=3, max_retries=1)
+    command = _build_probe_command(mixed_port, 3, rounds=1, strict=True,
+                                   targets=targets, include_compact=False)
+    code, stdout, _stderr = ssh_manager.execute_command_with_status(
+        client, command, timeout=12, log_command=False,
+    )
+    if code != 0:
+        return False, "正式入口短测执行失败或超过等待时间"
+    results = _parse_remote_probe_output(stdout)
+    expected = {label for label, _url in targets}
+    complete = len(results) == len(expected) and {item.label for item in results} == expected
+    passed = complete and all(item.ok for item in results)
+    return passed, f"正式入口短测 {sum(item.ok for item in results)}/{len(expected)} 通过" + (
+        "" if complete else "（结果不完整）"
+    )
+
+
+def _restore_remote_automatic_config(ssh_name, mixed_port, original_config, expected_config, expected_routes):
+    """Restore the exact topology only while this transaction still owns it.
+
+    The caller holds host_lock; no route bindings or shared selection are written.
+    Full text, including recovery metadata, is compared instead of a node key.
+    """
+    if proxy_routing.load_ssh_routes(ssh_name) != expected_routes:
+        raise _RemoteProxyUpdateOwnershipChanged("正式复核期间已保存分流变化，未回滚新设置")
+    _profile, client = _connect_ssh(ssh_name)
+    home = remote_config._remote_home(client)
+    path = posixpath.join(home, ".config", "mihomo", "config.yaml")
+    if (ssh_manager.read_remote_file(client, path) or "") != expected_config:
+        raise _RemoteProxyUpdateOwnershipChanged("正式复核期间完整代理配置已变化，未回滚新设置")
+    if original_config == expected_config:
+        return
+    ssh_manager.write_remote_file(client, path, original_config, file_mode=0o600)
+    if _remote_proxy_runtime_text(original_config) == _remote_proxy_runtime_text(expected_config):
+        return  # Restore recovery metadata without disturbing existing connections.
+    code, _stdout, _stderr = ssh_manager.execute_command_with_status(
+        client, _build_reload_command(path, mixed_port), timeout=20, log_command=False,
+    )
+    if code != 0:
+        raise RuntimeError("完整旧配置已写回，但恢复热加载未成功，运行状态待复核")
 
 
 def _reload_ai_proxy_automatically_after_isolated_probe(
@@ -5314,19 +5425,38 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
     profile_id: str,
     persist_selection: bool,
     strict_privacy: bool | None,
+    *,
+    expected_current_key: str | None = None,
+    expected_source: tuple | None = None,
 ) -> str:
     """Probe automatic candidates in isolation and mutate managed state at most once."""
 
     proxy_status = inspect_ai_proxy(ssh_name, mixed_port)
     if not proxy_status.running:
-        return f"{ssh_name}: AI 代理未运行，已跳过热更新"
+        return update_result(f"{ssh_name}: AI 代理未运行，已跳过热更新", "skipped", warning=True)
 
     try:
         original_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
     except Exception as exc:
-        return f"{ssh_name}: 无法读取自动更新前节点，已保留当前运行节点: {exc}"
+        return update_result(f"{ssh_name}: 无法读取自动更新前节点，已保留当前运行节点: {exc}",
+                             "retained", retryable=True, warning=True)
     if not original_node:
-        return f"{ssh_name}: 未读取到自动更新前节点，已保留当前运行节点"
+        return update_result(f"{ssh_name}: 未读取到自动更新前节点，已保留当前运行节点",
+                             "retained", retryable=True, warning=True)
+    if not _remote_automatic_subscription_origin_matches(
+        profile_id, expected_current_key, original_node, expected_source=expected_source,
+    ):
+        return update_result(f"{ssh_name}: 默认节点或订阅归属已变化，未继续自动更新", "skipped", warning=True)
+    try:
+        with proxy_routing.host_lock(ssh_name):
+            original_target = _remote_automatic_target_identity(ssh_name)
+            original_config = read_managed_ai_proxy_config(ssh_name)
+            if not original_config or AI_PROXY_CONFIG_MARKER not in original_config:
+                raise ValueError("未读取到可恢复的完整受管配置")
+            original_routes = copy.deepcopy(proxy_routing.load_ssh_routes(ssh_name))
+    except Exception as exc:
+        return update_result(f"{ssh_name}: 无法保存自动更新前完整配置，已保留当前运行节点: {exc}",
+                             "retained", retryable=True, warning=True)
     original_key = proxy_node_key(original_node)
     requested_key = proxy_node_key(requested_node)
     tried: list[str] = []
@@ -5348,45 +5478,85 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
         return summary
 
     def apply_candidate(node: dict) -> str:
-        try:
+        snapshot = {}
+        with proxy_routing.host_lock(ssh_name):
+            if _remote_automatic_target_identity(ssh_name) != original_target:
+                raise _RemoteProxyUpdateOwnershipChanged("SSH 服务器资料已变化，未继续自动更新")
+            if not _remote_automatic_subscription_origin_matches(
+                profile_id, expected_current_key, expected_source=expected_source,
+            ):
+                raise _RemoteProxyUpdateOwnershipChanged("活动订阅或订阅来源已变化，未继续自动更新")
             latest_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
-        except Exception as exc:
-            raise RuntimeError(f"正式应用前无法复核当前节点: {exc}") from exc
-        if not latest_node:
-            raise RuntimeError("正式应用前未读取到当前节点")
-        if proxy_node_key(latest_node) != original_key:
-            raise RuntimeError("隔离验证期间当前节点已变化，拒绝覆盖手动更新")
-        text = format_proxy_node(node)
-        fallback_nodes = _remote_proxy_fallback_nodes(
-            node,
-            candidate_nodes,
-            quality_results,
-        )
-        if profile_id or not persist_selection:
-            return reload_ai_proxy(
-                ssh_name,
-                text,
-                mixed_port,
-                profile_id=profile_id,
-                persist_selection=persist_selection,
-                fallback_nodes=fallback_nodes,
+            if not latest_node or proxy_node_key(latest_node) != original_key:
+                raise _RemoteProxyUpdateOwnershipChanged("隔离验证期间当前节点已变化，拒绝覆盖手动更新")
+            if proxy_routing.load_ssh_routes(ssh_name) != original_routes:
+                raise _RemoteProxyUpdateOwnershipChanged("隔离验证期间已保存分流变化，拒绝覆盖手动更新")
+            message = reload_ai_proxy(
+                ssh_name, format_proxy_node(node), mixed_port,
+                profile_id=profile_id, persist_selection=False,
+                fallback_nodes=_remote_proxy_fallback_nodes(node, candidate_nodes, quality_results),
+                _expected_config=original_config, _config_snapshot=snapshot,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
-        return reload_ai_proxy(
-            ssh_name,
-            text,
-            mixed_port,
-            fallback_nodes=fallback_nodes,
-            **_strict_privacy_call_kwargs(strict_privacy),
-        )
+            if not getattr(message, "applied", False):
+                return with_update_message(message, str(message))
+            applied_config = snapshot.get("new_config")
+            if not applied_config:
+                return update_result(f"{message}；无法确认本次完整配置归属，未提交节点选择，也未盲目回滚",
+                                     "failed", retryable=True, warning=True)
+        try:
+            verified, detail = _probe_remote_automatic_update_runtime(
+                ssh_name, mixed_port, applied_config, client=snapshot.get("client"),
+            )
+        except Exception:
+            verified, detail = False, "正式入口短测执行失败"
+        with proxy_routing.host_lock(ssh_name):
+            if _remote_automatic_target_identity(ssh_name) != original_target:
+                raise _RemoteProxyUpdateOwnershipChanged("正式复核期间 SSH 服务器资料已变化，未回滚新设置")
+            if not _remote_automatic_subscription_origin_matches(
+                profile_id, expected_current_key, expected_source=expected_source,
+            ):
+                raise _RemoteProxyUpdateOwnershipChanged("正式复核期间活动订阅或订阅来源已变化，未回滚新设置")
+            if (read_managed_ai_proxy_config(ssh_name) != applied_config
+                    or proxy_routing.load_ssh_routes(ssh_name) != original_routes):
+                raise _RemoteProxyUpdateOwnershipChanged("正式复核期间完整代理配置或分流已变化，未回滚新设置")
+            if verified is not False:
+                if persist_selection:
+                    try:
+                        set_proxy_subscription_selected_node(node, **({"profile_id": profile_id} if profile_id else {}))
+                    except Exception:
+                        return update_result(f"{message}；{detail}；运行配置已应用，但节点选择保存失败",
+                                             "applied", warning=True)
+                return update_result(f"{message}；{detail}", message.outcome, warning=verified is None)
+            if applied_config == original_config:
+                return update_result(f"{ssh_name}: {detail}；配置未改动，已保持现有运行线路，未执行重载",
+                                     "retained", retryable=True, warning=True)
+            try:
+                _restore_remote_automatic_config(
+                    ssh_name, mixed_port, original_config, applied_config, original_routes,
+                )
+            except _RemoteProxyUpdateOwnershipChanged:
+                raise
+            except Exception:
+                return update_result(f"{ssh_name}: {detail}；完整旧配置恢复未完成，运行状态待复核",
+                                     "failed", retryable=True, warning=True)
+            return update_result(f"{ssh_name}: {detail}；已恢复更新前完整配置及线路拓扑，未改变已保存节点选择",
+                                 "retained", retryable=True, warning=True)
+
+    def apply_validated(node, probe_summary, *, backup=False):
+        try:
+            message = apply_candidate(node)
+        except _RemoteProxyUpdateOwnershipChanged as exc:
+            return update_result(f"{ssh_name}: {exc}", "skipped", warning=True)
+        except Exception as exc:
+            return update_result(f"{ssh_name}: 候选隔离验证通过，但正式热更新失败: {exc}",
+                                 "failed", retryable=True, warning=True)
+        label = "后备候选隔离验证通过" if backup else "隔离验证通过"
+        return with_update_message(message, f"{message}；{label}: {_compact_probe_summary(probe_summary)}")
 
     requested_probe = validate_candidate(requested_node)
     if requested_probe is not None:
-        try:
-            reload_message = apply_candidate(requested_node)
-        except Exception as exc:
-            return f"{ssh_name}: 候选隔离验证通过，但正式热更新失败: {exc}"
-        return f"{reload_message}；隔离验证通过: {_compact_probe_summary(requested_probe)}"
+        return apply_validated(requested_node, requested_probe)
 
     candidates = tuple(
         item
@@ -5396,7 +5566,8 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
     if not candidates:
         tried_summary = "；".join(tried[:3])
         suffix = f": {tried_summary}" if tried_summary else ""
-        return f"{ssh_name}: 自动热更新候选未通过隔离验证，已保留当前运行节点{suffix}"
+        return update_result(f"{ssh_name}: 自动热更新候选未通过隔离验证，已保留当前运行节点{suffix}",
+                             "retained", retryable=True, warning=True)
 
     try:
         latencies = measure_proxy_node_latencies_on_server(
@@ -5407,7 +5578,8 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
             max_workers=20,
         )
     except Exception as exc:
-        return f"{ssh_name}: 自动候选隔离验证未通过，后备节点测速失败，已保留当前运行节点: {exc}"
+        return update_result(f"{ssh_name}: 自动候选隔离验证未通过，后备节点测速失败，已保留当前运行节点: {exc}",
+                             "retained", retryable=True, warning=True)
 
     ranked = []
     for item in ranked_proxy_subscription_nodes_for_ai_probe(candidates, quality_results, latencies):
@@ -5430,20 +5602,13 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
         candidate_probe = validate_candidate(item.node, latency_label)
         if candidate_probe is None:
             continue
-        try:
-            reload_message = apply_candidate(item.node)
-        except Exception as exc:
-            return f"{ssh_name}: 后备候选隔离验证通过，但正式热更新失败: {exc}"
-        return (
-            f"{reload_message}；后备候选隔离验证通过: "
-            f"{_compact_probe_summary(candidate_probe)}"
-        )
+        return apply_validated(item.node, candidate_probe, backup=True)
 
     tried_summary = "；".join(tried[:3])
     suffix = f"；尝试摘要: {tried_summary}" if tried_summary else ""
-    return (
+    return update_result(
         f"{ssh_name}: 自动尝试 {1 + attempt_count} 个候选仍未通过隔离 3/3×4 服务 + compact 验证，"
-        f"已保留当前运行节点{suffix}"
+        f"已保留当前运行节点{suffix}", "retained", retryable=True, warning=True,
     )
 
 
@@ -5459,6 +5624,8 @@ def reload_ai_proxy_verified(
     *,
     automatic_update: bool = False,
     strict_privacy: bool | None = None,
+    _expected_current_key: str | None = None,
+    _expected_source: tuple | None = None,
 ) -> str:
     requested_node = parse_proxy_node(proxy_text)
     if automatic_update:
@@ -5472,6 +5639,8 @@ def reload_ai_proxy_verified(
             profile_id,
             persist_selection,
             strict_privacy,
+            expected_current_key=_expected_current_key,
+            expected_source=_expected_source,
         )
     requested_key = proxy_node_key(requested_node)
     requested_fallback_nodes = _remote_proxy_fallback_nodes(
@@ -5647,6 +5816,9 @@ def refresh_running_ai_proxy_from_subscription(
     profile_id: str = "",
     persist_selection: bool = True,
     strict_privacy: bool | None = None,
+    expected_current_key: str | None = None,
+    expected_source: tuple | None = None,
+    require_service_binding: bool = False,
 ) -> str:
     # Reading the default and reloading its bound service pools is one host
     # operation. Otherwise a concurrent manual node change can be overwritten
@@ -5655,8 +5827,25 @@ def refresh_running_ai_proxy_from_subscription(
     with proxy_routing.host_lock(ssh_name):
         status = inspect_ai_proxy(ssh_name, mixed_port)
         if not status.running:
-            return f"{ssh_name}: AI 代理未运行，已跳过订阅热更新"
+            return update_result(f"{ssh_name}: AI 代理未运行，已跳过订阅热更新", "skipped", warning=True)
         routes = proxy_routing.load_ssh_routes(ssh_name)
+        if require_service_binding and (
+            not profile_id or profile_id not in routes["service_profile_bindings"].values()
+        ):
+            # A timer's bound-service request must never gain permission to
+            # switch the default node if its binding was removed while queued.
+            return update_result(f"{ssh_name}: 订阅分流绑定已变化，仅保留刷新缓存，未更改默认线路",
+                                 "skipped", warning=True)
+        if expected_source is not None and not _remote_automatic_subscription_origin_matches(
+            profile_id, None, expected_source=expected_source,
+        ):
+            return update_result(f"{ssh_name}: 订阅来源已变化，未应用旧来源的刷新结果", "skipped", warning=True)
+        if expected_current_key is not None:
+            node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+            if (not node or not _remote_automatic_subscription_origin_matches(
+                    profile_id, expected_current_key, node, expected_source=expected_source)
+                    or (profile_id and profile_id in routes["service_profile_bindings"].values())):
+                return update_result(f"{ssh_name}: 默认节点或订阅分流归属已变化，仅保留刷新缓存", "skipped", warning=True)
         if profile_id and profile_id in routes["service_profile_bindings"].values():
             # One reload rebuilds every bound route, including subscriptions
             # refreshed together by the timer. Report all affected pool gaps.
@@ -5669,11 +5858,25 @@ def refresh_running_ai_proxy_from_subscription(
                 persist_selection=False, routing_preferences=routes,
                 **_strict_privacy_call_kwargs(strict_privacy),
             )
-            return message + ("；" + "；".join(warnings) if warnings else "")
+            detail = str(message)
+            if getattr(message, "outcome", "unknown") != "unknown":
+                detail += "；该操作仅处理绑定分流配置，未逐目标执行连通性验证"
+            if warnings:
+                detail += "；" + "；".join(warnings)
+            result = with_update_message(message, detail)
+            return update_result(result, result.outcome, retryable=result.retryable,
+                                 warning=result.warning or bool(warnings))
     candidates = tuple(item for item in (nodes or []) if isinstance(item, ProxySubscriptionNode))
     if not candidates:
-        return f"{ssh_name}: 订阅里没有可用节点，已跳过热更新"
+        return update_result(f"{ssh_name}: 订阅里没有可用节点，已跳过热更新", "retained",
+                             retryable=True, warning=True)
     current_node = _read_remote_managed_proxy_node(ssh_name, mixed_port)
+    if (expected_current_key is not None or expected_source is not None) and (
+        (expected_current_key is not None and not current_node)
+        or not _remote_automatic_subscription_origin_matches(
+            profile_id, expected_current_key, current_node, expected_source=expected_source)
+    ):
+        return update_result(f"{ssh_name}: 默认节点或订阅归属已变化，未继续自动更新", "skipped", warning=True)
     chosen = (
         _find_matching_subscription_node(candidates, current_node, quality_results)
         if current_node
@@ -5682,9 +5885,9 @@ def refresh_running_ai_proxy_from_subscription(
     if chosen is None:
         automatic_candidates = automatic_proxy_subscription_nodes(candidates, quality_results)
         if not automatic_candidates:
-            return (
+            return update_result(
                 f"{ssh_name}: 订阅已刷新，但仅有香港节点可候选；"
-                "香港仅允许手动选择，已保留当前运行节点"
+                "香港仅允许手动选择，已保留当前运行节点", "retained", warning=True,
             )
         try:
             latencies = measure_proxy_node_latencies_on_server(
@@ -5695,16 +5898,19 @@ def refresh_running_ai_proxy_from_subscription(
                 max_workers=20,
             )
         except Exception as exc:
-            return f"{ssh_name}: 订阅已刷新，但远端节点测速失败，已保留当前运行节点: {exc}"
+            return update_result(f"{ssh_name}: 订阅已刷新，但远端节点测速失败，已保留当前运行节点: {exc}",
+                                 "retained", retryable=True, warning=True)
         chosen, reason = best_proxy_subscription_node_for_hot_update(
             automatic_candidates,
             quality_results,
             latencies,
         )
         if chosen is None and reason == "quality_rejected":
-            return f"{ssh_name}: 订阅已刷新，但所有可连节点都有明确的不合格质量证据，已保留当前运行节点"
+            return update_result(f"{ssh_name}: 订阅已刷新，但所有可连节点都有明确的不合格质量证据，已保留当前运行节点",
+                                 "retained", warning=True)
         if chosen is None:
-            return f"{ssh_name}: 订阅已刷新，但没有测到可连节点，已保留当前运行节点"
+            return update_result(f"{ssh_name}: 订阅已刷新，但没有测到可连节点，已保留当前运行节点",
+                                 "retained", retryable=True, warning=True)
     return reload_ai_proxy_verified(
         ssh_name,
         format_proxy_node(chosen.node),
@@ -5714,6 +5920,8 @@ def refresh_running_ai_proxy_from_subscription(
         profile_id=profile_id,
         persist_selection=persist_selection,
         automatic_update=True,
+        **({"_expected_current_key": expected_current_key} if expected_current_key is not None else {}),
+        **({"_expected_source": expected_source} if expected_source is not None else {}),
         **_strict_privacy_call_kwargs(strict_privacy),
     )
 
@@ -9406,6 +9614,8 @@ def _build_probe_command(
     *,
     rounds: int = 1,
     strict: bool = False,
+    targets: tuple | None = None,
+    include_compact: bool = True,
 ) -> str:
     mixed_port = _normalize_port(mixed_port, "本地代理端口")
     try:
@@ -9416,7 +9626,11 @@ def _build_probe_command(
         rounds = max(1, min(3, int(rounds)))
     except (TypeError, ValueError):
         rounds = 1
-    targets = REMOTE_AI_STABILITY_TARGETS if strict else REMOTE_AI_PROBE_TARGETS
+    allowed_targets = REMOTE_AI_STABILITY_TARGETS if strict else REMOTE_AI_PROBE_TARGETS
+    if targets is None:
+        targets = allowed_targets
+    elif not targets or any(target not in allowed_targets for target in targets):
+        raise ValueError("代理复核目标必须来自内置探针集合")
     targets_json = json.dumps(targets, ensure_ascii=False)
     curl_probes = "\n".join(
         f"probe_curl {shlex.quote(label)} {shlex.quote(url)}"
@@ -9443,6 +9657,7 @@ timeout = float(sys.argv[2])
 targets = json.loads(sys.argv[3])
 rounds = max(1, min(3, int(sys.argv[4])))
 strict = sys.argv[5] == "1"
+include_compact = {bool(include_compact)!r}
 compact_label = {REMOTE_CODEX_COMPACT_PROBE_LABEL!r}
 compact_url = {REMOTE_CODEX_COMPACT_PROBE_URL!r}
 compact_payload_bytes = {REMOTE_CODEX_COMPACT_PROBE_PAYLOAD_BYTES}
@@ -9636,7 +9851,7 @@ for round_index in range(1, rounds + 1):
                 f"probe\\t{{clean(label)}}\\t{{1 if ok else 0}}\\t{{clean(detail)}}\\t{{elapsed}}",
                 flush=True,
             )
-if strict:
+if strict and include_compact:
     label, ok, detail, elapsed = probe_compact()
     print(
         f"probe\\t{{clean(label)}}\\t{{1 if ok else 0}}\\t{{clean(detail)}}\\t{{elapsed}}",

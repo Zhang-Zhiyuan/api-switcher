@@ -9,6 +9,13 @@ from ui.feedback import safe_feedback_text
 from ui.theme import COLORS, bind_wraplength, button_style, font
 
 
+def _configure_changed(widget, **options):
+    """CTk paints even identical options; avoid needless Tcl calls and redraws."""
+    changed = {key: value for key, value in options.items() if widget.cget(key) != value}
+    if changed:
+        widget.configure(**changed)
+
+
 def route_description(row, preferences, catalog):
     """Describe saved/draft intent, not live connectivity or the current exit IP."""
     service = row["id"]
@@ -170,6 +177,8 @@ class ServiceRouteOverview(ctk.CTkFrame):
             self._command(service)
 
     def set_enabled(self, enabled):
+        if self._enabled == bool(enabled):
+            return
         self._enabled = bool(enabled)
         state = "normal" if enabled else "disabled"
         self._manage.configure(state=state)
@@ -195,22 +204,25 @@ class ServiceRouteOverview(ctk.CTkFrame):
             if key not in self._rows:
                 self._rows[key] = self._build_row(key)
             row = self._rows[key]
+            if row.get("info") == info and row.get("description") == description:
+                continue
             row["info"], row["description"] = info, description
-            row["target"].configure(text=" ".join(safe_feedback_text(info["label"]).split()))
-            row["state"].configure(text="继承基准" if key == "custom" else (("默认启用" if info["always"] else "已启用") if info["enabled"] else "未启用"),
+            _configure_changed(row["target"], text=" ".join(safe_feedback_text(info["label"]).split()))
+            _configure_changed(row["state"], text="继承基准" if key == "custom" else (("默认启用" if info["always"] else "已启用") if info["enabled"] else "未启用"),
                                     text_color=COLORS["muted"] if info["enabled"] else COLORS["muted_soft"])
-            row["profile"].configure(text=description["profile"])
-            row["node"].configure(text=description["node"])
-            row["hint"].configure(text=description["hint"], text_color=COLORS["warning"] if description["warning"] else COLORS["muted_soft"])
+            _configure_changed(row["profile"], text=description["profile"])
+            _configure_changed(row["node"], text=description["node"])
+            _configure_changed(row["hint"], text=description["hint"], text_color=COLORS["warning"] if description["warning"] else COLORS["muted_soft"])
         # Keep canonical order even after custom targets are added/removed.
         self._rows = {info["id"]: self._rows[info["id"]] for info, _ in descriptions}
         enabled = sum(info["enabled"] for info, _ in descriptions if info["id"] != "custom")
         bound = sum(desc["bound"] for _, desc in descriptions)
         warnings = sum(desc["warning"] for _, desc in descriptions)
-        self._summary.configure(text=f"已保存 · {enabled} 个目标启用 · {bound} 项独立线路"
+        _configure_changed(self._summary, text=f"已保存 · {enabled} 个目标启用 · {bound} 项独立线路"
                                 + (f" · {warnings} 项需修复" if warnings else ""),
                                 text_color=COLORS["warning"] if warnings else COLORS["muted"])
-        self._layout(self._narrow, force=True)
+        self._layout(self._narrow)
+        self._filter()
         self._signature = signature
 
     def _build_row(self, key):
@@ -253,20 +265,22 @@ class ServiceRouteOverview(ctk.CTkFrame):
 
     def _layout(self, narrow, *, force=False):
         scale = self._get_widget_scaling()
-        if narrow == self._narrow and scale == self._layout_scale and not force:
-            return
-        self._narrow = narrow
-        self._layout_scale = scale
-        self._heading.grid_columnconfigure(3, minsize=round(76 * scale))
-        self._header.grid_columnconfigure(0, weight=1)
-        self._title.grid(row=0, column=0, sticky="w")
-        self._header_actions.grid(row=1 if narrow else 0, column=0 if narrow else 1,
-                                  sticky="ew" if narrow else "e", pady=(6, 0) if narrow else 0)
-        if narrow:
-            self._heading.pack_forget()
-        else:
-            self._heading.pack(fill="x", pady=(0, 4), before=self._body)
+        if narrow != self._narrow or scale != self._layout_scale or force:
+            self._narrow = narrow
+            self._layout_scale = scale
+            self._heading.grid_columnconfigure(3, minsize=round(76 * scale))
+            self._header.grid_columnconfigure(0, weight=1)
+            self._title.grid(row=0, column=0, sticky="w")
+            self._header_actions.grid(row=1 if narrow else 0, column=0 if narrow else 1,
+                                      sticky="ew" if narrow else "e", pady=(6, 0) if narrow else 0)
+            if narrow:
+                self._heading.pack_forget()
+            else:
+                self._heading.pack(fill="x", pady=(0, 4), before=self._body)
         for row in self._rows.values():
+            # New targets need layout even when the viewport has not changed.
+            if row.get("layout") == (narrow, scale) and not force:
+                continue
             tile = row["tile"]
             for widget in (row["target_box"], row["profile"], row["node_box"], row["edit"]):
                 widget.grid_forget()
@@ -284,7 +298,7 @@ class ServiceRouteOverview(ctk.CTkFrame):
                 tile.grid_columnconfigure(3, minsize=round(76 * scale))
                 for col, name in enumerate(("target_box", "profile", "node_box", "edit")):
                     row[name].grid(row=0, column=col, sticky="ew", padx=10, pady=6)
-        self._filter()
+            row["layout"] = (narrow, scale)
 
     def _toggle_inactive(self):
         self._show_inactive = not self._show_inactive
@@ -292,13 +306,32 @@ class ServiceRouteOverview(ctk.CTkFrame):
 
     def _filter(self):
         inactive = 0
+        desired = []
         for row in self._rows.values():
-            row["tile"].pack_forget()
             hidden = not row["info"]["enabled"] and not row["description"]["warning"]
             inactive += int(hidden)
             if self._show_inactive or not hidden:
-                row["tile"].pack(fill="x", pady=(0, 4))
-        self._more.pack_forget()
+                desired.append(row["tile"])
+        # Only insert, remove or move changed targets; stable rows stay mapped.
+        current = list(self._body.pack_slaves())
+        wanted = set(desired)
+        for tile in reversed(current):
+            if tile not in wanted:
+                tile.pack_forget()
+        order = [tile for tile in current if tile in wanted]
+        for index, tile in enumerate(desired):
+            if index < len(order) and order[index] is tile:
+                continue
+            if tile in order:
+                order.remove(tile)
+            options = {"fill": "x", "pady": (0, 4)}
+            if index < len(order):
+                options["before"] = order[index]
+            tile.pack(**options)
+            order.insert(index, tile)
         if inactive:
-            self._more.configure(text="收起未启用目标" if self._show_inactive else f"查看未启用目标（{inactive}）")
-            self._more.pack(anchor="w", pady=(4, 0), before=self._note)
+            _configure_changed(self._more, text="收起未启用目标" if self._show_inactive else f"查看未启用目标（{inactive}）")
+            if not self._more.winfo_manager():
+                self._more.pack(anchor="w", pady=(4, 0), before=self._note)
+        elif self._more.winfo_manager():
+            self._more.pack_forget()

@@ -176,3 +176,73 @@ def test_overview_canvas_resize_uses_dpi_adjusted_width(overview):
     assert widget._narrow is False
     widget._on_resize(SimpleNamespace(widget=widget._canvas, width=600 * scale))
     assert widget._narrow is True
+
+
+def test_single_route_change_updates_only_changed_text_without_relayout(overview, monkeypatch):
+    widget, _ = overview
+    calls = []
+    for key, row in widget._rows.items():
+        for name in ("target", "state", "profile", "node", "hint"):
+            label = row[name]
+            original = label.configure
+            def configure(*args, _original=original, _key=key, _name=name, **kwargs):
+                calls.append((_key, _name))
+                return _original(*args, **kwargs)
+            monkeypatch.setattr(label, "configure", configure)
+        for name in ("target_box", "profile", "node_box", "edit", "tile"):
+            for operation in ("grid", "grid_forget", "pack", "pack_forget"):
+                control = row[name]
+                original = getattr(control, operation)
+                def geometry(*args, _original=original, **kwargs):
+                    calls.append(("geometry", "unexpected"))
+                    return _original(*args, **kwargs)
+                monkeypatch.setattr(control, operation, geometry)
+    prefs = _preferences()
+    prefs["service_node_bindings"]["claude"] = "one"
+    widget.set_routes(prefs, _catalog())
+    assert calls == [("claude", "node")]
+    assert widget._rows["claude"]["node"].cget("text") == "日本 · 家宽 01"
+
+
+def test_overview_incremental_visibility_keeps_order_and_existing_tiles(overview):
+    widget, _ = overview
+    original = {key: row["tile"] for key, row in widget._rows.items()}
+    prefs = _preferences()
+    prefs["builtin_sites"]["github"] = True
+    prefs["custom_targets"] = [{"id": "new", "value": "long.example.invalid", "enabled": True}]
+    widget.set_routes(prefs, _catalog())
+    assert all(widget._rows[key]["tile"] is tile for key, tile in original.items())
+    for row in widget._rows.values():
+        assert row["profile"].winfo_manager() == "grid"
+    def visible():
+        return [key for key, row in widget._rows.items() if row["tile"] in widget._body.pack_slaves()]
+    assert visible() == [key for key, row in widget._rows.items() if row["info"]["enabled"]]
+    widget._toggle_inactive()
+    assert widget._body.pack_slaves() == [row["tile"] for row in widget._rows.values()]
+    widget.set_routes(_preferences(), _catalog())
+    assert "custom:new" not in widget._rows and "custom" not in widget._rows
+    assert widget._body.pack_slaves() == [row["tile"] for row in widget._rows.values()]
+    widget._toggle_inactive()
+    assert visible() == [key for key, row in widget._rows.items() if row["info"]["enabled"]]
+
+
+def test_warning_visibility_updates_without_recreating_other_rows(overview):
+    widget, _ = overview
+    prefs = _preferences()
+    prefs["service_profile_bindings"]["github"] = "missing"
+    widget.set_routes(prefs, _catalog())
+    assert widget._rows["github"]["tile"].winfo_manager() == "pack"
+    assert "1 项需修复" in widget._summary.cget("text")
+    widget.set_routes(_preferences(), _catalog())
+    assert widget._rows["github"]["tile"].winfo_manager() == ""
+    assert "需修复" not in widget._summary.cget("text")
+
+
+def test_equal_enabled_state_does_not_redraw_any_button(overview, monkeypatch):
+    widget, _ = overview
+    widget.set_enabled(False)
+    calls = []
+    for control in [widget._manage, *(row["edit"] for row in widget._rows.values())]:
+        monkeypatch.setattr(control, "configure", lambda **kwargs: calls.append(kwargs))
+    widget.set_enabled(False)
+    assert not calls

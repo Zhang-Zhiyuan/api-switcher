@@ -222,7 +222,9 @@ def test_replacement_schedule_failure_keeps_existing_timer(timer):
 def test_background_timer_runs_with_saved_targets_and_preserves_dirty_editor(timer):
     timer.calls.dirty = True
     timer.start()
-    assert timer.calls.worker == [(timer.kind, {"server_names": () if timer.kind == "local" else ("confirmed",)})]
+    assert timer.calls.worker == [(timer.kind, {
+        "server_names": () if timer.kind == "local" else ("confirmed",), "interval_seconds": 1800,
+    })]
     assert timer.calls.refresh == [{"preserve_editor": True}]
     assert timer.calls.nodes == []
     assert timer.calls.release == [True]

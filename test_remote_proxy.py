@@ -6938,6 +6938,11 @@ def test_automatic_reload_missing_current_snapshot_fails_closed(monkeypatch):
 
 
 def test_automatic_reload_applies_once_only_after_isolated_probe(monkeypatch):
+    from core.proxy_update_result import update_result
+    from models.profile import SSHProfile
+
+    monkeypatch.setattr(remote_proxy.profile_manager, "list_ssh_profiles", lambda: [SSHProfile("server", "synthetic.invalid")])
+
     original = remote_proxy.parse_proxy_node(
         "{ name: original, type: vless, server: old.example.com, port: 443 }"
     )
@@ -6945,6 +6950,10 @@ def test_automatic_reload_applies_once_only_after_isolated_probe(monkeypatch):
         "{ name: requested, type: vless, server: new.example.com, port: 443 }"
     )
     events = []
+    original_config = remote_proxy.build_mihomo_config(original, 7890)
+    applied_config = remote_proxy.build_mihomo_config(requested, 7890)
+    config = [original_config]
+    monkeypatch.setattr(remote_proxy, "read_managed_ai_proxy_config", lambda _name: config[0])
     monkeypatch.setattr(
         remote_proxy,
         "inspect_ai_proxy",
@@ -6962,11 +6971,25 @@ def test_automatic_reload_applies_once_only_after_isolated_probe(monkeypatch):
         lambda *_args, **_kwargs: events.append("probe")
         or _remote_stability_summary(),
     )
-    monkeypatch.setattr(
-        remote_proxy,
-        "reload_ai_proxy",
-        lambda *_args, **_kwargs: events.append("reload") or "reloaded once",
-    )
+    def reload(*_args, **kwargs):
+        assert kwargs["persist_selection"] is False
+        assert kwargs["_expected_config"] == original_config
+        kwargs["_config_snapshot"].update(old_config=original_config, new_config=applied_config)
+        config[0] = applied_config
+        events.append("reload")
+        return update_result("reloaded once", "applied")
+
+    def runtime(_client, command, **kwargs):
+        assert "ROUNDS=1" in command and "STRICT=1" in command
+        assert "include_compact = False" in command and kwargs["timeout"] == 12
+        events.append("runtime")
+        return 0, "\n".join(f"probe\t{label}\t1\tsynthetic response\t1"
+                            for label, _url in remote_proxy.REMOTE_AI_STABILITY_TARGETS), ""
+
+    monkeypatch.setattr(remote_proxy, "reload_ai_proxy", reload)
+    monkeypatch.setattr(remote_proxy, "_connect_ssh", lambda *_a, **_k: (None, object()))
+    monkeypatch.setattr(remote_proxy.ssh_manager, "execute_command_with_status", runtime)
+    monkeypatch.setattr(remote_proxy, "set_proxy_subscription_selected_node", lambda *_a, **_k: events.append("selection"))
 
     message = remote_proxy.reload_ai_proxy_verified(
         "server",
@@ -6974,11 +6997,16 @@ def test_automatic_reload_applies_once_only_after_isolated_probe(monkeypatch):
         automatic_update=True,
     )
 
-    assert events == ["probe", "reload"]
+    assert events == ["probe", "reload", "runtime", "selection"]
     assert "隔离验证通过" in message
+    assert "正式入口短测 4/4 通过" in message
+    assert message.outcome == "applied"
 
 
 def test_automatic_reload_refuses_to_overwrite_node_changed_during_probe(monkeypatch):
+    from models.profile import SSHProfile
+
+    monkeypatch.setattr(remote_proxy.profile_manager, "list_ssh_profiles", lambda: [SSHProfile("server", "synthetic.invalid")])
     original = remote_proxy.parse_proxy_node(
         "{ name: original, type: vless, server: old.example.com, port: 443 }"
     )
@@ -6989,6 +7017,8 @@ def test_automatic_reload_refuses_to_overwrite_node_changed_during_probe(monkeyp
         "{ name: requested, type: vless, server: new.example.com, port: 443 }"
     )
     reads = iter([original, changed])
+    original_config = remote_proxy.build_mihomo_config(original, 7890)
+    monkeypatch.setattr(remote_proxy, "read_managed_ai_proxy_config", lambda _name: original_config)
     monkeypatch.setattr(
         remote_proxy,
         "inspect_ai_proxy",
@@ -7020,6 +7050,7 @@ def test_automatic_reload_refuses_to_overwrite_node_changed_during_probe(monkeyp
     )
 
     assert "当前节点已变化" in message
+    assert message.outcome == "skipped"
 
 
 def test_probe_ai_proxy_stability_requires_all_short_and_compact_results(monkeypatch):

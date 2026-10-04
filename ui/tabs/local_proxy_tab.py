@@ -2635,7 +2635,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._schedule_periodic_update(initial=True)
         self._subscription_timer_restored = True
 
-    def _schedule_periodic_update(self, initial: bool = False, *, retry: bool = False):
+    def _schedule_periodic_update(self, initial: bool = False, *, retry: bool = False, delay_seconds=None):
         if getattr(self, "_destroyed", False) or not bool(self._periodic_update_var.get()):
             self._cancel_periodic_update()
             return
@@ -2646,7 +2646,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         except (AttributeError, TypeError, ValueError, OverflowError):
             interval_minutes = 60
         delay_minutes = 1 if initial or retry else interval_minutes
-        replacement = self.after(delay_minutes * 60 * 1000, self._run_periodic_update)
+        from ui.subscription_auto_refresh import periodic_refresh_delay_ms
+
+        replacement = self.after(periodic_refresh_delay_ms(delay_minutes * 60, delay_seconds), self._run_periodic_update)
         # Retain the existing timer if Tk cannot create its replacement.
         self._cancel_periodic_update()
         self._periodic_update_after_id = replacement

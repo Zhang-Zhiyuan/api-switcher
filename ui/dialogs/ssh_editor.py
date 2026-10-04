@@ -361,7 +361,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
             except Exception as e:
                 success = False
                 message = f"测试失败: {e}"
-            self._safe_after(lambda: self._finish_test(success, message))
+            self._safe_after(lambda: self._finish_test(success, message, expected_data=data))
 
         try:
             threading.Thread(target=run_test, name="ssh-editor-test", daemon=True).start()
@@ -384,10 +384,23 @@ class SSHEditorDialog(ctk.CTkToplevel):
                 text_color=COLORS["muted"],
             )
 
-    def _finish_test(self, success: bool, message: str) -> None:
-        if not self.winfo_exists():
+    def _finish_test(self, success: bool, message: str, *, expected_data: dict | None = None) -> None:
+        if self.__dict__.get("_destroyed", False) or not self.winfo_exists():
             return
         self._set_test_busy(False)
+        if expected_data is not None:
+            # Compare only on the UI thread. Never log or persist the form's
+            # temporary credentials, and do not label an edited host as tested.
+            try:
+                matches = self._collect_data() == expected_data
+            except Exception:
+                matches = False
+            if not matches:
+                self._test_result.configure(
+                    text="配置已变化，旧连接测试结果已忽略；请对当前配置重新测试。",
+                    text_color=COLORS["warning"],
+                )
+                return
         self._test_result.configure(
             text=safe_feedback_text(message),
             text_color=COLORS["success"] if success else COLORS["danger"],
