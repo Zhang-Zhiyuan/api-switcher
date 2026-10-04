@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ui.dialogs.route_selection_dialogs import AUTO_MODE, FIXED_MODE, POOL_MODE, RouteNodeDialog
+from ui.dialogs.route_selection_dialogs import AUTO_MODE, FIXED_MODE, MODE_LABELS, POOL_MODE, RouteNodeDialog
 
 
 @pytest.fixture
@@ -81,7 +81,7 @@ def test_node_click_replaces_automatic_guidance_with_fixed_guidance(mode_picker)
 def test_no_pool_compatibility_rejects_hidden_mode_without_changing_guidance(mode_picker):
     case = mode_picker(selected_key="one", with_pool=False)
     dialog = case.dialog
-    assert POOL_MODE not in dialog._modes.cget("values")
+    assert MODE_LABELS[POOL_MODE] not in dialog._modes.cget("values")
     note = dialog._mode_note.cget("text")
     dialog._set_mode(POOL_MODE)
     assert dialog._mode == FIXED_MODE and dialog._mode_note.cget("text") == note

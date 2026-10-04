@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ui.dialogs.route_selection_dialogs import AUTO_MODE, FIXED_MODE, MAX_POOL_NODES, POOL_MODE, RouteNodeDialog
+from ui.dialogs.route_selection_dialogs import AUTO_MODE, FIXED_MODE, MAX_POOL_NODES, MODE_LABELS, POOL_MODE, RouteNodeDialog
 
 
 def _nodes(count=8):
@@ -46,7 +46,7 @@ def _choose_visible(dialog, *indices):
 def test_pool_selection_only_commits_to_draft_callback_on_explicit_save(pool_picker):
     case = pool_picker()
     dialog = case.dialog
-    assert POOL_MODE in dialog._modes.cget("values")
+    assert MODE_LABELS[POOL_MODE] in dialog._modes.cget("values")
     dialog._set_mode(POOL_MODE)
     _choose_visible(dialog, 1, 4)
     case.root.update()

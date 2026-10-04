@@ -15,6 +15,7 @@ from ui.theme import COLORS, bind_wraplength, button_style, center_window, font,
 AUTO_MODE = "订阅内自动切换"
 FIXED_MODE = "固定节点"
 POOL_MODE = "自选候选自动切换"
+MODE_LABELS = {FIXED_MODE: "固定节点", POOL_MODE: "指定备用", AUTO_MODE: "订阅自动"}
 MAX_POOL_NODES = MAX_SERVICE_NODE_POOL_SIZE
 
 
@@ -66,7 +67,7 @@ class RouteNodeDialog(DraftChoiceDialog):
                  auto_route_usable=True, auto_route_candidate_count=None,
                  selected_keys=None, on_select_pool=None):
         super().__init__(master)
-        self.title("选择节点策略")
+        self.title("选择节点与备用")
         self.geometry("700x710" if on_select_pool or selected_keys else "680x600")
         self.minsize(480, 540 if on_select_pool or selected_keys else 410)
         self.configure(fg_color=COLORS["app_bg"])
@@ -90,6 +91,7 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._closed = False
         self._visible = []
         self._mode = POOL_MODE if self._selected_keys else (FIXED_MODE if selected_key else AUTO_MODE)
+        self._pool_was_opened = self._mode == POOL_MODE
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
 
@@ -105,11 +107,15 @@ class RouteNodeDialog(DraftChoiceDialog):
         pool_body.pack(fill="x", padx=8, pady=(0, 6))
         pool_actions = ctk.CTkFrame(pool_body, fg_color="transparent", height=80)
         pool_actions.pack(side="right", fill="y", padx=(8, 0))
-        for label, command in (("上移", lambda: self._move_pool(-1)),
-                               ("下移", lambda: self._move_pool(1)),
-                               ("移除", self._remove_pool)):
-            ctk.CTkButton(pool_actions, text=label, width=66, command=command,
-                          **{**button_style("secondary", compact=True), "height": 24}).pack(fill="x", pady=1)
+        self._pool_actions = {}
+        for key, label, command in (("first", "设为首选", self._prioritize_pool),
+                                    ("up", "上移", lambda: self._move_pool(-1)),
+                                    ("down", "下移", lambda: self._move_pool(1)),
+                                    ("remove", "移除", self._remove_pool)):
+            button = ctk.CTkButton(pool_actions, text=label, width=76, command=command,
+                                   **{**button_style("secondary", compact=True), "height": 24})
+            button.pack(fill="x", pady=1)
+            self._pool_actions[key] = button
         self._pool_list = tk.Listbox(
             pool_body, exportselection=False, activestyle="dotbox", height=4,
             bg=COLORS["field_bg"], fg=COLORS["text"], selectbackground=COLORS["primary"],
@@ -121,6 +127,7 @@ class RouteNodeDialog(DraftChoiceDialog):
         self._pool_list.configure(yscrollcommand=pool_scroll.set)
         self._pool_list.pack(fill="both", expand=True)
         self._pool_list.bind("<Delete>", lambda _event: self._remove_pool())
+        self._pool_list.bind("<<ListboxSelect>>", self._update_pool_actions)
         self._selection = ctk.CTkLabel(footer, text="", font=font(12), anchor="w", justify="left", height=22)
         self._selection.pack(fill="x", pady=(0, 8))
         bind_wraplength(footer, self._selection, padding=4)
@@ -131,26 +138,27 @@ class RouteNodeDialog(DraftChoiceDialog):
             row=0, column=0, sticky="ew", padx=(0, 8))
         self._choose = ctk.CTkButton(actions, text="使用此选择", command=self._commit, **button_style("accent"))
         self._choose.grid(row=0, column=1, sticky="ew")
+        self._draft_note = ctk.CTkLabel(
+            footer, text="仅写入草稿，保存并应用后生效。",
+            text_color=COLORS["muted"], font=font(11), anchor="w", justify="left",
+        )
+        self._draft_note.pack(fill="x", pady=(6, 0))
+        bind_wraplength(footer, self._draft_note, padding=4)
 
         heading = ctk.CTkLabel(body, text=safe_feedback_text(f"{service_label} · {profile_name}"),
                               font=font(17, "bold"), text_color=COLORS["text"], anchor="w", justify="left")
         heading.pack(fill="x", padx=6, pady=(4, 8))
         bind_wraplength(body, heading, padding=16)
-        modes = [AUTO_MODE, POOL_MODE, FIXED_MODE] if self._pool_enabled else [AUTO_MODE, FIXED_MODE]
-        self._modes = ctk.CTkSegmentedButton(body, values=modes, command=self._set_mode, font=font(12),
+        modes = [FIXED_MODE, POOL_MODE, AUTO_MODE] if self._pool_enabled else [FIXED_MODE, AUTO_MODE]
+        self._modes = ctk.CTkSegmentedButton(body, values=[MODE_LABELS[mode] for mode in modes],
+                                           command=self._select_mode_label, font=font(12),
                                            selected_color=COLORS["primary"], unselected_color=COLORS["secondary"])
         self._modes.pack(fill="x", padx=6)
-        self._modes.set(self._mode)
+        self._modes.set(MODE_LABELS[self._mode])
         self._mode_note = ctk.CTkLabel(body, text="",
                                       text_color=COLORS["muted"], font=font(11), anchor="w", justify="left")
         self._mode_note.pack(fill="x", padx=6, pady=(8, 2))
         bind_wraplength(body, self._mode_note, padding=16)
-        self._draft_note = ctk.CTkLabel(
-            body, text="列表来自本地缓存；选择仅写入草稿，保存并应用后生效。",
-            text_color=COLORS["muted"], font=font(11), anchor="w", justify="left",
-        )
-        self._draft_note.pack(fill="x", padx=6, pady=(0, 8))
-        bind_wraplength(body, self._draft_note, padding=16)
         self._search = ctk.CTkEntry(body, placeholder_text="搜索名称 / 地区关键词（不代表实测出口）", **input_style())
         self._search.pack(fill="x", padx=6)
         self._search.bind("<KeyRelease>", self._schedule_filter)
@@ -184,11 +192,25 @@ class RouteNodeDialog(DraftChoiceDialog):
         self.grab_set()
         self._search.focus_set()
 
+    def _select_mode_label(self, label):
+        for mode, display in MODE_LABELS.items():
+            if label == display:
+                self._set_mode(mode)
+                return
+
     def _set_mode(self, mode):
         if mode not in {AUTO_MODE, FIXED_MODE, POOL_MODE} or (mode == POOL_MODE and not self._pool_enabled):
             return
+        if mode == POOL_MODE and not self._pool_was_opened:
+            # Turning one fixed node into a bounded failover list should keep
+            # that node first, not force the user to search for it again. Never
+            # infer extra candidates, discard a missing pin, or refill a pool
+            # the user has deliberately emptied during this dialog.
+            if self._mode == FIXED_MODE and self._selected_key and not self._selected_keys:
+                self._selected_keys = [self._selected_key]
+            self._pool_was_opened = True
         self._mode = mode
-        self._modes.set(mode)
+        self._modes.set(MODE_LABELS[mode])
         self._filter()
 
     def _schedule_filter(self, _event=None):
@@ -220,7 +242,7 @@ class RouteNodeDialog(DraftChoiceDialog):
                 self._list.see(index)
                 break
         self._refreshing_list = False
-        self._count.configure(text=f"显示 {len(self._visible)} / {len(self._nodes)} 个节点"
+        self._count.configure(text=f"本地缓存 {len(self._visible)} / {len(self._nodes)} 个节点"
                               + (" · 无匹配结果，请更换关键词" if not self._visible else
                                  " · 点击勾选/取消，搜索不会丢失已选项" if self._mode == POOL_MODE else
                                  " · 点击节点即可固定该节点"))
@@ -245,7 +267,26 @@ class RouteNodeDialog(DraftChoiceDialog):
             selected_index = max(0, min(selected_index, len(self._selected_keys) - 1))
             self._pool_list.selection_set(selected_index)
             self._pool_list.see(selected_index)
-        self._pool_caption.configure(text=f"已选 {len(self._selected_keys)}/{MAX_POOL_NODES} · 从上到下为故障切换优先顺序")
+        self._pool_caption.configure(text=f"已选 {len(self._selected_keys)}/{MAX_POOL_NODES} · 第 1 项首选，其余依次备用")
+        self._update_pool_actions()
+
+    def _update_pool_actions(self, _event=None):
+        selected = self._pool_list.curselection()
+        index = selected[0] if self._mode == POOL_MODE and selected else None
+        for key, usable in {
+            "first": index is not None and index > 0,
+            "up": index is not None and index > 0,
+            "down": index is not None and index < len(self._selected_keys) - 1,
+            "remove": index is not None,
+        }.items():
+            self._pool_actions[key].configure(state="normal" if usable else "disabled")
+
+    def _prioritize_pool(self):
+        selected = self._pool_list.curselection()
+        if self._mode != POOL_MODE or not selected or selected[0] == 0:
+            return
+        self._selected_keys.insert(0, self._selected_keys.pop(selected[0]))
+        self._render_pool(0)
 
     def _move_pool(self, step):
         selected = self._pool_list.curselection()
@@ -320,7 +361,7 @@ class RouteNodeDialog(DraftChoiceDialog):
         elif self._mode == POOL_MODE:
             missing = sum(key not in self._keys for key in self._selected_keys)
             valid = bool(self._selected_keys) and not missing and len(self._selected_keys) <= MAX_POOL_NODES and callable(self._on_select_pool)
-            text = f"仅在这 {len(self._selected_keys)} 个候选中按顺序故障切换，不使用订阅内其他节点。"
+            text = f"已选 {len(self._selected_keys)} 个候选 · 按顺序切换"
             if not self._selected_keys:
                 text = f"请勾选候选节点（最多 {MAX_POOL_NODES} 个）；可在已选列表中调整优先顺序。"
             elif missing:
@@ -335,7 +376,9 @@ class RouteNodeDialog(DraftChoiceDialog):
             text = "已选固定节点：" + label if label is not None else "请选择一个节点；原固定节点缺失时不会自动替换。"
             valid = label is not None
         self._selection.configure(text=text, text_color=COLORS["text"] if valid and not widening else COLORS["warning"])
-        self._choose.configure(state="normal" if valid else "disabled")
+        action = ("使用订阅自动" if self._mode == AUTO_MODE else
+                  f"使用 {len(self._selected_keys)} 个候选" if self._mode == POOL_MODE else "使用固定节点")
+        self._choose.configure(text=action, state="normal" if valid else "disabled")
 
     def _select_visible(self, _event=None):
         if self._refreshing_list:

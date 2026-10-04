@@ -20,6 +20,7 @@ DIRECT = DIRECT_PROFILE
 ENABLE = RESUME_ROUTE
 DISABLE = ORIGINAL_RULES
 OPERATIONS = (SET_ROUTE, DIRECT, FOLLOW, DISABLE, TAGGED, ENABLE)
+CHOOSE_ROUTE = "请选择访问线路"
 
 
 def _set_target_enabled(draft, service, row, enabled):
@@ -98,7 +99,7 @@ def apply_route_batch(preferences, catalog, services, operation, *, profile_id="
 
 
 class RouteBulkDialog(DraftChoiceDialog):
-    def __init__(self, master, *, rows, catalog, on_apply):
+    def __init__(self, master, *, rows, catalog, on_apply, initial_services=(), scope_label=""):
         super().__init__(master)
         self.title("批量设置目标分流")
         self.geometry("760x700")
@@ -112,6 +113,7 @@ class RouteBulkDialog(DraftChoiceDialog):
         self._node_key = ""
         self._node_keys = []
         self._profile_id = ""
+        self._operation = ctk.StringVar(value=SET_ROUTE)
         self._vars = {}
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
@@ -122,61 +124,64 @@ class RouteBulkDialog(DraftChoiceDialog):
         self._status.pack(fill="x", pady=(0, 8))
         bind_wraplength(footer, self._status, padding=8)
         ctk.CTkButton(footer, text="取消", width=90, command=self.destroy, **button_style("secondary")).pack(side="left")
-        self._apply_button = ctk.CTkButton(footer, text="写入所选目标草稿", command=self._commit,
+        self._apply_button = ctk.CTkButton(footer, text="确认选择，返回编辑", command=self._commit,
                                          state="disabled", **button_style("accent"))
         self._apply_button.pack(side="right")
         # Keep only the confirmation footer fixed. At high DPI, fixed settings
         # used to consume the entire height and hide every target checkbox.
         body = self._body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
         body.pack(fill="both", expand=True, padx=12, pady=(12, 0))
-        heading = ctk.CTkLabel(body, text="批量设置目标分流", font=font(18, "bold"), anchor="w")
+        heading = ctk.CTkLabel(body, text="为多个目标选择同一线路", font=font(18, "bold"), anchor="w")
         heading.pack(fill="x", padx=6, pady=(4, 8))
-        note = ctk.CTkLabel(body, text="只修改当前位置的勾选目标。写入草稿后核对，保存并应用才生效。",
+        note = ctk.CTkLabel(body, text=(f"位置：{safe_feedback_text(scope_label)}\n" if scope_label else "")
+                            + "只修改勾选目标；确认后返回编辑，保存并应用才生效。",
                             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left")
         note.pack(fill="x", padx=6, pady=(0, 10))
         bind_wraplength(body, note, padding=12)
         settings = ctk.CTkFrame(body, fg_color=COLORS["surface"])
         settings.pack(fill="x", padx=6)
         settings.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(settings, text="批量操作", font=font(12)).grid(row=0, column=0, padx=10, pady=10)
-        self._operation = ctk.CTkComboBox(settings, values=list(OPERATIONS), state="readonly",
-                                         command=self._operation_changed, **combo_style())
-        self._operation.set(SET_ROUTE)
-        self._operation.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
-        self._profile_caption = ctk.CTkLabel(settings, text="订阅线路", font=font(12))
-        self._profile_caption.grid(row=1, column=0, padx=10, pady=6)
-        self._profiles = {"请选择订阅": ""}
+        self._profile_caption = ctk.CTkLabel(settings, text="访问线路", font=font(12))
+        self._profile_caption.grid(row=0, column=0, padx=10, pady=10)
+        self._profiles = {CHOOSE_ROUTE: ""}
+        actions = [FOLLOW, DIRECT, DISABLE, ENABLE, TAGGED]
+        reserved = {*actions, SET_ROUTE, CHOOSE_ROUTE}
         for item in catalog:
             label = safe_feedback_text(str(item["name"]))
             network = item.get("network_type")
             if network in {"residential", "datacenter"}:
                 label += " · " + ("家宽" if network == "residential" else "非家宽")
             base, suffix = label, 2
-            while label in self._profiles:
+            while label in self._profiles or label in reserved:
                 label = f"{base} ({suffix})"
                 suffix += 1
             self._profiles[label] = item["id"]
-        self._profile = ctk.CTkComboBox(settings, values=list(self._profiles), state="readonly",
-                                       command=self._select_profile, **combo_style())
-        self._profile.set("请选择订阅")
-        self._profile.grid(row=1, column=1, sticky="ew", padx=10, pady=6)
+        self._profile = ctk.CTkComboBox(settings, values=[CHOOSE_ROUTE, *actions, *list(self._profiles)[1:]],
+                                       state="readonly", command=self._select_route, **combo_style())
+        self._profile.set(CHOOSE_ROUTE)
+        self._profile.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
         self._node_caption = ctk.CTkLabel(settings, text="节点与备用", font=font(12))
-        self._node_caption.grid(row=2, column=0, padx=10, pady=10)
         self._node_button = ctk.CTkButton(settings, text="先选择订阅，再设置节点", command=self._open_nodes,
                                         state="disabled", **button_style("secondary"))
-        self._node_button.grid(row=2, column=1, sticky="ew", padx=10, pady=10)
+        self._selection_note = ctk.CTkLabel(body, text="", font=font(12), text_color=COLORS["muted"],
+                                          anchor="w", justify="left")
+        self._selection_note.pack(fill="x", padx=6, pady=(10, 0))
+        bind_wraplength(body, self._selection_note, padding=12)
         toolbar = ctk.CTkFrame(body, fg_color="transparent")
         toolbar.pack(fill="x", padx=6, pady=10)
         for label, group in (("全选", "all"), ("AI 服务", "ai"), ("网站", "sites"), ("清空选择", "none")):
             ctk.CTkButton(toolbar, text=label, width=100, command=lambda group=group: self._select_group(group),
                           **button_style("secondary", compact=True)).pack(side="left", padx=(0, 6))
         wrap_action_group(toolbar, wide_columns=4)
+        initial = set(initial_services)
         for row in rows:
-            var = ctk.BooleanVar(value=False)
+            var = ctk.BooleanVar(value=row["id"] in initial)
             self._vars[row["id"]] = var
-            text = safe_feedback_text(row["label"]) + (" · 已启用" if row["enabled"] else " · 未启用")
+            text = safe_feedback_text(row["label"]) + (" · 专用线路" if row["enabled"] else " · 沿用原规则")
             ctk.CTkCheckBox(body, text=text, variable=var, command=self._changed,
                             font=font(12), checkbox_width=18, checkbox_height=18).pack(fill="x", padx=10, pady=8)
+        self._initial_selection = bool(initial & self._vars.keys())
+        self._changed()
         center_window(self, master)
         self.grab_set()
 
@@ -189,18 +194,28 @@ class RouteBulkDialog(DraftChoiceDialog):
 
     def _changed(self):
         count = sum(var.get() for var in self._vars.values())
-        self._apply_button.configure(state="normal" if count else "disabled", text=f"写入 {count} 个目标草稿")
+        ready = self._operation.get() != SET_ROUTE or bool(self._profile_id)
+        self._apply_button.configure(state="normal" if count and ready else "disabled", text=f"确认 {count} 项，返回编辑")
+        prefix = "已带入主列表筛选；" if self._initial_selection else ""
+        self._selection_note.configure(text=f"{prefix}已选 {count} / {len(self._vars)} 个目标，可继续调整勾选。")
+
+    def _select_route(self, label):
+        if label in self._profiles:
+            self._select_profile(label)
+        elif label in OPERATIONS and label != SET_ROUTE:
+            self._operation_changed(label)
 
     def _operation_changed(self, operation):
-        enabled = operation == SET_ROUTE
-        for widget, row, col in ((self._profile_caption, 1, 0), (self._profile, 1, 1),
-                                 (self._node_caption, 2, 0), (self._node_button, 2, 1)):
+        self._operation.set(operation)
+        enabled = operation == SET_ROUTE and bool(self._profile_id)
+        label = next((label for label, key in self._profiles.items() if key == self._profile_id), CHOOSE_ROUTE)
+        self._profile.set(label if operation == SET_ROUTE else operation)
+        for widget, col in ((self._node_caption, 0), (self._node_button, 1)):
             if enabled:
-                widget.grid(row=row, column=col, sticky="ew" if col else "", padx=10, pady=6 if row == 1 else 10)
+                widget.grid(row=1, column=col, sticky="ew" if col else "", padx=10, pady=(0, 10))
             else:
                 widget.grid_forget()
-        self._profile.configure(state="readonly" if enabled else "disabled")
-        self._node_button.configure(state="normal" if enabled and self._profile_id else "disabled")
+        self._node_button.configure(state="normal" if enabled else "disabled")
         self._status.configure(
             text={
                 DIRECT: "直连会启用所选目标，使用设备自身网络，不自动回退代理；不能与严格隐私同时启用。",
@@ -210,6 +225,7 @@ class RouteBulkDialog(DraftChoiceDialog):
             }.get(operation, "选择目标和线路；所选线路会启用，保存并应用后生效。"),
             text_color=COLORS["muted"],
         )
+        self._changed()
 
     def _select_profile(self, label):
         selected = self._profiles.get(label, "")
@@ -217,7 +233,7 @@ class RouteBulkDialog(DraftChoiceDialog):
             self._profile_id = selected
             self._node_key, self._node_keys = "", []
         self._update_node_label()
-        self._operation_changed(self._operation.get())
+        self._operation_changed(SET_ROUTE)
 
     def _update_node_label(self):
         if self._node_keys:
@@ -274,6 +290,9 @@ class RouteBulkDialog(DraftChoiceDialog):
             return
         chosen = [key for key, var in self._vars.items() if var.get()]
         if not chosen:
+            return
+        if self._operation.get() == SET_ROUTE and not self._profile_id:
+            self._status.configure(text="请选择访问线路；指定订阅时需有可用缓存。", text_color=COLORS["warning"])
             return
         try:
             self._on_apply(chosen, self._operation.get(), profile_id=self._profile_id,

@@ -144,7 +144,8 @@ def test_batch_hides_irrelevant_node_controls_without_resetting_selection(tk_roo
             dialog._operation_changed(operation)
             ctk.set_widget_scaling(1.25)
             tk_root.update()
-            assert not dialog._profile.winfo_manager()
+            assert dialog._profile.winfo_viewable()
+            assert dialog._profile.get() == operation
             assert not dialog._node_button.winfo_manager()
             assert dialog._node_key == "three"
         dialog._operation.set(bulk.SET_ROUTE)

@@ -925,6 +925,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if self._filter_after_id:
             self.after_cancel(self._filter_after_id)
         self._filter_after_id = self.after(120, self._filter_rows)
+        self._update_bulk_action()
 
     def _set_category(self, category):
         self._category = category
@@ -945,6 +946,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             return
         query = self._search.get().strip().casefold()
         visible = []
+        visible_services = []
         for service, row in self._rows.items():
             aliases = "gpt chatgpt" if service == "openai" else ""
             description = row["description"]
@@ -956,6 +958,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 or self._category == "待修复" and description["warning"])
             if show:
                 visible.append(row["tile"])
+                visible_services.append(service)
+        self._visible_services = tuple(visible_services)
         if tuple(visible) != getattr(self, "_visible_tiles", None):
             self._visible_tiles = tuple(visible)
             self._empty.pack_forget()
@@ -966,6 +970,22 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if not visible:
                 self._empty.pack(fill="x", padx=12, pady=24)
         _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 选线路即启用；“沿用原规则”不等于直连")
+        self._update_bulk_action()
+
+    def _has_route_filter(self):
+        return self._category != "全部" or bool(self._search.get().strip())
+
+    def _update_bulk_action(self, *, enabled=True):
+        filtered = self._has_route_filter()
+        pending = self._filter_after_id is not None
+        count = len(getattr(self, "_visible_services", ()))
+        # A previously empty search must not block an immediate click after
+        # editing the query. Opening the dialog flushes this pending filter;
+        # never advertise the old result count while it is being recomputed.
+        ready = enabled and not self._busy and not self._closed and bool(self._rows) and (pending or not filtered or count > 0)
+        _configure_changed(self._bulk_button,
+                           text="批量设置…" if pending else f"批量设置（{count}）" if filtered else "批量设置",
+                           state="normal" if ready else "disabled")
 
     def _select_profile(self, service, label):
         if self._busy or service not in self._rows:
@@ -1167,9 +1187,16 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             return
         from ui.dialogs.service_route_bulk_dialog import RouteBulkDialog
 
+        # Flush the debounced search before capturing this explicit action's
+        # targets. A just-entered query must never select the previous results.
+        self._filter_rows()
+        initial_services = self._visible_services if self._has_route_filter() else ()
+        if self._has_route_filter() and not initial_services:
+            return
         scope = self._scope
         self._bulk_dialog = RouteBulkDialog(
             self, rows=proxy_routing.route_rows(self._drafts[scope]), catalog=self._catalog,
+            initial_services=initial_services, scope_label=scope,
             on_apply=lambda services, operation, **choices: self._accept_bulk_edit(scope, services, operation, **choices),
         )
 
@@ -1324,6 +1351,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._refresh_row(service)
         if self._drafts:
             self._update_legacy_cleanup()
+        self._update_bulk_action(enabled=enabled)
 
     def _apply(self, *, allow_missing=False, approved_scope_change=None):
         if self._closed or self._busy or not self._drafts:
