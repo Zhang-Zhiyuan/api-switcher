@@ -211,6 +211,8 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_saved_subscription_load_generation = 0
         self._deferred_proxy_saved_subscription_pending = False
         self._proxy_node_text = None
+        self._proxy_node_editor_expanded = False
+        self._proxy_maintenance_expanded = False
         self._proxy_target_label = None
         self._proxy_cache_label = None
         self._proxy_selected_label = None
@@ -1059,7 +1061,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             proxy_controls,
-            text="1 订阅来源",
+            text="1 管理订阅",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -1220,7 +1222,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             proxy_controls,
-            text="2 节点选择",
+            text="2 选择默认节点",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -1299,7 +1301,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         ).pack(anchor="e", pady=(2, 4))
         self._proxy_use_node_button = ctk.CTkButton(
             proxy_node_actions,
-            text="使用当前",
+            text="填入待部署",
             width=112,
             command=self._use_selected_proxy_subscription_node,
             state="disabled",
@@ -1308,7 +1310,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._proxy_use_node_button.pack(anchor="e")
         self._proxy_hot_update_button = ctk.CTkButton(
             proxy_node_actions,
-            text="热更新当前",
+            text="切换默认节点",
             width=112,
             command=self._hot_update_selected_proxy_subscription_node,
             state="disabled",
@@ -1411,44 +1413,51 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             proxy_controls,
-            text="待部署节点",
+            text="手工节点配置",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
         ).grid(row=11, column=0, sticky="nw", pady=(8, 0))
+        self._proxy_node_editor_host = ctk.CTkFrame(proxy_controls, fg_color="transparent")
+        self._proxy_node_editor_host.grid(row=11, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self._proxy_node_editor_toggle = ctk.CTkButton(
+            self._proxy_node_editor_host, text="展开节点配置 / 导入文件 ▾",
+            command=self._toggle_proxy_node_editor, **button_style("secondary", compact=True),
+        )
+        self._proxy_node_editor_toggle.pack(fill="x")
         self._proxy_node_text = ctk.CTkTextbox(
-            proxy_controls,
+            self._proxy_node_editor_host,
             height=96,
             **textbox_style(monospace=True),
         )
-        self._proxy_node_text.grid(row=11, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
 
         proxy_button_frame = ctk.CTkFrame(proxy_controls, fg_color="transparent")
         proxy_button_frame.grid(row=11, column=3, sticky="ne", pady=(8, 0))
-        ctk.CTkLabel(
-            proxy_button_frame,
-            text="节点来源",
-            text_color=COLORS["muted"],
-            font=font(11, "bold"),
-            anchor="e",
-        ).pack(anchor="e", pady=(0, 4))
         self._proxy_load_file_button = ctk.CTkButton(
-            proxy_button_frame,
+            self._proxy_node_editor_host,
             text="导入文件",
             width=96,
             command=self._load_proxy_node_file,
             **button_style("secondary", compact=True),
         )
-        self._proxy_load_file_button.pack(anchor="e", pady=(0, 10))
+        common_actions = ctk.CTkFrame(proxy_button_frame, fg_color="transparent")
+        common_actions.pack(fill="x")
+        self._proxy_maintenance_toggle = ctk.CTkButton(
+            proxy_button_frame, text="维护工具 ▾", command=self._toggle_proxy_maintenance,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_maintenance_toggle.pack(fill="x", pady=(8, 0))
+        maintenance = ctk.CTkFrame(proxy_button_frame, fg_color="transparent")
+        self._proxy_maintenance_tools = maintenance
         ctk.CTkLabel(
-            proxy_button_frame,
+            common_actions,
             text="SSH 远端",
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="e",
         ).pack(anchor="e", pady=(0, 4))
         self._proxy_deploy_button = ctk.CTkButton(
-            proxy_button_frame,
+            common_actions,
             text="部署远端",
             width=96,
             command=self._deploy_ai_proxy,
@@ -1456,7 +1465,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_deploy_button.pack(anchor="e", pady=(0, 6))
         self._proxy_inspect_button = ctk.CTkButton(
-            proxy_button_frame,
+            common_actions,
             text="检查远端",
             width=96,
             command=self._inspect_ai_proxy,
@@ -1464,7 +1473,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_inspect_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_core_button = ctk.CTkButton(
-            proxy_button_frame,
+            maintenance,
             text="更新内核",
             width=96,
             command=self._update_remote_proxy_core,
@@ -1472,7 +1481,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_remote_core_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_test_button = ctk.CTkButton(
-            proxy_button_frame,
+            common_actions,
             text="测试远端",
             width=96,
             command=self._probe_ai_proxy,
@@ -1480,7 +1489,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_remote_test_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_stale_cleanup_button = ctk.CTkButton(
-            proxy_button_frame,
+            maintenance,
             text="清理脏代理",
             width=96,
             command=self._cleanup_stale_ai_proxy,
@@ -1488,14 +1497,15 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_remote_stale_cleanup_button.pack(anchor="e", pady=(0, 6))
         self._proxy_remote_cleanup_button = ctk.CTkButton(
-            proxy_button_frame,
+            common_actions,
             text="清理远端",
             width=96,
             command=self._cleanup_ai_proxy,
             **button_style("danger", compact=True),
         )
         self._proxy_remote_cleanup_button.pack(anchor="e", pady=(0, 10))
-        wrap_action_group(proxy_button_frame)
+        wrap_action_group(common_actions)
+        wrap_action_group(maintenance)
 
         self._proxy_status_label = ctk.CTkLabel(
             proxy_controls,
@@ -1520,6 +1530,28 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_section_after_id = self.after(
             self.REMOTE_AUTO_SECTION_DELAY_MS,
             self._build_remote_auto_section,
+        )
+
+    def _toggle_proxy_node_editor(self):
+        self._proxy_node_editor_expanded = not self._proxy_node_editor_expanded
+        if self._proxy_node_editor_expanded:
+            self._proxy_node_text.pack(fill="x", pady=(6, 0))
+            self._proxy_load_file_button.pack(anchor="w", pady=(6, 0))
+        else:
+            self._proxy_node_text.pack_forget()
+            self._proxy_load_file_button.pack_forget()
+        self._proxy_node_editor_toggle.configure(
+            text="收起手工节点配置 ▴" if self._proxy_node_editor_expanded else "展开节点配置 / 导入文件 ▾",
+        )
+
+    def _toggle_proxy_maintenance(self):
+        self._proxy_maintenance_expanded = not self._proxy_maintenance_expanded
+        if self._proxy_maintenance_expanded:
+            self._proxy_maintenance_tools.pack(fill="x", pady=(6, 0))
+        else:
+            self._proxy_maintenance_tools.pack_forget()
+        self._proxy_maintenance_toggle.configure(
+            text="收起维护工具 ▴" if self._proxy_maintenance_expanded else "维护工具 ▾",
         )
 
     def _build_proxy_subscription_picker(self):
@@ -2742,7 +2774,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if routes_dialog is not None and routes_dialog.winfo_exists() and not routes_dialog._closed:
             routes_dialog._reload_catalog()
         self._update_proxy_subscription_profile_form_controls()
-        self._set_proxy_status("标记已保存，打开目标分流可预览默认分配，保存并应用后生效；名称/链接草稿及服务器线路未改动。", "success")
+        self._set_proxy_status("标记已保存，可点击“智能分流方案”预览分配，再保存并应用；名称/链接草稿及服务器线路未改动。", "success")
 
     def _proxy_subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()
@@ -3192,7 +3224,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         if local_bindings:
             message = (
                 "该订阅正被 Win11 服务分流使用；请先在“Win11 本机代理”中"
-                "把对应服务改为“跟随当前节点”或其他订阅，再删除"
+                "把对应服务改为“默认代理线路”或其他订阅，再删除"
             )
             self._set_proxy_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -4779,7 +4811,7 @@ class SSHTab(ctk.CTkScrollableFrame):
                     message += f" 同 IP 复用 {reused_ip_count} 个。"
                 if preserved_complete_count:
                     message += f" 本次 {preserved_complete_count} 个部分结果未覆盖上次完整证据。"
-                message += " 检测未切换远端代理；确认后点击“使用当前”并按需部署。"
+                message += " 检测未切换远端代理；确认后点击“填入待部署”并按需部署。"
                 if save_error:
                     message += f" 质量结果缓存失败: {save_error}"
                 self._set_proxy_status(message, severity)
@@ -4973,7 +5005,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         node_summary = remote_proxy.describe_proxy_node(item.node)
         severity = "warning" if selection_save_error else "success"
         self._set_proxy_selected_summary(f"待部署节点: {node_summary}", severity)
-        message = f"已填入待部署节点: {node_summary}"
+        message = f"已填入待部署节点: {node_summary}；尚未应用到运行中的代理。"
+        if persist_selection and not selection_save_error:
+            message += "已记住订阅首选，后续应用或订阅更新可能采用此选择。"
         if selection_save_error:
             message += f"；选择缓存失败: {selection_save_error}"
         self._set_proxy_status(message, severity)

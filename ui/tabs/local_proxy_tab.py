@@ -132,6 +132,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._selected_label = None
         self._node_text = None
         self._node_text_host = None
+        self._node_editor_frame = None
+        self._node_editor_expanded = False
+        self._maintenance_expanded = False
         self._node_text_after_id = None
         self._deferred_node_text_pending = False
         self._deferred_initial_refresh_pending = False
@@ -170,9 +173,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         subtitle = ctk.CTkLabel(
             header,
             text=(
-                "托管当前 Windows 用户的系统代理、环境变量和 VS Code 本机设置；"
-                "可安全共享给默认 WSL 发行版中的 Codex/Claude Code。"
-                "这是应用层代理，不是 VPN/TUN。"
+                "先准备订阅与默认节点，再启动代理；网站可在“网站访问线路”中单独指定线路。"
+                "只影响当前 Windows 用户及已开启共享的 WSL，不是 VPN/TUN。"
             ),
             text_color=COLORS["muted"],
             font=font(12),
@@ -340,7 +342,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         self._subscription_heading = ctk.CTkLabel(
             controls,
-            text="1 订阅来源",
+            text="1 管理订阅",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -521,7 +523,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         self._node_selection_heading = ctk.CTkLabel(
             controls,
-            text="2 节点选择",
+            text="2 选择默认节点",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -615,7 +617,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         ).pack(anchor="e", pady=(2, 4))
         self._use_node_button = ctk.CTkButton(
             node_actions,
-            text="使用当前",
+            text="填入待启动",
             width=118,
             command=self._use_selected_subscription_node,
             state="disabled",
@@ -624,7 +626,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._use_node_button.pack(anchor="e")
         self._hot_update_node_button = ctk.CTkButton(
             node_actions,
-            text="热更新当前",
+            text="切换默认节点",
             width=118,
             command=self._hot_update_selected_subscription_node,
             state="disabled",
@@ -684,7 +686,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._proxy_start_heading.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         self._pending_node_label = ctk.CTkLabel(
             controls,
-            text="待启动节点",
+            text="手工节点配置",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
@@ -692,16 +694,22 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self._pending_node_label.grid(row=9, column=0, sticky="nw", pady=(8, 0))
         self._node_text_host = ctk.CTkFrame(
             controls,
-            height=96,
+            height=38,
             fg_color=COLORS["field_bg"],
             corner_radius=8,
             border_width=1,
             border_color=COLORS["border"],
         )
         self._node_text_host.grid(row=9, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(8, 0))
-        self._node_text_host.grid_propagate(False)
+        self._node_editor_toggle = ctk.CTkButton(
+            self._node_text_host, text="展开节点配置 / 导入文件 ▾",
+            command=self._toggle_node_editor, **button_style("secondary", compact=True),
+        )
+        self._node_editor_toggle.pack(fill="x", padx=4, pady=4)
+        self._node_editor_frame = ctk.CTkFrame(self._node_text_host, height=96, fg_color="transparent")
+        self._node_editor_frame.pack_propagate(False)
         ctk.CTkLabel(
-            self._node_text_host,
+            self._node_editor_frame,
             text="节点输入框正在准备...",
             text_color=COLORS["muted"],
             font=font(12),
@@ -710,30 +718,31 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         actions = ctk.CTkFrame(controls, fg_color="transparent")
         self._proxy_actions = actions
         actions.grid(row=9, column=3, sticky="ne", pady=(8, 0))
-        ctk.CTkLabel(
-            actions,
-            text="节点来源",
-            text_color=COLORS["muted"],
-            font=font(11, "bold"),
-            anchor="e",
-        ).pack(anchor="e", pady=(0, 4))
         self._load_file_button = ctk.CTkButton(
-            actions,
+            self._node_text_host,
             text="导入文件",
             width=104,
             command=self._load_node_file,
             **button_style("secondary", compact=True),
         )
-        self._load_file_button.pack(anchor="e", pady=(0, 10))
+        common_actions = ctk.CTkFrame(actions, fg_color="transparent")
+        common_actions.pack(fill="x")
+        self._maintenance_toggle = ctk.CTkButton(
+            actions, text="维护工具 ▾", command=self._toggle_maintenance,
+            **button_style("secondary", compact=True),
+        )
+        self._maintenance_toggle.pack(fill="x", pady=(8, 0))
+        maintenance = ctk.CTkFrame(actions, fg_color="transparent")
+        self._maintenance_tools = maintenance
         ctk.CTkLabel(
-            actions,
+            common_actions,
             text="本机运行",
             text_color=COLORS["muted"],
             font=font(11, "bold"),
             anchor="e",
         ).pack(anchor="e", pady=(0, 4))
         self._start_button = ctk.CTkButton(
-            actions,
+            common_actions,
             text="启动本机",
             width=104,
             command=self._start_local_proxy,
@@ -741,7 +750,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._start_button.pack(anchor="e", pady=(0, 6))
         self._inspect_button = ctk.CTkButton(
-            actions,
+            common_actions,
             text="检查状态",
             width=104,
             command=self._inspect_local_proxy,
@@ -749,7 +758,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._inspect_button.pack(anchor="e", pady=(0, 6))
         self._cleanup_proxy_button = ctk.CTkButton(
-            actions,
+            maintenance,
             text="清理脏代理",
             width=104,
             command=self._inspect_and_cleanup_stale_proxy,
@@ -757,7 +766,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._cleanup_proxy_button.pack(anchor="e", pady=(0, 6))
         self._core_update_button = ctk.CTkButton(
-            actions,
+            maintenance,
             text="更新内核",
             width=104,
             command=self._update_local_proxy_core,
@@ -765,7 +774,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._core_update_button.pack(anchor="e", pady=(0, 6))
         self._test_button = ctk.CTkButton(
-            actions,
+            common_actions,
             text="测试连通",
             width=104,
             command=self._probe_local_proxy,
@@ -773,7 +782,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._test_button.pack(anchor="e", pady=(0, 6))
         self._wsl_test_button = ctk.CTkButton(
-            actions,
+            maintenance,
             text="测试/修复 WSL",
             width=104,
             command=self._test_and_repair_wsl_proxy,
@@ -781,14 +790,15 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         )
         self._wsl_test_button.pack(anchor="e", pady=(0, 6))
         self._stop_button = ctk.CTkButton(
-            actions,
+            common_actions,
             text="停止并恢复",
             width=104,
             command=self._stop_local_proxy,
             **button_style("danger", compact=True),
         )
         self._stop_button.pack(anchor="e")
-        wrap_action_group(actions)
+        wrap_action_group(common_actions)
+        wrap_action_group(maintenance)
 
         self._status_label = ctk.CTkLabel(
             controls,
@@ -806,6 +816,32 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         self.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._schedule_responsive_layout(delay_ms=0)
         self._subscription_picker_after_id = self.after(1800, self._build_subscription_picker)
+
+    def _toggle_node_editor(self):
+        self._node_editor_expanded = not self._node_editor_expanded
+        if self._node_editor_expanded:
+            # An explicit edit/import must not wait for the delayed picker.
+            # Otherwise importing before the textbox exists silently loses it.
+            if not self._node_text:
+                self._build_node_text(force=True)
+            self._node_editor_frame.pack(fill="x", padx=4, pady=(0, 4))
+            self._load_file_button.pack(anchor="w", padx=4, pady=(0, 4))
+        else:
+            self._node_editor_frame.pack_forget()
+            self._load_file_button.pack_forget()
+        self._node_editor_toggle.configure(
+            text="收起手工节点配置 ▴" if self._node_editor_expanded else "展开节点配置 / 导入文件 ▾",
+        )
+
+    def _toggle_maintenance(self):
+        self._maintenance_expanded = not self._maintenance_expanded
+        if self._maintenance_expanded:
+            self._maintenance_tools.pack(fill="x", pady=(6, 0))
+        else:
+            self._maintenance_tools.pack_forget()
+        self._maintenance_toggle.configure(
+            text="收起维护工具 ▴" if self._maintenance_expanded else "维护工具 ▾",
+        )
 
     def _logical_layout_width(self) -> int:
         width = self.winfo_width()
@@ -960,24 +996,26 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if not self._node_text and not self._node_text_after_id:
             self._node_text_after_id = self.after(360, self._build_node_text)
 
-    def _build_node_text(self):
+    def _build_node_text(self, *, force=False):
+        if force and self._node_text_after_id:
+            self.after_cancel(self._node_text_after_id)
         self._node_text_after_id = None
-        if not is_active_tab(self):
+        if not force and not is_active_tab(self):
             self._deferred_node_text_pending = True
             return
-        if recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
+        if not force and recent_user_scroll(self, idle_ms=self.SCROLL_IDLE_BUILD_MS):
             self._node_text_after_id = self.after(self.SCROLL_RETRY_BUILD_MS, self._build_node_text)
             return
         self._deferred_node_text_pending = False
         if self._node_text or not self._node_text_host:
             return
         try:
-            for child in self._node_text_host.winfo_children():
+            for child in self._node_editor_frame.winfo_children():
                 child.destroy()
         except Exception:
             pass
         self._node_text = ctk.CTkTextbox(
-            self._node_text_host,
+            self._node_editor_frame,
             height=96,
             **textbox_style(monospace=True),
         )
@@ -1812,7 +1850,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if routes_dialog is not None and routes_dialog.winfo_exists() and not routes_dialog._closed:
             routes_dialog._reload_catalog()
         self._update_subscription_profile_form_controls()
-        self._set_status("标记已保存，打开目标分流可预览默认分配，保存并应用后生效；名称/链接草稿及当前线路未改动。", "success")
+        self._set_status("标记已保存，可点击“智能分流方案”预览分配，再保存并应用；名称/链接草稿及当前线路未改动。", "success")
 
     def _subscription_profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or "未命名订阅").strip()
@@ -2252,7 +2290,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if bound_services:
             message = (
                 f"该订阅正被 {'、'.join(bound_services)} 使用；"
-                "请先把对应线路改为“跟随当前节点”或其他订阅，再删除"
+                "请先把对应线路改为“默认代理线路”或其他订阅，再删除"
             )
             self._set_status(message, "warning")
             show_toast(self.winfo_toplevel(), message, is_error=True)
@@ -4288,7 +4326,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     message += f" 同 IP 复用 {reused_ip_count} 个。"
                 if preserved_complete_count:
                     message += f" 本次 {preserved_complete_count} 个部分结果未覆盖上次完整证据。"
-                message += " 检测未切换正在运行的代理；确认后可点击“热更新当前”无重启应用。"
+                message += " 检测未切换正在运行的代理；确认后可点击“切换默认节点”无重启应用。"
                 if save_error:
                     message += f" 质量结果缓存失败: {save_error}"
                 self._set_status(message, severity)
@@ -4368,25 +4406,14 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         node_summary = remote_proxy.describe_proxy_node(item.node)
         severity = "warning" if selection_save_error else "success"
         self._set_selected_summary(f"待启动节点: {node_summary}", severity)
-        message = f"已填入待启动节点: {node_summary}"
+        message = f"已填入待启动节点: {node_summary}；尚未应用到运行中的代理。"
+        if persist_selection and not selection_save_error:
+            message += "已记住订阅首选，后续应用或订阅更新可能采用此选择。"
         if selection_save_error:
             message += f"；选择缓存失败: {selection_save_error}"
         self._set_status(message, severity)
         if show_message:
             show_toast(self.winfo_toplevel(), message, is_error=bool(selection_save_error))
-            if not selection_save_error and target_profile_id:
-                try:
-                    bound_services = (
-                        local_proxy.local_proxy_service_bindings_for_profile(
-                            target_profile_id
-                        )
-                    )
-                except Exception:
-                    bound_services = ()
-                if bound_services:
-                    self._apply_saved_routing(
-                        "已保存所选节点，正在同步该订阅绑定的独立服务线路。"
-                    )
 
     def _hot_update_selected_subscription_node(self):
         if self._periodic_update_running:
@@ -4702,7 +4729,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self.winfo_toplevel(),
             title="启动 Win11 本机代理",
             message=(
-                "将使用当前节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
+                "将使用待启动节点启动 Windows 本机 mihomo，并写入当前 Windows 用户的 "
                 "HTTP_PROXY/HTTPS_PROXY/ALL_PROXY、VS Code 本机代理设置，以及 Win11 当前用户系统代理。\n"
                 f"识别到节点: {node_summary}\n"
                 + (
@@ -4715,7 +4742,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     f"已配置 {service_binding_count} 项服务订阅绑定；会从各自订阅缓存装载独立节点池，"
                     "不会切换订阅页面或改写 Codex/Claude 登录状态。\n"
                     if service_binding_count
-                    else "服务线路均跟随当前节点，保持原有单订阅行为。\n"
+                    else "未单独绑定订阅的目标仍按已保存的默认代理、直连或继承规则处理。\n"
                 )
                 + (
                     "WSL 共享已开启：会识别默认发行版的实际网络模式；镜像网络只走回环，"

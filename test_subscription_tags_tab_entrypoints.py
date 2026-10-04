@@ -103,7 +103,8 @@ def test_tags_action_preserves_existing_or_new_name_url_draft_and_selection(form
         assert "catalog" in form.events
         entry = next(item for item in tab._service_route_catalog if item["id"] == form.first["id"])
         assert entry["network_type"] == "residential"
-    assert any(isinstance(event, tuple) and "保存并应用后生效" in event[0] for event in form.events)
+    assert any(isinstance(event, tuple) and all(text in event[0] for text in
+               ("智能分流方案", "保存并应用", "未改动")) for event in form.events)
 
 
 def test_tags_action_reuses_existing_window_without_reloading_or_saving(form, monkeypatch):

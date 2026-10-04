@@ -57,9 +57,9 @@ class SubscriptionTagsDialog(ctk.CTkToplevel):
         # Long instructions must scroll with the rows: at high widget scaling
         # a fixed header can consume the entire short window and unmap the list.
         notice = ctk.CTkLabel(
-            self._rows, text="按订阅实际用途手动分类；标记不代表出口 IP 已经过质量验证。\n"
-                             "打开目标分流后，AI 服务优先家宽，其余内置网站（含 X/Reddit）优先非家宽。\n"
-                             "仅补齐未配置目标，手动选择优先；标记保存不切换线路，分流需另点“保存并应用”。",
+            self._rows, text="家宽：优先推荐给 AI；非家宽：优先推荐给视频、搜索、下载和社交。\n"
+                             "不确定时保持未标记。标记只用于推荐，不代表 IP 质量已经验证。\n"
+                             "保存标记不会改动分流；返回后点击智能方案，核对并“保存并应用”才会换线。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(12, 6))

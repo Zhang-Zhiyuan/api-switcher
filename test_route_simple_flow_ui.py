@@ -68,7 +68,7 @@ def test_reselecting_saved_subscription_enables_site_without_resetting_pin(edito
     dialog._toggle("youtube", False)
     assert not dialog._drafts[dialog._scope]["builtin_sites"]["youtube"]
     row = dialog._rows["youtube"]
-    row["profile"].cget("command")(row["profile"].get())
+    row["profile"].cget("command")(row["saved_choice"])
     root.update()
     assert row["enabled"].get()
     assert dialog._drafts[dialog._scope]["service_node_bindings"]["youtube"] == "three"
@@ -106,7 +106,7 @@ def test_compact_editor_layout_and_visible_actions_at_multiple_scales(editor, tk
         assert viewport.winfo_viewable() and viewport.winfo_height() >= 140
         packed = dialog._table.pack_slaves()
         assert packed[:2] == [dialog._header, dialog._filters]
-        folder = Path(__file__).resolve().parent / "dist" / "route-simplification-ui" / "after"
+        folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2469" / "editor"
         folder.mkdir(parents=True, exist_ok=True)
         capture_window_image(dialog).save(folder / f"top-{int(scale * 100)}.png")
         # The first route must be reachable and fully visible, not merely

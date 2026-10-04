@@ -37,15 +37,15 @@ def _preferences():
     })
 
 
-def test_batch_pool_changes_only_chosen_routes_and_not_enabled_states():
+def test_batch_pool_changes_and_enables_only_chosen_routes():
     original = _preferences()
     before = copy.deepcopy(original)
     chosen = ["claude", "youtube", "custom:demo"]
     result, notices = bulk_ui.apply_route_batch(original, _catalog(), chosen, bulk_ui.SET_ROUTE,
                                                  profile_id="dc", node_keys=["four", "three"])
     assert original == before and result is not original
-    assert result["builtin_sites"] == original["builtin_sites"]
-    assert result["custom_targets"] == original["custom_targets"]
+    assert result["builtin_sites"] == {**original["builtin_sites"], "youtube": True}
+    assert result["custom_targets"] == [{**original["custom_targets"][0], "enabled": True}]
     for service in chosen:
         assert result["service_profile_bindings"][service] == "dc"
         assert result["service_node_pools"][service] == ["four", "three"]
@@ -65,7 +65,7 @@ def test_batch_follow_default_clears_fixed_pool_and_preserves_other_targets():
         assert result["service_route_modes"][service] == "default"
     assert result["service_route_modes"]["google"] == "default"
     assert result["service_node_pools"]["openai"] == original["service_node_pools"]["openai"]
-    assert result["builtin_sites"] == original["builtin_sites"]
+    assert result["builtin_sites"] == {**original["builtin_sites"], "youtube": True}
 
 
 @pytest.mark.parametrize("choices", [{}, {"node_key": "three"}, {"node_keys": ["four", "three"]}])
@@ -78,7 +78,7 @@ def test_batch_set_route_clears_explicit_default_and_obsolete_strategy(choices):
         assert result["service_profile_bindings"][service] == "dc"
         assert result["service_node_bindings"].get(service, "") == choices.get("node_key", "")
         assert result["service_node_pools"].get(service, []) == choices.get("node_keys", [])
-    assert result["builtin_sites"] == original["builtin_sites"]
+    assert result["builtin_sites"] == {**original["builtin_sites"], "youtube": True}
 
 
 @pytest.mark.parametrize("choices", [
@@ -117,7 +117,7 @@ def test_auto_batch_requires_usable_primary_but_explicit_pool_can_choose_safe_no
     assert result["service_node_pools"]["youtube"] == ["four"]
 
 
-def test_tagged_batch_reassigns_only_chosen_and_keeps_disabled_status():
+def test_tagged_batch_reassigns_and_enables_only_chosen():
     catalog = _catalog()
     catalog[0]["network_type"], catalog[1]["network_type"] = "residential", "datacenter"
     original = _preferences()
@@ -126,7 +126,7 @@ def test_tagged_batch_reassigns_only_chosen_and_keeps_disabled_status():
     assert result["service_profile_bindings"]["google"] == "dc"
     assert "youtube" not in result["service_node_pools"]
     assert "google" not in result["service_route_modes"]
-    assert result["builtin_sites"] == original["builtin_sites"]
+    assert result["builtin_sites"] == {**original["builtin_sites"], "youtube": True}
     assert result["service_node_bindings"]["claude"] == "one"
     assert result["service_node_pools"]["openai"] == ["two", "one"]
     assert "google_ai" not in result["service_profile_bindings"]
@@ -236,8 +236,8 @@ def test_editor_bulk_is_current_scope_draft_only_and_preview_lists_selected_targ
                               profile_id="dc", node_keys=["four", "three"])
     assert dialog._drafts[second] == before[second]
     assert dialog._originals == before and not editor.applied
-    assert dialog._drafts[first]["builtin_sites"] == before[first]["builtin_sites"]
-    assert {change["service"] for change in dialog._changes} == {"claude"}
+    assert dialog._drafts[first]["builtin_sites"] == {**before[first]["builtin_sites"], "youtube": True}
+    assert {change["service"] for change in dialog._changes} == {"claude", "youtube"}
     assert {change["scope"] for change in dialog._changes} == {first}
     assert "自选 2" in dialog._rows["claude"]["node"].get()
 

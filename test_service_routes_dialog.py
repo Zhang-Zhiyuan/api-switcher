@@ -318,7 +318,7 @@ def test_dirty_and_disabled_badges_update_and_reset_without_applying(editor):
     _root, dialog, saved = editor
     assert dialog._reset_button.cget("state") == "disabled"
     dialog._toggle("youtube", False)
-    assert "未启用" in dialog._rows["youtube"]["state_label"].cget("text")
+    assert "沿用代理范围" in dialog._rows["youtube"]["state_label"].cget("text")
     assert "未保存" in dialog._rows["youtube"]["state_label"].cget("text")
     assert dialog._rows["youtube"]["description"]["enabled"] is False
     assert dialog._reset_button.cget("state") == "normal"

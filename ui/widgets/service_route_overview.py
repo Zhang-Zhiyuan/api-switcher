@@ -36,7 +36,7 @@ def route_description(row, preferences, catalog):
         if inherited:
             hint = "继承自定义默认 · " + hint
         if not row["enabled"]:
-            hint = "未启用 · 仅保留直连选择，勾选并保存后才生效。"
+            hint = "未启用 · 仅保留直连选择，重新选择线路并保存后才生效。"
         return {"profile": "直连（不经过代理）", "node": "无需代理节点", "hint": hint,
                 "warning": False, "bound": not inherited, "enabled": bool(row["enabled"]),
                 "inherited": inherited, "source_hint": hint}
@@ -278,6 +278,7 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
         self._enabled = True
         self._rows = {}
         self._show_inactive = False
+        self._show_details = False
         self._narrow = None
         self._layout_scale = None
         self._signature = None
@@ -285,14 +286,14 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
         self._runtime_preferences_fingerprint = None
         self._header = ctk.CTkFrame(self, fg_color="transparent")
         self._header.pack(fill="x")
-        self._title = ctk.CTkLabel(self._header, text="目标分流", font=font(15, "bold"), text_color=COLORS["text"], anchor="w")
+        self._title = ctk.CTkLabel(self._header, text="网站访问线路", font=font(15, "bold"), text_color=COLORS["text"], anchor="w")
         self._header_actions = ctk.CTkFrame(self._header, fg_color="transparent")
         self._header_action_columns = None
         self._preset = (ctk.CTkButton(
             self._header_actions, text="一键套用智能分流方案", width=200,
             command=self._open_preset, **button_style("primary", compact=True))
             if preset_command is not None else None)
-        self._manage = ctk.CTkButton(self._header_actions, text="管理目标分流", width=130,
+        self._manage = ctk.CTkButton(self._header_actions, text="设置网站线路", width=130,
                                      command=lambda: self._open(""), **button_style("secondary", compact=True))
         self._inspect = (ctk.CTkButton(self._header_actions, text="检查网址去向", width=130,
                                       command=inspect_command, **button_style("secondary", compact=True))
@@ -304,7 +305,6 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
             self._preset_note = ctk.CTkLabel(
                 self, text="AI 优先家宽，普通网站优先非家宽。\n先预览再应用，不会自动修改现有分流。",
                 font=font(11), text_color=COLORS["muted"], anchor="w", justify="left")
-            self._preset_note.pack(fill="x", pady=(4, 0))
             bind_wraplength(self, self._preset_note, padding=8)
         self._summary = ctk.CTkLabel(self, text="正在读取已保存线路…", font=font(12),
                                     text_color=COLORS["muted"], anchor="w", justify="left")
@@ -318,17 +318,22 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
         bind_wraplength(self, self._runtime_status, padding=8)
         self._heading = ctk.CTkFrame(self, fg_color=COLORS["surface_alt"], corner_radius=6)
         self._heading.pack(fill="x", pady=(0, 4))
-        for column, text in enumerate(("访问目标", "访问线路", "节点策略")):
+        for column, text in enumerate(("访问目标", "已保存线路", "节点 / 备用")):
             self._heading.grid_columnconfigure(column, weight=(2, 3, 4)[column], uniform="route-overview")
             ctk.CTkLabel(self._heading, text=text, font=font(11), text_color=COLORS["muted"], anchor="w").grid(
                 row=0, column=column, sticky="ew", padx=10, pady=2)
         self._heading.grid_columnconfigure(3, minsize=76)
         self._body = ctk.CTkFrame(self, fg_color="transparent")
         self._body.pack(fill="x")
+        self._details_toggle = ctk.CTkButton(
+            self, text="显示线路说明 ▾", command=self._toggle_details,
+            **button_style("secondary", compact=True),
+        )
+        self._details_toggle.pack(anchor="w", pady=(4, 0))
         self._more = ctk.CTkButton(self, text="查看未启用目标", command=self._toggle_inactive,
                                    **button_style("secondary", compact=True))
         self._note = ctk.CTkLabel(
-            self, text="仅核对每个目标的一个代表域名/IP；内核选择不代表真实出口或实时连通。点“检查网址去向”查看详情。"
+            self, text="以上为已保存配置，不代表实时连通。运行检查仅核对代表目标，不验证出口 IP / 国家。"
                        if inspect_command else "这里只展示已保存配置，不代表实时连通；线路修改需在编辑窗口保存并应用。",
             font=font(11), text_color=COLORS["muted_soft"], anchor="w", justify="left")
         self._note.pack(fill="x", pady=(6, 0))
@@ -385,11 +390,15 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
             if row.get("info") == info and row.get("description") == description:
                 continue
             row["info"], row["description"] = info, description
+            source = "custom" if description["inherited"] else key
+            pool = (preferences.get("service_node_pools") or {}).get(source, [])
+            row["short_node"] = f"自选 {len(pool)} 个候选 · 顺序切换" if pool else description["node"]
             _configure_changed(row["target"], text=" ".join(safe_feedback_text(info["label"]).split()))
             _configure_changed(row["state"], text="继承基准" if key == "custom" else (("默认启用" if info["always"] else "已启用") if info["enabled"] else "未启用"),
                                     text_color=COLORS["muted"] if info["enabled"] else COLORS["muted_soft"])
-            _configure_changed(row["profile"], text=description["profile"])
-            _configure_changed(row["node"], text=description["node"])
+            details = getattr(self, "_show_details", False)
+            _configure_changed(row["profile"], text=description["profile"] if info["enabled"] or details else "沿用原规则")
+            _configure_changed(row["node"], text=description["node"] if details else row["short_node"] if info["enabled"] else "不新增专属规则")
             _configure_changed(row["hint"], text=description["hint"], text_color=COLORS["warning"] if description["warning"] else COLORS["muted_soft"])
         # Keep canonical order even after custom targets are added/removed.
         self._rows = {info["id"]: self._rows[info["id"]] for info, _ in descriptions}
@@ -477,6 +486,7 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
             else:
                 self._heading.pack(fill="x", pady=(0, 4), before=self._body)
         for row in self._rows.values():
+            self._sync_row_details(row)
             # New targets need layout even when the viewport has not changed.
             if row.get("layout") == (narrow, scale) and not force:
                 continue
@@ -498,6 +508,41 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
                 for col, name in enumerate(("target_box", "profile", "node_box", "edit")):
                     row[name].grid(row=0, column=col, sticky="ew", padx=10, pady=6)
             row["layout"] = (narrow, scale)
+
+    def _sync_row_details(self, row):
+        """Expose full saved intent on demand; warnings never depend on this fold."""
+        info, description = row["info"], row["description"]
+        presentation = (self._show_details, info["enabled"], info["id"],
+                        description["warning"], description["profile"], description["node"], row["short_node"])
+        if row.get("presentation") == presentation:
+            return
+        _configure_changed(row["profile"], text=description["profile"] if info["enabled"] or self._show_details else "沿用原规则")
+        _configure_changed(row["node"], text=description["node"] if self._show_details else row["short_node"] if info["enabled"] else "不新增专属规则")
+        for name, visible in (
+            ("state", self._show_details or not info["enabled"] or info["id"] == "custom"),
+            ("hint", self._show_details or description["warning"]),
+        ):
+            widget = row[name]
+            if visible and not widget.winfo_manager():
+                # Put an expanded explanation before a runtime snapshot, if present.
+                options = {"fill": "x"}
+                if name == "hint" and row["runtime"].winfo_manager():
+                    options["before"] = row["runtime"]
+                widget.pack(**options)
+            elif not visible and widget.winfo_manager():
+                widget.pack_forget()
+        row["presentation"] = presentation
+
+    def _toggle_details(self):
+        self._show_details = not self._show_details
+        _configure_changed(self._details_toggle, text="收起线路说明 ▴" if self._show_details else "显示线路说明 ▾")
+        if self._preset_note is not None:
+            if self._show_details:
+                self._preset_note.pack(fill="x", pady=(4, 0), before=self._summary)
+            else:
+                self._preset_note.pack_forget()
+        # No saved state or runtime snapshot is touched by a presentation change.
+        self._layout(self._narrow)
 
     def _toggle_inactive(self):
         self._show_inactive = not self._show_inactive

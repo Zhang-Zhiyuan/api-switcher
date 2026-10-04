@@ -9,16 +9,28 @@ from core import proxy_routing
 from core.subscription_routing_policy import preferred_network_type, route_candidate_count, suggest_tagged_routes
 from ui.dialogs.route_selection_dialogs import DraftChoiceDialog, RouteNodeDialog
 from ui.feedback import safe_feedback_text
+from ui.route_labels import DEFAULT_PROFILE, DIRECT_PROFILE, ORIGINAL_RULES, RESUME_ROUTE
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font
 from ui.widgets.action_group import wrap_action_group
 
 SET_ROUTE = "设置订阅与节点"
 TAGGED = "按用途重新分配"
-FOLLOW = "跟随默认线路"
-DIRECT = "直连（不经过代理）"
-ENABLE = "启用目标"
-DISABLE = "停用目标"
-OPERATIONS = (SET_ROUTE, DIRECT, TAGGED, FOLLOW, ENABLE, DISABLE)
+FOLLOW = DEFAULT_PROFILE
+DIRECT = DIRECT_PROFILE
+ENABLE = RESUME_ROUTE
+DISABLE = ORIGINAL_RULES
+OPERATIONS = (SET_ROUTE, DIRECT, FOLLOW, DISABLE, TAGGED, ENABLE)
+
+
+def _set_target_enabled(draft, service, row, enabled):
+    if row["always"]:
+        return
+    if service.startswith("custom:"):
+        for item in draft["custom_targets"]:
+            if f"custom:{item['id']}" == service:
+                item["enabled"] = enabled
+    else:
+        draft["builtin_sites"][service] = enabled
 
 
 def apply_route_batch(preferences, catalog, services, operation, *, profile_id="", node_key="", node_keys=()):
@@ -48,12 +60,7 @@ def apply_route_batch(preferences, catalog, services, operation, *, profile_id="
             if row["always"]:
                 notices.append(f"{row['label']} 为默认启用目标，已保留其状态。")
                 continue
-            if service.startswith("custom:"):
-                for item in draft["custom_targets"]:
-                    if f"custom:{item['id']}" == service:
-                        item["enabled"] = operation == ENABLE
-            else:
-                draft["builtin_sites"][service] = operation == ENABLE
+            _set_target_enabled(draft, service, row, operation == ENABLE)
             continue
         # Recommendation failures must keep the target's original pinned route.
         candidate = copy.deepcopy(draft) if operation == TAGGED else draft
@@ -63,13 +70,6 @@ def apply_route_batch(preferences, catalog, services, operation, *, profile_id="
         candidate["service_route_modes"].pop(service, None)
         if operation in (FOLLOW, DIRECT):
             candidate["service_route_modes"][service] = "direct" if operation == DIRECT else "default"
-            if operation == DIRECT and not row["always"]:
-                if service.startswith("custom:"):
-                    for item in candidate["custom_targets"]:
-                        if f"custom:{item['id']}" == service:
-                            item["enabled"] = True
-                else:
-                    candidate["builtin_sites"][service] = True
         elif operation == SET_ROUTE:
             candidate["service_profile_bindings"][service] = profile_id
             if node_key:
@@ -91,6 +91,9 @@ def apply_route_batch(preferences, catalog, services, operation, *, profile_id="
                 notices.extend(reason for reason in reasons if "已保留" not in reason)
                 continue
             draft = candidate
+        # An explicit route choice has the same meaning in the single and bulk
+        # editors: enable that rule. Failed recommendations above keep it intact.
+        _set_target_enabled(draft, service, row, True)
     return proxy_routing.normalize_routes(draft), notices
 
 
@@ -114,7 +117,7 @@ class RouteBulkDialog(DraftChoiceDialog):
         self.bind("<Escape>", lambda _event: self.destroy())
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=18, pady=16)
-        self._status = ctk.CTkLabel(footer, text="先勾选目标；设置线路不会改变原有启用状态。", anchor="w",
+        self._status = ctk.CTkLabel(footer, text="选择目标和线路；所选线路会启用，保存并应用后生效。", anchor="w",
                                    justify="left", font=font(12), text_color=COLORS["muted"])
         self._status.pack(fill="x", pady=(0, 8))
         bind_wraplength(footer, self._status, padding=8)
@@ -140,7 +143,8 @@ class RouteBulkDialog(DraftChoiceDialog):
                                          command=self._operation_changed, **combo_style())
         self._operation.set(SET_ROUTE)
         self._operation.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
-        ctk.CTkLabel(settings, text="订阅线路", font=font(12)).grid(row=1, column=0, padx=10, pady=6)
+        self._profile_caption = ctk.CTkLabel(settings, text="订阅线路", font=font(12))
+        self._profile_caption.grid(row=1, column=0, padx=10, pady=6)
         self._profiles = {"请选择订阅": ""}
         for item in catalog:
             label = safe_feedback_text(str(item["name"]))
@@ -156,7 +160,8 @@ class RouteBulkDialog(DraftChoiceDialog):
                                        command=self._select_profile, **combo_style())
         self._profile.set("请选择订阅")
         self._profile.grid(row=1, column=1, sticky="ew", padx=10, pady=6)
-        ctk.CTkLabel(settings, text="节点策略", font=font(12)).grid(row=2, column=0, padx=10, pady=10)
+        self._node_caption = ctk.CTkLabel(settings, text="节点与备用", font=font(12))
+        self._node_caption.grid(row=2, column=0, padx=10, pady=10)
         self._node_button = ctk.CTkButton(settings, text="先选择订阅，再设置节点", command=self._open_nodes,
                                         state="disabled", **button_style("secondary"))
         self._node_button.grid(row=2, column=1, sticky="ew", padx=10, pady=10)
@@ -188,11 +193,21 @@ class RouteBulkDialog(DraftChoiceDialog):
 
     def _operation_changed(self, operation):
         enabled = operation == SET_ROUTE
+        for widget, row, col in ((self._profile_caption, 1, 0), (self._profile, 1, 1),
+                                 (self._node_caption, 2, 0), (self._node_button, 2, 1)):
+            if enabled:
+                widget.grid(row=row, column=col, sticky="ew" if col else "", padx=10, pady=6 if row == 1 else 10)
+            else:
+                widget.grid_forget()
         self._profile.configure(state="readonly" if enabled else "disabled")
         self._node_button.configure(state="normal" if enabled and self._profile_id else "disabled")
         self._status.configure(
-            text=("直连会启用所选目标，使用目标设备自身网络，不自动回退代理；严格隐私模式下不可启用。"
-                  if operation == DIRECT else "先勾选目标；设置线路不会改变原有启用状态。"),
+            text={
+                DIRECT: "直连会启用所选目标，使用设备自身网络，不自动回退代理；不能与严格隐私同时启用。",
+                DISABLE: "暂停所选网站的单独分流，原订阅和节点保留；不等于直连。AI 服务保持启用。",
+                ENABLE: "恢复所选网站之前的线路与节点；保存并应用后生效。",
+                TAGGED: "为所选目标按用途分配并启用；没有合适订阅时保留原设置。",
+            }.get(operation, "选择目标和线路；所选线路会启用，保存并应用后生效。"),
             text_color=COLORS["muted"],
         )
 

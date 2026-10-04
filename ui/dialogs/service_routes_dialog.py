@@ -16,12 +16,10 @@ from core.subscription_routing_policy import (
 )
 from ui.dialogs.confirm_dialog import ConfirmDialog
 from ui.feedback import safe_feedback_text
+from ui.route_labels import DEFAULT_CUSTOM_PROFILE, DEFAULT_PROFILE, DIRECT_PROFILE, ORIGINAL_RULES, RESUME_ROUTE
 from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style, textbox_style
 from ui.widgets.service_route_overview import route_changes, route_description
 
-DEFAULT_PROFILE = "跟随默认线路"
-DIRECT_PROFILE = "直连（不经过代理）"
-DEFAULT_CUSTOM_PROFILE = "跟随自定义默认线路"
 DEFAULT_NODE = "订阅首选 + 故障切换"
 AUTO_PROFILE = "按用途重新分配"
 MISSING_PROFILE = "订阅已失效，请重新选择"
@@ -128,7 +126,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                            command=self._open_preset_dialog, **button_style("primary", compact=True))
         self._preset_button.pack(side="right")
         notice = ctk.CTkLabel(
-            header, text="选择网站的访问线路，再点“保存并应用”。指定订阅后，可按需设置节点与备用。",
+            header, text="每个目标只选一种访问方式，再保存应用。选订阅后可设置固定节点或备用。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(2, 6))
@@ -373,7 +371,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             return f"{row['label']}（{description['profile']}）"
         text += ("\n\n规则覆盖 / 生效范围（当前位置草稿，非运行态）：\n"
                  "同一目标以自定义设置为准；子域名 / 更小网段优先。域名规则排在 IP 规则之前。\n"
-                 "未勾选目标不等于直连；直连需目标设备自身网络可达，不能与严格隐私同时启用。")
+                 "沿用原规则不等于直连；直连需目标设备自身网络可达，不能与严格隐私同时启用。")
         for notice in preview["overlaps"][:40]:
             label = "覆盖" if notice["kind"] == "override" else f"子范围例外于 {notice['parent']}"
             text += f"\n• {notice['target']}：{label}；{describe(notice['shadowed'])} → {describe(notice['winner'])}"
@@ -714,7 +712,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 label += " · " + ("家宽" if profile["network_type"] == "residential" else "非家宽")
             if not profile["nodes"]:
                 label += " · 请先拉取"
-            if label in (AUTO_PROFILE, DIRECT_PROFILE):
+            if label in (AUTO_PROFILE, DIRECT_PROFILE, ORIGINAL_RULES, RESUME_ROUTE):
                 label += "（订阅）"
             label = _unused_label(label, mapping, suffixes)
             mapping[label] = profile["id"]
@@ -773,14 +771,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             target = ctk.CTkFrame(tile, fg_color="transparent")
             target.grid_columnconfigure(1, weight=1)
             enabled = ctk.BooleanVar(value=info["enabled"])
-            check = ctk.CTkCheckBox(
-                target, text="", variable=enabled, width=22,
-                checkbox_width=16, checkbox_height=16,
-                command=lambda key=service, var=enabled: self._toggle(key, var.get()),
-                state="disabled" if info["always"] else "normal",
-            )
-            if not info["always"]:
-                check.grid(row=0, column=0, sticky="nw", padx=(0, 4))
             name = ctk.CTkLabel(
                 target, text=safe_feedback_text(info["label"]), font=font(12, "bold"),
                 text_color=COLORS["text"], anchor="w", justify="left", width=1, height=22,
@@ -807,7 +797,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 delete = ctk.CTkButton(tile, text="移除", width=52, command=lambda key=service: self._remove_custom(key),
                                       **button_style("secondary", compact=True))
             self._rows[service] = {
-                "tile": tile, "enabled": enabled, "check": check, "always": info["always"],
+                "tile": tile, "enabled": enabled, "always": info["always"],
                 "label": info["label"], "info": info, "profile": profile_combo, "node": node_combo,
                 "target": target, "state_label": state_label, "detail": detail, "name": name,
                 "profile_caption": profile_caption, "node_caption": node_caption, "delete": delete,
@@ -830,8 +820,16 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 label = DEFAULT_PROFILE
             elif mode == "direct":
                 label = DIRECT_PROFILE
+        active = bool(row["enabled"].get())
+        row["saved_choice"] = label
+        if not active:
+            label = ORIGINAL_RULES
         profile_labels = list(profiles)
         profile_labels.insert(1, DIRECT_PROFILE)
+        if not row["always"]:
+            profile_labels.insert(0, ORIGINAL_RULES)
+            if not active:
+                profile_labels.insert(1, RESUME_ROUTE)
         _configure_changed(row["profile"], state="disabled" if self._busy else "readonly", values=[
             *profile_labels, *([AUTO_PROFILE] if preferred_network_type(service) else []),
             *([MISSING_PROFILE] if label == MISSING_PROFILE else []),
@@ -845,14 +843,16 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         row["nodes"] = nodes
         row["node"].set("无需代理节点" if mode == "direct" else
                         f"自选 {len(pool)} 个候选 · 自动切换" if pool else node_label if profile_id else label)
-        _configure_changed(row["node"], state="normal" if profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
+        _configure_changed(row["node"], state="normal" if active and profile_id and not self._busy else "disabled", text_color_disabled=COLORS["muted"])
         row["info"]["enabled"] = bool(row["enabled"].get())
         description = route_description(row["info"], draft, self._catalog)
         row["description"] = description
         dirty = self._row_changed(service)
-        state = "继承基准" if service == "custom" else ("默认启用" if row["always"] else ("已启用" if row["enabled"].get() else "未启用"))
+        state = "自定义目标共用设置" if service == "custom" else ("专用线路" if active else "沿用代理范围")
         preferred = preferred_network_type(service)
-        if mode == "direct":
+        if not active:
+            state += " · 原线路已保留"
+        elif mode == "direct":
             state += " · 手动直连"
         elif preferred:
             state += " · 建议" + ("家宽" if preferred == "residential" else "非家宽")
@@ -883,7 +883,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _layout_rows(self):
         for service, row in self._rows.items():
-            bound = bool(self._drafts[self._scope]["service_profile_bindings"].get(service))
+            bound = bool(row["enabled"].get() and self._drafts[self._scope]["service_profile_bindings"].get(service))
             details = self._more_open or row["description"]["warning"]
             layout = (self._narrow, self._table._get_widget_scaling(), bound, details)
             if row.get("layout") == layout:
@@ -965,9 +965,17 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 tile.pack(fill="x", pady=(0, 6), padx=2)
             if not visible:
                 self._empty.pack(fill="x", padx=12, pady=24)
-        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 勾选：单独设置线路；未勾选：沿用原规则，不等于直连")
+        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 选线路即启用；“沿用原规则”不等于直连")
 
     def _select_profile(self, service, label):
+        if self._busy or service not in self._rows:
+            return
+        if label in (ORIGINAL_RULES, RESUME_ROUTE):
+            if not self._rows[service]["always"]:
+                # Suspend/resume only the rule, preserving the exact pin/pool
+                # and inheritance mode for a reversible one-choice workflow.
+                self._toggle(service, label == RESUME_ROUTE)
+            return
         if label == AUTO_PROFILE:
             self._use_tagged_default(service)
             return
@@ -986,7 +994,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         else:
             modes.pop(service, None)
         if draft["service_profile_bindings"].get(service, "") == profile_id:
-            if (direct or profile_id) and not self._rows[service]["always"]:
+            if not self._rows[service]["always"]:
                 self._toggle(service, True)
             else:
                 self._changed(service)
@@ -998,7 +1006,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             draft["service_profile_bindings"].pop(service, None)
         draft["service_node_bindings"].pop(service, None)
         draft.get("service_node_pools", {}).pop(service, None)
-        if (profile_id or direct) and not self._rows[service]["always"]:
+        if not self._rows[service]["always"]:
             self._toggle(service, True)
         else:
             self._changed(service)
@@ -1125,7 +1133,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if candidates:
             self._status.configure(
                 text=self._status.cget("text") + f" 检测到 {len(candidates)} 项疑似旧版 X/Reddit 家宽绑定；"
-                     "可在“更多设置 → 整理旧版分流”中核对。",
+                     "可在“更多 / 说明 → 整理旧版分流”中核对。",
                 text_color=COLORS["warning"],
             )
 
@@ -1310,7 +1318,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._custom_entry.configure(state=state)
         self._custom_toggle.configure(state=state)
         for service, row in self._rows.items():
-            _configure_changed(row["check"], state="disabled" if row["always"] else state)
             _configure_changed(row["profile"], state="readonly" if enabled else "disabled")
             if row["delete"]:
                 _configure_changed(row["delete"], state=state)
