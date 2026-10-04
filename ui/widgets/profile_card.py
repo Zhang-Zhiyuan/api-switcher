@@ -30,7 +30,8 @@ def _bind_profile_card_action_grid(container, buttons) -> None:
     def apply_layout(event=None):
         try:
             width = int(getattr(event, "width", 0) or container.winfo_width())
-            if width <= 1:
+            use_ancestor_width = width <= 1
+            if use_ancestor_width:
                 # A just-created frame has no geometry yet. Starting every
                 # card with a one-column toolbar causes a tall layout followed
                 # by an expensive full-list reflow when its real width arrives.
@@ -38,13 +39,15 @@ def _bind_profile_card_action_grid(container, buttons) -> None:
                 while parent is not None and width <= 1:
                     width = parent.winfo_width()
                     parent = getattr(parent, "master", None)
-                width = max(1, width - 28)
             try:
                 scaling = float(container._get_widget_scaling())
             except (AttributeError, TypeError, ValueError):
                 scaling = 1.0
             if scaling > 0:
                 width = round(width / scaling)
+            if use_ancestor_width:
+                # The card's 14px side paddings are CTk logical units too.
+                width = max(1, width - 28)
             columns = _profile_card_action_columns(width, len(widgets))
             if columns == state["columns"]:
                 return

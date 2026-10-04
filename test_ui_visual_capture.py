@@ -87,6 +87,7 @@ def capture(monkeypatch):
     dlls = SimpleNamespace(
         user32=SimpleNamespace(GetAncestor=Function(root), RedrawWindow=Function(redraw),
                                GetForegroundWindow=Function(lambda: state["foreground"]),
+                               SetForegroundWindow=Function(lambda hwnd: state.setdefault("activation_requests", []).append(hwnd)),
                                GetClientRect=Function(client_rect), ClientToScreen=Function(client_origin)),
         dwmapi=SimpleNamespace(DwmFlush=Function(flush)),
     )
@@ -149,6 +150,7 @@ def test_explicit_foreground_mode_rechecks_wrapper_and_limits_capture_to_client_
     assert ui_visual_audit.capture_window_image(window, onscreen=True) == "synthetic-image"
     assert grabs == [{"bbox": (10, 20, 410, 320), "all_screens": True}]
     assert window.topmost is False
+    assert state["activation_requests"] == [200]
 
 
 def test_foreign_foreground_refuses_capture_and_restores_topmost(capture):

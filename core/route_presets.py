@@ -5,7 +5,7 @@ import copy
 
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES, LOCAL_PROXY_BUILTIN_SITES
 from core.subscription_routing_policy import (
-    auto_route_unavailable_reason, route_candidate_count,
+    ai_route_candidate_count, ai_route_candidate_nodes, auto_route_unavailable_reason, route_candidate_count,
     route_catalog_groups, route_draft_authority_valid,
 )
 
@@ -25,7 +25,7 @@ ROUTE_PRESETS = {
     },
 }
 NETWORK_LABELS = {"residential": "家宽", "datacenter": "非家宽"}
-AI_NODE_STRATEGIES = {"fixed": "固定首选节点（不自动切换）", "auto": "订阅内自动切换（可能跨国家）"}
+AI_NODE_STRATEGIES = {"fixed": "固定推荐节点（不自动切换）", "auto": "订阅内自动切换（可能跨国家）"}
 _BINDING_FIELDS = ("service_profile_bindings", "service_node_bindings", "service_node_pools", "service_route_modes")
 _TARGETS = (*LOCAL_PROXY_AI_SERVICES, *LOCAL_PROXY_BUILTIN_SITES)
 _AI_IDS = {item["id"] for item in LOCAL_PROXY_AI_SERVICES}
@@ -60,6 +60,14 @@ def _choose_source(preferences, catalog, network_type, requested, preset_id):
     if not eligible:
         return None, f"缺少可用的{NETWORK_LABELS[network_type]}订阅；请先标记并拉取缓存，原线路保留"
 
+    # A family also used for AI should not be recommended solely because it
+    # contains more nodes: an all-HK source is still usable for normal websites.
+    ai_source = any(_desired_network(service, preset_id) == network_type for service in _AI_IDS)
+    if ai_source:
+        ai_eligible = [item for item in eligible if ai_route_candidate_nodes(item)]
+        if ai_eligible:
+            eligible = ai_eligible
+
     usage = {}
     for item in _TARGETS:
         service = item["id"]
@@ -73,13 +81,14 @@ def _choose_source(preferences, catalog, network_type, requested, preset_id):
     # Keep an already-used source first; otherwise prefer actual standby
     # availability. Stable IDs, not labels or input order, break ties so a
     # rename/refresh doesn't oscillate recommendations. No latency is inferred.
+    candidate_count = ai_route_candidate_count if ai_source else route_candidate_count
     chosen = min(eligible, key=lambda item: (-usage.get(item["id"], 0),
-                                           -int(route_candidate_count(item) > 1), item["id"]))
+                                           -int(candidate_count(item) > 1), item["id"]))
     if len(eligible) == 1:
         reason = "唯一可用的同类订阅"
     elif usage.get(chosen["id"]):
         reason = "优先沿用同类目标已使用的订阅"
-    elif route_candidate_count(chosen) > 1:
+    elif candidate_count(chosen) > 1:
         reason = "优先选择缓存中有备用候选的订阅；同等条件按稳定标识选择"
     else:
         reason = "同等条件按稳定标识选择；可在上方改选"
@@ -98,6 +107,21 @@ def _fixed_primary_key(profile):
             or any(ord(char) < 32 for char in key)):
         return ""
     return key if sum(isinstance(item, dict) and item.get("key") == key for item in nodes) == 1 else ""
+
+
+def _kept_ai_warning(preferences, catalog, service):
+    rows = route_catalog_groups(catalog).get(preferences.get("service_profile_bindings", {}).get(service), ())
+    if len(rows) != 1:
+        return ""
+    profile = rows[0]
+    allowed = {node["key"] for node in ai_route_candidate_nodes(profile)}
+    selected = preferences.get("service_node_pools", {}).get(service) or [
+        preferences.get("service_node_bindings", {}).get(service)]
+    if any(key and key not in allowed for key in selected):
+        return "已有手动节点包含香港、已知不合格或缺失候选；已保留，请检查或勾选重新规划"
+    if not allowed:
+        return "已有订阅无符合 AI 自动筛选的节点；已保留原设置，请更换订阅或候选"
+    return ""
 
 
 def plan_route_preset(preferences, catalog, preset_id="balanced", *, sources=None,
@@ -126,16 +150,19 @@ def plan_route_preset(preferences, catalog, preset_id="balanced", *, sources=Non
     protected = {protected_services} if isinstance(protected_services, str) else set(protected_services or ())
     needed = (("residential", "datacenter") if preset_id == "balanced"
               else ("residential",) if preset_id == "ai_only" else ("datacenter",))
-    selected, primary_keys = {}, {}
+    selected, primary_keys, ai_candidates = {}, {}, {}
     notices = ["仅生成当前位置草稿；核对后保存并应用。自定义目标和已关闭目标不变。",
-               "推荐依据订阅标记与本地缓存，未实时测速；家宽标记不代表已验证出口质量。"]
+               "推荐依据订阅标记与本地缓存，未实时测速；家宽标记不代表已验证出口质量。",
+               "AI 自动推荐排除香港及缓存已知不合格节点；地区未知仍需实测，节点名称不等于已验证真实出口。"]
     for network_type in needed:
         profile, reason = _choose_source(preferences, catalog, network_type, sources.get(network_type, ""), preset_id)
         selected[network_type] = {"id": profile["id"] if profile else "", "reason": reason,
                                   "candidate_count": route_candidate_count(profile) if profile else 0}
         primary_keys[network_type] = _fixed_primary_key(profile) if profile else ""
+        ai_candidates[network_type] = ai_route_candidate_nodes(profile) if profile else []
+        selected[network_type]["ai_candidate_count"] = ai_route_candidate_count(profile) if profile else 0
         notices.append(f"{NETWORK_LABELS[network_type]}：{reason}。")
-    notices.append("本次将修改的 AI 目标固定到缓存首选；失效不自动换节点，不保证固定 IP / 国家。" if ai_strategy == "fixed" else
+    notices.append("本次将修改的 AI 目标固定到筛选后的推荐节点；失效不自动换节点，不保证固定 IP / 国家。" if ai_strategy == "fixed" else
                    "本次将修改的 AI 目标使用订阅自动候选，可能随刷新变化，未限制出口国家；可手动自选候选。")
     draft = copy.deepcopy(preferences)
     decisions, changed = [], []
@@ -149,6 +176,9 @@ def plan_route_preset(preferences, catalog, preset_id="balanced", *, sources=Non
             continue
         if not replace_existing and (service in protected or any(service in preferences.get(field, {}) for field in _BINDING_FIELDS)):
             decision.update(status="kept", reason="保留已有线路或手动修改；勾选重新规划才会替换")
+            warning = _kept_ai_warning(preferences, catalog, service) if service in _AI_IDS else ""
+            if warning:
+                decision.update(warning=True, reason=warning)
             continue
         profile_id = selected.get(desired, {}).get("id")
         if desired != "direct" and not profile_id:
@@ -159,6 +189,14 @@ def plan_route_preset(preferences, catalog, preset_id="balanced", *, sources=Non
         if pin_ai and not primary_key:
             decision.update(status="unavailable", reason="订阅首选节点已失效或不明确，请先手动选择；原线路保留，不猜选其他节点")
             continue
+        candidates = ai_candidates.get(desired, [])
+        if service in _AI_IDS and not candidates:
+            decision.update(status="unavailable", reason="该订阅无符合 AI 自动筛选的节点（排除香港及已知不合格节点）；原线路保留，请更换订阅")
+            continue
+        replaced_primary = False
+        if pin_ai and primary_key not in {node["key"] for node in candidates}:
+            primary_key = candidates[0]["key"]
+            replaced_primary = True
         before = tuple(copy.deepcopy(draft.get(field, {}).get(service)) for field in _BINDING_FIELDS)
         was_enabled = draft.get("builtin_sites", {}).get(service)
         for field in _BINDING_FIELDS:
@@ -171,10 +209,15 @@ def plan_route_preset(preferences, catalog, preset_id="balanced", *, sources=Non
             draft.setdefault("service_profile_bindings", {})[service] = profile_id
             if pin_ai:
                 draft.setdefault("service_node_bindings", {})[service] = primary_key
-                reason = "固定本次订阅首选；失效不自动换节点，不保证供应商维持同一 IP / 国家"
+                reason = "固定筛选后的推荐节点；失效不自动换节点，不保证供应商维持同一 IP / 国家"
+                if replaced_primary:
+                    reason = "原首选为香港或不符合 AI 自动筛选，已改选同订阅候选；" + reason
             else:
-                reason = ("订阅首选 + 同订阅故障切换（备用按服务策略筛选）" if selected[desired]["candidate_count"] > 1
+                count = selected[desired]["ai_candidate_count" if service in _AI_IDS else "candidate_count"]
+                reason = ("订阅首选 + 同订阅故障切换（主备均按服务策略筛选）" if count > 1
                           else "订阅首选；缓存仅 1 个候选，暂无备用可切换")
+            if service in _AI_IDS:
+                reason += "；排除香港及已知不合格自动候选，地区信息未验证真实出口"
         if service not in _AI_IDS:
             draft.setdefault("builtin_sites", {})[service] = True
         after = tuple(draft.get(field, {}).get(service) for field in _BINDING_FIELDS)

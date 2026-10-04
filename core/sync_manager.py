@@ -5,7 +5,6 @@ import posixpath
 import shlex
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from core import auth_parser, parser, profile_manager, remote_config, remote_proxy, security, toml_parser, vscode_parser
 from core.providers import ProviderRegistry
@@ -1210,44 +1209,11 @@ def _read_remote_codex_account_state(client, ssh_profile) -> _RemoteCodexAccount
     )
 
 
-def _codex_auth_timestamp(value: object) -> float:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    text = str(value or "").strip()
-    if not text:
-        return 0.0
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
-    except (OverflowError, ValueError):
-        try:
-            return float(text)
-        except ValueError:
-            return 0.0
-
-
-def _codex_auth_freshness(auth: dict | None) -> tuple[float, float, float]:
-    """Return comparable refresh/expiry metadata without exposing token text."""
-    if not isinstance(auth, dict):
-        return (0.0, 0.0, 0.0)
-    refreshed_at = _codex_auth_timestamp(auth.get("last_refresh"))
-    latest_expiry = 0.0
-    tokens = auth.get("tokens")
-    if isinstance(tokens, dict):
-        for value in tokens.values():
-            if not isinstance(value, str):
-                continue
-            payload = profile_manager._decode_jwt_payload(value)
-            latest_expiry = max(latest_expiry, _codex_auth_timestamp(payload.get("exp")))
-    return (max(refreshed_at, latest_expiry), refreshed_at, latest_expiry)
-
-
 def _codex_existing_auth_is_newer(existing: dict | None, incoming: dict | None) -> bool:
-    existing_freshness = _codex_auth_freshness(existing)
-    incoming_freshness = _codex_auth_freshness(incoming)
-    return existing_freshness != (0.0, 0.0, 0.0) and existing_freshness > incoming_freshness
+    # Use the same rotation ordering as local import/switching. A longer-lived
+    # old JWT does not outrank a newer refresh, and absent metadata is unknown.
+    return (isinstance(existing, dict) and isinstance(incoming, dict)
+            and auth_parser.codex_auth_is_newer(existing, incoming))
 
 
 def sync_claude_to_server(ssh_name: str, claude_name: str) -> str:
@@ -1512,11 +1478,27 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
         client,
         (auth_path, config_path, codex_env_path, persistent_env_path, *shell_env_paths),
     )
-    _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile)
+    old_auth = _strict_remote_read(remote_config.read_remote_codex_auth, client, ssh_profile)
     old_config = _strict_remote_read(remote_config.read_remote_codex_config, client, ssh_profile)
     old_codex_env = snapshot[codex_env_path]
     from core import codex_env, persistent_env
     config = old_config or {}
+    preserved_newer_remote = False
+    if (profile_manager._codex_credentials_store(config) == "file"
+            and _codex_existing_auth_is_newer(old_auth, auth)):
+        # Only a complete, same-account file-backed bundle has authority to
+        # protect a newer remote rotation. Keyring/auto leftovers, malformed
+        # snapshots and display-name matches cannot override the chosen account.
+        from core.account_transfer import _clean_credentials, _same_login
+
+        try:
+            _clean_credentials("codex", old_auth)
+        except ValueError:
+            pass
+        else:
+            if _same_login("codex", old_auth, auth):
+                auth = profile_manager._normalize_codex_official_auth(old_auth)
+                preserved_newer_remote = True
     updated_config = toml_parser.apply_codex_official_account(deepcopy(config))
     validation_ok = None
     validation_output = ""
@@ -1557,6 +1539,16 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
             detail = validation_output or "codex login status 返回失败"
             raise RuntimeError(f"远程 Codex 登录状态校验失败: {detail}")
 
+    # The snapshot predates strict reads/selection. Refuse drift before entering
+    # the rollback boundary, otherwise a later failure could restore a token
+    # that the remote client already rotated during those reads. This does not
+    # lock out external CLI writes during the actual multi-file transaction.
+    try:
+        _validate_remote_files_unchanged(client, snapshot, snapshot)
+    except Exception as exc:
+        raise RuntimeError(
+            "远程 Codex 状态在读取期间已变化或无法复核，未写入；请停止远端 Codex 客户端后重试"
+        ) from exc
     _run_remote_transaction(client, snapshot, "远程 Codex 账号切换", write_and_verify)
 
     logger.info(f"Synced Codex account '{account_name}' to {ssh_profile.host}")
@@ -1565,7 +1557,8 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
     else:
         detail = f" | {validation_output}" if validation_output else ""
     refresh_detail = " | 已在推送前刷新本机账号快照" if refreshed else ""
-    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}{refresh_detail}{detail}"
+    retained_detail = " | 远端同一账号的登录凭据较新，已保留完整远端登录状态，未用旧快照覆盖" if preserved_newer_remote else ""
+    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}{refresh_detail}{retained_detail}{detail}"
 
 
 def sync_selected_to_server(

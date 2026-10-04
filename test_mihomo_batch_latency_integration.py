@@ -174,14 +174,20 @@ def test_real_batch_reduces_core_startups_for_full_node_list(monkeypatch):
         baseline = local_proxy.measure_proxy_node_data_plane_latencies(nodes, attempts=1, max_workers=4)
         old_seconds = time.monotonic() - started
         baseline_starts = len(starts)
-        assert all(result.ok for result in baseline.values())
+        assert all(result.ok for result in baseline.values()), {
+            key: (result.detail, result.incomplete, result.cancelled)
+            for key, result in baseline.items() if not result.ok
+        }
         assert baseline_starts == len(nodes)
         started = time.monotonic()
         quick = local_proxy.measure_proxy_node_data_plane_latencies(nodes, quick=True, attempts=1, max_workers=16)
         quick_seconds = time.monotonic() - started
         assert len(starts) - baseline_starts == 1, "quick mode must not silently use the per-node fallback"
         assert set(quick) == set(baseline)
-        assert all(result.ok for result in quick.values())
+        assert all(result.ok for result in quick.values()), {
+            key: (result.detail, result.incomplete, result.cancelled)
+            for key, result in quick.items() if not result.ok
+        }
         assert all(proxy.hits for proxy in upstreams)
         assert not sentinel.hits
         # Do not encode a flaky wall-time ratio as a correctness assertion.

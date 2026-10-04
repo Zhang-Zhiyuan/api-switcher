@@ -127,11 +127,32 @@ def start_saved_refresh(tab, *, scope: str, thread_factory):
             current_interval = _saved_interval_seconds(getattr(tab, prefix + "periodic_update_interval_saved", 60))
             if hint is not None and current_interval == interval_seconds:
                 schedule_options["delay_seconds"] = hint
+            result_sources = payload.get("result_sources")
+            has_source_identity = "result_sources" in payload
+            if has_source_identity and not isinstance(result_sources, dict):
+                raise ValueError("订阅刷新来源身份格式无效")
             if results:
                 refresh = tab._refresh_subscription_profile_options if scope == "local" else tab._refresh_proxy_subscription_profile_options
                 refresh(preserve_editor=True)
                 if scope == "local":
                     tab._request_route_catalog_refresh()
+                if has_source_identity:
+                    # A saved edit can occur after the worker queues completion.
+                    # Validate at the point of UI consumption, retaining healthy
+                    # siblings rather than discarding the entire refresh batch.
+                    saved = remote_proxy.load_proxy_subscription_state().get("profiles") or {}
+                    valid = {
+                        profile_id: result for profile_id, result in results.items()
+                        if isinstance(saved.get(profile_id), dict)
+                        and result_sources.get(profile_id) == subscription_auto_refresh.subscription_source_identity(
+                            profile_id, saved[profile_id],
+                        )
+                    }
+                    if len(valid) != len(results):
+                        errors.append("订阅来源已变化，未用旧链接节点覆盖当前列表")
+                        retry = True
+                        schedule_options.clear()
+                    results = valid
                 dirty = tab._subscription_profile_blocks_automatic_refresh if scope == "local" else tab._proxy_subscription_profile_blocks_automatic_refresh
                 current_id = tab._current_subscription_profile_id() if scope == "local" else tab._current_proxy_subscription_profile_id()
                 if current_id in results and not dirty():

@@ -400,12 +400,45 @@ def configure_if_changed(widget, **options) -> None:
         widget.configure(**changes)
 
 
+def sync_scrollable_frame_width(scroll) -> bool:
+    """Repair stale vertical canvas-window geometry after fitting/remapping.
+
+    On Windows the canvas item's configured width can already be correct while
+    its embedded frame retains the previous physical width. Replaying that size
+    lets Tk reconcile it without a nested update or a polling/redraw loop.
+    """
+    if scroll is None or getattr(scroll, "_orientation", "vertical") != "vertical":
+        return False
+    try:
+        canvas = scroll._parent_canvas
+        viewport_width = canvas.winfo_width()
+        content_width = scroll.winfo_width()
+        if viewport_width <= 1 or content_width <= 1 or viewport_width == content_width:
+            return False
+        canvas.itemconfigure(scroll._create_window_id, width=viewport_width)
+        return True
+    except (AttributeError, TypeError, ValueError, tkinter.TclError):
+        return False
+
+
 def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, max_width: int = 980) -> None:
     """Keep CTkLabel wraplength responsive to its container."""
-    state = {"after_id": None, "wraplength": None}
+    state = {"after_id": None, "wraplength": None, "scaling": None, "destroyed": False}
+
+    def widget_scaling():
+        try:
+            # CTkToplevel exposes window scaling, not widget scaling. Text
+            # wraplength is always in the label's widget-logical units.
+            scaler = label if hasattr(label, "_get_widget_scaling") else container
+            scaling = float(scaler._get_widget_scaling())
+        except (AttributeError, TypeError, ValueError):
+            return 1.0
+        return scaling if math.isfinite(scaling) and scaling > 0 else 1.0
 
     def update(_event=None):
         state["after_id"] = None
+        if state["destroyed"]:
+            return
         try:
             if not label.winfo_exists():
                 return
@@ -416,15 +449,9 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
                 while parent is not None and width <= 1:
                     width = parent.winfo_width()
                     parent = getattr(parent, "master", None)
-            try:
-                # CTkToplevel exposes window scaling, not widget scaling. Text
-                # wraplength is always in the label's widget-logical units.
-                scaler = label if hasattr(label, "_get_widget_scaling") else container
-                scaling = float(scaler._get_widget_scaling())
-            except (AttributeError, TypeError, ValueError):
-                scaling = 1.0
-            if scaling > 0:
-                width = round(width / scaling)
+            scaling = widget_scaling()
+            state["scaling"] = scaling
+            width = round(width / scaling)
             if width <= 1:
                 wraplength = max(1, min(max_width, max(min_width, 1)))
             else:
@@ -439,6 +466,8 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
             return
 
     def schedule_update(_event=None):
+        if state["destroyed"]:
+            return
         source = getattr(_event, "widget", None)
         if source is not None and not any(source is target for target in event_targets):
             # Toplevel bindtags also receive every child's Configure event.
@@ -451,12 +480,40 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
         except Exception:
             update()
 
+    def label_scaling_changed(event=None):
+        # Child events do not bubble to a parent CTkFrame. Listen on the label
+        # itself, but avoid new idle work for ordinary text/height changes.
+        if not state["destroyed"] and widget_scaling() != state["scaling"]:
+            schedule_update(event)
+
+    def stop(event=None):
+        source = getattr(event, "widget", None)
+        if source is not None and not any(source is target for target in event_targets):
+            return
+        state["destroyed"] = True
+        after_id, state["after_id"] = state["after_id"], None
+        if after_id is not None:
+            try:
+                container.after_cancel(after_id)
+            except Exception:
+                pass
+
+    def bind_event(widget, sequence, callback):
+        binder = getattr(widget, "bind", None)
+        if not callable(binder):
+            return
+        try:
+            binder(sequence, callback, add="+")
+        except TypeError:
+            binder(sequence, callback)
+
     event_targets = (container, getattr(container, "_canvas", None), label,
                      getattr(label, "_canvas", None), getattr(label, "_label", None))
-    try:
-        container.bind("<Configure>", schedule_update, add="+")
-    except TypeError:
-        container.bind("<Configure>", schedule_update)
+    bind_event(container, "<Configure>", schedule_update)
+    bind_event(container, "<Destroy>", stop)
+    if label is not container:
+        bind_event(label, "<Configure>", label_scaling_changed)
+        bind_event(label, "<Destroy>", stop)
     schedule_update()
 
 

@@ -282,7 +282,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=14, pady=(14, 8))
 
-        title_area = ctk.CTkFrame(header, fg_color="transparent")
+        title_area = ctk.CTkFrame(header, width=1, fg_color="transparent")
         title_area.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             title_area,
@@ -295,19 +295,21 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="管理远端连接，把 API、账号、Git 登录、AI 代理和自动续跑部署到 SSH 环境。",
             text_color=COLORS["muted"],
             font=font(12),
+            width=1,
             anchor="w",
             justify="left",
         )
         subtitle_label.pack(anchor="w", fill="x", pady=(2, 0))
         bind_wraplength(title_area, subtitle_label, padding=20, max_width=760)
 
-        ctk.CTkButton(
+        new_server_button = ctk.CTkButton(
             header,
             text="+ 新建服务器",
             width=126,
             command=self._create_server,
             **button_style("primary"),
-        ).pack(side="right")
+        )
+        self._bind_compact_header(header, title_area, new_server_button)
 
         self._workflow_hint = ctk.CTkLabel(
             self,
@@ -331,22 +333,27 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         sync_header = ctk.CTkFrame(self, fg_color="transparent")
         sync_header.pack(fill="x", padx=14, pady=(8, 5))
+        sync_title_area = ctk.CTkFrame(sync_header, width=1, fg_color="transparent")
         ctk.CTkLabel(
-            sync_header,
+            sync_title_area,
             text="配置同步",
             text_color=COLORS["text"],
             font=font(16, "bold"),
-        ).pack(side="left")
+        ).pack(anchor="w")
         self._batch_target_label = ctk.CTkLabel(
-            sync_header,
+            sync_title_area,
             text="目标: 未勾选服务器",
             text_color=COLORS["warning"],
             font=font(12, "bold"),
+            width=1,
+            anchor="w",
+            justify="left",
         )
-        self._batch_target_label.pack(side="left", padx=(12, 0))
-        ctk.CTkFrame(sync_header, width=1, height=1, fg_color="transparent").pack(side="left", fill="x", expand=True)
+        self._batch_target_label.pack(fill="x")
+        bind_wraplength(sync_title_area, self._batch_target_label, padding=0, min_width=80)
+        sync_header_actions = ctk.CTkFrame(sync_header, width=1, height=1, fg_color="transparent")
         self._batch_select_all_button = ctk.CTkButton(
-            sync_header,
+            sync_header_actions,
             text="全选目标",
             width=86,
             command=self._select_all_batch_servers,
@@ -354,13 +361,14 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._batch_select_all_button.pack(side="right", padx=(6, 0))
         self._batch_clear_button = ctk.CTkButton(
-            sync_header,
+            sync_header_actions,
             text="清空目标",
             width=78,
             command=self._clear_batch_servers,
             **button_style("secondary", compact=True),
         )
         self._batch_clear_button.pack(side="right")
+        self._bind_compact_header(sync_header, sync_title_area, sync_header_actions)
 
         self._sync_frame = ctk.CTkFrame(self, **card_frame_kwargs())
         self._sync_frame.pack(fill="x", padx=14, pady=(0, 12))
@@ -378,10 +386,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="未选择目标服务器",
             text_color=COLORS["warning"],
             font=font(13, "bold"),
+            width=1,
             anchor="w",
             justify="left",
         )
         self._target_summary_label.grid(row=0, column=0, columnspan=4, sticky="ew")
+        bind_wraplength(self._sync_controls, self._target_summary_label, padding=0, min_width=80)
         self._target_hint_label = ctk.CTkLabel(
             self._sync_controls,
             text="在上方服务器卡片勾选目标。选 1 台就是单台操作，选多台就是批量；远端拉取、Git 检查/导入和远端自动续跑需要刚好选 1 台。",
@@ -419,7 +429,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._profile_combo.grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(12, 0))
 
-        self._push_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        self._push_button_frame = ctk.CTkFrame(sync_controls, width=1, height=1, fg_color="transparent")
         self._push_button_frame.grid(row=2, column=3, sticky="e", pady=(12, 0))
         self._sync_current_button = ctk.CTkButton(
             self._push_button_frame,
@@ -465,7 +475,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._remote_pull_combo.grid(row=3, column=2, sticky="ew", padx=(0, 8), pady=(10, 0))
         self._remote_pull_combo.set("请先读取远端配置")
-        self._remote_pull_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        self._remote_pull_button_frame = ctk.CTkFrame(sync_controls, width=1, height=1, fg_color="transparent")
         self._remote_pull_button_frame.grid(row=3, column=3, sticky="e", pady=(10, 0))
         self._remote_inspect_button = ctk.CTkButton(
             self._remote_pull_button_frame,
@@ -575,7 +585,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._git_login_status_label.grid(row=7, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0))
         bind_wraplength(sync_controls, self._git_login_status_label, padding=20)
-        self._git_button_frame = ctk.CTkFrame(sync_controls, fg_color="transparent")
+        self._git_button_frame = ctk.CTkFrame(sync_controls, width=1, height=1, fg_color="transparent")
         self._git_button_frame.grid(row=7, column=3, sticky="e", pady=(10, 0))
         ctk.CTkButton(
             self._git_button_frame,
@@ -598,6 +608,12 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=self._import_git_login,
             **button_style("secondary", compact=True),
         ).pack(side="left")
+
+        self._sync_action_groups = tuple(
+            (frame, tuple(frame.pack_slaves()), columns)
+            for frame, columns in ((self._push_button_frame, 2),
+                                   (self._remote_pull_button_frame, 2), (self._git_button_frame, 3))
+        )
 
         self._sync_status_label = ctk.CTkLabel(
             sync_controls,
@@ -623,6 +639,80 @@ class SSHTab(ctk.CTkScrollableFrame):
             scaling = 1.0
         return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
 
+    @staticmethod
+    def _bind_compact_header(header, title_area, actions) -> None:
+        """Give a title/description the full row before its actions squeeze it."""
+        title_area.pack_forget()
+        actions.pack_forget()
+        previous = None
+
+        def layout(event=None):
+            nonlocal previous
+            width = (event.width if event else header.winfo_width()) / header._get_widget_scaling()
+            narrow = width < 560
+            if narrow == previous:
+                return
+            previous = narrow
+            header.grid_columnconfigure(0, weight=1)
+            header.grid_columnconfigure(1, weight=0)
+            title_area.grid(row=0, column=0, sticky="ew")
+            actions.grid(row=1 if narrow else 0, column=0 if narrow else 1,
+                         sticky="w" if narrow else "e", padx=0 if narrow else (12, 0),
+                         pady=(6, 0) if narrow else 0)
+
+        header.bind("<Configure>", layout, add="+")
+        layout()
+
+    @staticmethod
+    def _grid_action_buttons(frame, buttons, columns) -> None:
+        # Tk prohibits grid while any sibling still uses pack. Detach the
+        # whole group before placing its first button in the new manager.
+        for button in buttons:
+            button.pack_forget()
+        for column in range(len(buttons)):
+            frame.grid_columnconfigure(column, weight=1 if column < columns else 0,
+                                       minsize=0, uniform="ssh-actions" if column < columns else "")
+        for index, button in enumerate(buttons):
+            button.grid(row=index // columns, column=index % columns, sticky="ew",
+                        padx=(0, 6) if index % columns < columns - 1 else 0,
+                        pady=(0, 5) if index + columns < len(buttons) else 0)
+
+    @staticmethod
+    def _bind_server_card_layout(row, target, status, text_area, actions) -> None:
+        # Geometry-only: selection variables, connection callbacks and enabled
+        # states stay on the original widgets through every resize.
+        binder = getattr(row, "bind", None)
+        if not callable(binder):
+            return
+        buttons = tuple(actions.pack_slaves())
+        previous = None
+
+        def layout(event=None):
+            nonlocal previous
+            width = (event.width if event else row.winfo_width()) / row._get_widget_scaling()
+            narrow = width < 600
+            columns = 3 if width >= 240 else 2 if width >= 160 else 1
+            state = (narrow, columns)
+            if state == previous:
+                return
+            previous = state
+            for column in range(4):
+                row.grid_columnconfigure(column, weight=1 if column == (2 if not narrow else 3) else 0,
+                                         minsize=0)
+            target.grid(row=0, column=0, rowspan=1 if narrow else 2, sticky="w", padx=(0, 8))
+            status.grid(row=0, column=1, rowspan=1 if narrow else 2, sticky="w", padx=(0, 8))
+            text_area.grid(row=1 if narrow else 0, column=0 if narrow else 2,
+                           rowspan=1 if narrow else 2, columnspan=4 if narrow else 1,
+                           sticky="ew", padx=0, pady=(6, 0) if narrow else 0)
+            actions.grid(row=2 if narrow else 0, column=0 if narrow else 3,
+                         rowspan=1 if narrow else 2, columnspan=4 if narrow else 1,
+                         sticky="ew" if narrow else "e", padx=0 if narrow else (10, 0),
+                         pady=(6, 0) if narrow else 0)
+            SSHTab._grid_action_buttons(actions, buttons, columns)
+
+        binder("<Configure>", layout, add="+")
+        layout()
+
     def _schedule_responsive_layout(self, _event=None, delay_ms: int = 20) -> None:
         if self._destroyed or self._responsive_after_id is not None:
             return
@@ -641,10 +731,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         logical_width = self._logical_layout_width()
         stacked = _ssh_tab_stacked(logical_width)
         proxy_stacked = _ssh_proxy_form_stacked(logical_width)
-        responsive_state = (stacked, proxy_stacked)
+        ultra_narrow = logical_width <= 420
+        responsive_state = (stacked, proxy_stacked, ultra_narrow)
         if responsive_state == self._responsive_state:
             return
         self._responsive_state = responsive_state
+        for frame, buttons, columns in getattr(self, "_sync_action_groups", ()):
+            self._grid_action_buttons(frame, buttons, 1 if ultra_narrow else columns)
 
         widgets = (
             self._target_summary_label,
@@ -683,11 +776,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._push_content_label.grid(row=2, column=0, sticky="w", pady=(12, 0))
             self._sync_kind_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
             self._profile_combo.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-            self._push_button_frame.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._push_button_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             self._remote_pull_label.grid(row=5, column=0, sticky="w", pady=(12, 0))
             self._remote_pull_type_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
             self._remote_pull_combo.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-            self._remote_pull_button_frame.grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._remote_pull_button_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             self._remote_pull_hint.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             self._codex_wire_api_label.grid(row=9, column=0, sticky="w", pady=(12, 0))
             self._codex_wire_api_combo.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
@@ -698,8 +791,16 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._clear_api_button.grid(row=13, column=0, columnspan=2, sticky="w", pady=(8, 0))
             self._git_login_label.grid(row=14, column=0, columnspan=2, sticky="w", pady=(12, 0))
             self._git_login_status_label.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-            self._git_button_frame.grid(row=16, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            self._git_button_frame.grid(row=16, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             self._sync_status_label.grid(row=17, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            if ultra_narrow:
+                self._sync_controls.grid_columnconfigure(0, weight=1)
+                self._sync_controls.grid_columnconfigure(1, weight=0)
+                # Even a 160px combo plus its label cannot share a row when
+                # high widget scaling leaves only ~240 logical pixels.
+                for row, widget in enumerate(widgets):
+                    widget.grid(row=row, column=0, columnspan=2, sticky="ew", padx=0,
+                                pady=0 if row == 0 else (6, 0))
             self._apply_deployment_responsive_layout(stacked=True)
             return
 
@@ -736,6 +837,22 @@ class SSHTab(ctk.CTkScrollableFrame):
         for widget in frame.grid_slaves():
             info = dict(widget.grid_info())
             info.pop("in", None)
+            if isinstance(widget, ctk.CTkBaseClass):
+                # Tk reports physical padding, but CTk.grid expects logical
+                # padding and scales it again. Prefer the original arguments
+                # (also avoiding rounding loss at fractional DPI settings).
+                call = getattr(widget, "_last_geometry_manager_call", None) or {}
+                original = call.get("kwargs", {}) if getattr(call.get("function"), "__name__", "") in {
+                    "grid", "grid_configure",
+                } else {}
+                scale = widget._get_widget_scaling()
+                for key in ("padx", "pady"):
+                    if key in original:
+                        info[key] = original[key]
+                    elif key in info and scale > 0:
+                        value = info[key]
+                        info[key] = (tuple(float(part) / scale for part in value)
+                                     if isinstance(value, (tuple, list)) else float(value) / scale)
             layout.append((widget, info))
         return tuple(
             sorted(
@@ -905,17 +1022,23 @@ class SSHTab(ctk.CTkScrollableFrame):
         ctk.CTkLabel(routes_card, text="目标分流 · 每台服务器独立保存", font=font(13, "bold"),
                      text_color=COLORS["text"]).pack(anchor="w", padx=14, pady=(10, 2))
         route_hint = ctk.CTkLabel(
-            routes_card, text="为 Claude、GPT、YouTube 和自定义域名分别选择订阅与节点。"
+            routes_card, text="智能方案：AI 优先家宽，视频、搜索等网站优先非家宽；先预览，再保存并应用。"
+                              "也可为 Claude、GPT、YouTube 和自定义域名分别选择订阅与节点。"
                               "在编辑窗口按服务器查看和筛选，修改后统一保存并应用；部署和热更新沿用各自的设置。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         route_hint.pack(fill="x", padx=14)
         bind_wraplength(routes_card, route_hint, padding=32)
-        self._proxy_service_routes_button = ctk.CTkButton(
-            routes_card, text="管理已选服务器分流", command=self._open_proxy_service_routes,
+        self._proxy_route_preset_button = ctk.CTkButton(
+            routes_card, text="一键套用智能分流方案", width=196, command=self._open_proxy_route_preset,
             **button_style("primary", compact=True),
         )
-        self._proxy_service_routes_button.pack(anchor="w", padx=14, pady=(8, 12))
+        self._proxy_route_preset_button.pack(anchor="w", padx=14, pady=(8, 6))
+        self._proxy_service_routes_button = ctk.CTkButton(
+            routes_card, text="管理已选服务器分流", command=self._open_proxy_service_routes,
+            **button_style("secondary", compact=True),
+        )
+        self._proxy_service_routes_button.pack(anchor="w", padx=14, pady=(0, 6))
         self._proxy_route_diagnostics_button = ctk.CTkButton(
             routes_card, text="检查已选服务器的分流 / 网址去向", command=self._open_route_diagnostics,
             **button_style("secondary", compact=True),
@@ -2062,7 +2185,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         selected_var = ctk.BooleanVar(master=self, value=p.name in self._selected_server_names)
         self._server_selection_vars[p.name] = selected_var
-        ctk.CTkCheckBox(
+        target_checkbox = ctk.CTkCheckBox(
             row,
             text="目标",
             width=52,
@@ -2072,7 +2195,8 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(11),
             variable=selected_var,
             command=lambda n=p.name, v=selected_var: self._toggle_batch_server(n, v.get()),
-        ).grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 8))
+        )
+        target_checkbox.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 8))
 
         status_pill = ctk.CTkLabel(
             row,
@@ -2086,7 +2210,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         status_pill.grid(row=0, column=1, rowspan=2, sticky="w", padx=(0, 8))
 
-        text_area = ctk.CTkFrame(row, fg_color="transparent")
+        text_area = ctk.CTkFrame(row, width=1, fg_color="transparent")
         text_area.grid(row=0, column=2, rowspan=2, sticky="ew")
         title_line = ctk.CTkFrame(text_area, fg_color="transparent")
         title_line.pack(fill="x")
@@ -2096,9 +2220,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             text=p.name,
             text_color=COLORS["text"],
             font=font(14, "bold"),
+            width=1,
             anchor="w",
         )
-        name_label.pack(side="left")
+        name_label.pack(side="left", fill="x", expand=True)
+        bind_wraplength(name_label, name_label, padding=0, min_width=80, max_width=860)
 
         if is_active:
             ctk.CTkLabel(
@@ -2117,13 +2243,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             text="  |  ".join(info),
             text_color=COLORS["muted"],
             font=font(11),
+            width=1,
             anchor="w",
             justify="left",
         )
         info_label.pack(fill="x", pady=(1, 0))
         bind_wraplength(text_area, info_label, padding=24, min_width=260, max_width=860)
 
-        btn_frame = ctk.CTkFrame(row, fg_color="transparent")
+        btn_frame = ctk.CTkFrame(row, width=1, height=1, fg_color="transparent")
         btn_frame.grid(row=0, column=3, rowspan=2, sticky="e", padx=(10, 0))
 
         if is_connected:
@@ -2158,6 +2285,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             command=lambda n=p.name: self._delete_server(n),
             **button_style("danger", compact=True),
         ).pack(side="left")
+        self._bind_server_card_layout(row, target_checkbox, status_pill, text_area, btn_frame)
 
     def _create_server(self):
         def on_save(profile, _, secret_updates):
@@ -2484,6 +2612,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._proxy_inspect_button,
             getattr(self, "_proxy_remote_core_button", None),
             getattr(self, "_proxy_service_routes_button", None),
+            getattr(self, "_proxy_route_preset_button", None),
             self._proxy_remote_test_button,
             getattr(self, "_proxy_remote_stale_cleanup_button", None),
             self._proxy_remote_cleanup_button,
@@ -5109,7 +5238,10 @@ class SSHTab(ctk.CTkScrollableFrame):
             self.winfo_toplevel(), scopes={name: name for name in server_names},
         )
 
-    def _open_proxy_service_routes(self):
+    def _open_proxy_route_preset(self):
+        self._open_proxy_service_routes(preset=True)
+
+    def _open_proxy_service_routes(self, *, preset=False):
         if self._proxy_busy or self._ssh_busy:
             self._set_proxy_status("当前 SSH 操作正在进行，请稍后编辑目标分流。", "warning")
             return
@@ -5120,6 +5252,13 @@ class SSHTab(ctk.CTkScrollableFrame):
         if existing and existing.winfo_exists():
             existing.lift()
             existing.focus()
+            if set(existing._scopes) != set(server_names):
+                message = "分流窗口仍在编辑原来选择的服务器；请先保存或关闭该窗口，再打开新目标。已有草稿已保留。"
+                self._set_proxy_status(message, "warning")
+                existing._status.configure(text=message, text_color=COLORS["warning"])
+                return
+            if preset:
+                existing.show_preset()
             return
         from core import proxy_routing
         from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
@@ -5133,6 +5272,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             ),
             on_saved=lambda: self._set_proxy_status("SSH 目标分流处理完成，各服务器结果请查看编辑窗口。", "success"),
             on_tags_saved=lambda: self._refresh_proxy_subscription_profile_options(preserve_editor=True),
+            initial_preset=preset,
         )
 
     def _inspect_ai_proxy(self):

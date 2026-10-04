@@ -1886,6 +1886,31 @@ def proxy_subscription_node_auto_selectable(
     )
 
 
+def proxy_subscription_node_ai_auto_selectable(
+    item: ProxySubscriptionNode,
+    quality_result: ProxyNodeQualityResult | dict | None = None,
+) -> bool:
+    """Gate automatic AI primary/standby choices, not verified service access.
+
+    Explicit manual pins/pools do not use this gate. Unknown or incomplete
+    quality is not a failed measurement; fresh, complete rejection is. Region
+    hints and cached Hong Kong evidence remain conservative exclusions, never
+    proof that another node's real exit is supported or unchanged.
+    """
+    try:
+        if not proxy_subscription_node_auto_selectable(item, quality_result):
+            return False
+        node = _normalize_proxy_node(item.node)
+        if (str(node.get("dialer-proxy") or "").strip()
+                or proxy_region_is_hong_kong(proxy_subscription_node_region(item))
+                or proxy_node_region(node) in PROXY_AUTO_SELECTION_BLOCKED_REGIONS):
+            return False
+        return not (proxy_node_quality_decisive_for_ai_proxy(quality_result)
+                    and not proxy_node_quality_for_ai_proxy_ok(quality_result))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def automatic_proxy_subscription_nodes(
     nodes,
     quality_results: dict[str, ProxyNodeQualityResult | dict] | None = None,
@@ -4140,10 +4165,7 @@ def _remote_proxy_fallback_nodes(
             break
         item_key = proxy_subscription_node_key(item)
         quality = qualities.get(item_key)
-        if (
-            proxy_node_quality_decisive_for_ai_proxy(quality)
-            and not proxy_node_quality_for_ai_proxy_ok(quality)
-        ):
+        if not proxy_subscription_node_ai_auto_selectable(item, quality):
             continue
         try:
             normalized = _normalize_proxy_node(item.node)

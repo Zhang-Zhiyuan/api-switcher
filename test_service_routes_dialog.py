@@ -535,7 +535,11 @@ def test_change_preview_shows_removed_target_and_subscription_strategy_reset(edi
     dialog._toggle_preview()
     text = dialog._preview.get("1.0", "end")
     assert "家宽订阅 A" in text and "机房订阅 B" in text
-    assert "美国 · 家宽 02" in text and "订阅首选（暂无备用）" in text
+    # This fixture's datacenter source contains only Hong Kong. Resetting the
+    # old pin does not make it an eligible automatic AI destination.
+    assert "美国 · 家宽 02" in text and "无符合 AI 自动筛选的候选" in text
+    assert dialog._rows["claude"]["description"]["warning"]
+    assert "claude" not in dialog._drafts[dialog._scope]["service_node_bindings"]
     dialog._reset()
     assert not dialog._changes
     assert not saved

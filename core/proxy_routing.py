@@ -374,24 +374,33 @@ def load_route_catalog() -> list[dict]:
         try:
             cached = remote_proxy.load_cached_proxy_subscription(profile)
             if cached:
+                qualities = remote_proxy.load_proxy_subscription_qualities(profile)
                 entry["nodes"] = [
                     {"key": remote_proxy.proxy_subscription_node_key(item),
-                     "label": str(item.node.get("name") or f"节点 {index}")}
+                     "label": str(item.node.get("name") or f"节点 {index}"),
+                     "region": remote_proxy.proxy_subscription_node_region(item),
+                     "ai_auto_selectable": remote_proxy.proxy_subscription_node_ai_auto_selectable(
+                         item, qualities.get(remote_proxy.proxy_subscription_node_key(item)))}
                     for index, item in enumerate(cached.nodes, 1)
                     if not str(item.node.get("dialer-proxy") or "").strip()
                 ]
                 # Node keys include display names; aliases of one connection
                 # are not separate fallback exits. Count only independent,
                 # normalized connections using the already loaded cache.
-                connection_keys = set()
+                connection_keys, ai_connection_keys = set(), set()
                 for item in cached.nodes:
                     if str(item.node.get("dialer-proxy") or "").strip():
                         continue
                     try:
-                        connection_keys.add(remote_proxy._proxy_node_connection_key(item.node))
+                        connection_key = remote_proxy._proxy_node_connection_key(item.node)
+                        connection_keys.add(connection_key)
+                        if remote_proxy.proxy_subscription_node_ai_auto_selectable(
+                                item, qualities.get(remote_proxy.proxy_subscription_node_key(item))):
+                            ai_connection_keys.add(connection_key)
                     except (TypeError, ValueError):
                         continue
                 entry["auto_route_candidate_count"] = len(connection_keys)
+                entry["ai_auto_route_candidate_count"] = len(ai_connection_keys)
                 # Deployment uses the saved primary, or the first original
                 # node when it disappeared; never the first filtered node.
                 if cached.nodes:

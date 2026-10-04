@@ -147,3 +147,46 @@ def test_workflow_hint_wraps_compactly_and_keeps_server_visible(ssh_window, tk_r
         assert card.winfo_rooty() + card.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height()
     finally:
         ctk.set_widget_scaling(previous_scale)
+
+
+@pytest.mark.parametrize("dpi", [100, 125, 150, 175, 200, 250])
+def test_ssh_controls_stay_inside_after_wide_narrow_dpi_roundtrip(ssh_window, tk_root, monkeypatch, dpi):
+    import time
+
+    window, tab = ssh_window
+    errors = []
+    monkeypatch.setattr(tk_root, "report_callback_exception", lambda *error: errors.append(error))
+    scale = dpi / 100
+    monkeypatch.setattr(ctk.ScalingTracker, "get_window_dpi_scaling", lambda _window: scale)
+    ctk.ScalingTracker.window_dpi_scaling_dict[window] = scale
+    ctk.ScalingTracker.update_scaling_callbacks_for_window(window)
+    tab._render_server_card({"profile": tab._server_profiles[0]})
+    card = tab._cards_frame.winfo_children()[0]
+    variables = dict(tab._server_selection_vars)
+
+    def settle(seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            tk_root.update()
+            time.sleep(0.005)
+
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from descendants(child)
+
+    settle(1.1)
+    for width in (1100, 380, 740, 300, 1100):
+        window.geometry(f"{width}x700")
+        settle(0.15)
+        tab._apply_responsive_layout()
+        settle(0.1)
+        for section in (card, tab._sync_frame):
+            for widget in descendants(section):
+                if not isinstance(widget, (ctk.CTkButton, ctk.CTkComboBox, ctk.CTkCheckBox)):
+                    continue
+                assert widget.winfo_rootx() >= section.winfo_rootx() - 2
+                assert widget.winfo_rootx() + widget.winfo_width() <= section.winfo_rootx() + section.winfo_width() + 2
+        assert tab._server_selection_vars == variables
+        assert tuple(tab._cards_frame.winfo_children()) == (card,)
+    assert not errors

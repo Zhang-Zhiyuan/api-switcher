@@ -4815,11 +4815,32 @@ def _selected_subscription_route_pool(
         if aliases and warnings is not None:
             warnings.append(f"{aliases} 个自选候选节点实际为重复连接，已合并；实际可切换连接数 {len(selected)} 个")
         return selected[0], tuple(selected[1:])
+    candidate_nodes = cached.nodes
+    qualities = {}
+    if ai_sensitive and not node_key:
+        # The subscription-wide pick is not an explicit per-service pin. Apply
+        # the same policy to automatic primary and standby nodes; otherwise a
+        # selected/first Hong Kong node bypasses the standby safety filter.
+        qualities = remote_proxy.load_proxy_subscription_qualities(profile)
+        automatic_candidates = []
+        for item in cached.nodes:
+            try:
+                key = remote_proxy.proxy_subscription_node_key(item)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if remote_proxy.proxy_subscription_node_ai_auto_selectable(item, qualities.get(key)):
+                automatic_candidates.append(item)
+        candidate_nodes = tuple(automatic_candidates)
+        if not candidate_nodes:
+            raise RuntimeError(
+                "该订阅没有符合 AI 自动选择策略的可用节点（香港、已明确拒绝的质量或无法独立运行节点被排除）；"
+                "已停止更新，请检查订阅或显式手动选择节点"
+            )
     selected_key = node_key or str(profile.get("selected_node_key") or "").strip()
     selected_item = next(
         (
             item
-            for item in cached.nodes
+            for item in candidate_nodes
             if selected_key
             and hmac.compare_digest(
                 remote_proxy.proxy_subscription_node_key(item),
@@ -4831,7 +4852,7 @@ def _selected_subscription_route_pool(
     if selected_item is None:
         if node_key:
             raise RuntimeError(f"订阅“{profile.get('name') or '未命名订阅'}”中的固定节点已失效，请重新选择节点")
-        selected_item = cached.nodes[0]
+        selected_item = candidate_nodes[0]
     primary_node = remote_proxy._normalize_proxy_node(selected_item.node)
     if str(primary_node.get("dialer-proxy") or "").strip():
         name = str(profile.get("name") or "该订阅").strip() or "该订阅"
@@ -4843,10 +4864,9 @@ def _selected_subscription_route_pool(
         # An explicit node is pinned; never silently switch it to another exit.
         return primary_node, ()
     if ai_sensitive:
-        qualities = remote_proxy.load_proxy_subscription_qualities(profile)
         fallback_nodes = _local_proxy_fallback_nodes(
             primary_node,
-            cached.nodes,
+            candidate_nodes,
             qualities,
         )
     else:
@@ -5135,10 +5155,7 @@ def _local_proxy_fallback_nodes(
             break
         item_key = remote_proxy.proxy_subscription_node_key(item)
         quality = qualities.get(item_key)
-        if (
-            remote_proxy.proxy_node_quality_decisive_for_ai_proxy(quality)
-            and not remote_proxy.proxy_node_quality_for_ai_proxy_ok(quality)
-        ):
+        if not remote_proxy.proxy_subscription_node_ai_auto_selectable(item, quality):
             continue
         try:
             normalized = remote_proxy._normalize_proxy_node(item.node)

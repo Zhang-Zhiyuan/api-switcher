@@ -22,6 +22,11 @@ _SCHEDULE = SubscriptionRefreshSchedule()
 _SOURCE_FIELDS = ("url", "source_path", "source_revision")
 
 
+def subscription_source_identity(profile_id: str, profile: dict) -> str:
+    """Opaque source identity for queued UI results; never expose saved URLs."""
+    return make_source_key(profile_id, **{key: profile.get(key, "") for key in _SOURCE_FIELDS})
+
+
 def _current_source(profile_id: str, original: dict) -> dict:
     current = (remote_proxy.load_proxy_subscription_state().get("profiles") or {}).get(profile_id)
     if not isinstance(current, dict) or any(
@@ -327,7 +332,25 @@ def refresh_saved_subscriptions(scope: str, *, server_names=(), interval_seconds
                     scheduler.defer_apply(key, consumers[name], revision, version=version,
                                           retryable=(apply_error or profile_id in consumed) and bool(getattr(message, "retryable", False)),
                                           interval_seconds=interval_seconds)
-    payload = {"results": results, "errors": errors, "apply_messages": apply_messages,
+    # An earlier download may become stale while another source/host is being
+    # processed. Runtime guards alone do not protect the UI node list, which
+    # consumes this mapping after the worker returns.
+    result_sources = {}
+    for profile_id in tuple(results):
+        try:
+            _current_source(profile_id, profiles[profile_id])
+            result_sources[profile_id] = subscription_source_identity(profile_id, profiles[profile_id])
+        except Exception:
+            results.pop(profile_id, None)
+            if scheduled:
+                scheduler.invalidate(contexts[profile_id][0])
+            untracked_retry = True
+            message = "订阅来源已变化或无法确认，已丢弃旧来源的界面缓存结果"
+            errors.append(message)
+            steps.append(_step("cache", update_result(message, "skipped", warning=True, retryable=True),
+                               profile_id=profile_id))
+    payload = {"results": results, "result_sources": result_sources,
+               "errors": errors, "apply_messages": apply_messages,
                "steps": steps, "retryable": bool(errors) or any(item["retryable"] for item in steps), **counts}
     if scheduled:
         delays = [scheduler.next_delay(key, consumers[name], interval_seconds)

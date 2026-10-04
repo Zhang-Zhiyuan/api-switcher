@@ -5,7 +5,10 @@ from tkinter import filedialog
 from ui.widgets.masked_entry import MaskedEntry
 from models.profile import SSHProfile
 from ui.feedback import safe_feedback_text
-from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
+from ui.theme import (
+    COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style,
+    sync_scrollable_frame_width,
+)
 from ui.ui_dispatch import run_on_ui_thread
 
 
@@ -48,6 +51,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
             scrollbar_button_hover_color=COLORS["secondary_hover"],
         )
         scroll.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        self._form_scroll = scroll
 
         self._fields = {}
 
@@ -132,7 +136,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
             "remote_codex_dir",
             profile.remote_codex_dir if profile and profile.remote_codex_dir else "",
         )
-        remote_dir_hint = ctk.CTkLabel(
+        self._remote_dir_hint = ctk.CTkLabel(
             scroll,
             text=(
                 "留空自动识别：Claude 优先使用远程 CLAUDE_CONFIG_DIR，否则 ~/.claude；"
@@ -143,8 +147,10 @@ class SSHEditorDialog(ctk.CTkToplevel):
             anchor="w",
             justify="left",
         )
-        remote_dir_hint.pack(fill="x", padx=(128, 0), pady=(0, 4))
-        bind_wraplength(scroll, remote_dir_hint, padding=160, min_width=220, max_width=620)
+        self._remote_dir_hint.pack(fill="x", padx=(128, 0), pady=(0, 4))
+        # Its allocated width changes when narrow layouts remove the indent.
+        bind_wraplength(self._remote_dir_hint, self._remote_dir_hint,
+                        padding=4, min_width=220, max_width=620)
 
         # Test button
         test_frame = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -171,7 +177,8 @@ class SSHEditorDialog(ctk.CTkToplevel):
 
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=18, pady=(0, 16))
+        # A short high-DPI work area must shrink the scroll body, not hide Save.
+        btn_frame.pack(side="bottom", fill="x", padx=18, pady=(0, 16), before=header)
         ctk.CTkButton(
             btn_frame,
             text="取消",
@@ -239,7 +246,8 @@ class SSHEditorDialog(ctk.CTkToplevel):
     def _logical_width(self) -> int:
         width = self.winfo_width()
         try:
-            scaling = float(self._get_window_scaling())
+            # Fields use widget scaling, which can differ from window scaling.
+            scaling = float(self._test_btn._get_widget_scaling())
         except (AttributeError, TypeError, ValueError):
             scaling = 1.0
         return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
@@ -262,6 +270,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
             self._responsive_after_id = None
 
     def _apply_responsive_layout(self) -> None:
+        sync_scrollable_frame_width(self.__dict__.get("_form_scroll"))
         stacked = self._logical_width() < 620
         if stacked == self._responsive_stacked:
             return
@@ -285,6 +294,7 @@ class SSHEditorDialog(ctk.CTkToplevel):
                 for index, button in enumerate(buttons):
                     button.pack(side="left", padx=(0, 5) if index < len(buttons) - 1 else 0)
         self._auth_hint.pack_configure(padx=(0, 0) if stacked else (128, 0))
+        self._remote_dir_hint.pack_configure(padx=(0, 0) if stacked else (128, 0))
 
     def _pack_after(self, row, after_row) -> None:
         if row is None:

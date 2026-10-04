@@ -237,7 +237,7 @@ class RoutePresetDialog(RestoreGrabDialog):
         self._error_detail.pack_forget()
         preset_id = choices["preset_id"]
         _configure_changed(self._description, text=ROUTE_PRESETS[preset_id]["description"])
-        ai_hint = ("固定本次缓存首选，失效不自动换节点；要故障切换，可在编辑器自选候选。\n"
+        ai_hint = ("固定筛选后的推荐节点，失效不自动换节点；要故障切换，可在编辑器自选候选。\n"
                    "固定节点不保证供应商维持相同 IP / 国家。" if choices["ai_strategy"] == "fixed" else
                    "自动候选可随订阅刷新变化，可能跨国家；需在核对页明确确认。")
         if choices["ai_strategy"] == "fixed" and not choices["replace_existing"]:
@@ -248,7 +248,8 @@ class RoutePresetDialog(RestoreGrabDialog):
             if kept_auto:
                 ai_hint += (f"\n仍保留 {kept_auto} 项已有 AI 自动切换线路；要固定，请勾选“重新规划已有分流”"
                             "或返回编辑器单独调整。")
-        _configure_changed(self._ai_hint, text=ai_hint + "\n仅影响本次将修改的 AI 目标；保留的已有线路不变。",
+        _configure_changed(self._ai_hint, text=ai_hint + "\n自动推荐排除香港及已知不合格节点；地区未知仍需实测。"
+                           "\n仅影响本次将修改的 AI 目标；保留的已有线路不变。",
                            text_color=COLORS["muted"] if choices["ai_strategy"] == "fixed" else COLORS["warning"])
         for key, combo in self._source_combos.items():
             used = preset_id == "balanced" or (key == "residential" if preset_id == "ai_only" else key == "datacenter")
@@ -292,8 +293,11 @@ class RoutePresetDialog(RestoreGrabDialog):
             needs_sources |= not bool(source["id"])
             hint = self._source_rows[key][1]
             prefix = "已指定" if choices["sources"].get(key) else "推荐来源"
-            _configure_changed(hint, text=f"{prefix}：{labels.get(source['id'], '暂未分配')}\n{source['reason']}",
-                               text_color=COLORS["muted"] if source["id"] else COLORS["warning"])
+            ai_source = key == "residential" or preset_id == "datacenter"
+            ai_count = source["ai_candidate_count"]
+            eligibility = f"\nAI 自动候选：{ai_count} 个（已排除香港及已知不合格节点）" if ai_source else ""
+            _configure_changed(hint, text=f"{prefix}：{labels.get(source['id'], '暂未分配')}\n{source['reason']}" + eligibility,
+                               text_color=COLORS["warning"] if not source["id"] or ai_source and not ai_count else COLORS["muted"])
         if needs_sources:
             text = ("还没有订阅：请先返回代理页添加链接或导入节点。" if not self._catalog else
                     "先设置家宽 / 非家宽标记；无节点缓存时，返回代理页拉取订阅。")
@@ -312,11 +316,12 @@ class RoutePresetDialog(RestoreGrabDialog):
             service, status = decision["service"], decision["status"]
             description = route_description(rows[service], plan["draft"], self._catalog)
             before = self._before[service]
-            warning = status == "unavailable" or description["warning"]
+            policy_warning = bool(decision.get("warning"))
+            warning = status == "unavailable" or description["warning"] or policy_warning
             missing += int(bool(warning))
             kept += int(status in {"kept", "unchanged"})
             heading, detail = self._preview_rows[service]
-            state = statuses[status] + (" · 需检查" if description["warning"] and status != "unavailable" else "")
+            state = statuses[status] + (" · 需检查" if warning and status != "unavailable" else "")
             color = COLORS["warning" if warning else "accent" if status == "changed" else "muted"]
             _configure_changed(heading, text=decision["label"] + " · " + state, text_color=color)
             destination = description["profile"] + " → " + description["node"]
@@ -324,10 +329,12 @@ class RoutePresetDialog(RestoreGrabDialog):
                 text = f"原：{before['profile']} → {before['node']}\n新：{destination}"
                 if service in plan["draft"].get("service_node_bindings", {}):
                     text += "（固定节点）"
+                if service in LOCAL_PROXY_AI_SERVICE_IDS:
+                    text += "\n" + decision["reason"]
             elif status == "kept" and not warning:
                 text = destination + ("\n未启用 · 不新增专属规则" if not rows[service]["enabled"] else "\n保留已有选择")
             else:
-                text = destination + "\n" + (description["hint"] if description["warning"] else decision["reason"])
+                text = destination + "\n" + (description["hint"] if description["warning"] and not policy_warning else decision["reason"])
             _configure_changed(detail, text=text, text_color=COLORS["warning"] if warning else COLORS["muted"])
         self._counts = (len(plan["changed_services"]), kept, missing)
         self._update_actions()

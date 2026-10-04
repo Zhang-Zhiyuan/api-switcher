@@ -13,6 +13,7 @@ from datetime import date
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sys
 import time
@@ -21,6 +22,27 @@ from unittest.mock import patch
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKSPACE))
+
+
+def audit_run_id(value):
+    """Keep distinct audit runs without accepting paths or reserved filenames."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value):
+        raise argparse.ArgumentTypeError("run-id must use 1-64 ASCII letters, digits, hyphens or underscores")
+    return value
+
+
+def audit_run_directory(base: Path, run_id: str | None) -> Path:
+    return base / ("run-" + audit_run_id(run_id)) if run_id else base
+
+
+def audit_client_size(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+)x(\d+)", value)
+    if not match:
+        raise argparse.ArgumentTypeError("client-size must be WIDTHxHEIGHT in physical pixels")
+    width, height = map(int, match.groups())
+    if not (320 <= width <= 7680 and 240 <= height <= 4320):
+        raise argparse.ArgumentTypeError("client-size must be within 320x240 and 7680x4320")
+    return width, height
 
 
 def capture_window_image(window, *, onscreen=False):
@@ -83,6 +105,13 @@ def capture_window_image(window, *, onscreen=False):
             window.focus_force()
             window.update()
             hwnd = preview_handle()
+            # Tk focus can be local to its interpreter while another Windows
+            # application still owns the foreground. Request our verified HWND;
+            # if Windows denies it, the ownership checks below still refuse.
+            activate = user32.SetForegroundWindow
+            activate.argtypes, activate.restype = (ctypes.c_void_p,), ctypes.c_int
+            activate(hwnd)
+            window.update()
             require_foreground(hwnd)
             if prepare_native() != hwnd:
                 raise RuntimeError("preview window changed during capture")
@@ -162,6 +191,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--view", choices=("wide", "compact", "scaled", "tiny"), default="wide")
     parser.add_argument("--label", choices=("before", "after", "verify"), default="verify")
+    parser.add_argument("--run-id", type=audit_run_id, help="Keep this run in a separate output subdirectory")
+    parser.add_argument("--dpi", type=int, choices=(100, 125, 150, 175, 200, 250, 300),
+                        help="Simulate the reported monitor DPI in this isolated process only")
+    parser.add_argument("--client-size", type=audit_client_size,
+                        help="Requested physical client size, e.g. 1280x900")
     parser.add_argument("--tab", help="Capture one tab by its exact display label")
     parser.add_argument("--focus-maintenance", action="store_true", help="Also capture the Win11 proxy lifecycle notice")
     parser.add_argument("--expand-shortcuts", action="store_true", help="Also exercise the optional global shortcuts")
@@ -189,7 +223,7 @@ def main():
     if not specs:
         parser.error("unknown tab")
 
-    destination = WORKSPACE / "dist" / f"ui-audit-{date.today():%Y%m%d}" / args.label
+    destination = audit_run_directory(WORKSPACE / "dist" / f"ui-audit-{date.today():%Y%m%d}", args.run_id) / args.label
     destination.mkdir(parents=True, exist_ok=True)
     errors, captures, blocked = [], [], []
     secrets = {}
@@ -222,13 +256,28 @@ def main():
         seed_data()
         ctk.set_default_color_theme("blue")
         ctk.set_appearance_mode("dark")
-        if args.view in {"scaled", "tiny"}:
+        if args.dpi is not None:
+            # Exercise the same CTk callback path as monitor DPI detection.
+            # Do not change the user's monitor, registry or application settings.
+            guards.enter_context(patch.object(ctk.ScalingTracker, "get_window_dpi_scaling",
+                                              lambda _window: args.dpi / 100))
+        elif args.view in {"scaled", "tiny"}:
             ctk.set_widget_scaling(1.5)
         root = App()
         if args.expand_shortcuts:
             root._quick_tools_toggle.invoke()
         root.title("API 配置切换器 · 隔离界面检查（合成数据）")
-        root.geometry({"wide": "1120x800+30+30", "compact": "740x720+30+30", "scaled": "960x760+30+30", "tiny": "480x600+30+30"}[args.view])
+        if args.client_size:
+            scale = root._get_window_scaling()
+            width, height = (max(1, int(value / scale)) for value in args.client_size)
+            # Match fit_window_to_screen's capped minimum on a small work area.
+            root.minsize(min(root._min_width, width), min(root._min_height, height))
+            root.geometry(f"{width}x{height}+30+30")
+        else:
+            root.geometry({"wide": "1120x800+30+30", "compact": "740x720+30+30", "scaled": "960x760+30+30", "tiny": "480x600+30+30"}[args.view])
+        dpi_variant = f"-dpi-{args.dpi}" if args.dpi is not None else ""
+        if args.client_size:
+            dpi_variant += "-" + "x".join(map(str, args.client_size))
         def callback_error(kind, error, _tb):
             message = f"{kind.__name__}: {error}"
             errors.append(message)
@@ -238,7 +287,7 @@ def main():
         root.report_callback_exception = callback_error
         def capture(label, tab, suffix="top"):
             root.lift()
-            variant = ("-expanded" if args.focus_maintenance else "") + ("-shortcuts" if args.expand_shortcuts else "")
+            variant = dpi_variant + ("-expanded" if args.focus_maintenance else "") + ("-shortcuts" if args.expand_shortcuts else "")
             path = destination / f"{args.view}-{label}-{suffix}{variant}.png"
             capture_window_image(root, onscreen=args.onscreen).save(path)
             left, right = root.winfo_rootx(), root.winfo_rootx() + root.winfo_width()
@@ -284,10 +333,11 @@ def main():
                 if item["horizontal_overflow"]:
                     errors.append(f"{item['file']}: horizontal control overflow")
             report = {"view": args.view, "captures": captures, "callback_errors": errors, "blocked_operations": blocked,
+                      "simulated_monitor_dpi_percent": args.dpi, "requested_client_size": args.client_size,
                       "widget_scaling": root._shell._get_widget_scaling(), "window_scaling": root._get_window_scaling(),
                       "capture_mode": "foreground-client" if args.onscreen else "native-window"}
             report_name = args.view + (f"-{args.tab}" if args.tab else "")
-            report_name += ("-expanded" if args.focus_maintenance else "") + ("-shortcuts" if args.expand_shortcuts else "")
+            report_name += dpi_variant + ("-expanded" if args.focus_maintenance else "") + ("-shortcuts" if args.expand_shortcuts else "")
             (destination / f"{report_name}-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             print("VISUAL_ERRORS", errors, "BLOCKED_OPERATIONS", len(blocked), flush=True)
             root.destroy()

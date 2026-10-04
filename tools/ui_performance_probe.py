@@ -21,14 +21,16 @@ from types import SimpleNamespace
 WORKSPACE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKSPACE))
 
-
 def main():
+    from tools.ui_visual_audit import audit_run_directory, audit_run_id
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", choices=("profiles", "nodes", "routes"), default="profiles")
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--width", type=int, default=1040, help="Window width in logical pixels")
     parser.add_argument("--long-names", action="store_true", help="Exercise wrapping with long synthetic node names")
     parser.add_argument("--label", choices=("before", "after", "check"), default="check")
+    parser.add_argument("--run-id", type=audit_run_id, help="Keep this run in a separate output subdirectory")
     parser.add_argument("--screenshot", action="store_true")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -167,8 +169,16 @@ def main():
             picker._search_entry.insert(0, value)
             picker._render_nodes()
 
+        def select(index):
+            picker = target["widget"]
+            picker._select(picker._node_key(nodes[index]))
+            assert picker.selected_item() is nodes[index]
+
         phases = [("open", opening, ready), ("same_nodes", lambda: target["widget"].set_nodes(nodes), ready),
                   ("filter", lambda: search("000"), ready), ("clear_filter", lambda: search(""), ready),
+                  ("select_first", lambda: select(0), ready),
+                  ("select_last", lambda: select(-1), ready),
+                  ("reselect_last", lambda: select(-1), ready),
                   ("check_all", lambda: target["widget"]._set_matching_checked(True), ready)]
     else:
         from core import proxy_routing
@@ -198,8 +208,8 @@ def main():
             assert len(widget.filtered_items()) == args.count
             assert len(widget.checked_items()) == args.count
         suffix = f"-{args.width}" if args.width != 1040 else ""
-        output = WORKSPACE / "build" / f"ui-perf-{args.scenario}-{args.label}{suffix}"
-        output.parent.mkdir(exist_ok=True)
+        output = audit_run_directory(WORKSPACE / "build", args.run_id) / f"ui-perf-{args.scenario}-{args.label}{suffix}"
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.with_suffix(".json").write_text(json.dumps({"scenario": args.scenario, "count": args.count,
             "width": args.width, "long_names": args.long_names,
             "phases": results, "errors": errors}, ensure_ascii=False, indent=2), encoding="utf-8")

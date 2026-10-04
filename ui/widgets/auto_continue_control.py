@@ -38,6 +38,14 @@ def _bind_responsive_grid(container, items, column_selector) -> None:
     def apply_layout(event=None):
         try:
             width = int(getattr(event, "width", 0) or container.winfo_width())
+            # Configure widths are physical pixels; the breakpoints and CTk
+            # button sizes are logical units, including after a monitor move.
+            try:
+                scaling = float(container._get_widget_scaling())
+            except (AttributeError, TypeError, ValueError):
+                scaling = 1.0
+            if scaling > 0:
+                width = round(width / scaling)
             columns = max(1, min(len(widgets), int(column_selector(width))))
             if columns == state["columns"]:
                 return

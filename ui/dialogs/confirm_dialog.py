@@ -17,6 +17,12 @@ def _bind_two_button_footer(frame, primary_button, secondary_button) -> None:
     def apply_layout(event=None):
         try:
             width = int(getattr(event, "width", 0) or frame.winfo_width())
+            try:
+                scaling = float(frame._get_widget_scaling())
+            except (AttributeError, TypeError, ValueError):
+                scaling = 1.0
+            if scaling > 0:
+                width = round(width / scaling)
             columns = _dialog_action_columns(width)
             if columns == state["columns"]:
                 return

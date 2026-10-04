@@ -18,7 +18,7 @@ def test_overview_distinguishes_fixed_automatic_default_and_disabled_routes():
     assert _describe("claude", prefs)["hint"] == "固定节点 · 不自动换节点；不保证固定 IP / 国家"
     assert _describe("google_ai", prefs)["node"] == "沿用默认节点策略"
     prefs["service_node_bindings"].pop("claude")
-    assert _describe("claude", prefs)["hint"] == "自动切换 · 仅限此订阅，备用按服务策略筛选；未锁定国家"
+    assert _describe("claude", prefs)["hint"] == "自动切换 · 仅限此订阅，主备按服务策略筛选；未锁定国家"
     prefs["builtin_sites"]["youtube"] = False
     description = _describe("youtube", prefs)
     assert description["profile"] == "机房订阅 B"
@@ -150,7 +150,7 @@ def test_overview_equal_refresh_reuses_rows_and_missing_disabled_route_stays_vis
     prefs["service_profile_bindings"]["github"] = "deleted"
     widget.set_routes(prefs, _catalog())
     assert widget._rows["github"]["tile"].winfo_manager() == "pack"
-    assert "1 项需修复" in widget._summary.cget("text")
+    assert "1 项需检查" in widget._summary.cget("text")
     assert rows == {key: row["tile"] for key, row in widget._rows.items()}
 
 
@@ -232,10 +232,10 @@ def test_warning_visibility_updates_without_recreating_other_rows(overview):
     prefs["service_profile_bindings"]["github"] = "missing"
     widget.set_routes(prefs, _catalog())
     assert widget._rows["github"]["tile"].winfo_manager() == "pack"
-    assert "1 项需修复" in widget._summary.cget("text")
+    assert "1 项需检查" in widget._summary.cget("text")
     widget.set_routes(_preferences(), _catalog())
     assert widget._rows["github"]["tile"].winfo_manager() == ""
-    assert "需修复" not in widget._summary.cget("text")
+    assert "需检查" not in widget._summary.cget("text")
 
 
 def test_equal_enabled_state_does_not_redraw_any_button(overview, monkeypatch):

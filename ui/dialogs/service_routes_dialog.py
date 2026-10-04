@@ -65,7 +65,7 @@ class NodeChoiceButton(ctk.CTkButton):
 class ServiceRoutesDialog(ctk.CTkToplevel):
     def __init__(self, master, *, scopes, load_preferences, apply_preferences,
                  on_saved=None, initial_service="", catalog_loader=None, on_tags_saved=None,
-                 recover_preferences=None):
+                 recover_preferences=None, initial_preset=False):
         super().__init__(master)
         self.title("目标分流 · 订阅与节点")
         self.geometry("1040x760")
@@ -91,6 +91,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._closed = False
         self._narrow = False
         self._initial_service = initial_service
+        self._preset_requested = bool(initial_preset)
         self._filter_after_id = None
         self._category = "全部"
         self._node_dialog = None
@@ -116,7 +117,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         title_row.pack(fill="x")
         ctk.CTkLabel(title_row, text="目标分流", font=font(20, "bold"),
                      text_color=COLORS["text"]).pack(side="left")
-        self._preset_button = ctk.CTkButton(title_row, text="智能预设", width=110, state="disabled",
+        self._preset_button = ctk.CTkButton(title_row, text="智能分流方案", width=130, state="disabled",
                                            command=self._open_preset_dialog, **button_style("primary", compact=True))
         self._preset_button.pack(side="right")
         notice = ctk.CTkLabel(
@@ -606,12 +607,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._originals, self._catalog, self._contexts = payload
             self._drafts = copy.deepcopy(self._originals)
             self._busy = False
-            self._seed_tagged_defaults()
+            preset_requested = self._preset_requested
+            self._preset_requested = False
+            # The preset must start from saved intent, not auto-seeded draft
+            # bindings which it would then protect as existing manual choices.
+            if not preset_requested:
+                self._seed_tagged_defaults()
             self._render()
             if self._initial_service in self._rows:
                 self._search.set(self._rows[self._initial_service]["label"])
             self._set_editable(True)
             self._changed()
+            if preset_requested:
+                self.show_preset()
         elif event in ("catalog", "catalog_error"):
             self._busy = False
             if event == "catalog":
@@ -668,6 +676,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._on_saved()
         else:
             self._busy = False
+            self._preset_requested = False
             self._status.configure(text=f"读取失败：{payload}。请关闭后重试。", text_color=COLORS["danger"])
 
     def _ensure_mapping_cache(self):
@@ -1146,6 +1155,27 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             on_apply=lambda services, operation, **choices: self._accept_bulk_edit(scope, services, operation, **choices),
         )
 
+    def show_preset(self):
+        """Open the preset entry point without reloading or discarding a draft."""
+        if self._closed:
+            return
+        if self._busy:
+            if not self._drafts:
+                self._preset_requested = True
+                self._status.configure(text="正在读取分流和订阅，完成后打开智能方案…", text_color=COLORS["muted"])
+            else:
+                self._status.configure(text="分流操作正在进行，请完成后再打开智能方案。", text_color=COLORS["warning"])
+            return
+        if self._scope not in self._drafts:
+            return
+        modal = self.grab_current()
+        if modal is not None and modal not in (self, self._preset_dialog):
+            modal.lift()
+            self._status.configure(text="请先完成或关闭当前子窗口，再打开智能方案；已有草稿已保留。",
+                                   text_color=COLORS["warning"])
+            return
+        self._open_preset_dialog()
+
     def _open_preset_dialog(self):
         if self._busy or self._closed or self._scope not in self._drafts:
             return
@@ -1347,6 +1377,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._closed = True
+        self._preset_requested = False
         for dialog in (self._node_dialog, self._scope_copy_dialog, self._tags_dialog, self._bulk_dialog,
                        self._preset_dialog, self._scope_confirm_dialog):
             if dialog and dialog.winfo_exists():

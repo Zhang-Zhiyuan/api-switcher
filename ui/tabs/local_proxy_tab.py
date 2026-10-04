@@ -319,6 +319,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         routing_frame.pack(fill="x", padx=14, pady=(0, 12), before=policy_frame)
         self._route_overview = ServiceRouteOverview(
             routing_frame, command=self._open_service_routes, inspect_command=self._open_route_diagnostics,
+            preset_command=self._open_route_preset,
         )
         self._route_overview.pack(fill="x", padx=14, pady=14)
 
@@ -1724,7 +1725,10 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         self._route_diagnostics_dialog = RouteDiagnosticsDialog(self.winfo_toplevel())
 
-    def _open_service_routes(self, service_id=""):
+    def _open_route_preset(self):
+        self._open_service_routes(preset=True)
+
+    def _open_service_routes(self, service_id="", *, preset=False):
         if self._busy:
             self._set_routing_status("当前代理操作正在进行，请稍后编辑目标分流。", "warning")
             return
@@ -1732,6 +1736,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if existing and existing.winfo_exists():
             existing.lift()
             existing.focus()
+            if preset:
+                existing.show_preset()
             return
         from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
 
@@ -1743,6 +1749,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             ),
             on_saved=self._load_proxy_preferences_ui, initial_service=service_id,
             on_tags_saved=lambda: self._refresh_subscription_profile_options(preserve_editor=True),
+            initial_preset=preset,
         )
 
     def _open_subscription_tags(self):
@@ -3692,23 +3699,37 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             interval=1.0 if len(scope_keys) >= 256 else 0.25,
         )
 
+        results = {}
+        result_lock = threading.Lock()
+
         def report(_completed, _total, result):
             if result.node_key in scope_keys:
+                # A probe can report completed nodes before cleanup raises or
+                # its final mapping omits an item. Progress is terminal evidence,
+                # not just presentation: keep it for both cache and deep probes.
+                with result_lock:
+                    results[result.node_key] = result
                 progress.update(result.node_key, result)
 
         def run():
-            results = {}
+            group_errors = []
 
             def measure_group(items, action, label):
                 try:
-                    results.update(action() or {})
+                    returned = action() or {}
+                    with result_lock:
+                        for key, result in returned.items():
+                            if key in scope_keys:
+                                results.setdefault(key, result)
                 except Exception as exc:
                     detail = (str(exc).strip() or type(exc).__name__).splitlines()[0][:140]
-                    for item in items:
-                        key = remote_proxy.proxy_subscription_node_key(item)
-                        results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
-                            key, False, detail=f"{label}检测任务失败: {detail}", incomplete=True,
-                        ))
+                    group_errors.append(f"{label}检测任务失败: {detail}")
+                    with result_lock:
+                        for item in items:
+                            key = remote_proxy.proxy_subscription_node_key(item)
+                            results.setdefault(key, remote_proxy.ProxyNodeLatencyResult(
+                                key, False, detail=f"{label}检测任务失败: {detail}", incomplete=True,
+                            ))
 
             try:
                 measure_group(tcp_scope_nodes, lambda: remote_proxy.measure_proxy_node_latencies(
@@ -3755,6 +3776,8 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     f"可连 {passed_count}，失败 {completed_count - passed_count - incomplete_count - cancelled_count}，"
                     f"取消 {cancelled_count}，未完成 {incomplete_count}"
                 )
+                if group_errors:
+                    coverage_label += "；" + "；".join(group_errors)
                 save_error = ""
                 try:
                     if not profile_id:
@@ -3944,7 +3967,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     "这是无 token、无计费的网络近似，不是真实账号 compact。"
                     "验证使用隔离临时 mihomo，未改动系统代理或当前运行节点。"
                 )
-                severity = "warning" if save_error else "success"
+                severity = "warning" if save_error or group_errors else "success"
                 if save_error:
                     message += f" 测速结果缓存失败: {save_error}"
                 self._set_status(message, severity)

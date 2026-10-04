@@ -1,7 +1,12 @@
+import time
+
 import customtkinter as ctk
 from ui.feedback import safe_feedback_text
 from ui.widgets.masked_entry import MaskedEntry
-from ui.theme import COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style
+from ui.theme import (
+    COLORS, bind_wraplength, button_style, center_window, combo_style, font, input_style,
+    sync_scrollable_frame_width,
+)
 from ui.ui_dispatch import run_on_ui_thread
 from core.providers import CLAUDE_OFFICIAL_DEFAULT_MODEL, ProviderRegistry
 from core.api_config_parser import ParsedAPIConfig, parse_api_config_text
@@ -48,6 +53,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         self._field_layouts = {}
         self._responsive_after_id = None
         self._responsive_stacked = None
+        self._feedback_reveal_request = None
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 8))
@@ -74,27 +80,31 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             scrollbar_button_hover_color=COLORS["secondary_hover"],
         )
         scroll.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        self._form_scroll = scroll
+        scroll.bind("<Configure>", self._schedule_feedback_reveal, add="+")
 
         self._fields = {}
         self._error_label = ctk.CTkLabel(
-            self,
+            scroll,
             text="",
             text_color=COLORS["danger"],
             font=font(12),
             anchor="w",
             justify="left",
         )
-        self._error_label.pack(fill="x", padx=18, pady=(0, 6))
-        bind_wraplength(self, self._error_label, padding=44, min_width=260, max_width=700)
+        bind_wraplength(scroll, self._error_label, padding=8, min_width=260, max_width=700)
 
         if profile_type == "claude":
             self._build_claude_fields(scroll)
         else:
             self._build_codex_fields(scroll)
+        self._error_label.pack(fill="x", pady=(8, 6))
 
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=18, pady=(0, 16))
+        # The work-area fit can reduce the window below its preferred minimum.
+        # Reserve actions first, then let the scrolling body use what remains.
+        btn_frame.pack(side="bottom", fill="x", padx=18, pady=(0, 16), before=header)
 
         # Test connection button (left side)
         self._test_btn = ctk.CTkButton(
@@ -241,6 +251,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def destroy(self):
         self._destroyed = True
+        self._cancel_feedback_reveal()
         super().destroy()
 
     def _add_field(self, parent, label, key, value="", field_type="entry"):
@@ -329,7 +340,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
     def _logical_width(self) -> int:
         width = self.winfo_width()
         try:
-            scaling = float(self._get_window_scaling())
+            # Content can scale independently from the top-level geometry.
+            scaling = float(self._test_btn._get_widget_scaling())
         except (AttributeError, TypeError, ValueError):
             scaling = 1.0
         return max(1, round(width / scaling)) if scaling > 0 else max(1, width)
@@ -352,6 +364,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._responsive_after_id = None
 
     def _apply_responsive_layout(self) -> None:
+        sync_scrollable_frame_width(self.__dict__.get("_form_scroll"))
         stacked = self._logical_width() < 620
         if stacked == self._responsive_stacked:
             return
@@ -586,9 +599,58 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
     def _show_error(self, message: str) -> None:
         self._error_label.configure(text=safe_feedback_text(message), text_color=COLORS["danger"])
+        self._reveal_feedback(message)
 
     def _show_status(self, message: str, color: str = "muted") -> None:
         self._error_label.configure(text=safe_feedback_text(message), text_color=COLORS[color])
+        self._reveal_feedback(message)
+
+    def _reveal_feedback(self, message: str) -> None:
+        self._cancel_feedback_reveal()
+        scroll = self.__dict__.get("_form_scroll")
+        if not message or scroll is None or self._destroyed:
+            return
+        self._feedback_reveal_request = {"after_id": None, "deadline": time.monotonic() + 0.5}
+        self._schedule_feedback_reveal()
+
+    def _cancel_feedback_reveal(self) -> None:
+        request = self.__dict__.get("_feedback_reveal_request")
+        self._feedback_reveal_request = None
+        if request and request["after_id"] is not None:
+            try:
+                self.after_cancel(request["after_id"])
+            except Exception:
+                pass
+
+    def _schedule_feedback_reveal(self, _event=None) -> None:
+        request = self.__dict__.get("_feedback_reveal_request")
+        if request is None or self._destroyed:
+            return
+        if request["after_id"] is not None:
+            try:
+                self.after_cancel(request["after_id"])
+            except Exception:
+                pass
+
+        def reveal():
+            if self._destroyed or self.__dict__.get("_feedback_reveal_request") is not request:
+                return
+            # One feedback update gets one reveal, not a permanent scroll lock.
+            self._feedback_reveal_request = None
+            try:
+                canvas = self._form_scroll._parent_canvas
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.yview_moveto(1.0)
+            except Exception:
+                pass
+
+        try:
+            # A single idle runs before some text-wrap/pack Configure events.
+            # Wait briefly for those to settle, but bound repeated resize work.
+            delay = min(120, max(0, round((request["deadline"] - time.monotonic()) * 1000)))
+            request["after_id"] = self.after(delay, reveal)
+        except Exception:
+            self._feedback_reveal_request = None
 
     def _provider_note(self, provider, is_codex: bool) -> str:
         if provider is None:

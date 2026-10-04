@@ -19,6 +19,15 @@ def _proxy_node_picker_layout(width: int) -> tuple[int, bool]:
     return (4 if available >= 560 else (2 if available >= 360 else 1)), available < 420
 
 
+def _node_selection_button_style(selected: bool) -> dict:
+    # Selection changes colours, not geometry or fonts. Reapplying the full
+    # CTk style also rebuilds the button grid and its font callbacks even when
+    # those values are unchanged.
+    style = button_style("primary" if selected else "secondary", compact=True)
+    return {key: value for key, value in style.items()
+            if key in {"fg_color", "hover_color", "text_color"}}
+
+
 def _latency_transition_at(result, now):
     """Next freshness boundary; no timers or per-row clock reads."""
     if (result is None or remote_proxy.proxy_node_latency_cancelled(result)
@@ -1154,7 +1163,7 @@ class ProxyNodePicker(ctk.CTkFrame):
             cached["row"].configure(fg_color=COLORS["surface_alt"] if selected else COLORS["field_bg"])
             cached["button"].configure(
                 text="当前" if selected else "使用",
-                **button_style("primary" if selected else "secondary", compact=True),
+                **_node_selection_button_style(selected),
             )
         if cached["enabled"] != self._enabled:
             state = "normal" if self._enabled else "disabled"
@@ -1215,6 +1224,8 @@ class ProxyNodePicker(ctk.CTkFrame):
             self._on_select(item)
 
     def _update_visible_selection(self, previous_key: str, selected_key: str) -> None:
+        if previous_key == selected_key:
+            return
         for key in {str(previous_key or ""), str(selected_key or "")}:
             entry = getattr(self, "_visible_node_rows", {}).get(key)
             if not entry:
@@ -1225,7 +1236,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                 row.configure(fg_color=COLORS["surface_alt"] if selected else COLORS["field_bg"])
                 button.configure(
                     text="当前" if selected else "使用",
-                    **button_style("primary" if selected else "secondary", compact=True),
+                    **_node_selection_button_style(selected),
                 )
                 cached = getattr(self, "_row_cache", {}).get(key)
                 if cached is not None:

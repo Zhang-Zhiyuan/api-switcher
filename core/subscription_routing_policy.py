@@ -73,14 +73,50 @@ def auto_route_unavailable_reason(profile: dict) -> str:
     return ""
 
 
+def ai_route_candidate_nodes(profile: dict) -> list[dict]:
+    """Use sanitized catalog policy hints, not labels as proof of a safe exit.
+
+    Legacy catalogs lack policy metadata: still reject explicit Hong Kong
+    hints, but leave unknown regions eligible, as the deployment policy does.
+    Ambiguous keys cannot become automatically generated manual pins.
+    """
+    from core.remote_proxy import proxy_region_is_hong_kong
+
+    rows = profile.get("nodes") or ()
+    if not isinstance(rows, (list, tuple)):
+        return []
+    groups = {}
+    for row in rows:
+        key = row.get("key") if isinstance(row, dict) else None
+        if isinstance(key, str):
+            groups.setdefault(key, []).append(row)
+    return [row for duplicates in groups.values() for row in duplicates[:1]
+            if isinstance(row.get("key"), str) and row["key"]
+            and row["key"] == row["key"].strip() and len(row["key"]) <= 128
+            and not any(ord(char) < 32 for char in row["key"])
+            and all(duplicate == row for duplicate in duplicates)
+            and row.get("ai_auto_selectable", True) is True
+            and not proxy_region_is_hong_kong(row.get("region"))
+            and not proxy_region_is_hong_kong(row.get("label"))]
+
+
+def ai_route_candidate_count(profile: dict) -> int:
+    count = profile.get("ai_auto_route_candidate_count")
+    nodes = ai_route_candidate_nodes(profile)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = route_candidate_count(profile)
+    return min(count, len(nodes))
+
+
 def suggest_tagged_routes(
     preferences: dict, catalog: list[dict], protected_services=(),
 ) -> tuple[dict, list[str]]:
     """Return an independent draft and human-readable explanations.
 
     Only unassigned, not explicitly disabled targets receive a unique source.
-    No name-based inference, cross-label fallback, node pinning, or live writes
-    are performed. ``protected_services`` preserves edits such as explicitly
+    No name-based network-type inference, cross-label fallback, node pinning,
+    or live writes are performed. AI candidates still obey region/quality
+    exclusions. ``protected_services`` preserves edits such as explicitly
     choosing "follow default" before saving. Persisted ``service_route_modes``
     protects the same choice after the editor has been closed and reopened.
     """
@@ -125,6 +161,8 @@ def suggest_tagged_routes(
         reasons = {}
         for profile in tagged:
             reason = auto_route_unavailable_reason(profile)
+            if not reason and network_type == "residential" and not ai_route_candidate_nodes(profile):
+                reason = "无符合 AI 自动筛选的节点（排除香港及已知不合格节点）"
             if reason:
                 reasons[reason] = reasons.get(reason, 0) + 1
             else:
@@ -142,8 +180,12 @@ def suggest_tagged_routes(
             profiles[service] = profile_id
             if service in LOCAL_PROXY_BUILTIN_SITE_IDS:
                 draft.setdefault("builtin_sites", {})[service] = True
-        strategy = ("使用订阅首选与同订阅故障切换（备用按服务策略筛选）" if route_candidate_count(eligible[profile_id]) > 1
+        count = (ai_route_candidate_count(eligible[profile_id]) if network_type == "residential"
+                 else route_candidate_count(eligible[profile_id]))
+        strategy = ("使用订阅首选与同订阅故障切换（主备按服务策略筛选）" if count > 1
                     else "使用订阅首选；缓存仅 1 个可用节点，暂无备用可切换")
+        if network_type == "residential":
+            strategy += "；自动排除香港及已知不合格节点，未验证真实出口或连通性"
         notices.append(f"已为{target_label}填入{type_label}订阅，{strategy}；仅修改草稿，保存并应用后生效。")
     if kept:
         notices.append(f"已保留{ '、'.join(kept) }的已有线路或手动修改，未覆盖节点及启用状态。")
