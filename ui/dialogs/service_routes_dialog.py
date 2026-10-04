@@ -101,7 +101,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._tags_dialog = None
         self._scope_confirm_dialog = None
         self._manually_edited = {scope: set() for scope in self._scopes}
-        self._auto_seeded = set()
         self._default_notices = {}
         self._preview_open = False
         self._results_open = False
@@ -111,7 +110,15 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._changes = []
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-        header = ctk.CTkFrame(self, fg_color="transparent")
+        self._content = ctk.CTkFrame(self, fg_color="transparent")
+        self._content.pack(fill="both", expand=True, padx=20)
+        self._table = ctk.CTkScrollableFrame(self._content, fg_color=COLORS["surface"])
+        self._table.pack(fill="both", expand=True)
+        self._table.bind("<Configure>", self._on_resize, add="+")
+        # Real parentage matters: CTk dispatches wheel events by walking master,
+        # not by inspecting pack(in_=...). Every scrollable control belongs here.
+        header = ctk.CTkFrame(self._table, fg_color="transparent")
+        self._header = header
         header.pack(fill="x", padx=20, pady=(12, 8))
         title_row = ctk.CTkFrame(header, fg_color="transparent")
         title_row.pack(fill="x")
@@ -121,7 +128,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                                            command=self._open_preset_dialog, **button_style("primary", compact=True))
         self._preset_button.pack(side="right")
         notice = ctk.CTkLabel(
-            header, text="可用智能预设快速分配，也可逐项选择订阅、节点或直连。保存并应用后生效。",
+            header, text="选择网站的访问线路，再点“保存并应用”。指定订阅后，可按需设置节点与备用。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         notice.pack(fill="x", pady=(2, 6))
@@ -161,7 +168,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             )
             self._recovery_button.pack(anchor="w", pady=(6, 0))
 
-        filters = ctk.CTkFrame(self, fg_color="transparent")
+        filters = ctk.CTkFrame(self._table, fg_color="transparent")
         self._filters = filters
         filters.pack(fill="x", padx=20, pady=(0, 4))
         self._categories = ctk.CTkSegmentedButton(
@@ -186,26 +193,25 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._count_label.pack(fill="x", pady=(0, 2))
         bind_wraplength(filters, self._count_label, padding=4)
 
-        self._content = ctk.CTkFrame(self, fg_color="transparent")
-        self._content.pack(fill="both", expand=True, padx=20)
-        self._table = ctk.CTkScrollableFrame(self._content, fg_color=COLORS["surface"])
-        self._table.pack(fill="both", expand=True)
-        self._table.bind("<Configure>", self._on_resize, add="+")
+        # Filters scroll with the routes instead of consuming a fixed-height
+        # band. Large text must not push the editable rows out of the window.
+        filters.pack_forget()
+        filters.pack(in_=self._table, fill="x", padx=8, pady=(0, 6), after=self._header)
         self._loading = ctk.CTkLabel(self._table, text="正在读取订阅、节点和已保存线路…", text_color=COLORS["muted"])
         self._loading.pack(pady=30)
 
         # Reserve footer space before the scroll area: small windows must never
         # clip Save/Close below the table's requested height.
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.pack(side="bottom", fill="x", before=header)
+        footer.pack(side="bottom", fill="x", before=self._content)
         tools_row = ctk.CTkFrame(footer, fg_color="transparent")
         self._tools_row = tools_row
         self._tools_columns = None
         tools_row.pack(fill="x", padx=20, pady=(6, 2))
-        self._more_tools = ctk.CTkFrame(footer, fg_color=COLORS["surface_alt"], corner_radius=6)
-        self._more_toggle = ctk.CTkButton(tools_row, text="更多设置 ▾", width=100, command=self._toggle_more,
+        self._more_tools = ctk.CTkFrame(self._table, fg_color=COLORS["surface_alt"], corner_radius=6)
+        self._more_toggle = ctk.CTkButton(tools_row, text="更多 / 说明 ▾", width=80, command=self._toggle_more,
                                         **button_style("secondary", compact=True))
-        self._custom_toggle = ctk.CTkButton(tools_row, text="＋ 自定义目标", width=112, command=self._toggle_custom_form,
+        self._custom_toggle = ctk.CTkButton(tools_row, text="＋ 自定义", width=80, command=self._toggle_custom_form,
                                            **button_style("secondary", compact=True))
         self._tags_button = ctk.CTkButton(self._more_tools, text="标记家宽 / 非家宽", width=100, state="disabled",
                                          command=self._open_subscription_tags, **button_style("secondary", compact=True))
@@ -217,7 +223,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         )
         self._bulk_button = ctk.CTkButton(tools_row, text="批量设置", width=88, state="disabled",
                                          command=self._open_bulk_dialog, **button_style("secondary", compact=True))
-        self._preview_toggle = ctk.CTkButton(tools_row, text="检查修改（0）", width=120, state="disabled", command=self._toggle_preview,
+        self._preview_toggle = ctk.CTkButton(tools_row, text="修改清单", width=80, state="disabled", command=self._toggle_preview,
                                             **button_style("secondary", compact=True))
         tools_row.bind("<Configure>", self._layout_tools, add="+")
         add_row = ctk.CTkFrame(footer, fg_color="transparent")
@@ -262,6 +268,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._layout_tools()
         actions.bind("<Configure>", self._layout_actions, add="+")
         self._layout_actions()
+        # Keep only actions/status fixed. The setup header belongs to the same
+        # scrolling surface as filters and routes, including at high DPI.
+        header.pack_forget()
+        header.pack(in_=self._table, fill="x", padx=8, pady=(12, 8), before=self._filters)
         center_window(self, master)
         self.grab_set()
         self._start_load()
@@ -277,7 +287,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._custom_entry.focus_set()
         else:
             self._custom_form.pack_forget()
-        self._custom_toggle.configure(text="收起自定义输入" if self._custom_open else "＋ 自定义目标")
+        self._custom_toggle.configure(text="收起输入" if self._custom_open else "＋ 自定义")
 
     def _toggle_preview(self):
         if self._busy or not self._drafts:
@@ -290,21 +300,34 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._update_preview()
 
     def _toggle_more(self):
+        if not self._more_open and self._content_view != "edit":
+            self._preview_open = self._results_open = False
+            self._update_preview()
         self._more_open = not self._more_open
         if self._more_open:
             if self._custom_open:
                 self._custom_open = False
                 self._custom_form.pack_forget()
-                self._custom_toggle.configure(text="＋ 自定义目标")
-            self._more_tools.pack(fill="x", padx=20, pady=(4, 2), before=self._status)
+                self._custom_toggle.configure(text="＋ 自定义")
+            self._more_tools.pack(fill="x", padx=8, pady=(4, 8), after=self._filters)
         else:
             self._more_tools.pack_forget()
-        self._more_toggle.configure(text="收起设置 ▴" if self._more_open else "更多设置 ▾")
+        self._more_toggle.configure(text="收起说明 ▴" if self._more_open else "更多 / 说明 ▾")
+        self._layout_rows()
+        if self._more_open:
+            # The requested tools are inside the scroller; reveal them instead
+            # of jumping to the title and leaving the newly opened tools hidden.
+            self._table.update_idletasks()
+            viewport = self._table._parent_canvas
+            bounds = viewport.bbox("all")
+            if bounds and bounds[3] > bounds[1]:
+                top = self._more_tools.winfo_rooty() - viewport.winfo_rooty() + viewport.canvasy(0)
+                viewport.yview_moveto(max(0, top - bounds[1] - 4) / (bounds[3] - bounds[1]))
 
     def _sync_content_view(self):
         """Review/results use the content area, never shrink the editor footer."""
         view = "preview" if self._preview_open else "results" if self._results_open else "edit"
-        _configure_changed(self._preview_toggle, text="返回编辑" if view != "edit" else f"检查修改（{len(self._changes)}）")
+        _configure_changed(self._preview_toggle, text="返回编辑" if view != "edit" else "修改清单")
         if view == self._content_view:
             return
         self._content_view = view
@@ -313,16 +336,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._details.pack_forget()
         self._review_heading.pack_forget()
         if view == "edit":
-            self._filters.pack(fill="x", padx=20, pady=(0, 4), before=self._content)
+            if not self._filters.winfo_manager():
+                self._filters.pack(in_=self._table, fill="x", padx=8, pady=(0, 6),
+                                   after=self._header)
             self._table.pack(fill="both", expand=True)
         else:
-            self._filters.pack_forget()
+            # The whole table is hidden. Keep its child anchors packed so DPI
+            # changes can safely replay header before=filters while reviewing.
             if self._more_open:
                 self._toggle_more()
             if self._custom_open:
                 self._custom_open = False
                 self._custom_form.pack_forget()
-                self._custom_toggle.configure(text="＋ 自定义目标")
+                self._custom_toggle.configure(text="＋ 自定义")
             self._review_heading.configure(text="修改清单与规则说明" if view == "preview" else "应用结果")
             self._review_heading.pack(fill="x", pady=(0, 6))
             (self._preview if view == "preview" else self._details).pack(fill="both", expand=True)
@@ -395,7 +421,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _layout_actions(self, event=None):
         width = (event.width if event else self._actions.winfo_width()) / self._actions._get_widget_scaling()
-        columns = 3 if width >= 380 else 2
+        columns = 3 if width >= 330 else 2
         if columns == self._action_columns:
             return
         self._action_columns = columns
@@ -407,7 +433,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
 
     def _layout_tools(self, event=None):
         width = (event.width if event else self._tools_row.winfo_width()) / self._tools_row._get_widget_scaling()
-        columns = 4 if width >= 540 else 2
+        columns = 4 if width >= 360 else 2
         if columns == self._tools_columns:
             return
         self._tools_columns = columns
@@ -534,23 +560,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             text_color=COLORS["accent"] if added else COLORS["warning"],
         )
 
-    def _seed_tagged_defaults(self, *, reload=False):
-        """Populate only the visited scope's draft; never persist or apply here."""
-        if self._contexts.get(self._scope, {}).get("_authority_missing"):
-            return
-        if self._scope in self._auto_seeded and not reload:
-            return
-        self._auto_seeded.add(self._scope)
-        if not any(item.get("network_type") in {"residential", "datacenter"} for item in self._catalog):
-            self._default_notices.pop(self._scope, None)
-            return
-        before = self._drafts[self._scope]
-        draft, notices = suggest_tagged_routes(
-            before, self._catalog, protected_services=self._manually_edited[self._scope],
-        )
-        self._drafts[self._scope] = draft
-        self._default_notices[self._scope] = notices
-
     def _use_tagged_default(self, service):
         """Explicitly restore a single target's recommendation, not other rows."""
         if self._busy or not preferred_network_type(service):
@@ -609,10 +618,8 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             self._busy = False
             preset_requested = self._preset_requested
             self._preset_requested = False
-            # The preset must start from saved intent, not auto-seeded draft
-            # bindings which it would then protect as existing manual choices.
-            if not preset_requested:
-                self._seed_tagged_defaults()
+            # Viewing saved routes is read-only. Recommendations are generated
+            # only by an explicit preset/default action, never on load or browse.
             self._render()
             if self._initial_service in self._rows:
                 self._search.set(self._rows[self._initial_service]["label"])
@@ -623,10 +630,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         elif event in ("catalog", "catalog_error"):
             self._busy = False
             if event == "catalog":
-                if payload != self._catalog:
-                    self._auto_seeded.clear()
                 self._catalog = payload
-                self._seed_tagged_defaults(reload=True)
                 self._render()
             self._set_editable(True)
             self._changed()
@@ -639,7 +643,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 self._originals[scope] = proxy_routing.route_snapshot(recovered)
                 self._drafts[scope] = copy.deepcopy(self._originals[scope])
                 self._contexts[scope]["_authority_missing"] = False
-                self._auto_seeded.add(scope)
                 self._manually_edited[scope].clear()
                 self._default_notices.pop(scope, None)
                 self._render()
@@ -786,12 +789,12 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             bind_wraplength(target, name, padding=30, min_width=130)
             state_label = ctk.CTkLabel(target, text="", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
             state_label.grid(row=1, column=1, sticky="w")
-            profile_caption = ctk.CTkLabel(tile, text="访问线路 · 订阅 / 直连", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
+            profile_caption = ctk.CTkLabel(tile, text="访问线路", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
             profile_combo = ctk.CTkComboBox(
                 tile, values=list(profiles), state="readonly", width=160,
                 command=lambda label, key=service: self._select_profile(key, label), **combo_style(),
             )
-            node_caption = ctk.CTkLabel(tile, text="节点策略 · 点击搜索 / 设置", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
+            node_caption = ctk.CTkLabel(tile, text="节点与备用", font=font(10), text_color=COLORS["muted"], anchor="w", height=16)
             node_combo = NodeChoiceButton(
                 tile, text="", width=170, anchor="w", command=lambda key=service: self._open_node_picker(key),
                 **{**button_style("secondary"), "font": font(12)},
@@ -879,8 +882,10 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         return value(self._drafts[self._scope]) != value(self._originals[self._scope])
 
     def _layout_rows(self):
-        layout = (self._narrow, self._table._get_widget_scaling())
-        for row in self._rows.values():
+        for service, row in self._rows.items():
+            bound = bool(self._drafts[self._scope]["service_profile_bindings"].get(service))
+            details = self._more_open or row["description"]["warning"]
+            layout = (self._narrow, self._table._get_widget_scaling(), bound, details)
             if row.get("layout") == layout:
                 continue
             row["layout"] = layout
@@ -892,19 +897,24 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if self._narrow:
                 tile.grid_columnconfigure((0, 1), weight=1, uniform="route-editor")
                 row["target"].grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(8, 2))
-                offset, profile_col, node_col = 1, 0, 1
+                profile_col, node_col, control_row, detail_row = 0, 1, 2, 3
+                row["profile_caption"].grid(row=1, column=profile_col, sticky="w", padx=8, pady=(4, 0))
+                if bound:
+                    row["node_caption"].grid(row=1, column=node_col, sticky="w", padx=8, pady=(4, 0))
             else:
                 tile.grid_columnconfigure(0, minsize=round(190 * self._table._get_widget_scaling()))
                 tile.grid_columnconfigure((1, 2), weight=1, uniform="route-editor")
-                row["target"].grid(row=0, column=0, rowspan=2, sticky="ew", padx=12, pady=8)
-                offset, profile_col, node_col = 0, 1, 2
-            row["profile_caption"].grid(row=offset, column=profile_col, sticky="w", padx=8, pady=(4, 0))
-            row["node_caption"].grid(row=offset, column=node_col, sticky="w", padx=8, pady=(4, 0))
-            row["profile"].grid(row=offset + 1, column=profile_col, sticky="ew", padx=8)
-            row["node"].grid(row=offset + 1, column=node_col, sticky="ew", padx=8)
-            row["detail"].grid(row=offset + 2, column=profile_col, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
+                row["target"].grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+                profile_col, node_col, control_row, detail_row = 1, 2, 0, 1
+            row["profile"].grid(row=control_row, column=profile_col, columnspan=1 if bound else 2,
+                                sticky="ew", padx=8, pady=(0, 8) if self._narrow else 8)
+            if bound:
+                row["node"].grid(row=control_row, column=node_col, sticky="ew", padx=8,
+                                 pady=(0, 8) if self._narrow else 8)
+            if details:
+                row["detail"].grid(row=detail_row, column=profile_col, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
             if row["delete"]:
-                row["delete"].grid(row=0 if self._narrow else 1, column=2 if self._narrow else 3, padx=(0, 8), pady=4)
+                row["delete"].grid(row=0, column=2 if self._narrow else 3, padx=(0, 8), pady=4)
 
     def _on_resize(self, event):
         narrow = event.width / self._table._get_widget_scaling() < 860
@@ -955,7 +965,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
                 tile.pack(fill="x", pady=(0, 6), padx=2)
             if not visible:
                 self._empty.pack(fill="x", padx=12, pady=24)
-        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 勾选网站启用独立线路；AI 服务默认启用")
+        _configure_changed(self._count_label, text=f"显示 {len(visible)} / {len(self._rows)} 项 · 勾选：单独设置线路；未勾选：沿用原规则，不等于直连")
 
     def _select_profile(self, service, label):
         if label == AUTO_PROFILE:
@@ -976,7 +986,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         else:
             modes.pop(service, None)
         if draft["service_profile_bindings"].get(service, "") == profile_id:
-            if direct and not self._rows[service]["always"]:
+            if (direct or profile_id) and not self._rows[service]["always"]:
                 self._toggle(service, True)
             else:
                 self._changed(service)
@@ -1084,18 +1094,19 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         keys = ([service] + [key for key in self._rows if key.startswith("custom:") and service == "custom"]) if service else self._rows
         for key in keys:
             self._refresh_row(key)
+        self._layout_rows()
         self._filter_rows()
         self._reset_button.configure(state="normal" if not self._busy and self._drafts[self._scope] != self._originals[self._scope] else "disabled")
         self._save_button.configure(text=f"保存并应用（{count}）" if count > 1 else "保存并应用")
         if count:
             self._details.pack_forget()
         self._update_preview()
-        self._status.configure(text=f"待保存 · {count} 个位置 · {len(self._changes)} 项目标变化（含继承影响）" if count else "无未保存修改 · 可重新应用当前位置；此处不代表实时连通状态。",
+        self._status.configure(text=f"待保存 · {count} 个位置 · {len(self._changes)} 项目标变化（含继承影响）" if count else "无未保存修改 · 选择线路后，点击“保存并应用”生效。",
                                text_color=COLORS["accent"] if count else COLORS["muted"])
         if self._default_notices.get(self._scope):
             missing = sum("未分配：" in notice for notice in self._default_notices[self._scope])
             if missing:
-                self._status.configure(text=self._status.cget("text") + " 部分用途未分配，请点“检查修改”查看。",
+                self._status.configure(text=self._status.cget("text") + " 部分用途未分配，请点“修改清单”查看。",
                                        text_color=COLORS["warning"])
         candidates = self._update_legacy_cleanup()
         preflight = self._preflight(self._scope)
@@ -1122,7 +1133,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         if not self._busy and scope in self._drafts:
             self._scope = scope
             self._scope_combo.set(scope)
-            self._seed_tagged_defaults()
             self._render()
             self._changed()
 
@@ -1208,7 +1218,9 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._drafts[scope] = plan["draft"]
         self._manually_edited[scope].update(plan["changed_services"])
         self._default_notices[scope] = plan["notices"]
-        self._preview_open, self._results_open = True, False
+        # The preset already has a before/after review. Return to the editable
+        # list instead of forcing a second review page before the single Apply.
+        self._preview_open = self._results_open = False
         self._clear_filters()
         self._render()
         self._changed()
@@ -1224,7 +1236,7 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
         self._drafts[scope] = draft
         self._manually_edited[scope].update(services)
         self._default_notices[scope] = notices
-        self._preview_open = True
+        self._preview_open = False
         self._render()
         self._changed()
 
@@ -1238,7 +1250,6 @@ class ServiceRoutesDialog(ctk.CTkToplevel):
             if scope in self._drafts and scope != self._scope:
                 self._drafts[scope] = copy.deepcopy(self._drafts[self._scope])
                 self._manually_edited[scope] = set(self._manually_edited[self._scope])
-                self._auto_seeded.add(scope)
                 self._default_notices[scope] = list(self._default_notices.get(self._scope, []))
         self._preview_open = True
         self._changed()

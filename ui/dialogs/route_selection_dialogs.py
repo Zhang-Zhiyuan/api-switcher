@@ -141,16 +141,16 @@ class RouteNodeDialog(DraftChoiceDialog):
                                            selected_color=COLORS["primary"], unselected_color=COLORS["secondary"])
         self._modes.pack(fill="x", padx=6)
         self._modes.set(self._mode)
-        note_text = ("全订阅：候选可随刷新变化，可能跨国家。自选：只用勾选节点。\n"
-                     "固定：不自动换节点；固定节点不保证固定 IP / 国家。\n"
-                     "列表来自本地缓存；选择仅写入草稿，保存并应用后生效。"
-                     if self._pool_enabled else
-                     "自动：仅限此订阅，可能跨国家。固定：不自动换节点。\n"
-                     "固定节点不保证固定 IP / 国家；选择仅写入草稿，保存并应用后生效。")
-        note = ctk.CTkLabel(body, text=note_text,
-                           text_color=COLORS["muted"], font=font(11), anchor="w", justify="left")
-        note.pack(fill="x", padx=6, pady=8)
-        bind_wraplength(body, note, padding=16)
+        self._mode_note = ctk.CTkLabel(body, text="",
+                                      text_color=COLORS["muted"], font=font(11), anchor="w", justify="left")
+        self._mode_note.pack(fill="x", padx=6, pady=(8, 2))
+        bind_wraplength(body, self._mode_note, padding=16)
+        self._draft_note = ctk.CTkLabel(
+            body, text="列表来自本地缓存；选择仅写入草稿，保存并应用后生效。",
+            text_color=COLORS["muted"], font=font(11), anchor="w", justify="left",
+        )
+        self._draft_note.pack(fill="x", padx=6, pady=(0, 8))
+        bind_wraplength(body, self._draft_note, padding=16)
         self._search = ctk.CTkEntry(body, placeholder_text="搜索名称 / 地区关键词（不代表实测出口）", **input_style())
         self._search.pack(fill="x", padx=6)
         self._search.bind("<KeyRelease>", self._schedule_filter)
@@ -297,6 +297,13 @@ class RouteNodeDialog(DraftChoiceDialog):
             self._refreshing_list = False
 
     def _update_selection(self):
+        note = {
+            AUTO_MODE: "只在当前订阅内自动切换；候选会随订阅刷新变化，可能跨国家。",
+            POOL_MODE: "只在勾选的节点中按顺序切换，不使用其他节点；不保证出口国家。",
+            FIXED_MODE: "只使用选定节点，失效不自动切换；不保证固定 IP / 国家。",
+        }[self._mode]
+        if self._mode_note.cget("text") != note:
+            self._mode_note.configure(text=note)
         label = self._node_labels.get(self._selected_key)
         widening = self._mode == AUTO_MODE and self._original_limited
         if self._mode == AUTO_MODE:

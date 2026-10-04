@@ -49,7 +49,7 @@ def _ready(root, parent):
     return parent._preset_dialog
 
 
-def test_shortcut_skips_auto_seed_so_fixed_recommendations_actually_change_draft(tk_root, opened):
+def test_shortcut_previews_fixed_recommendations_without_changing_loaded_draft(tk_root, opened):
     parent, saved = opened()
     child = _ready(tk_root, parent)
     assert parent._drafts[parent._scope] == preferences()
@@ -61,12 +61,13 @@ def test_shortcut_skips_auto_seed_so_fixed_recommendations_actually_change_draft
     assert parent._originals == parent._drafts and not saved
 
 
-def test_normal_manage_entry_preserves_existing_auto_seed_behavior(tk_root, opened):
+def test_normal_manage_entry_is_read_only_even_with_tagged_subscriptions(tk_root, opened):
     parent, saved = opened(initial_preset=False)
     _wait(tk_root, lambda: not parent._busy)
     assert parent._preset_dialog is None
-    assert parent._drafts[parent._scope]["service_profile_bindings"]["openai"] == "home"
-    assert not saved
+    assert parent._drafts[parent._scope] == preferences()
+    assert parent._drafts == parent._originals
+    assert not parent._changes and not saved
 
 
 def test_repeated_loading_shortcut_only_opens_once_and_does_not_seed(tk_root, opened):
@@ -103,6 +104,7 @@ def test_failed_load_clears_pending_shortcut_without_popup(tk_root, opened):
 def test_existing_draft_and_busy_operation_are_not_reloaded_or_deferred(tk_root, opened):
     parent, saved = opened(initial_preset=False)
     _wait(tk_root, lambda: not parent._busy)
+    parent._drafts[parent._scope]["service_profile_bindings"]["openai"] = "home"
     parent._drafts[parent._scope]["service_node_bindings"]["openai"] = "h2"
     before = copy.deepcopy(parent._drafts)
     parent._busy = True

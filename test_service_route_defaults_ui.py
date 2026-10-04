@@ -1,4 +1,4 @@
-"""Native UI regressions for tagged routing drafts and persistent opt-outs."""
+"""Native regressions for explicit routing suggestions and read-only browsing."""
 
 import copy
 import os
@@ -73,10 +73,58 @@ def route_harness(tk_root):
         tk_root.update()
 
 
-def test_tagged_defaults_fill_only_current_scope_and_remain_unapplied(route_harness):
+@pytest.mark.parametrize("browse", ["open", "scope", "cache", "tags", "render"])
+def test_browsing_tagged_routes_does_not_create_drafts_or_require_discard_confirmation(route_harness, monkeypatch, browse):
+    harness = route_harness()
+    dialog = harness.open()
+    before = copy.deepcopy(dialog._originals)
+    if browse == "scope":
+        dialog._switch_scope(harness.scopes[1])
+        dialog._switch_scope(harness.scopes[0])
+    elif browse in {"cache", "tags"}:
+        getattr(dialog, "_reload_catalog" if browse == "cache" else "_subscription_tags_saved")()
+        _wait(harness.root, lambda: not dialog._busy)
+    elif browse == "render":
+        dialog._render()
+        dialog._changed()
+    assert dialog._drafts == dialog._originals == before
+    assert not dialog._changes and not harness.saved
+    assert all(harness.state[scope] == {} for scope in harness.scopes)
+
+    def unexpected_confirmation(*_args, **_kwargs):
+        pytest.fail("Viewing routes must not produce an unsaved-changes confirmation")
+
+    monkeypatch.setattr(routes_ui, "ConfirmDialog", unexpected_confirmation)
+    dialog._close()
+    harness.root.update()
+    assert not dialog.winfo_exists() and not harness.saved
+
+
+def test_browsing_preserves_saved_pins_pools_direct_default_disabled_and_custom_routes(route_harness):
+    harness = route_harness(preferences={
+        "service_profile_bindings": {"claude": "home", "openai": "home", "youtube": "dc", "custom": "dc"},
+        "service_node_bindings": {"claude": "home-one", "custom": "dc-one"},
+        "service_node_pools": {"openai": ["home-one"], "youtube": ["dc-one"]},
+        "service_route_modes": {"google_ai": "default", "google": "direct"},
+        "builtin_sites": {"youtube": False, "google": True},
+        "custom_targets": [{"id": "own", "kind": "domain", "value": "example.test", "enabled": False}],
+    })
+    dialog = harness.open()
+    before = copy.deepcopy(dialog._originals)
+    for scope in harness.scopes:
+        dialog._switch_scope(scope)
+        dialog._reload_catalog()
+        _wait(harness.root, lambda: not dialog._busy)
+        assert dialog._drafts == dialog._originals == before
+    assert not dialog._changes and not harness.saved
+
+
+def test_explicit_tagged_defaults_fill_only_current_scope_and_remain_unapplied(route_harness):
     harness = route_harness()
     dialog = harness.open()
     first, second = harness.scopes
+    assert dialog._drafts == dialog._originals and not dialog._changes
+    dialog._suggest_tagged_routes()
     assert dialog._drafts[first]["service_profile_bindings"] == EXPECTED
     assert dialog._drafts[second] == dialog._originals[second]
     assert not dialog._originals[first]["service_profile_bindings"]
@@ -86,13 +134,15 @@ def test_tagged_defaults_fill_only_current_scope_and_remain_unapplied(route_harn
     assert {change["scope"] for change in dialog._changes} == {first}
 
 
-def test_first_scope_visit_fills_that_scope_without_touching_other_draft(route_harness):
+def test_scope_visit_is_read_only_and_explicit_fill_preserves_other_draft(route_harness):
     harness = route_harness()
     dialog = harness.open()
     first, second = harness.scopes
     dialog._select_profile("claude", routes_ui.DEFAULT_PROFILE)
     before = copy.deepcopy(dialog._drafts[first])
     dialog._switch_scope(second)
+    assert dialog._drafts[second] == dialog._originals[second]
+    dialog._suggest_tagged_routes()
     assert dialog._drafts[second]["service_profile_bindings"] == EXPECTED
     assert dialog._drafts[first] == before
     dialog._switch_scope(first)
@@ -100,13 +150,15 @@ def test_first_scope_visit_fills_that_scope_without_touching_other_draft(route_h
     assert not harness.saved
 
 
-def test_auto_fill_preserves_saved_binding_pin_and_disabled_website(route_harness):
+def test_explicit_fill_preserves_saved_binding_pin_and_disabled_website(route_harness):
     harness = route_harness(preferences={
         "service_profile_bindings": {"claude": "dc"},
         "service_node_bindings": {"claude": "dc-one"},
         "builtin_sites": {"youtube": False},
     })
     dialog = harness.open()
+    assert dialog._drafts == dialog._originals and not dialog._changes
+    dialog._suggest_tagged_routes()
     draft = dialog._drafts[dialog._scope]
     assert draft["service_profile_bindings"]["claude"] == "dc"
     assert draft["service_node_bindings"]["claude"] == "dc-one"
@@ -139,6 +191,7 @@ def test_social_default_change_preserves_saved_home_route_until_explicit_realloc
 def test_follow_default_opt_out_survives_apply_and_reopening(route_harness):
     harness = route_harness()
     dialog = harness.open()
+    dialog._suggest_tagged_routes()
     dialog._select_profile("claude", routes_ui.DEFAULT_PROFILE)
     draft = dialog._drafts[dialog._scope]
     assert "claude" not in draft["service_profile_bindings"]
@@ -161,6 +214,7 @@ def test_follow_default_opt_out_survives_apply_and_reopening(route_harness):
 def test_choose_auto_again_only_reallocates_that_row(route_harness):
     harness = route_harness()
     dialog = harness.open()
+    dialog._suggest_tagged_routes()
     dialog._select_profile("openai", routes_ui.DEFAULT_PROFILE)
     dialog._select_profile("claude", routes_ui.DEFAULT_PROFILE)
     assert routes_ui.AUTO_PROFILE in dialog._rows["claude"]["profile"].cget("values")
@@ -179,6 +233,7 @@ def test_untagged_catalog_keeps_legacy_unassigned_behavior(route_harness):
         profile["network_type"] = "unknown"
     harness = route_harness(catalog=catalog)
     dialog = harness.open()
+    dialog._suggest_tagged_routes()
     assert dialog._drafts == dialog._originals
     assert not dialog._drafts[dialog._scope]["service_profile_bindings"]
     assert not dialog._changes and not harness.saved
@@ -193,6 +248,8 @@ def test_defaults_do_not_guess_without_unique_cached_subscription(route_harness,
         catalog.append({**copy.deepcopy(catalog[0]), "id": "second-home", "name": "另一合成家宽"})
     harness = route_harness(catalog=catalog)
     dialog = harness.open()
+    assert dialog._drafts == dialog._originals and not dialog._changes
+    dialog._suggest_tagged_routes()
     bindings = dialog._drafts[dialog._scope]["service_profile_bindings"]
     assert not HOME_SERVICES.intersection(bindings)
     assert all(bindings[service] == "dc" for service in DC_SERVICES)
@@ -200,7 +257,7 @@ def test_defaults_do_not_guess_without_unique_cached_subscription(route_harness,
 
 
 @pytest.mark.parametrize("reload_method", ["_reload_catalog", "_subscription_tags_saved"])
-def test_reloading_tags_or_cache_fills_only_missing_unprotected_current_targets(route_harness, reload_method):
+def test_reloading_tags_or_cache_requires_explicit_fill_and_preserves_manual_defaults(route_harness, reload_method):
     catalog = _catalog()
     for entry in catalog:
         entry["network_type"] = "unknown"
@@ -209,8 +266,11 @@ def test_reloading_tags_or_cache_fills_only_missing_unprotected_current_targets(
     dialog._select_profile("claude", routes_ui.DEFAULT_PROFILE)
     harness.catalog[0]["network_type"] = "residential"
     harness.catalog[1]["network_type"] = "datacenter"
+    before = copy.deepcopy(dialog._drafts)
     getattr(dialog, reload_method)()
     _wait(harness.root, lambda: not dialog._busy)
+    assert dialog._drafts == before
+    dialog._suggest_tagged_routes()
     bindings = dialog._drafts[dialog._scope]["service_profile_bindings"]
     assert bindings == {service: profile for service, profile in EXPECTED.items() if service != "claude"}
     assert dialog._drafts[dialog._scope]["service_route_modes"]["claude"] == "default"
@@ -219,7 +279,7 @@ def test_reloading_tags_or_cache_fills_only_missing_unprotected_current_targets(
     assert not harness.saved
 
 
-def test_catalog_refresh_reseeds_previously_visited_scope_only_when_revisited(route_harness):
+def test_catalog_refresh_and_revisiting_scope_require_explicit_suggestions_for_each_scope(route_harness):
     catalog = _catalog()
     for profile in catalog:
         profile["network_type"] = "unknown"
@@ -236,9 +296,14 @@ def test_catalog_refresh_reseeds_previously_visited_scope_only_when_revisited(ro
     harness.catalog[1]["network_type"] = "datacenter"
     dialog._reload_catalog()
     _wait(harness.root, lambda: not dialog._busy)
+    assert dialog._drafts[first] == dialog._originals[first]
+    assert dialog._drafts[second] == protected_second
+    dialog._suggest_tagged_routes()
     assert dialog._drafts[first]["service_profile_bindings"] == EXPECTED
     assert dialog._drafts[second] == protected_second
     dialog._switch_scope(second)
+    assert dialog._drafts[second] == protected_second
+    dialog._suggest_tagged_routes()
     assert dialog._drafts[second]["service_profile_bindings"] == {
         service: profile for service, profile in EXPECTED.items() if service != "google"
     }
@@ -369,7 +434,8 @@ def test_direct_choices_remain_visible_in_responsive_layout(route_harness, geome
         assert abs(dialog.winfo_width() - width * dialog._get_window_scaling()) <= 2
         assert abs(dialog.winfo_height() - height * dialog._get_window_scaling()) <= 2
         row = dialog._rows["youtube"]
-        for widget in (row["profile"], row["node"], dialog._save_button, dialog._bulk_button):
+        assert not row["node"].winfo_manager(), "direct routes have no node to configure"
+        for widget in (row["profile"], dialog._save_button, dialog._bulk_button):
             assert widget.winfo_ismapped()
             assert widget.winfo_rootx() >= dialog.winfo_rootx()
             assert widget.winfo_rootx() + widget.winfo_width() <= dialog.winfo_rootx() + dialog.winfo_width()
@@ -445,7 +511,10 @@ def capture_preview(directory):
     )
     try:
         _wait(root, lambda: not dialog._busy)
+        assert dialog._drafts == dialog._originals and not dialog._changes
+        dialog._suggest_tagged_routes()
         assert dialog._drafts[dialog._scope]["service_profile_bindings"] == EXPECTED
+        dialog._toggle_preview()
         for label, geometry in (("wide", "1040x760"), ("narrow", "720x680")):
             dialog.geometry(geometry)
             dialog.lift()

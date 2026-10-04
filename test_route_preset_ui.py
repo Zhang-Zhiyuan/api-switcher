@@ -15,8 +15,8 @@ from ui.dialogs.service_routes_dialog import ServiceRoutesDialog
 @pytest.fixture
 def editor(tk_root):
     saved = []
-    # Initial unknown labels avoid the older auto-seeding path; the preset sees
-    # labels after loading. This also tests opening after catalog metadata changes.
+    # Metadata changes after loading must be visible to the preset without
+    # implicitly changing the editor's routing draft.
     unlabelled = catalog()
     for item in unlabelled:
         item["network_type"] = "unknown"
@@ -226,7 +226,8 @@ def test_accept_changes_only_current_draft_and_explicit_save_applies(editor, tk_
     assert not saved and parent._originals == original
     assert parent._drafts[second] == original[second]
     assert len(parent._drafts[parent._scope]["service_profile_bindings"]) == 11
-    assert parent._preview_open and "预设草稿" in parent._status.cget("text")
+    assert not parent._preview_open and parent._content_view == "edit"
+    assert parent._table.winfo_manager() and "预设草稿" in parent._status.cget("text")
     assert parent._manually_edited[parent._scope] == set(child._plan["changed_services"])
     parent._save_button.invoke()
     _wait(tk_root, lambda: not parent._busy)
@@ -471,14 +472,17 @@ def test_fixed_preset_missing_primary_is_not_disguised_as_available(editor, tk_r
     assert not child._plan["draft"]["service_node_bindings"] and not saved
 
 
-def test_preseeded_automatic_ai_is_explicitly_preserved_not_claimed_fixed(tk_root):
+def test_saved_automatic_ai_is_explicitly_preserved_not_claimed_fixed(tk_root):
     saved = []
+    existing = preferences()
+    existing["service_profile_bindings"] = dict.fromkeys(("openai", "claude", "google_ai"), "home")
     parent = ServiceRoutesDialog(
-        tk_root, scopes=["合成已有标记"], load_preferences=lambda _: preferences(), catalog_loader=catalog,
+        tk_root, scopes=["合成已有标记"], load_preferences=lambda _: copy.deepcopy(existing), catalog_loader=catalog,
         apply_preferences=lambda *args: saved.append(args))
     try:
         _wait(tk_root, lambda: not parent._busy and parent.winfo_viewable())
         before = copy.deepcopy(parent._drafts)
+        assert before == parent._originals and not parent._changes
         assert before[parent._scope]["service_profile_bindings"]["claude"] == "home"
         assert not before[parent._scope]["service_node_bindings"]
         parent._open_preset_dialog()
