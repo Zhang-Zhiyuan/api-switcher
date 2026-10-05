@@ -1,0 +1,5 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_performance_probe.py --scenario nodes --count 1000 --long-names --width 740 --label check --run-id v2473 --child
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\native-perf\environment-32124
+pytest: FAILED (1)

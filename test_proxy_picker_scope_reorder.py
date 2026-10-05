@@ -16,9 +16,13 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
 
 
-def _expected_widgets(picker):
+def _expected_widgets(picker, *, current_page=False):
     expected = []
-    for region, items in picker._group_visible_nodes(picker.filtered_items()):
+    matches = picker.filtered_items()
+    if current_page:
+        start = picker._page_index * picker.PAGE_SIZE
+        matches = matches[start:start + picker.PAGE_SIZE]
+    for region, items in picker._group_visible_nodes(matches):
         expected.append(picker._header_cache[region]["frame"])
         expected.extend(picker._row_cache[picker._node_key(item)]["row"] for item in items)
     return expected
@@ -65,7 +69,10 @@ def test_latency_rank_changes_keep_controls_generation_and_new_order(monkeypatch
     assert picker._node_scope_generation == generation
     assert all(picker._row_cache[key] is value for key, value in rows.items())
     assert not any(root.destroyed for root in roots)
-    assert picker._list_frame.pack_slaves() == _expected_widgets(picker)
+    assert picker._list_frame.pack_slaves() == _expected_widgets(picker, current_page=True)
+    assert picker.filtered_items() == list(ranked)
+    assert len(picker.group_items("美国")) == count
+    assert picker.batch_items() == [item for item in ranked if picker._node_key(item) == checked]
     assert picker.selected_key() == selected and picker._checked_keys == {checked}
     assert picker._header_cache["美国"]["ok"] == count
 

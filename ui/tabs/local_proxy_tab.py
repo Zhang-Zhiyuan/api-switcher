@@ -249,6 +249,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             font=font(12),
         )
         proxy_non_cn_check.grid(row=0, column=2, sticky="w")
+        self._proxy_non_cn_check = proxy_non_cn_check
         self._wsl_share_check = ctk.CTkCheckBox(
             startup_box,
             text="共享到 WSL（Codex/Claude）",
@@ -1267,6 +1268,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             getattr(self, "_wsl_test_button", None),
             self._stop_button,
             self._apply_routing_button,
+            getattr(self, "_proxy_non_cn_check", None),
             getattr(self, "_strict_privacy_check", None),
             getattr(self, "_wsl_share_check", None),
             getattr(self, "_wsl_optimize_button", None),
@@ -1582,16 +1584,31 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
     def _on_proxy_non_cn_toggle(self):
         enabled = bool(self._proxy_non_cn_var.get())
-        try:
+        saved = False
+
+        def worker():
+            nonlocal saved
             local_proxy.set_local_proxy_non_cn_mode(enabled)
-        except Exception as e:
-            message = f"保存大陆境外 IP 代理开关失败: {e}"
+            saved = True
+            prefix = "已开启大陆境外 IP 走代理。" if enabled else "已关闭大陆境外 IP 走代理。"
+            try:
+                return f"{prefix} {local_proxy.apply_local_proxy_routing_to_running()}"
+            except Exception as exc:
+                raise RuntimeError(f"偏好已保存，但运行规则未应用，请稍后重试“应用规则”: {exc}") from exc
+
+        def restore_visible_preference(_error=None):
+            # Saving and applying remain separate operations: an apply failure
+            # must not pretend the successfully saved preference was reverted.
+            self._proxy_non_cn_var.set(enabled if saved else not enabled)
             self._load_proxy_preferences_ui()
-            self._set_routing_status(message, "error")
-            show_toast(self.winfo_toplevel(), message, is_error=True)
-            return
-        self._load_proxy_preferences_ui()
-        self._apply_saved_routing("已开启大陆境外 IP 走代理。" if enabled else "已关闭大陆境外 IP 走代理。")
+
+        self._run_local_task(
+            "正在后台保存大陆境外 IP 代理开关并应用规则...",
+            worker,
+            "设置大陆境外 IP 代理",
+            on_success=lambda _result: self._load_proxy_preferences_ui(),
+            on_error=restore_visible_preference,
+        )
 
     def _strict_privacy_selected(self) -> bool:
         value = getattr(self, "_strict_privacy_var", None)
@@ -4644,8 +4661,17 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         on_error=None,
         failure_hint: str = "",
     ):
+        def notify_error(error):
+            if on_error:
+                try:
+                    on_error(error)
+                except Exception:
+                    pass
+
         if self._busy:
-            show_toast(self.winfo_toplevel(), "本机代理操作正在进行中，请稍等", is_error=True)
+            message = "本机代理操作正在进行中，请稍等"
+            notify_error(message)
+            show_toast(self.winfo_toplevel(), message, is_error=True)
             return
         self._set_busy(True)
         self._set_status(busy_message, "busy")
@@ -4661,11 +4687,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                     return
                 self._set_busy(False)
                 if not payload["ok"]:
-                    if on_error:
-                        try:
-                            on_error(payload["error"])
-                        except Exception:
-                            pass
+                    notify_error(payload["error"])
                     message = f"{success_prefix}失败: {payload['error']}"
                     if failure_hint:
                         message = f"{message}；{failure_hint}"
@@ -4697,6 +4719,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             threading.Thread(target=run, daemon=True).start()
         except Exception as exc:
             self._set_busy(False)
+            notify_error(str(exc))
             message = f"{success_prefix}启动失败: {exc}"
             if failure_hint:
                 message = f"{message}；{failure_hint}"

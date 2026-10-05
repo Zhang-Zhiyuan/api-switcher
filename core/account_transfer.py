@@ -285,6 +285,7 @@ def export_account_login(
     _validate_output_path(path)
     from core.switcher import _SWITCH_LOCK
 
+    snapshot_warnings = ()
     with _SWITCH_LOCK, profile_manager._STORE_CACHE_LOCK:
         used_current = account_name is None
         if account_name is None:
@@ -305,6 +306,12 @@ def export_account_login(
                     and not (profile_type == "codex" and auth_parser.codex_auth_is_newer(credentials, current))):
                 credentials = current
                 used_current = True
+            if profile_type == "codex":
+                newest = profile_manager.newest_saved_codex_account_auth(credentials)
+                if newest != credentials:
+                    credentials = _clean_credentials(profile_type, newest)
+                    used_current = False
+                    snapshot_warnings = ("已采用本机同一账号较新的完整登录快照，避免导出旧 token；未修改当前登录或账号卡片。",)
         payload = {
             "payload_version": ACCOUNT_VERSION,
             "kind": ACCOUNT_FORMAT,
@@ -322,7 +329,8 @@ def export_account_login(
         raise ValueError("账号登录包过大，已拒绝导出")
     _validate_output_path(path)
     atomic_write_text(path, serialized)
-    return AccountExportResult(path, profile_type, name, used_current, _login_warnings(profile_type, credentials))
+    return AccountExportResult(path, profile_type, name, used_current,
+                               (*_login_warnings(profile_type, credentials), *snapshot_warnings))
 
 
 def _read_payload(path: Path, password: str) -> dict:

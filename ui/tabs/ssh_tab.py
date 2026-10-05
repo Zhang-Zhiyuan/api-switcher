@@ -101,6 +101,33 @@ def _proxy_deployment_feedback(payload) -> tuple[str, str]:
     return summary + (f": {details}" if details else "；未收到可确认的目标结果，请检查状态"), severity
 
 
+def _proxy_probe_feedback(payload) -> tuple[str, str]:
+    if not payload.get("ok"):
+        return f"AI 代理连通性测试失败: {payload.get('error') or '任务未完成'}", "error"
+    batch = payload.get("result") or {}
+    results = list(batch.get("results") or ())
+    failures = list(batch.get("failures") or ())
+    count = max(len(batch.get("server_names") or ()), len(results) + len(failures))
+    # A successful SSH command is not evidence that its AI targets are usable.
+    # Require the complete current probe contract, not a generic success word.
+    expected = len(remote_proxy.REMOTE_AI_PROBE_TARGETS)
+    complete_marker = f"AI 连通性 {expected}/{expected} 可达"
+    healthy = sum(
+        remote_proxy._probe_summary_all_ok(str(result))
+        and complete_marker in str(result)
+        and "探测结果不完整" not in str(result)
+        for result in results
+    )
+    if failures and not results:
+        summary, severity = "AI 代理连通性测试失败", "error"
+    elif healthy and healthy == count:
+        summary, severity = f"AI 代理连通性全部通过（{healthy} 台）", "success"
+    else:
+        summary, severity = f"AI 代理连通性需检查（全部目标可达 {healthy}/{count} 台）", "warning"
+    details = " | ".join(str(item) for item in (*results, *failures))
+    return summary + (f": {details}" if details else "；未得到有效测试结果，请重试"), severity
+
+
 def _run_parallel_server_actions(
     server_names,
     action,
@@ -5455,12 +5482,10 @@ class SSHTab(ctk.CTkScrollableFrame):
         target_label = self._format_server_target(server_names)
 
         def done(payload):
-            self._show_server_batch_result(payload, "AI 代理连通性测试完成")
-            if payload["ok"]:
-                result = payload.get("result") or {}
-                failures = result.get("failures", [])
-                severity = "warning" if failures and result.get("results") else "error" if failures else "success"
-                self._set_proxy_status(self._sync_status_label.cget("text"), severity)
+            message, severity = _proxy_probe_feedback(payload)
+            self._set_sync_status(message, severity)
+            self._set_proxy_status(message, severity)
+            show_toast(self.winfo_toplevel(), message, severity=severity)
 
         self._run_proxy_ssh_task(
             f"正在通过 {target_label} 的 AI 代理并行测试 OpenAI/Claude/Gemini 连通性...",

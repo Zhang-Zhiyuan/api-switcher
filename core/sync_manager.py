@@ -1462,7 +1462,9 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
     """Sync a saved Codex official account snapshot to the remote server."""
     refreshed = profile_manager.refresh_codex_account_snapshot_if_current(account_name)
     account = _find_profile(profile_manager.list_codex_account_profiles(), account_name, "Codex 官方账号")
-    auth = profile_manager.load_codex_account_auth(account)
+    saved_auth = profile_manager.load_codex_account_auth(account)
+    auth = profile_manager.newest_saved_codex_account_auth(saved_auth)
+    newer_local_snapshot = auth != saved_auth
 
     ssh_profile, client = _connect_ssh(ssh_name)
 
@@ -1557,8 +1559,10 @@ def sync_codex_account_to_server(ssh_name: str, account_name: str) -> str:
     else:
         detail = f" | {validation_output}" if validation_output else ""
     refresh_detail = " | 已在推送前刷新本机账号快照" if refreshed else ""
+    newer_detail = (" | 已采用本机同一账号较新的完整登录快照"
+                    if newer_local_snapshot and not preserved_newer_remote else "")
     retained_detail = " | 远端同一账号的登录凭据较新，已保留完整远端登录状态，未用旧快照覆盖" if preserved_newer_remote else ""
-    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}{refresh_detail}{retained_detail}{detail}"
+    return f"已同步 Codex 账号 '{account_name}' 到 {ssh_profile.host}{refresh_detail}{newer_detail}{retained_detail}{detail}"
 
 
 def sync_selected_to_server(

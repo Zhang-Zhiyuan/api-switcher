@@ -1,0 +1,202 @@
+{
+  "scenario": "routes",
+  "count": 1000,
+  "width": 1040,
+  "long_names": false,
+  "completed": true,
+  "success": true,
+  "current_phase": "return_scope",
+  "progress": {
+    "elapsed_ms": 547.0
+  },
+  "phases": [
+    {
+      "phase": "open",
+      "action_ms": 362.0,
+      "ready_ms": 740.8,
+      "max_gap_ms": 366.7,
+      "p95_gap_ms": 366.7,
+      "slow_callbacks": [
+        [
+          "main.<locals>.run_phase",
+          [
+            1,
+            362.1,
+            362.1
+          ]
+        ],
+        [
+          "ServiceRoutesDialog._poll",
+          [
+            1,
+            308.3,
+            308.3
+          ]
+        ],
+        [
+          "CTkBaseClass._update_dimensions_event",
+          [
+            168,
+            99.5,
+            6.7
+          ]
+        ],
+        [
+          "CTkToplevel._update_dimensions_event",
+          [
+            403,
+            13.7,
+            0.1
+          ]
+        ],
+        [
+          "bind_wraplength.<locals>.schedule_update",
+          [
+            425,
+            9.3,
+            0.1
+          ]
+        ],
+        [
+          "bind_wraplength.<locals>.update",
+          [
+            53,
+            7.1,
+            1.0
+          ]
+        ],
+        [
+          "CTkScrollbar.set",
+          [
+            12,
+            4.5,
+            0.9
+          ]
+        ],
+        [
+          "CTkToplevel._revert_withdraw_after_windows_set_titlebar_color",
+          [
+            1,
+            4.3,
+            4.3
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "switch_scope",
+      "action_ms": 6.3,
+      "ready_ms": 32.3,
+      "max_gap_ms": 30.4,
+      "p95_gap_ms": 30.4,
+      "slow_callbacks": [
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            6.4,
+            6.4
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            16,
+            0.9,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            3,
+            0.6,
+            0.2
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            11,
+            0.4,
+            0.1
+          ]
+        ],
+        [
+          "CTkTextbox._check_if_scrollbars_needed.<locals>.<lambda>",
+          [
+            4,
+            0.4,
+            0.2
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            1,
+            0.1,
+            0.1
+          ]
+        ]
+      ]
+    },
+    {
+      "phase": "return_scope",
+      "action_ms": 4.6,
+      "ready_ms": 30.8,
+      "max_gap_ms": 31.2,
+      "p95_gap_ms": 31.2,
+      "slow_callbacks": [
+        [
+          "main.<locals>.run_phase.<locals>.report.<locals>.<lambda>",
+          [
+            1,
+            4.7,
+            4.7
+          ]
+        ],
+        [
+          "main.<locals>.tick",
+          [
+            15,
+            0.9,
+            0.1
+          ]
+        ],
+        [
+          "ScalingTracker.check_dpi_scaling",
+          [
+            3,
+            0.7,
+            0.3
+          ]
+        ],
+        [
+          "AppearanceModeTracker.update",
+          [
+            10,
+            0.4,
+            0.1
+          ]
+        ],
+        [
+          "CTkTextbox._check_if_scrollbars_needed.<locals>.<lambda>",
+          [
+            2,
+            0.2,
+            0.2
+          ]
+        ],
+        [
+          "main.<locals>.run_phase.<locals>.poll",
+          [
+            1,
+            0.0,
+            0.0
+          ]
+        ]
+      ]
+    }
+  ],
+  "errors": []
+}

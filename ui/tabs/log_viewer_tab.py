@@ -3,6 +3,7 @@
 """
 import customtkinter as ctk
 import logging
+from collections import deque
 from queue import Empty
 from tkinter import filedialog
 from datetime import datetime
@@ -77,6 +78,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._log_entries: list[dict] = []
         self._filtered_entry_count = 0
         self._visible_line_count = 0
+        self._rendered_entry_lines = deque()
         self._responsive_after_id = None
         self._responsive_state = None
         self._build_ui()
@@ -364,6 +366,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
             end_index = self._log_text.index("end-1c")
             self._log_text.tag_add(level, start_index, end_index)
             self._visible_line_count += 1
+            self._rendered_entry_lines.append(message.count("\n") + 1)
         self._trim_rendered_lines()
         self._log_text.configure(state="disabled")
 
@@ -380,12 +383,14 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._log_text.configure(state="normal")
         self._log_text.delete("1.0", "end")
         self._visible_line_count = 0
+        self._rendered_entry_lines.clear()
         for level, message in render_entries:
             start_index = self._log_text.index("end-1c")
             self._log_text.insert("end", message + "\n")
             end_index = self._log_text.index("end-1c")
             self._log_text.tag_add(level, start_index, end_index)
             self._visible_line_count += 1
+            self._rendered_entry_lines.append(message.count("\n") + 1)
         self._log_text.configure(state="disabled")
 
         if self._auto_scroll:
@@ -397,7 +402,12 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         overflow = self._visible_line_count - self.MAX_RENDERED_LINES
         if overflow <= 0:
             return
-        self._log_text.delete("1.0", f"{overflow + 1}.0")
+        # The limit counts records, while Tk indexes count physical newlines.
+        # Delete complete records so tracebacks never leave orphaned lines and
+        # grow the rendered buffer on every append. Wrapped lines and Unicode
+        # characters do not affect these newline-based boundaries.
+        physical_lines = sum(self._rendered_entry_lines.popleft() for _ in range(overflow))
+        self._log_text.delete("1.0", f"{physical_lines + 1}.0")
         self._visible_line_count = self.MAX_RENDERED_LINES
 
     def _update_render_status(self, total_visible: int | None = None):
@@ -445,6 +455,7 @@ class LogViewerTab(ctk.CTkScrollableFrame):
         self._log_entries = []
         self._filtered_entry_count = 0
         self._visible_line_count = 0
+        self._rendered_entry_lines.clear()
 
         # 重置计数
         for key in self._log_counts:

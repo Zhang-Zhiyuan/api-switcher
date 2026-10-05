@@ -17,6 +17,15 @@ from core.url_validation import normalize_claude_base_url, validate_api_base_url
 
 
 _MAX_CONFIG_TEXT_CHARS = 2_000_000
+_CODE_FENCE_RE = re.compile(r"(?m)^[ \t]*```[^\r\n`]*\r?\n(?P<body>[\s\S]*?)^[ \t]*```[ \t]*(?=\r?$)")
+_TOML_PROVIDER_RE = re.compile(
+    r"(?im)^[ \t]*(?:\[{1,2}[ \t]*[\"']?(?:model[_-]?providers|providers?)[\"']?(?=[.\]\s])|"
+    r"[\"']?(?:model[_-]?providers|providers?)[\"']?[ \t]*(?:\.|=[ \t]*\{))"
+)
+_COPIED_SHELL_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:(?:export|env|set|setx(?:\.exe)?)[ \t]+(?!=)|\$env:|"
+    r"\[(?:System\.)?Environment\]::SetEnvironmentVariable\()[^\r\n]*(?:\r?\n|$)"
+)
 _ASSIGNMENT_RE = re.compile(
     r"(?:^|[\r\n;&])\s*(?:(?:export|set|env)\s+)?"
     r"(?:\$env:)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
@@ -435,6 +444,8 @@ def _scope_provider_json(value: object, profile_type: str) -> object:
     for key, item in value.items():
         if _compact_name(key) in _JSON_PROVIDER_CONTAINER_KEYS and isinstance(item, dict):
             entries = {label: config for label, config in item.items() if isinstance(config, dict)}
+            if len(entries) != len(item):
+                raise ValueError("供应商配置格式无效：每个供应商必须是独立对象，不能使用数组或字符串代替")
             selector = next((
                 entry for name, entry in value.items()
                 if _compact_name(name) == "modelprovider" and isinstance(entry, str)
@@ -466,9 +477,90 @@ def _scope_provider_json(value: object, profile_type: str) -> object:
     return result
 
 
+def _normalize_toml_provider_text(text: str) -> str:
+    """Convert copied provider tables to structured JSON before any sniffing.
+
+    TOML assignments are scoped to their table, not shell-style global values.
+    Keep separately copied auth JSON and explicit shell env commands outside
+    that document so selected providers can resolve only their named env key.
+    No process environment or credential files are consulted.
+    """
+    if not _TOML_PROVIDER_RE.search(text):
+        return text
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+
+    def serialize(document):
+        try:
+            parsed = tomllib.loads(document)
+        except (ValueError, RecursionError):
+            raise ValueError("TOML 供应商配置不完整或格式有误；请复制完整配置，密钥变量可单独附在后面") from None
+        return json.dumps(parsed, ensure_ascii=False, default=str)
+
+    # A valid whole document may itself contain Markdown in a multiline string.
+    # Respect TOML's own string boundaries before looking for pasted code blocks.
+    if _TOML_PROVIDER_RE.search(text):
+        try:
+            return json.dumps(tomllib.loads(text), ensure_ascii=False, default=str)
+        except (ValueError, RecursionError):
+            pass
+
+    # Parse fenced TOML independently of surrounding instructions or auth.json.
+    def convert_fence(match):
+        body = match.group("body")
+        return serialize(body) if _TOML_PROVIDER_RE.search(body) else match.group(0)
+
+    text = _CODE_FENCE_RE.sub(convert_fence, text)
+    if not _TOML_PROVIDER_RE.search(text):
+        return text
+    try:
+        return json.dumps(tomllib.loads(text), ensure_ascii=False, default=str)
+    except (ValueError, RecursionError):
+        pass
+
+    extras = []
+
+    def blank(fragment):
+        return re.sub(r"[^\r\n]", " ", fragment)
+
+    def separate(match):
+        extras.append((match.start(), match.group(0)))
+        return blank(match.group(0))
+
+    document = _CODE_FENCE_RE.sub(separate, text)
+    # Only standalone objects are separate auth/env snippets. Inline tables
+    # and JSON-looking strings within valid TOML must retain their boundaries.
+    decoder = json.JSONDecoder()
+    spans = []
+    cursor = 0
+    for match in re.finditer(r"(?m)^[ \t]*(?=\{)", document):
+        start = match.end()
+        if start < cursor:
+            continue
+        try:
+            parsed, length = decoder.raw_decode(document[start:])
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(parsed, dict):
+            cursor = start + length
+            spans.append((match.start(), cursor))
+    for start, end in reversed(spans):
+        extras.append((start, document[start:end]))
+        document = document[:start] + blank(document[start:end]) + document[end:]
+    document = _COPIED_SHELL_LINE_RE.sub(separate, document)
+    if extras and ('"""' in document or "'''" in document):
+        # Avoid guessing whether an apparent external command was inside a
+        # multiline TOML string. A fenced document can express this unambiguously.
+        raise ValueError("含多行字符串的 TOML 请单独放在 toml 代码块中；不会猜测密钥边界")
+    return serialize(document) + "\n" + "\n".join(fragment for _position, fragment in sorted(extras))
+
+
 def _scope_provider_text(text: str, profile_type: str) -> tuple[str, tuple[str, dict] | None]:
     # Remove inactive provider text, not just its aliases: otherwise the later
     # URL/key sniffing fallback could still borrow inactive credentials.
+    text = _normalize_toml_provider_text(text)
     providers: list[tuple[str, dict]] = []
     for candidate in _json_candidates(text):
         try:
@@ -904,6 +996,26 @@ def _vendor_token_keys(values: dict[str, str], generic_keys: set[str]) -> list[s
     ]
 
 
+def _pick_vendor_token(values: dict[str, str], keys: list[str], endpoint: str) -> tuple[str, str]:
+    """Pair vendor credentials with an explicit endpoint/name, never key length."""
+    if not keys:
+        return "", ""
+    provider = _provider_for_url(endpoint)
+    if provider == "custom":
+        provider = _provider_id_from_label(values.get("PROVIDER") or values.get("MODEL_PROVIDER"))
+    if provider != "custom":
+        matching = [key for key in keys if _provider_for_keys({key}) == provider]
+        if matching:
+            keys = matching
+        elif any(_provider_for_keys({key}) != "custom" for key in keys):
+            raise ValueError("API 端点或供应商与密钥变量不匹配；请只复制当前供应商的完整配置")
+    if len({_provider_for_keys({key}) for key in keys}) > 1 or len({_clean_value(values[key]) for key in keys}) > 1:
+        raise ValueError("检测到多个供应商密钥，无法确定配对；请指定供应商与端点，或只复制目标配置")
+    preferred = _PROVIDER_ENV_KEYS.get(provider)
+    key = preferred if preferred in keys else sorted(keys)[0]
+    return _clean_value(values[key]), key
+
+
 def _pick_value(values: dict[str, str], keys: tuple[str, ...]) -> tuple[str, str]:
     for key in keys:
         value = _clean_value(values.get(key))
@@ -938,7 +1050,6 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
     values = _extract_values(raw, explicit_env_values=explicit_env_values)
     if selected_provider is not None:
         values = _provider_pair_values(values, selected_provider, requested_type, explicit_env_values)
-    upper_keys = set(values)
     type_hints = _profile_type_hints(values)
     if requested_type:
         if len(type_hints) == 1 and requested_type not in type_hints:
@@ -1000,16 +1111,18 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
     generic_token_keys = {
         "APIKEY", "API_KEY", "API_TOKEN", "AUTH_TOKEN", "BEARER_TOKEN", "AUTHORIZATION"
     }
-    if token_key in generic_token_keys:
-        vendor_keys = _vendor_token_keys(values, generic_token_keys)
-        vendor_key = min(vendor_keys, key=lambda key: (key.count("_"), len(key)), default="")
-        if vendor_key:
-            token, token_key = _clean_value(values[vendor_key]), vendor_key
-    if not token:
-        # Vendor-specific keys such as DEEPSEEK_API_KEY are valid Codex keys.
-        vendor_keys = _vendor_token_keys(values, generic_token_keys)
-        token_key = min(vendor_keys, key=lambda key: (key.count("_"), len(key)), default="")
-        token = _clean_value(values.get(token_key))
+    vendor_keys = _vendor_token_keys(values, generic_token_keys)
+    # JSON suffix aliases may expose a vendor key as API_KEY. Only inferred
+    # aliases need resolving back to their source; an explicitly supplied
+    # generic/client credential must not be overridden by unrelated variables.
+    generic_is_explicit = bool(token) and (
+        _clean_value(explicit_env_values.get(token_key)) == token
+        or all(_clean_value(values[key]) != token for key in vendor_keys)
+    )
+    if not token or (token_key in generic_token_keys and not generic_is_explicit):
+        vendor_token, vendor_key = _pick_vendor_token(values, vendor_keys, normalized_candidate)
+        if vendor_token:
+            token, token_key = vendor_token, vendor_key
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
 
@@ -1017,7 +1130,7 @@ def parse_api_config_text(text: str, profile_type: str | None = None) -> ParsedA
     model, model_key = _pick_value(values, model_keys + _GENERIC_MODEL_KEYS)
     provider_id = _provider_for_url(normalized_candidate)
     if provider_id == "custom":
-        provider_id = _provider_for_keys(upper_keys)
+        provider_id = _provider_for_keys({token_key})
     provider_hint_name = ""
     if provider_id == "custom":
         provider_hint = _clean_value(values.get("PROVIDER") or values.get("MODEL_PROVIDER"))

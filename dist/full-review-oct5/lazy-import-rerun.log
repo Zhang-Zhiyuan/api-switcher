@@ -1,0 +1,7 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_local_proxy_tab_lazy_imports.py
+...................                                                      [100%]
+19 passed in 5.22s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-27240
+pytest: OK

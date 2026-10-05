@@ -1,0 +1,27 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_visual_audit.py --view wide --dpi 100 --client-size 1440x900 --run-id v2473 --label after --onscreen --child
+{"file": "wide-Claude Code-top-dpi-100-1440x900.png", "tab": "Claude Code", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-Claude Code-bottom-dpi-100-1440x900.png", "tab": "Claude Code", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-Codex CLI-top-dpi-100-1440x900.png", "tab": "Codex CLI", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-Codex CLI-bottom-dpi-100-1440x900.png", "tab": "Codex CLI", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-环境变量-top-dpi-100-1440x900.png", "tab": "环境变量", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-环境变量-bottom-dpi-100-1440x900.png", "tab": "环境变量", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-浏览器 Profile-top-dpi-100-1440x900.png", "tab": "浏览器 Profile", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-浏览器 Profile-bottom-dpi-100-1440x900.png", "tab": "浏览器 Profile", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-会话迁移-top-dpi-100-1440x900.png", "tab": "会话迁移", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-会话迁移-bottom-dpi-100-1440x900.png", "tab": "会话迁移", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-SSH 服务器-top-dpi-100-1440x900.png", "tab": "SSH 服务器", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {"_proxy_subscription_picker_host": [936, 387], "_proxy_subscription_picker": [936, 387]}, "section_bounds": {}}
+{"file": "wide-SSH 服务器-middle-dpi-100-1440x900.png", "tab": "SSH 服务器", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {"_proxy_subscription_picker_host": [936, 387], "_proxy_subscription_picker": [936, 387]}, "section_bounds": {}}
+{"file": "wide-SSH 服务器-bottom-dpi-100-1440x900.png", "tab": "SSH 服务器", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {"_proxy_subscription_picker_host": [936, 387], "_proxy_subscription_picker": [936, 387]}, "section_bounds": {}}
+{"file": "wide-Win11 代理-top-dpi-100-1440x900.png", "tab": "Win11 代理", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {"_controls_grid": [1314, 1110], "_subscription_picker_host": [1020, 387], "_subscription_picker": [1020, 387], "_node_actions": [196, 470]}, "section_bounds": {"routes": [80, 484], "policy": [576, 88], "nodes": [676, 1138]}}
+{"file": "wide-Win11 代理-middle-dpi-100-1440x900.png", "tab": "Win11 代理", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {"_controls_grid": [1314, 1110], "_subscription_picker_host": [1020, 387], "_subscription_picker": [1020, 387], "_node_actions": [196, 470]}, "section_bounds": {"routes": [80, 484], "policy": [576, 88], "nodes": [676, 1138]}}
+{"file": "wide-Win11 代理-bottom-dpi-100-1440x900.png", "tab": "Win11 代理", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {"_controls_grid": [1314, 1110], "_subscription_picker_host": [1020, 387], "_subscription_picker": [1020, 387], "_node_actions": [196, 470]}, "section_bounds": {"routes": [80, 484], "policy": [576, 88], "nodes": [676, 1138]}}
+{"file": "wide-通用设置-top-dpi-100-1440x900.png", "tab": "通用设置", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-通用设置-bottom-dpi-100-1440x900.png", "tab": "通用设置", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-使用统计-top-dpi-100-1440x900.png", "tab": "使用统计", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-使用统计-bottom-dpi-100-1440x900.png", "tab": "使用统计", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+VISUAL_CALLBACK_ERROR RuntimeError: refusing capture: preview is not the foreground window
+VISUAL_ERRORS ['RuntimeError: refusing capture: preview is not the foreground window'] BLOCKED_OPERATIONS 0
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\visual-audit\environment-26864
+pytest: FAILED (1)

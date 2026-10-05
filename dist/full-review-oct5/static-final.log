@@ -1,0 +1,22 @@
+
+== dependencies ==
+Runtime dependencies: customtkinter, keyring, tomli_w, tomllib, PIL, paramiko, pystray, cryptography, yaml
+dependencies: OK
+
+== release-dependencies ==
+Pinned release dependencies: 32 packages
+release-dependencies: OK
+
+== mojibake ==
+No source mojibake markers found.
+mojibake: OK
+
+== syntax ==
+Python source syntax: OK
+syntax: OK
+
+== ruff ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m ruff check .
+All checks passed!
+ruff: OK
+FINAL_STATIC [('dependencies', True), ('pinned', True), ('mojibake', True), ('syntax', True), ('ruff', True)]

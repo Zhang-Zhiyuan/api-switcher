@@ -1,0 +1,57 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_picker_responsiveness.py
+...........                                                              [100%]
+11 passed in 17.81s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_picker_scope_reorder_ui.py
+...                                                                      [100%]
+3 passed in 9.05s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_ui_render_performance.py
+.....................................                                    [100%]
+37 passed in 0.84s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_page_disclosure_ui.py
+....                                                                     [100%]
+4 passed in 13.93s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_ssh_compact_layout_ui.py
+................                                                         [100%]
+16 passed in 34.58s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_main_window_layout_ui.py
+.........                                                                [100%]
+9 passed in 17.73s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_dpi_layout_ui.py
+.......................                                                  [100%]
+23 passed in 53.26s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_ui_simplification.py
+...............                                                          [100%]
+15 passed in 24.97s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-6688
+pytest: OK
+FINAL_NATIVE_RECHECK [('test_proxy_picker_responsiveness.py', True), ('test_proxy_picker_scope_reorder_ui.py', True), ('test_ui_render_performance.py', True), ('test_proxy_page_disclosure_ui.py', True), ('test_ssh_compact_layout_ui.py', True), ('test_main_window_layout_ui.py', True), ('test_dpi_layout_ui.py', True), ('test_ui_simplification.py', True)]

@@ -1,0 +1,975 @@
+NATIVE_MODULES 37
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_account_transfer_ui.py
+....................................                                     [100%]
+36 passed in 2.61s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_dpi_layout_ui.py
+.......................                                                  [100%]
+23 passed in 62.53s (0:01:02)
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_legacy_route_cleanup_ui.py
+...............                                                          [100%]
+15 passed in 42.27s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_main_window_layout_ui.py
+.........                                                                [100%]
+9 passed in 21.78s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_optional_migration_password_ui.py
+.......................                                                  [100%]
+23 passed in 1.96s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_profile_tab_responsiveness.py
+............                                                             [100%]
+12 passed in 19.64s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_lifecycle_ui.py
+.......                                                                  [100%]
+7 passed in 3.54s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_page_disclosure_ui.py
+....                                                                     [100%]
+4 passed in 46.02s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_picker_responsiveness.py
+...........                                                              [100%]
+11 passed in 37.80s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_proxy_picker_scope_reorder_ui.py
+...                                                                      [100%]
+3 passed in 19.84s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_access_choices_ui.py
+................                                                         [100%]
+16 passed in 30.93s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_bulk_clarity_ui.py
+............FF                                                           [100%]
+================================== FAILURES ===================================
+________________ test_batch_clarity_synthetic_screenshots[1.0] ________________
+
+batch = <function batch.<locals>.create at 0x000000000B64B2E0>
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scale = 1.0
+
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_batch_clarity_synthetic_screenshots(batch, tk_root, scale):
+        from tools.ui_visual_audit import capture_window_image
+        view, accepted = batch(initial=("openai", "claude", "google_ai"), long_name=True)
+        previous_scale = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            _settle(tk_root, 1.1)
+            view.geometry("920x780")
+            _settle(tk_root)
+            assert view._target_columns == (2 if scale == 1.0 else 1)
+            assert view._apply_button.winfo_rooty() + view._apply_button.winfo_height() <= view.winfo_rooty() + view.winfo_height()
+            assert view._body._parent_canvas.winfo_height() >= 180
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "bulk"
+            folder.mkdir(parents=True, exist_ok=True)
+            label = view._target_labels["custom:demo"]
+            long_text = label.cget("text")
+            label.configure(text="演示自定义网站")
+            _settle(tk_root)
+>           capture_window_image(view, onscreen=True).save(folder / f"choices-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_bulk_clarity_ui.py:227:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 18488680
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+________________ test_batch_clarity_synthetic_screenshots[2.5] ________________
+
+batch = <function batch.<locals>.create at 0x0000000005ACAB60>
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scale = 2.5
+
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_batch_clarity_synthetic_screenshots(batch, tk_root, scale):
+        from tools.ui_visual_audit import capture_window_image
+        view, accepted = batch(initial=("openai", "claude", "google_ai"), long_name=True)
+        previous_scale = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            _settle(tk_root, 1.1)
+            view.geometry("920x780")
+            _settle(tk_root)
+            assert view._target_columns == (2 if scale == 1.0 else 1)
+            assert view._apply_button.winfo_rooty() + view._apply_button.winfo_height() <= view.winfo_rooty() + view.winfo_height()
+            assert view._body._parent_canvas.winfo_height() >= 180
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "bulk"
+            folder.mkdir(parents=True, exist_ok=True)
+            label = view._target_labels["custom:demo"]
+            long_text = label.cget("text")
+            label.configure(text="演示自定义网站")
+            _settle(tk_root)
+>           capture_window_image(view, onscreen=True).save(folder / f"choices-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_bulk_clarity_ui.py:227:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 27471100
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+=========================== short test summary info ===========================
+FAILED test_route_bulk_clarity_ui.py::test_batch_clarity_synthetic_screenshots[1.0]
+FAILED test_route_bulk_clarity_ui.py::test_batch_clarity_synthetic_screenshots[2.5]
+2 failed, 12 passed in 26.92s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: FAILED (1)
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_bulk_context_ui.py
+............FF                                                           [100%]
+================================== FAILURES ===================================
+_______ test_filtered_editor_and_batch_screenshots_preserve_drafts[1.0] _______
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!serviceroutesdialog13>, [])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scale = 1.0
+
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_filtered_editor_and_batch_screenshots_preserve_drafts(editor, tk_root, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        before = copy.deepcopy(dialog._drafts)
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            dialog._set_category("AI 服务")
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2470"
+            folder.mkdir(parents=True, exist_ok=True)
+            until = time.monotonic() + 0.4
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._bulk_button.winfo_viewable()
+            assert dialog._bulk_button.cget("text") == "批量设置（3）"
+>           capture_window_image(dialog, onscreen=True).save(folder / f"filtered-editor-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_bulk_context_ui.py:173:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 1650948
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+_______ test_filtered_editor_and_batch_screenshots_preserve_drafts[2.5] _______
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!serviceroutesdialog14>, [])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scale = 2.5
+
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_filtered_editor_and_batch_screenshots_preserve_drafts(editor, tk_root, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        before = copy.deepcopy(dialog._drafts)
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            dialog._set_category("AI 服务")
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2470"
+            folder.mkdir(parents=True, exist_ok=True)
+            until = time.monotonic() + 0.4
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._bulk_button.winfo_viewable()
+            assert dialog._bulk_button.cget("text") == "批量设置（3）"
+>           capture_window_image(dialog, onscreen=True).save(folder / f"filtered-editor-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_bulk_context_ui.py:173:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 3742946
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+=========================== short test summary info ===========================
+FAILED test_route_bulk_context_ui.py::test_filtered_editor_and_batch_screenshots_preserve_drafts[1.0]
+FAILED test_route_bulk_context_ui.py::test_filtered_editor_and_batch_screenshots_preserve_drafts[2.5]
+2 failed, 12 passed in 28.49s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: FAILED (1)
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_bulk_simple_ui.py
+...............FF                                                        [100%]
+================================== FAILURES ===================================
+_______________ test_compact_bulk_route_choice_screenshots[1.0] _______________
+
+bulk = namespace(dialog=<ui.dialogs.service_route_bulk_dialog.RouteBulkDialog object .!routebulkdialog16>, root=<customtkinter.windows.ctk_tk.CTk object .>, applied=[])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scale = 1.0
+
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_compact_bulk_route_choice_screenshots(bulk, tk_root, scale):
+        from tools.ui_visual_audit import capture_window_image
+        dialog, root = bulk.dialog, bulk.root
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            dialog.geometry("760x700")
+            dialog._select_group("sites")
+            dialog._select_route(ui.DIRECT)
+            until = time.monotonic() + 0.4
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._profile.winfo_viewable()
+            assert not dialog._node_button.winfo_manager()
+            assert dialog._apply_button.winfo_rooty() + dialog._apply_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            viewport = dialog._body._parent_canvas
+            assert viewport.winfo_height() > 100
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2470"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"bulk-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_bulk_simple_ui.py:121:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 112930550
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+_______________ test_compact_bulk_route_choice_screenshots[2.5] _______________
+
+bulk = namespace(dialog=<ui.dialogs.service_route_bulk_dialog.RouteBulkDialog object .!routebulkdialog17>, root=<customtkinter.windows.ctk_tk.CTk object .>, applied=[])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scale = 2.5
+
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_compact_bulk_route_choice_screenshots(bulk, tk_root, scale):
+        from tools.ui_visual_audit import capture_window_image
+        dialog, root = bulk.dialog, bulk.root
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            dialog.geometry("760x700")
+            dialog._select_group("sites")
+            dialog._select_route(ui.DIRECT)
+            until = time.monotonic() + 0.4
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._profile.winfo_viewable()
+            assert not dialog._node_button.winfo_manager()
+            assert dialog._apply_button.winfo_rooty() + dialog._apply_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            viewport = dialog._body._parent_canvas
+            assert viewport.winfo_height() > 100
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2470"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"bulk-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_bulk_simple_ui.py:121:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 5578542
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+=========================== short test summary info ===========================
+FAILED test_route_bulk_simple_ui.py::test_compact_bulk_route_choice_screenshots[1.0]
+FAILED test_route_bulk_simple_ui.py::test_compact_bulk_route_choice_screenshots[2.5]
+2 failed, 15 passed in 10.54s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: FAILED (1)
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_bulk_ui.py
+.......................................                                  [100%]
+39 passed in 34.96s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_diagnostics_dialog.py
+.........                                                                [100%]
+9 passed in 9.20s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_editor_clarity_ui.py
+.....FFFFFF.                                                             [100%]
+================================== FAILURES ===================================
+_____ test_slim_footer_scrolling_tools_and_back_action_at_scale[1.0-edit] _____
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!serviceroutesdialog6>, [])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, view = 'edit'
+scale = 1.0
+
+    @pytest.mark.parametrize("view", ["edit", "preview", "results"])
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_slim_footer_scrolling_tools_and_back_action_at_scale(editor, tk_root, view, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            # Let CTk's one-second scaling size lock expire before sizing the
+            # actual window used by the screenshot/layout assertions.
+            until = time.monotonic() + 1.1
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            dialog.geometry("900x680")
+            dialog._set_category("AI 服务")
+            if view == "preview":
+                dialog._select_node("claude", "日本 · 家宽 01")
+                dialog._preview_toggle.invoke()
+            elif view == "results":
+                dialog._reapply_current()
+                fixtures._wait(root, lambda: not dialog._busy)
+            until = time.monotonic() + 0.35
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._content_view == view
+            footer = dialog._actions.master
+            assert footer.winfo_height() < dialog.winfo_height() * 0.4
+            assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            if view == "edit":
+                assert dialog._tools_row.master is dialog._table
+                dialog._reveal_table_widget(dialog._tools_row)
+            else:
+                assert dialog._back_button.winfo_viewable()
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "editor"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"{view}-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_editor_clarity_ui.py:135:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 18752618
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+___ test_slim_footer_scrolling_tools_and_back_action_at_scale[1.0-preview] ____
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!serviceroutesdialog7>, [])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, view = 'preview'
+scale = 1.0
+
+    @pytest.mark.parametrize("view", ["edit", "preview", "results"])
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_slim_footer_scrolling_tools_and_back_action_at_scale(editor, tk_root, view, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            # Let CTk's one-second scaling size lock expire before sizing the
+            # actual window used by the screenshot/layout assertions.
+            until = time.monotonic() + 1.1
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            dialog.geometry("900x680")
+            dialog._set_category("AI 服务")
+            if view == "preview":
+                dialog._select_node("claude", "日本 · 家宽 01")
+                dialog._preview_toggle.invoke()
+            elif view == "results":
+                dialog._reapply_current()
+                fixtures._wait(root, lambda: not dialog._busy)
+            until = time.monotonic() + 0.35
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._content_view == view
+            footer = dialog._actions.master
+            assert footer.winfo_height() < dialog.winfo_height() * 0.4
+            assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            if view == "edit":
+                assert dialog._tools_row.master is dialog._table
+                dialog._reveal_table_widget(dialog._tools_row)
+            else:
+                assert dialog._back_button.winfo_viewable()
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "editor"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"{view}-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_editor_clarity_ui.py:135:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 19221606
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+___ test_slim_footer_scrolling_tools_and_back_action_at_scale[1.0-results] ____
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!servicero... [], 'service_node_bindings': {'claude': 'two', 'openai': 'one', 'youtube': 'three'}, 'service_node_pools': {}, ...})])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, view = 'results'
+scale = 1.0
+
+    @pytest.mark.parametrize("view", ["edit", "preview", "results"])
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_slim_footer_scrolling_tools_and_back_action_at_scale(editor, tk_root, view, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            # Let CTk's one-second scaling size lock expire before sizing the
+            # actual window used by the screenshot/layout assertions.
+            until = time.monotonic() + 1.1
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            dialog.geometry("900x680")
+            dialog._set_category("AI 服务")
+            if view == "preview":
+                dialog._select_node("claude", "日本 · 家宽 01")
+                dialog._preview_toggle.invoke()
+            elif view == "results":
+                dialog._reapply_current()
+                fixtures._wait(root, lambda: not dialog._busy)
+            until = time.monotonic() + 0.35
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._content_view == view
+            footer = dialog._actions.master
+            assert footer.winfo_height() < dialog.winfo_height() * 0.4
+            assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            if view == "edit":
+                assert dialog._tools_row.master is dialog._table
+                dialog._reveal_table_widget(dialog._tools_row)
+            else:
+                assert dialog._back_button.winfo_viewable()
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "editor"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"{view}-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_editor_clarity_ui.py:135:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 18883690
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+_____ test_slim_footer_scrolling_tools_and_back_action_at_scale[2.5-edit] _____
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!serviceroutesdialog9>, [])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, view = 'edit'
+scale = 2.5
+
+    @pytest.mark.parametrize("view", ["edit", "preview", "results"])
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_slim_footer_scrolling_tools_and_back_action_at_scale(editor, tk_root, view, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            # Let CTk's one-second scaling size lock expire before sizing the
+            # actual window used by the screenshot/layout assertions.
+            until = time.monotonic() + 1.1
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            dialog.geometry("900x680")
+            dialog._set_category("AI 服务")
+            if view == "preview":
+                dialog._select_node("claude", "日本 · 家宽 01")
+                dialog._preview_toggle.invoke()
+            elif view == "results":
+                dialog._reapply_current()
+                fixtures._wait(root, lambda: not dialog._busy)
+            until = time.monotonic() + 0.35
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._content_view == view
+            footer = dialog._actions.master
+            assert footer.winfo_height() < dialog.winfo_height() * 0.4
+            assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            if view == "edit":
+                assert dialog._tools_row.master is dialog._table
+                dialog._reveal_table_widget(dialog._tools_row)
+            else:
+                assert dialog._back_button.winfo_viewable()
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "editor"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"{view}-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_editor_clarity_ui.py:135:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 19352678
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+___ test_slim_footer_scrolling_tools_and_back_action_at_scale[2.5-preview] ____
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!serviceroutesdialog10>, [])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, view = 'preview'
+scale = 2.5
+
+    @pytest.mark.parametrize("view", ["edit", "preview", "results"])
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_slim_footer_scrolling_tools_and_back_action_at_scale(editor, tk_root, view, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            # Let CTk's one-second scaling size lock expire before sizing the
+            # actual window used by the screenshot/layout assertions.
+            until = time.monotonic() + 1.1
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            dialog.geometry("900x680")
+            dialog._set_category("AI 服务")
+            if view == "preview":
+                dialog._select_node("claude", "日本 · 家宽 01")
+                dialog._preview_toggle.invoke()
+            elif view == "results":
+                dialog._reapply_current()
+                fixtures._wait(root, lambda: not dialog._busy)
+            until = time.monotonic() + 0.35
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._content_view == view
+            footer = dialog._actions.master
+            assert footer.winfo_height() < dialog.winfo_height() * 0.4
+            assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            if view == "edit":
+                assert dialog._tools_row.master is dialog._table
+                dialog._reveal_table_widget(dialog._tools_row)
+            else:
+                assert dialog._back_button.winfo_viewable()
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "editor"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"{view}-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_editor_clarity_ui.py:135:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 19014762
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+___ test_slim_footer_scrolling_tools_and_back_action_at_scale[2.5-results] ____
+
+editor = (<customtkinter.windows.ctk_tk.CTk object .>, <ui.dialogs.service_routes_dialog.ServiceRoutesDialog object .!servicero... [], 'service_node_bindings': {'claude': 'two', 'openai': 'one', 'youtube': 'three'}, 'service_node_pools': {}, ...})])
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, view = 'results'
+scale = 2.5
+
+    @pytest.mark.parametrize("view", ["edit", "preview", "results"])
+    @pytest.mark.parametrize("scale", [1.0, 2.5])
+    def test_slim_footer_scrolling_tools_and_back_action_at_scale(editor, tk_root, view, scale):
+        from tools.ui_visual_audit import capture_window_image
+        root, dialog, saved = editor
+        previous = ctk.ScalingTracker.widget_scaling
+        try:
+            ctk.set_widget_scaling(scale)
+            # Let CTk's one-second scaling size lock expire before sizing the
+            # actual window used by the screenshot/layout assertions.
+            until = time.monotonic() + 1.1
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            dialog.geometry("900x680")
+            dialog._set_category("AI 服务")
+            if view == "preview":
+                dialog._select_node("claude", "日本 · 家宽 01")
+                dialog._preview_toggle.invoke()
+            elif view == "results":
+                dialog._reapply_current()
+                fixtures._wait(root, lambda: not dialog._busy)
+            until = time.monotonic() + 0.35
+            while time.monotonic() < until:
+                root.update()
+                time.sleep(0.01)
+            assert dialog._content_view == view
+            footer = dialog._actions.master
+            assert footer.winfo_height() < dialog.winfo_height() * 0.4
+            assert dialog._save_button.winfo_rooty() + dialog._save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            if view == "edit":
+                assert dialog._tools_row.master is dialog._table
+                dialog._reveal_table_widget(dialog._tools_row)
+            else:
+                assert dialog._back_button.winfo_viewable()
+            folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2471" / "editor"
+            folder.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(folder / f"{view}-{int(scale * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_editor_clarity_ui.py:135:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 19483750
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+=========================== short test summary info ===========================
+FAILED test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale[1.0-edit]
+FAILED test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale[1.0-preview]
+FAILED test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale[1.0-results]
+FAILED test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale[2.5-edit]
+FAILED test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale[2.5-preview]
+FAILED test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale[2.5-results]
+6 failed, 6 passed in 53.60s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: FAILED (1)
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_node_choice_simple_ui.py
+.....FF                                                                  [100%]
+================================== FAILURES ===================================
+_______ test_compact_picker_footer_and_modes_remain_visible_at_dpi[1.0] _______
+
+simple_picker = <function simple_picker.<locals>.create at 0x0000000004F762A0>
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scaling = 1.0
+
+    @pytest.mark.parametrize("scaling", [1.0, 2.5])
+    def test_compact_picker_footer_and_modes_remain_visible_at_dpi(simple_picker, tk_root, scaling):
+        from tools.ui_visual_audit import capture_window_image
+
+        previous = ctk.ScalingTracker.widget_scaling
+        case = simple_picker(selected_keys=["node-1", "node-4", "node-7"])
+        dialog = case.dialog
+        try:
+            ctk.set_widget_scaling(scaling)
+            dialog.geometry("560x650")
+            dialog.lift()
+            for _ in range(12):
+                tk_root.update()
+                time.sleep(0.03)
+            canvas = dialog._body._parent_canvas
+            assert dialog._modes.winfo_width() <= canvas.winfo_width()
+            for widget in (dialog._choose, dialog._draft_note):
+                assert widget.winfo_rooty() + widget.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            destination = Path("dist/proxy-simple-workflow-v2470/nodes")
+            destination.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(destination / f"node-pool-{int(scaling * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_node_choice_simple_ui.py:118:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 15081514
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+_______ test_compact_picker_footer_and_modes_remain_visible_at_dpi[2.5] _______
+
+simple_picker = <function simple_picker.<locals>.create at 0x000000000C77FBA0>
+tk_root = <customtkinter.windows.ctk_tk.CTk object .>, scaling = 2.5
+
+    @pytest.mark.parametrize("scaling", [1.0, 2.5])
+    def test_compact_picker_footer_and_modes_remain_visible_at_dpi(simple_picker, tk_root, scaling):
+        from tools.ui_visual_audit import capture_window_image
+
+        previous = ctk.ScalingTracker.widget_scaling
+        case = simple_picker(selected_keys=["node-1", "node-4", "node-7"])
+        dialog = case.dialog
+        try:
+            ctk.set_widget_scaling(scaling)
+            dialog.geometry("560x650")
+            dialog.lift()
+            for _ in range(12):
+                tk_root.update()
+                time.sleep(0.03)
+            canvas = dialog._body._parent_canvas
+            assert dialog._modes.winfo_width() <= canvas.winfo_width()
+            for widget in (dialog._choose, dialog._draft_note):
+                assert widget.winfo_rooty() + widget.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+            destination = Path("dist/proxy-simple-workflow-v2470/nodes")
+            destination.mkdir(parents=True, exist_ok=True)
+>           capture_window_image(dialog, onscreen=True).save(destination / f"node-pool-{int(scaling * 100)}.png")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_route_node_choice_simple_ui.py:118:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tools\ui_visual_audit.py:115: in capture_window_image
+    require_foreground(hwnd)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+hwnd = 6762538
+
+    def require_foreground(hwnd):
+        if get_ancestor(foreground(), 2) != hwnd or preview_handle() != hwnd:
+>           raise RuntimeError("refusing capture: preview is not the foreground window")
+E           RuntimeError: refusing capture: preview is not the foreground window
+
+tools\ui_visual_audit.py:99: RuntimeError
+=========================== short test summary info ===========================
+FAILED test_route_node_choice_simple_ui.py::test_compact_picker_footer_and_modes_remain_visible_at_dpi[1.0]
+FAILED test_route_node_choice_simple_ui.py::test_compact_picker_footer_and_modes_remain_visible_at_dpi[2.5]
+2 failed, 5 passed in 7.63s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: FAILED (1)
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_node_mode_feedback_ui.py
+........                                                                 [100%]
+8 passed in 4.53s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_node_pool_ui.py
+..............                                                           [100%]
+14 passed in 15.18s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_overview_simple_ui.py
+.......                                                                  [100%]
+7 passed in 25.16s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preflight_ui.py
+.......                                                                  [100%]
+7 passed in 22.44s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preset_entry_ui.py
+.............                                                            [100%]
+13 passed in 31.60s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preset_simple_ui.py
+........                                                                 [100%]
+8 passed in 17.78s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preset_ui.py
+.................................                                        [100%]
+33 passed in 91.24s (0:01:31)
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_runtime_overview_ui.py
+.....                                                                    [100%]
+5 passed in 12.39s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_scope_safety_ui.py
+..............                                                           [100%]
+14 passed in 24.18s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_selection_dialogs.py
+.................                                                        [100%]
+17 passed in 6.18s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_simple_flow_ui.py
+..........                                                               [100%]
+10 passed in 25.20s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_service_route_defaults_ui.py
+.............................                                            [100%]
+29 passed in 43.45s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_service_route_overview.py
+......................                                                   [100%]
+22 passed in 4.75s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_service_routes_dialog.py
+.................................                                        [100%]
+33 passed in 40.83s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_ssh_compact_layout_ui.py
+................                                                         [100%]
+16 passed in 34.29s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_subscription_tags_dialog.py
+..........                                                               [100%]
+10 passed in 7.46s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_subscription_tags_tab_entrypoints.py
+..................                                                       [100%]
+18 passed in 5.03s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_ui_render_performance.py
+.....................................                                    [100%]
+37 passed in 0.85s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_ui_simplification.py
+...............                                                          [100%]
+15 passed in 25.63s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-10312
+pytest: OK
+NATIVE_RESULTS [('test_account_transfer_ui.py', True), ('test_dpi_layout_ui.py', True), ('test_legacy_route_cleanup_ui.py', True), ('test_main_window_layout_ui.py', True), ('test_optional_migration_password_ui.py', True), ('test_profile_tab_responsiveness.py', True), ('test_proxy_lifecycle_ui.py', True), ('test_proxy_page_disclosure_ui.py', True), ('test_proxy_picker_responsiveness.py', True), ('test_proxy_picker_scope_reorder_ui.py', True), ('test_route_access_choices_ui.py', True), ('test_route_bulk_clarity_ui.py', False), ('test_route_bulk_context_ui.py', False), ('test_route_bulk_simple_ui.py', False), ('test_route_bulk_ui.py', True), ('test_route_diagnostics_dialog.py', True), ('test_route_editor_clarity_ui.py', False), ('test_route_node_choice_simple_ui.py', False), ('test_route_node_mode_feedback_ui.py', True), ('test_route_node_pool_ui.py', True), ('test_route_overview_simple_ui.py', True), ('test_route_preflight_ui.py', True), ('test_route_preset_entry_ui.py', True), ('test_route_preset_simple_ui.py', True), ('test_route_preset_ui.py', True), ('test_route_runtime_overview_ui.py', True), ('test_route_scope_safety_ui.py', True), ('test_route_selection_dialogs.py', True), ('test_route_simple_flow_ui.py', True), ('test_service_route_defaults_ui.py', True), ('test_service_route_overview.py', True), ('test_service_routes_dialog.py', True), ('test_ssh_compact_layout_ui.py', True), ('test_subscription_tags_dialog.py', True), ('test_subscription_tags_tab_entrypoints.py', True), ('test_ui_render_performance.py', True), ('test_ui_simplification.py', True)]

@@ -2253,6 +2253,34 @@ def load_codex_account_auth(profile: CodexAccountProfile) -> dict:
     return _normalize_codex_official_auth(auth)
 
 
+def newest_saved_codex_account_auth(auth: dict, *, profiles=None) -> dict:
+    """Read a provably newer complete bundle for this exact saved login.
+
+    Legacy versions may retain several cards for one account. Export, remote
+    push and activation must agree about its newest available rotation. This
+    never refreshes tokens, merges fields, updates a card or switches a login.
+    Incomplete bundles, unknown age and conflicting workspaces cannot win.
+    """
+    from core.account_transfer import _clean_credentials, _same_login
+    from core.auth_parser import codex_auth_is_newer
+
+    chosen = auth
+    with _STORE_CACHE_LOCK:
+        for profile in list_codex_account_profiles() if profiles is None else profiles:
+            try:
+                candidate = load_codex_account_auth(profile)
+                _clean_credentials("codex", candidate)
+            except (OSError, ValueError):
+                continue
+            # Compare with both the requested identity and the best-so-far
+            # identity: sparse legacy metadata must not bridge two workspaces.
+            if (_same_login("codex", auth, candidate)
+                    and _same_login("codex", chosen, candidate)
+                    and codex_auth_is_newer(candidate, chosen)):
+                chosen = candidate
+    return chosen
+
+
 def _codex_account_identity_from_auth(auth: dict) -> str:
     return _identity_from_json(auth, "codex-login")
 

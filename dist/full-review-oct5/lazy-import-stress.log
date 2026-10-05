@@ -1,0 +1,9 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider --keep-duplicates test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py test_local_proxy_tab_lazy_imports.py
+........................................................................ [ 10%]
+........................................................................ [ 10%]
+..............................................                           [ 10%]
+190 passed in 43.67s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-34288
+pytest: OK

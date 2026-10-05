@@ -1,0 +1,7 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_bulk_simple_ui.py::test_compact_bulk_route_choice_screenshots test_log_viewer_retention_ui.py test_account_transfer_ui.py test_proxy_page_disclosure_ui.py
+............................................                             [100%]
+44 passed in 21.68s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-27716
+pytest: OK

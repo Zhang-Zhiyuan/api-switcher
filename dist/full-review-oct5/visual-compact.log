@@ -1,0 +1,30 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_visual_audit.py --view compact --dpi 150 --client-size 1000x800 --run-id v2473 --label after --onscreen --child
+{"file": "compact-Claude Code-top-dpi-150-1000x800.png", "tab": "Claude Code", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-Claude Code-bottom-dpi-150-1000x800.png", "tab": "Claude Code", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-Codex CLI-top-dpi-150-1000x800.png", "tab": "Codex CLI", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-Codex CLI-bottom-dpi-150-1000x800.png", "tab": "Codex CLI", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-环境变量-top-dpi-150-1000x800.png", "tab": "环境变量", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-环境变量-bottom-dpi-150-1000x800.png", "tab": "环境变量", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-浏览器 Profile-top-dpi-150-1000x800.png", "tab": "浏览器 Profile", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-浏览器 Profile-bottom-dpi-150-1000x800.png", "tab": "浏览器 Profile", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-会话迁移-top-dpi-150-1000x800.png", "tab": "会话迁移", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-会话迁移-bottom-dpi-150-1000x800.png", "tab": "会话迁移", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-SSH 服务器-top-dpi-150-1000x800.png", "tab": "SSH 服务器", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {"_proxy_subscription_picker_host": [810, 641], "_proxy_subscription_picker": [810, 641]}, "section_bounds": {}}
+{"file": "compact-SSH 服务器-middle-dpi-150-1000x800.png", "tab": "SSH 服务器", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {"_proxy_subscription_picker_host": [810, 641], "_proxy_subscription_picker": [810, 641]}, "section_bounds": {}}
+{"file": "compact-SSH 服务器-bottom-dpi-150-1000x800.png", "tab": "SSH 服务器", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {"_proxy_subscription_picker_host": [810, 641], "_proxy_subscription_picker": [810, 641]}, "section_bounds": {}}
+{"file": "compact-Win11 代理-top-dpi-150-1000x800.png", "tab": "Win11 代理", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {"_controls_grid": [810, 2396], "_subscription_picker_host": [810, 641], "_subscription_picker": [810, 641], "_node_actions": [810, 465]}, "section_bounds": {"routes": [126, 1098], "policy": [1242, 126], "nodes": [1386, 2438]}}
+{"file": "compact-Win11 代理-middle-dpi-150-1000x800.png", "tab": "Win11 代理", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {"_controls_grid": [810, 2396], "_subscription_picker_host": [810, 641], "_subscription_picker": [810, 641], "_node_actions": [810, 465]}, "section_bounds": {"routes": [126, 1098], "policy": [1242, 126], "nodes": [1386, 2438]}}
+{"file": "compact-Win11 代理-bottom-dpi-150-1000x800.png", "tab": "Win11 代理", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {"_controls_grid": [810, 2396], "_subscription_picker_host": [810, 641], "_subscription_picker": [810, 641], "_node_actions": [810, 465]}, "section_bounds": {"routes": [126, 1098], "policy": [1242, 126], "nodes": [1386, 2438]}}
+{"file": "compact-通用设置-top-dpi-150-1000x800.png", "tab": "通用设置", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-通用设置-bottom-dpi-150-1000x800.png", "tab": "通用设置", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-使用统计-top-dpi-150-1000x800.png", "tab": "使用统计", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-使用统计-bottom-dpi-150-1000x800.png", "tab": "使用统计", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-备份管理-top-dpi-150-1000x800.png", "tab": "备份管理", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-备份管理-bottom-dpi-150-1000x800.png", "tab": "备份管理", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-日志查看器-top-dpi-150-1000x800.png", "tab": "日志查看器", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "compact-日志查看器-bottom-dpi-150-1000x800.png", "tab": "日志查看器", "size": [999, 800], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+VISUAL_ERRORS [] BLOCKED_OPERATIONS 0
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\visual-audit\environment-25100
+pytest: OK

@@ -1,0 +1,29 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_performance_probe.py --scenario nodes --count 1000 --long-names --width 740 --label after --run-id v2473 --child
+PHASE_START open
+Traceback (most recent call last):
+  File "C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\tkinter\__init__.py", line 1968, in __call__
+    return self.func(*args)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\tkinter\__init__.py", line 862, in callit
+    func(*args)
+  File "C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_performance_probe.py", line 293, in run_phase
+    action()
+  File "C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_performance_probe.py", line 195, in opening
+    picker.set_nodes(nodes)
+  File "C:\Users\Zzy\Desktop\Tools\API切换器\ui\widgets\proxy_node_picker.py", line 394, in set_nodes
+    self._render_nodes()
+  File "C:\Users\Zzy\Desktop\Tools\API切换器\ui\widgets\proxy_node_picker.py", line 639, in _render_nodes
+    self._update_page_controls()
+  File "C:\Users\Zzy\Desktop\Tools\API切换器\ui\widgets\proxy_node_picker.py", line 575, in _update_page_controls
+    bar.pack(fill="x", pady=(0, 5), before=self._list_frame)
+  File "C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\site-packages\customtkinter\windows\widgets\core_widget_classes\ctk_base_class.py", line 298, in pack
+    return super().pack(**self._apply_argument_scaling(kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\tkinter\__init__.py", line 2483, in pack_configure
+    self.tk.call(
+_tkinter.TclError: window ".!proxynodepicker.!ctkframe2.!canvas.!ctkscrollableframe" isn't packed
+CALLBACK_ERRORS ['TclError: window ".!proxynodepicker.!ctkframe2.!canvas.!ctkscrollableframe" isn\'t packed']
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\native-perf\environment-20808
+pytest: FAILED (1)

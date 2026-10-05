@@ -1,0 +1,37 @@
+{
+  "view": "wide",
+  "captures": [
+    {
+      "file": "wide-备份管理-top-dpi-100-1440x900.png",
+      "tab": "备份管理",
+      "size": [
+        1440,
+        900
+      ],
+      "horizontal_overflow": [],
+      "layout_sizes": {},
+      "section_bounds": {}
+    },
+    {
+      "file": "wide-备份管理-bottom-dpi-100-1440x900.png",
+      "tab": "备份管理",
+      "size": [
+        1440,
+        900
+      ],
+      "horizontal_overflow": [],
+      "layout_sizes": {},
+      "section_bounds": {}
+    }
+  ],
+  "callback_errors": [],
+  "blocked_operations": [],
+  "simulated_monitor_dpi_percent": 100,
+  "requested_client_size": [
+    1440,
+    900
+  ],
+  "widget_scaling": 1.0,
+  "window_scaling": 1.0,
+  "capture_mode": "foreground-client"
+}

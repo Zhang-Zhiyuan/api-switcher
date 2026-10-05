@@ -1,0 +1,25 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -u -c import sys, runpy, tkinter, traceback
+original = tkinter.Misc._report_exception
+def report(self):
+    traceback.print_exc()
+    return original(self)
+tkinter.Misc._report_exception = report
+sys.argv = ['tools/ui_performance_probe.py', '--scenario', 'nodes', '--count', '1000', '--long-names', '--width', '740', '--label', 'check', '--run-id', 'v2473-diagnose-1000', '--child']
+runpy.run_path(sys.argv[0], run_name='__main__')
+
+Traceback (most recent call last):
+  File "C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\tkinter\__init__.py", line 1968, in __call__
+    return self.func(*args)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\tkinter\__init__.py", line 862, in callit
+    func(*args)
+  File "tools/ui_performance_probe.py", line 251, in poll
+    finish()
+  File "tools/ui_performance_probe.py", line 209, in finish
+    assert len(widget.checked_items()) == args.count
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-12068
+pytest: FAILED (1)

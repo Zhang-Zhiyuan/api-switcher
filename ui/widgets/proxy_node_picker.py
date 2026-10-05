@@ -64,6 +64,7 @@ class ProxyNodePicker(ctk.CTkFrame):
     TEARDOWN_BATCH_DELAY_MS = 8
     SCROLL_IDLE_RENDER_MS = 520
     SEARCH_RENDER_DELAY_MS = 220
+    PAGE_SIZE = 120
 
     def __init__(self, master, on_select=None, on_scope_change=None, on_group_quality=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -102,6 +103,12 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._empty_label = None
         self._last_match_count = 0
         self._last_visible_count = 0
+        self._page_index = 0
+        self._page_filter_snapshot = None
+        self._page_bar = None
+        self._page_label = None
+        self._previous_page_button = None
+        self._next_page_button = None
         self._metadata_version = 0
         self._metadata_checked_at = None
         self._metadata_next_expiry = None
@@ -251,6 +258,24 @@ class ProxyNodePicker(ctk.CTkFrame):
             scrollbar_button_hover_color=COLORS["secondary_hover"],
         )
         self._list_frame.pack(fill="x")
+        # Navigation lives above the fixed-height scrolling list, not at the
+        # end of its native rows. Small subscriptions keep the original view.
+        self._page_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self._page_bar.grid_columnconfigure(1, weight=1)
+        self._previous_page_button = ctk.CTkButton(
+            self._page_bar, text="上一页", width=64, **button_style("secondary", compact=True),
+        )
+        self._previous_page_button.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self._page_label = ctk.CTkLabel(
+            self._page_bar, text="", font=font(11), text_color=COLORS["muted_soft"],
+            anchor="center", justify="center",
+        )
+        self._page_label.grid(row=0, column=1, sticky="ew")
+        self._next_page_button = ctk.CTkButton(
+            self._page_bar, text="下一页", width=64, **button_style("secondary", compact=True),
+        )
+        self._next_page_button.grid(row=0, column=2, sticky="e", padx=(6, 0))
+        bind_wraplength(self._page_bar, self._page_label, padding=152)
         self.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._schedule_responsive_layout(delay_ms=0)
 
@@ -333,6 +358,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         scope = tuple(sorted((self._node_key(item), self._node_region(item)) for item in self._nodes))
         if scope != self.__dict__.get("_node_scope_signature"):
             self._node_scope_generation = self.__dict__.get("_node_scope_generation", 0) + 1
+            self._page_index = 0
             # Hidden tabs can visit A -> B -> A without painting B. The old A
             # signature may match again, but its callbacks now carry an expired
             # scope generation, so those controls must be rebuilt on activation.
@@ -418,6 +444,7 @@ class ProxyNodePicker(ctk.CTkFrame):
                 except Exception:
                     pass
         self._set_visible_rows_enabled(self._enabled)
+        self._update_page_controls()
 
     def selected_key(self) -> str:
         return self._selected_key
@@ -498,6 +525,7 @@ class ProxyNodePicker(ctk.CTkFrame):
         return False
 
     def _reset_filters(self):
+        self._page_index = 0
         try:
             if self._search_entry:
                 self._search_entry.delete(0, "end")
@@ -510,6 +538,74 @@ class ProxyNodePicker(ctk.CTkFrame):
         except Exception:
             pass
         self._render_nodes()
+
+    def _page_filter_state(self):
+        def value(name, default):
+            widget = self.__dict__.get(name)
+            return widget.get() if widget is not None else default
+
+        return (
+            str(value("_search_entry", "")).strip().casefold(),
+            value("_filter_combo", "全部"),
+            value("_region_combo", self.REGION_ALL),
+            value("_quality_combo", "全部质量"),
+        )
+
+    def _page_nodes(self, matches):
+        """Bound native widgets only; all selection/testing APIs keep matches."""
+        filters = self._page_filter_state()
+        if filters != self.__dict__.get("_page_filter_snapshot"):
+            self._page_index = 0
+            self._page_filter_snapshot = filters
+        pages = max(1, (len(matches) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self._page_index = max(0, min(self.__dict__.get("_page_index", 0), pages - 1))
+        start = self._page_index * self.PAGE_SIZE
+        return matches[start:start + self.PAGE_SIZE]
+
+    def _update_page_controls(self):
+        bar = self.__dict__.get("_page_bar")
+        if bar is None:
+            return
+        count = self._last_match_count
+        page = self.__dict__.get("_page_index", 0)
+        pages = max(1, (count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        if count <= self.PAGE_SIZE:
+            bar.pack_forget()
+        else:
+            # CTkScrollableFrame.pack delegates to its outer frame. Its inner
+            # content frame is a canvas child, not a sibling pack anchor.
+            list_host = getattr(self._list_frame, "_parent_frame", self._list_frame)
+            bar.pack(fill="x", pady=(0, 5), before=list_host)
+        start, end = page * self.PAGE_SIZE + 1, min(count, (page + 1) * self.PAGE_SIZE)
+        self._page_label.configure(
+            text=f"第 {page + 1}/{pages} 页 · 显示 {start if count else 0}–{end} / {count}\n翻页不改变勾选/检测范围",
+        )
+        token = (self.__dict__.get("_node_scope_generation", 0), self._render_generation, self._page_filter_state())
+        enabled = self.__dict__.get("_enabled", True)
+        self._previous_page_button.configure(
+            state="normal" if enabled and page > 0 else "disabled",
+            command=lambda: self._show_node_page(page - 1, token),
+        )
+        self._next_page_button.configure(
+            state="normal" if enabled and page + 1 < pages else "disabled",
+            command=lambda: self._show_node_page(page + 1, token),
+        )
+
+    def _show_node_page(self, page, token):
+        if not self.__dict__.get("_enabled", True) or self.__dict__.get("_destroyed", False):
+            return
+        current = (self.__dict__.get("_node_scope_generation", 0), self._render_generation, self._page_filter_state())
+        if token != current or self._render_after_id:
+            return
+        pages = max(1, (self._last_match_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        target = max(0, min(page, pages - 1))
+        if target == self.__dict__.get("_page_index", 0):
+            return
+        self._page_index = target
+        self._render_nodes()
+        canvas = getattr(self._list_frame, "_parent_canvas", None)
+        if canvas is not None:
+            canvas.yview_moveto(0)
 
     def _render_nodes(self):
         pending_render = self._render_after_id
@@ -541,8 +637,9 @@ class ProxyNodePicker(ctk.CTkFrame):
         self._last_match_count = len(matches)
         total = len(self._nodes)
         quality_count = int(self._summary_counts.get("quality") or 0)
-        visible = matches
+        visible = self._page_nodes(matches)
         self._last_visible_count = len(visible)
+        self._update_page_controls()
 
         self._update_summary_label(match_count=len(matches), visible_count=len(visible))
         self._update_scope_label()

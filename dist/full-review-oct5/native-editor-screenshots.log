@@ -1,0 +1,7 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_editor_clarity_ui.py::test_slim_footer_scrolling_tools_and_back_action_at_scale
+......                                                                   [100%]
+6 passed in 28.03s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-1448
+pytest: OK

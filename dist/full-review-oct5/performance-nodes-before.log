@@ -1,0 +1,7 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_performance_probe.py --scenario nodes --count 1000 --long-names --width 740 --label before --run-id v2473 --child
+PHASE_START open
+CALLBACK_ERRORS ['open timed out']
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\native-perf\environment-33952
+pytest: FAILED (1)

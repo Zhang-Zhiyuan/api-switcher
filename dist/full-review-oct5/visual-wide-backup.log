@@ -1,0 +1,8 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe C:\Users\Zzy\Desktop\Tools\API切换器\tools\ui_visual_audit.py --view wide --dpi 100 --client-size 1440x900 --tab 备份管理 --run-id v2473 --label after --onscreen --child
+{"file": "wide-备份管理-top-dpi-100-1440x900.png", "tab": "备份管理", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+{"file": "wide-备份管理-bottom-dpi-100-1440x900.png", "tab": "备份管理", "size": [1440, 900], "horizontal_overflow": [], "layout_sizes": {}, "section_bounds": {}}
+VISUAL_ERRORS [] BLOCKED_OPERATIONS 0
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\visual-audit\environment-36512
+pytest: OK

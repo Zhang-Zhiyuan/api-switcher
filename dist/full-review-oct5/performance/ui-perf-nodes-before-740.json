@@ -1,0 +1,19 @@
+{
+  "scenario": "nodes",
+  "count": 1000,
+  "width": 740,
+  "long_names": true,
+  "completed": false,
+  "success": false,
+  "current_phase": "open",
+  "progress": {
+    "elapsed_ms": 45140.1,
+    "rendered_rows": 723,
+    "render_pending": true,
+    "checked_nodes": 0
+  },
+  "phases": [],
+  "errors": [
+    "open timed out"
+  ]
+}

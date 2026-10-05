@@ -1,0 +1,27 @@
+
+== artifacts ==
+dist\API切换器.exe  31319655 bytes  SHA256 57E3266A03CD83A9FE673C64BDA3D9838241FC6C4DD84276423A141F7461E20F
+artifacts: OK
+
+== diff-check ==
+git diff --check HEAD --
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'build_exe.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'core/account_transfer.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'core/api_config_parser.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'core/profile_manager.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'core/switcher.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'core/sync_manager.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'requirements-release.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'test_proxy_picker_scope_reorder.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tools/ui_performance_probe.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/tabs/local_proxy_tab.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/tabs/log_viewer_tab.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/tabs/ssh_tab.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/widgets/proxy_node_picker.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'version_info.txt', LF will be replaced by CRLF the next time Git touches it
+diff-check: OK
+
+== mojibake ==
+No source mojibake markers found.
+mojibake: OK

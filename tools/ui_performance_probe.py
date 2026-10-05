@@ -15,11 +15,37 @@ from pathlib import Path
 import queue
 import sys
 import time
+import traceback
 from types import SimpleNamespace
 
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKSPACE))
+
+def _write_probe_report(output, args, results, errors, *, completed, current_phase=None,
+                        progress=None, validate=None):
+    """Persist partial failures without requiring a completed native UI.
+
+    Final-state checks only make sense after every phase (including check_all)
+    ran. Preserve the shared errors list so main's exit status matches the report.
+    """
+    if not completed and not errors:
+        errors.append("probe ended before all phases completed")
+    if completed and not errors and validate is not None:
+        try:
+            validate()
+        except Exception as exc:
+            errors.append(f"final validation failed: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+    report = {"scenario": args.scenario, "count": args.count,
+              "width": args.width, "long_names": args.long_names,
+              "completed": bool(completed), "success": bool(completed and not errors),
+              "current_phase": current_phase, "progress": progress or {},
+              "phases": results, "errors": list(errors)}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.with_suffix(".json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
 
 def main():
     from tools.ui_visual_audit import audit_run_directory, audit_run_id
@@ -58,8 +84,18 @@ def main():
     root.configure(fg_color=theme.COLORS["app_bg"])
     errors, results, messages = [], [], queue.Queue()
     root._ui_dispatch = lambda callback: messages.put(callback)
-    root.report_callback_exception = lambda _type, error, _tb: errors.append(str(error))
     monitor = {"active": False, "last": time.perf_counter(), "gaps": [], "calls": defaultdict(lambda: [0, 0.0, 0.0])}
+    lifecycle = {"finished": False, "phase": None, "started_at": None}
+
+    def callback_failed(error_type, error, tb):
+        errors.append(f"{error_type.__name__}: {error}")
+        traceback.print_exception(error_type, error, tb)
+        # Leave the currently executing Tk callback before tearing its widgets
+        # down. A timer also handles a busy redraw queue promptly.
+        if not lifecycle["finished"]:
+            root.after(0, lambda: finish(completed=False))
+
+    root.report_callback_exception = callback_failed
     original_call = tkinter.CallWrapper.__call__
 
     def call(self, *values):
@@ -198,35 +234,62 @@ def main():
         phases = [("open", opening, ready), ("switch_scope", lambda: target["widget"]._switch_scope("隔离 SSH"), ready),
                   ("return_scope", lambda: target["widget"]._switch_scope("隔离本机"), ready)]
 
-    def finish():
+    def finish(*, completed=False):
+        if lifecycle["finished"]:
+            return
+        lifecycle["finished"] = True
         monitor["active"] = False
         widget = target.get("widget")
-        if args.scenario == "profiles":
-            assert len(widget._cards_frame.winfo_children()) == args.count
-            assert len(widget._account_cards_frame.winfo_children()) == args.count
-        elif args.scenario == "nodes":
-            assert len(widget.filtered_items()) == args.count
-            assert len(widget.checked_items()) == args.count
+
+        def validate():
+            if args.scenario == "profiles":
+                assert len(widget._cards_frame.winfo_children()) == args.count, "profile card count mismatch"
+                assert len(widget._account_cards_frame.winfo_children()) == args.count, "account card count mismatch"
+            elif args.scenario == "nodes":
+                assert len(widget.filtered_items()) == args.count, "filtered node count mismatch"
+                assert len(widget.checked_items()) == args.count, "checked node count mismatch"
+
+        progress = {}
+        if lifecycle["started_at"] is not None:
+            progress["elapsed_ms"] = round((time.perf_counter() - lifecycle["started_at"]) * 1000, 1)
+        if args.scenario == "nodes" and widget is not None:
+            progress.update(rendered_rows=len(widget.__dict__.get("_row_cache", {})),
+                            render_pending=bool(widget.__dict__.get("_render_plan_pending")),
+                            checked_nodes=len(widget.__dict__.get("_checked_keys", ())))
         suffix = f"-{args.width}" if args.width != 1040 else ""
         output = audit_run_directory(WORKSPACE / "build", args.run_id) / f"ui-perf-{args.scenario}-{args.label}{suffix}"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.with_suffix(".json").write_text(json.dumps({"scenario": args.scenario, "count": args.count,
-            "width": args.width, "long_names": args.long_names,
-            "phases": results, "errors": errors}, ensure_ascii=False, indent=2), encoding="utf-8")
-        if args.screenshot:
-            from tools.ui_visual_audit import capture_window_image
-            window = widget if args.scenario == "routes" else root
-            capture_window_image(window).save(output.with_suffix(".png"))
-        print("CALLBACK_ERRORS", errors, flush=True)
-        root.destroy()
+        try:
+            report = _write_probe_report(output, args, results, errors, completed=completed,
+                                         current_phase=lifecycle["phase"], progress=progress, validate=validate)
+            if args.screenshot and report["success"]:
+                try:
+                    from tools.ui_visual_audit import capture_window_image
+                    window = widget if args.scenario == "routes" else root
+                    capture_window_image(window).save(output.with_suffix(".png"))
+                except Exception as exc:
+                    errors.append(f"screenshot failed: {type(exc).__name__}: {exc}")
+                    traceback.print_exc()
+                    _write_probe_report(output, args, results, errors, completed=completed,
+                                        current_phase=lifecycle["phase"], progress=progress)
+        except Exception as exc:
+            errors.append(f"report write failed: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+        finally:
+            print("CALLBACK_ERRORS", errors, flush=True)
+            try:
+                root.destroy()
+            except tkinter.TclError:
+                pass
 
     def run_phase(index=0):
         if index >= len(phases):
-            finish()
+            finish(completed=True)
             return
         label, action, ready = phases[index]
         monitor.update(active=True, last=time.perf_counter(), gaps=[], calls=defaultdict(lambda: [0, 0.0, 0.0]))
         start = time.perf_counter()
+        lifecycle.update(phase=label, started_at=start)
+        print("PHASE_START", label, flush=True)
         action()
         action_ms = (time.perf_counter() - start) * 1000
 
@@ -256,12 +319,17 @@ def main():
 
     def watchdog():
         errors.append("watchdog timeout")
-        root.destroy()
+        finish(completed=False)
 
     root.after(90000, watchdog)
     root.after(16, tick)
     root.after(600, run_phase)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        if not lifecycle["finished"]:
+            finish(completed=False)
+        tkinter.CallWrapper.__call__ = original_call
     return 1 if errors else 0
 
 
