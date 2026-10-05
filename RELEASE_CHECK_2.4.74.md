@@ -24,6 +24,6 @@
 - 普通全量回归一次通过：5070 passed、22 skipped，耗时 355.61 秒；21 项为需显式指定 Codex 二进制的可选兼容性检查，1 项为手工真实 API 检查。见 [全量记录](dist/cleanup-v2474/ordinary.log)。
 - 文档的本地链接和 18 份报告的历史文件均已核对；6 条新增忽略规则已验证生效。
 - 本轮没有修改界面操作流程，未重跑 39 个原生 GUI 模块或截图；前一版本的原生实测证据原样保留，不将其计为本轮新运行结果。
-- [Windows 单文件 EXE](dist/API切换器.exe)：版本 2.4.74，31,317,828 字节。SHA-256：`2B2AE40B1BF9BA2E885F4E2D1B991F17AAF1679F0418AAD174C1722394E68CE9`。
+- [Windows 单文件 EXE 历史版本](https://github.com/Zhang-Zhiyuan/api-switcher/blob/9d6d8e4cacdc0a18c78d3fd2d994047bc7c0fb9b/dist/API切换器.exe)：版本 2.4.74，31,317,828 字节。SHA-256：`2B2AE40B1BF9BA2E885F4E2D1B991F17AAF1679F0418AAD174C1722394E68CE9`。
 - [构建日志](dist/cleanup-v2474/build.log)：打包和 8 秒隔离启动检查通过；构建脚本清理了本轮自行生成的 build/ 和 spec 中间文件，未触及前述被拒绝清理的旧目录。
 - [内置代码核对](dist/cleanup-v2474/package-payload.log)：142 个项目模块及 main.py 与最终源码一致。

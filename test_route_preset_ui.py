@@ -43,6 +43,8 @@ def open_preset(editor, tk_root):
 
 def review(child, root):
     child._preview_tab.invoke()
+    if not child._show_changes:
+        child._change_details_button.invoke()
     root.update()
     assert child._view == "preview"
     assert child._preview.winfo_viewable() and not child._setup.winfo_viewable()
@@ -68,7 +70,7 @@ def test_preview_and_cancel_have_no_side_effects_and_restore_editor_grab(editor,
     assert parent._drafts == original and not saved
 
 
-def test_first_action_only_reviews_and_back_keeps_choices(editor, tk_root):
+def test_optional_adjustments_review_and_back_keep_choices(editor, tk_root):
     parent, child, saved = open_preset(editor, tk_root)
     original = copy.deepcopy(parent._drafts)
     child._replace.set(True)
@@ -80,11 +82,13 @@ def test_first_action_only_reviews_and_back_keeps_choices(editor, tk_root):
         tk_root.update()
         assert child._view == "preview" and child.winfo_exists()
         assert parent._drafts == original and not saved
-        child._back_button.invoke()
+        child._setup_tab.invoke()
         tk_root.update()
         assert child._view == "setup" and child._replace.get()
         assert child._scheme.get() == ROUTE_PRESETS["datacenter"]["label"]
         assert child._preview_rows == widgets
+    child._back_button.invoke()
+    assert child._view == "preview" and child.winfo_exists()
     child._back_button.invoke()
     assert not child.winfo_exists() and parent._drafts == original
 
@@ -93,7 +97,8 @@ def test_first_action_only_reviews_and_back_keeps_choices(editor, tk_root):
 def test_editing_choices_after_review_needs_fresh_review(editor, tk_root, refresh):
     parent, child, saved = open_preset(editor, tk_root)
     original = copy.deepcopy(parent._drafts)
-    child._accept()  # Calling acceptance before review is also guarded.
+    child._setup_tab.invoke()
+    child._accept()  # Calling acceptance while adjusting is still guarded.
     assert parent._drafts == original and child.winfo_exists()
     review(child, tk_root)
     child._scheme.set(ROUTE_PRESETS["ai_only"]["label"])
@@ -274,6 +279,8 @@ def test_existing_choices_require_explicit_replanning_and_preview_updates(editor
     parent, child, saved = open_preset(editor, tk_root)
     assert child._plan["draft"]["service_node_pools"]["claude"] == ["d2", "d1"]
     assert "保留" in child._preview_rows["claude"][0].cget("text")
+    child._setup_tab.invoke()
+    tk_root.update()
     child._replace_checkbox._canvas.event_generate("<Button-1>", x=8, y=8)
     tk_root.update()
     assert child._replace.get()
@@ -374,6 +381,7 @@ def test_preset_real_scroll_and_small_high_dpi_footer_reachable(editor, tk_root,
             tk_root.update()
             time.sleep(0.01)
         child.geometry(geometry)
+        child._setup_tab.invoke()
         tk_root.update()
         viewport = child._body._parent_canvas
         assert viewport.winfo_height() >= 100 * child._body._get_widget_scaling()
@@ -438,7 +446,7 @@ def test_auto_ack_is_invalidated_when_preset_choices_change(editor, tk_root, cha
     child._refresh()
     review(child, tk_root)
     child._auto_ack_checkbox.toggle()
-    child._back_button.invoke()
+    child._setup_tab.invoke()
     if change == "scheme":
         child._scheme.set(ROUTE_PRESETS["datacenter"]["label"])
     elif change == "source":

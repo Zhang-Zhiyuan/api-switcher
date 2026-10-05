@@ -1,0 +1,21 @@
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preset_simple_ui.py
+.................                                                        [100%]
+17 passed in 21.18s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-36860
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preset_ui.py
+.................................                                        [100%]
+33 passed in 77.70s (0:01:17)
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-36860
+pytest: OK
+
+== pytest ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m pytest -q -p no:cacheprovider test_route_preset_entry_ui.py
+.............                                                            [100%]
+13 passed in 23.12s
+pytest cleanup: removed C:\Users\Zzy\AppData\Local\Temp\api-switcher-release-check\4b7cad9046fc\environment-36860
+pytest: OK

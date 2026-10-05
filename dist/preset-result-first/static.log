@@ -1,0 +1,33 @@
+
+== syntax ==
+Python source syntax: OK
+syntax: OK
+
+== dependencies ==
+Runtime dependencies: customtkinter, keyring, tomli_w, tomllib, PIL, paramiko, pystray, cryptography, yaml
+dependencies: OK
+
+== release-dependencies ==
+Pinned release dependencies: 32 packages
+release-dependencies: OK
+
+== mojibake ==
+No source mojibake markers found.
+mojibake: OK
+
+== ruff ==
+C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python.exe -m ruff check .
+All checks passed!
+ruff: OK
+
+== diff-check ==
+git diff --check HEAD --
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'RELEASE_CHECK_2.4.74.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'build_exe.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'requirements-release.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'test_route_preset_simple_ui.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'test_route_preset_ui.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/dialogs/route_preset_dialog.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'version_info.txt', LF will be replaced by CRLF the next time Git touches it
+diff-check: OK
