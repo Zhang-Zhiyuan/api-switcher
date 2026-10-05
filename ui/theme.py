@@ -209,47 +209,114 @@ def _scroll_widget(widget, event, horizontal: bool = False) -> bool:
         return False
 
 
-def _scroll_chain_index(chain, target) -> int:
-    for index, candidate in enumerate(chain):
-        if candidate is target:
-            return index
-    raise ValueError
+def _dispatch_mouse_wheel(event):
+    """Route once per Tk interpreter, not once per ever-created scroll frame."""
+    if _event_scroll_consumed(event):
+        return None
+    _mark_scroll_activity(getattr(event, "widget", None))
+    horizontal = bool(getattr(event, "state", 0) & 0x0001)
+    for candidate in _event_scroll_chain(event):
+        if not getattr(candidate, "_api_switcher_scroll_canvas", False):
+            if isinstance(getattr(candidate, "master", None), ctk.CTkScrollbar):
+                # The scrollbar's local handler has already moved its target.
+                # Its widget ancestry leads to the outer page, not that target.
+                return None
+            # Native text/list controls handle their own input before bind_all.
+            # Only let the containing page take over at their boundary.
+            if _scroll_widget_can_consume(candidate, event, horizontal=horizontal):
+                return None
+            continue
+        try:
+            if not candidate.winfo_ismapped():
+                continue
+        except tkinter.TclError:
+            continue
+        if _scroll_widget(candidate, event, horizontal=horizontal):
+            _mark_event_scroll_consumed(event)
+            return None
+    return None
 
 
 def _patch_nested_scrollable_frame_mousewheel() -> None:
+    """Replace CTk 5.2.2's per-instance global wheel/Shift registrations.
+
+    Tk owns bind_all callbacks until the root dies, even after a frame closes.
+    A single stateless dispatcher avoids both retained dead widgets and O(N)
+    event fan-out across hidden tabs and previously closed dialogs. Only CTk's
+    own registrations are intercepted; callers' bind_all hooks stay intact.
+    """
     scrollable_cls = ctk.CTkScrollableFrame
     if getattr(scrollable_cls, "_api_switcher_nested_scroll_guard", False):
         return
 
-    def guarded_mouse_wheel_all(self, event):
-        if _event_scroll_consumed(event):
-            return None
+    original_bind_all = scrollable_cls.bind_all
+    internal_handlers = {
+        "<MouseWheel>": scrollable_cls._mouse_wheel_all,
+        "<KeyPress-Shift_L>": scrollable_cls._keyboard_shift_press_all,
+        "<KeyPress-Shift_R>": scrollable_cls._keyboard_shift_press_all,
+        "<KeyRelease-Shift_L>": scrollable_cls._keyboard_shift_release_all,
+        "<KeyRelease-Shift_R>": scrollable_cls._keyboard_shift_release_all,
+    }
 
-        try:
-            if not self._parent_canvas.winfo_ismapped():
+    @functools.wraps(original_bind_all)
+    def bind_scroll_events_once(self, sequence=None, func=None, add=None):
+        if (getattr(func, "__self__", None) is self
+                and getattr(func, "__func__", None) is internal_handlers.get(sequence)
+                and sequence in internal_handlers):
+            if sequence != "<MouseWheel>":
+                # Read the modifier on the actual event. Global Shift flags
+                # become stuck if focus changes before the key is released.
                 return None
-        except Exception:
-            return None
+            self._parent_canvas._api_switcher_scroll_canvas = True
+            root = self._root()
+            binding = getattr(root, "_api_switcher_mousewheel_binding", None)
+            if binding is None:
+                binding = root.bind_all(sequence, _dispatch_mouse_wheel, add="+")
+                root._api_switcher_mousewheel_binding = binding
+            return binding
+        return original_bind_all(self, sequence, func, add)
 
-        _mark_scroll_activity(getattr(event, "widget", None))
-        chain = _event_scroll_chain(event)
-        try:
-            parent_index = _scroll_chain_index(chain, self._parent_canvas)
-        except ValueError:
-            return None
-        horizontal = bool(getattr(self, "_shift_pressed", False))
-        for child_scroll in chain[:parent_index]:
-            if _scroll_widget_can_consume(child_scroll, event, horizontal=horizontal):
-                return None
-        if _scroll_widget(self._parent_canvas, event, horizontal=horizontal):
-            _mark_event_scroll_consumed(event)
-        return None
-
-    scrollable_cls._mouse_wheel_all = guarded_mouse_wheel_all
+    scrollable_cls.bind_all = bind_scroll_events_once
     scrollable_cls._api_switcher_nested_scroll_guard = True
 
 
 _patch_nested_scrollable_frame_mousewheel()
+
+
+def _patch_scrollable_frame_configure() -> None:
+    """Moving the embedded frame while scrolling is not a content resize."""
+    scrollable_cls = ctk.CTkScrollableFrame
+    if getattr(scrollable_cls, "_api_switcher_scrollregion_guard", False):
+        return
+    original_init = scrollable_cls.__init__
+
+    @functools.wraps(original_init)
+    def init_with_size_guard(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        last_size = None
+
+        def refresh_scroll_region(event):
+            nonlocal last_size
+            size = (event.width, event.height) if event.type == tkinter.EventType.Configure else None
+            if size is not None and size == last_size:
+                return
+            last_size = size
+            self._parent_canvas.configure(scrollregion=self._parent_canvas.bbox("all"))
+
+        # Replace only the base constructor's handler, before subclasses add
+        # theirs. Geometry/DPI/content changes still update the scroll region.
+        self.bind("<Configure>", refresh_scroll_region)
+        # Shrinking scrolled-away content can unmap its embedded window before
+        # Tk sends a size Configure. Its bbox already has the new request size;
+        # repair the range so the viewport cannot remain over empty space.
+        self.bind("<Map>", refresh_scroll_region, add="+")
+        self.bind("<Unmap>", refresh_scroll_region, add="+")
+
+    scrollable_cls.__init__ = init_with_size_guard
+    scrollable_cls._api_switcher_scrollregion_guard = True
+
+
+_patch_scrollable_frame_configure()
 
 
 def _patch_scrollbar_idle_redraw() -> None:
@@ -423,7 +490,7 @@ def sync_scrollable_frame_width(scroll) -> bool:
 
 def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, max_width: int = 980) -> None:
     """Keep CTkLabel wraplength responsive to its container."""
-    state = {"after_id": None, "wraplength": None, "scaling": None, "destroyed": False}
+    state = {"after_id": None, "wraplength": None, "scaling": None, "destroyed": False, "container_width": None}
 
     def widget_scaling():
         try:
@@ -443,6 +510,7 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
             if not label.winfo_exists():
                 return
             width = container.winfo_width()
+            state["container_width"] = width
             if width <= 1:
                 # Avoid an initial narrow wrap followed by a full-list reflow.
                 parent = getattr(container, "master", None)
@@ -474,6 +542,12 @@ def bind_wraplength(container, label, padding: int = 32, min_width: int = 220, m
             # Label events still cover widget-only DPI changes.
             return
         if state.get("after_id"):
+            return
+        if (source is not None and source in (container, getattr(container, "_canvas", None))
+                and getattr(_event, "width", None) == state["container_width"]
+                and state["container_width"] is not None and widget_scaling() == state["scaling"]):
+            # Canvas scrolling produces position-only Configure events. They
+            # must not schedule one idle layout per responsive label.
             return
         try:
             state["after_id"] = container.after_idle(update)

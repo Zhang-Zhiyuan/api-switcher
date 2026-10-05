@@ -230,3 +230,53 @@ def test_scroll_widget_supports_horizontal_direction():
     assert theme._scroll_widget(scrollable, event, horizontal=True)
 
     assert scrollable.calls == [("x", ("scroll", 1, "units"))]
+
+
+def test_dispatch_wheel_chooses_innermost_scrollable_and_uses_event_modifiers():
+    inner, outer = _Scrollable(y=(0.1, 0.4)), _Scrollable(y=(0.1, 0.4), x=(0.1, 0.4))
+    for canvas in (inner, outer):
+        canvas._api_switcher_scroll_canvas = True
+        canvas.winfo_ismapped = lambda: True
+    for state, expected in ((0, inner), (1, outer)):
+        inner.calls.clear()
+        outer.calls.clear()
+        event = SimpleNamespace(delta=-120, state=state, _api_switcher_scroll_chain=(inner, outer))
+        theme._dispatch_mouse_wheel(event)
+        assert theme._event_scroll_consumed(event)
+        assert expected.calls == [("x" if state else "y", ("scroll", 24, "units"))]
+        assert not (outer if expected is inner else inner).calls
+        theme._dispatch_mouse_wheel(event)
+        assert len(expected.calls) == 1
+
+
+def test_dispatch_wheel_bubbles_at_boundary_and_ignores_hidden_frames():
+    inner, hidden, outer = _Scrollable(y=(0.6, 1.0)), _Scrollable(y=(0.2, 0.6)), _Scrollable(y=(0.2, 0.6))
+    for canvas in (inner, hidden, outer):
+        canvas._api_switcher_scroll_canvas = True
+        canvas.winfo_ismapped = lambda: True
+    hidden.winfo_ismapped = lambda: False
+    theme._dispatch_mouse_wheel(SimpleNamespace(delta=-120, state=0, _api_switcher_scroll_chain=(inner, hidden, outer)))
+    assert not inner.calls and not hidden.calls
+    assert outer.calls == [("y", ("scroll", 24, "units"))]
+
+
+def test_dispatch_wheel_does_not_double_scroll_native_text():
+    native, outer = _Scrollable(y=(0.2, 0.6)), _Scrollable(y=(0.2, 0.6))
+    outer._api_switcher_scroll_canvas = True
+    outer.winfo_ismapped = lambda: True
+    theme._dispatch_mouse_wheel(SimpleNamespace(delta=-120, state=0, _api_switcher_scroll_chain=(native, outer)))
+    assert not native.calls and not outer.calls
+
+
+def test_wraplength_position_only_configures_do_not_queue_idle_layout():
+    container, label = _WrapContainer(width=640), _WrapLabel()
+    theme.bind_wraplength(container, label)
+    container.idle_callbacks.pop(0)()
+    for y in range(100):
+        container.bindings["<Configure>"](SimpleNamespace(widget=container, width=640, height=900, y=-y))
+    assert not container.idle_callbacks
+    container.width = 720
+    container.bindings["<Configure>"](SimpleNamespace(widget=container, width=720))
+    assert len(container.idle_callbacks) == 1
+    container.idle_callbacks.pop(0)()
+    assert label.configures[-1] == {"wraplength": 688}

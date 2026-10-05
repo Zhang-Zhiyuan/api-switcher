@@ -39,6 +39,7 @@ def _write_probe_report(output, args, results, errors, *, completed, current_pha
             traceback.print_exc()
     report = {"scenario": args.scenario, "count": args.count,
               "width": args.width, "long_names": args.long_names,
+              "scroll": getattr(args, "scroll", False), "scroll_history": getattr(args, "scroll_history", 0),
               "completed": bool(completed), "success": bool(completed and not errors),
               "current_phase": current_phase, "progress": progress or {},
               "phases": results, "errors": list(errors)}
@@ -58,12 +59,17 @@ def main():
     parser.add_argument("--label", choices=("before", "after", "check"), default="check")
     parser.add_argument("--run-id", type=audit_run_id, help="Keep this run in a separate output subdirectory")
     parser.add_argument("--screenshot", action="store_true")
+    parser.add_argument("--scroll", action="store_true", help="Measure rapid native wheel input after the other phases")
+    parser.add_argument("--scroll-history", type=int, default=0,
+                        help="Simulate previously closed scrollable dialogs before measuring (0-100)")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not 1 <= args.count <= 1000:
         parser.error("count must be between 1 and 1000")
     if not 320 <= args.width <= 2000:
         parser.error("width must be between 320 and 2000")
+    if not 0 <= args.scroll_history <= 100:
+        parser.error("scroll-history must be between 0 and 100")
     if not args.child:
         import release_check
 
@@ -234,6 +240,47 @@ def main():
         phases = [("open", opening, ready), ("switch_scope", lambda: target["widget"]._switch_scope("隔离 SSH"), ready),
                   ("return_scope", lambda: target["widget"]._switch_scope("隔离本机"), ready)]
 
+    if args.scroll:
+        scroll = {"done": False, "events": 0, "moved": False}
+
+        def scroll_surface():
+            widget = target["widget"]
+            frame = widget._list_frame if args.scenario == "nodes" else widget._table if args.scenario == "routes" else widget
+            return frame._parent_canvas
+
+        def closed_views():
+            for _ in range(args.scroll_history):
+                dialog = ctk.CTkFrame(root)
+                ctk.CTkScrollableFrame(dialog)
+                dialog.destroy()
+
+        def rapid_scroll():
+            canvas = scroll_surface()
+            canvas.yview_moveto(0)
+            assert canvas.yview()[1] < 1, "synthetic content must overflow the viewport"
+            scroll.update(done=False, events=0, moved=False)
+
+            def send_batch(index=0):
+                if lifecycle["finished"]:
+                    return
+                if index == 160:
+                    assert scroll["moved"], "wheel input did not move the viewport"
+                    scroll["done"] = True
+                    return
+                delta = -120 if (index // 20) % 2 == 0 else 120
+                for _ in range(4):
+                    canvas.event_generate("<MouseWheel>", delta=delta)
+                    scroll["events"] += 1
+                scroll["moved"] |= canvas.yview()[0] > 0
+                root.after(8, lambda: send_batch(index + 1))
+
+            root.after(20, send_batch)
+
+        phases.append(("rapid_scroll", rapid_scroll, lambda: scroll["done"]))
+        if args.scroll_history:
+            phases.extend((("closed_views", closed_views, lambda: True),
+                           ("rapid_scroll_after_dialogs", rapid_scroll, lambda: scroll["done"])))
+
     def finish(*, completed=False):
         if lifecycle["finished"]:
             return
@@ -301,6 +348,10 @@ def main():
                       "p95_gap_ms": round(gaps[min(len(gaps) - 1, int(len(gaps) * 0.95))], 1) if gaps else 0,
                       "slow_callbacks": sorted(((name, [values[0], round(values[1], 1), round(values[2], 1)])
                                                 for name, values in monitor["calls"].items()), key=lambda item: item[1][1], reverse=True)[:8]}
+            if label.startswith("rapid_scroll"):
+                result["wheel_events"] = scroll["events"]
+                result["global_wheel_bindings"] = sum(bool(line.strip()) for line in
+                                                     scroll_surface().bind_all("<MouseWheel>").splitlines())
             results.append(result)
             print(json.dumps(result, ensure_ascii=False), flush=True)
             root.after(200, lambda: run_phase(index + 1))
