@@ -87,7 +87,7 @@ SSH 连通性测试不再把命令正常返回当成目标全部可达。全部�
 
 ## 发布产物
 
-- [Windows 单文件 EXE](dist/API切换器.exe)，FileVersion / ProductVersion 均为 2.4.73，31,319,655 字节。
+- [Windows 单文件 EXE 历史版本](https://github.com/Zhang-Zhiyuan/api-switcher/blob/a72eefa014d20190d22d5112d60798303458cb38/dist/API切换器.exe)，FileVersion / ProductVersion 均为 2.4.73，31,319,655 字节。
 - SHA-256：`57E3266A03CD83A9FE673C64BDA3D9838241FC6C4DD84276423A141F7461E20F`。
 - [打包日志](dist/full-review-oct5/build-final.log)：打包成功，隔离启动持续运行 8 秒，通过启动检查；未接触现用数据。
 - [内置代码比对](dist/full-review-oct5/package-payload.log)：142 个项目模块及 main.py 与最终源码一致；仅归一化字节码中的文件名。

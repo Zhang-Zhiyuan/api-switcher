@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 *.py[cod]
 *$py.class
 *.so
@@ -58,3 +61,6 @@ desktop.ini
 *.tmp
 *.bak
 *.backup
+/tmp_ui_screens/
+/tmp_mihomo_validation/
+/$HOME/

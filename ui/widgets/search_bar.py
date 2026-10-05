@@ -165,22 +165,3 @@ def fuzzy_match(query: str, text: str) -> bool:
             return True
 
     return query_index == len(query)
-
-
-def highlight_match(text: str, query: str) -> str:
-    """
-    高亮匹配的文本（返回带标记的文本）
-
-    Args:
-        text: 原始文本
-        query: 搜索查询
-
-    Returns:
-        带高亮标记的文本
-    """
-    if not query:
-        return text
-
-    # 简单实现：返回原文本
-    # 实际高亮需要在显示层面处理
-    return text

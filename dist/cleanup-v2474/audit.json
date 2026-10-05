@@ -1,0 +1,64 @@
+{
+  "baseline_commit": "a72eefa014d20190d22d5112d60798303458cb38",
+  "directory_deletion_status": "blocked_by_execution_policy_not_performed",
+  "version_control_cleanup": {
+    "removed_from_index_files": 152,
+    "removed_from_index_bytes": 9699102,
+    "local_copies_preserved": true
+  },
+  "candidate_bytes": 84765439,
+  "old_dist": {
+    "files": 1017,
+    "bytes": 66001822,
+    "git_tracked_files": 147,
+    "git_tracked_bytes": 9352267,
+    "untracked_files": 870,
+    "untracked_bytes": 56649555
+  },
+  "retained_dist": [
+    "dist/API切换器.exe",
+    "dist/full-review-oct5",
+    "dist/proxy-simple-workflow-v2473",
+    "dist/ui-audit-20261005/run-v2473"
+  ],
+  "old_dist_directories": [
+    "dist/direct-routes-ui",
+    "dist/proxy-review-20260922",
+    "dist/proxy-simple-workflow-v2469",
+    "dist/proxy-simple-workflow-v2470",
+    "dist/proxy-simple-workflow-v2471",
+    "dist/proxy-workflow-v2472",
+    "dist/route-bulk-ui",
+    "dist/route-preflight-ui",
+    "dist/route-preset-ui",
+    "dist/route-runtime-ui",
+    "dist/route-scope-ui",
+    "dist/route-simplification-ui",
+    "dist/routing-access-ui",
+    "dist/ui-audit-20260921",
+    "dist/ui-audit-20260927",
+    "dist/ui-audit-20260929",
+    "dist/ui-audit-20260930",
+    "dist/ui-audit-20261004",
+    "dist/ui-performance-v2.4.53",
+    "dist/ui-performance-v2.4.54",
+    "dist/ui-audit-20261005/run-v2471",
+    "dist/ui-audit-20261005/run-v2472"
+  ],
+  "other_candidates": [
+    "tmp_ui_screens",
+    "tmp_mihomo_validation",
+    "$HOME",
+    "__pycache__",
+    ".ruff_cache",
+    "config/__pycache__",
+    "core/__pycache__",
+    "core/auto_continue/__pycache__",
+    "models/__pycache__",
+    "tools/__pycache__",
+    "ui/__pycache__",
+    "ui/dialogs/__pycache__",
+    "ui/tabs/__pycache__",
+    "ui/widgets/__pycache__"
+  ]
+}

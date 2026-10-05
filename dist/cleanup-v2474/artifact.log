@@ -1,0 +1,15 @@
+
+== artifacts ==
+dist\API切换器.exe  31317828 bytes  SHA256 2B2AE40B1BF9BA2E885F4E2D1B991F17AAF1679F0418AAD174C1722394E68CE9
+artifacts: OK
+
+== diff-check ==
+git diff --check HEAD --
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'RELEASE_CHECK_2.4.73.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'build_exe.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'requirements-release.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/widgets/search_bar.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'version_info.txt', LF will be replaced by CRLF the next time Git touches it
+diff-check: OK
