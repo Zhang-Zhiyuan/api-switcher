@@ -8,6 +8,7 @@ import pytest
 
 from models.profile import ClaudeAccountProfile, ClaudeProfile, CodexAccountProfile, CodexProfile
 from ui.tabs import claude_tab, codex_tab
+from ui.theme import COLORS
 
 
 CASES = [(claude_tab, claude_tab.ClaudeTab, "claude"), (codex_tab, codex_tab.CodexTab, "codex")]
@@ -74,19 +75,58 @@ def test_native_unchanged_refresh_and_tab_return_preserve_cards_and_scroll(view,
     assert refreshes == [] and not tab._deferred_render_pending
 
 
-def test_native_changes_replace_only_affected_cards_and_remove_invalid_auth_actions(view):
+def test_native_changes_update_cards_and_revoke_invalid_auth_actions(view):
     root, tab, data, _ = view
     old_api, old_accounts = [frame.pack_slaves() for frame in (tab._cards_frame, tab._account_cards_frame)]
+    revoked_calls = []
+    old_accounts[1]._on_switch = lambda name: revoked_calls.append(("switch", name))
+    old_accounts[1]._on_export = lambda name: revoked_calls.append(("export", name))
+    old_commands = [old_accounts[1]._action_buttons[key].cget("command") for key in ("switch", "export")]
+    name = data["profiles"][0]["profile"].name
+    tab._profile_tests_inflight.add(name)
+    tab._set_profile_test_busy(name, True)
     data["profiles"][0]["is_active"] = True
     data["accounts"][1]["snapshot"] = (False, "synthetic invalid snapshot")
     tab._render_refresh_payload(data, 1)
     drain(root, tab)
     new_api, new_accounts = [frame.pack_slaves() for frame in (tab._cards_frame, tab._account_cards_frame)]
-    assert not old_api[0].winfo_exists() and not old_accounts[1].winfo_exists()
-    assert new_api[1:] == old_api[1:]
-    assert new_accounts[0] is old_accounts[0] and new_accounts[2] is old_accounts[2]
+    assert new_api == old_api and new_accounts == old_accounts
     assert new_accounts[1]._on_switch is None
-    assert new_api[0]._name == data["profiles"][0]["profile"].name
+    assert new_accounts[1]._on_export is None
+    assert set(new_accounts[1]._action_buttons) == {"delete"}
+    assert new_accounts[1].cget("border_color") == COLORS["danger"]
+    assert "synthetic invalid snapshot" in new_accounts[1]._info_labels[1].cget("text")
+    for command in old_commands:
+        command()  # Revoked callbacks are inert even if a stale command was queued.
+    assert not revoked_calls
+    assert new_api[0]._name == name and new_api[0]._is_active
+    assert "switch" not in new_api[0]._action_buttons
+    assert new_api[0]._active_tag.winfo_manager() == "pack"
+    assert tab._profile_test_buttons[name] is new_api[0].test_button
+    assert new_api[0].test_button.cget("state") == "disabled"
+    assert new_api[0].test_button.cget("text") == "测试中"
+    tab._finish_profile_test(name)
+    assert new_api[0].test_button.cget("state") == "normal"
+
+
+def test_native_summary_edit_keeps_test_progress_and_list_geometry(view):
+    root, tab, data, _ = view
+    card = tab._cards_frame.pack_slaves()[0]
+    name = data["profiles"][0]["profile"].name
+    children = card.winfo_children()
+    labels = card._info_labels[:]
+    buttons = dict(card._action_buttons)
+    tab._profile_tests_inflight.add(name)
+    tab._set_profile_test_busy(name, True)
+    data["profiles"][0]["profile"].model = "synthetic-edited-model"
+    tab._render_refresh_payload(data, 1)
+    drain(root, tab)
+    assert card is tab._cards_frame.pack_slaves()[0]
+    assert card.winfo_children() == children and card._info_labels == labels
+    assert card._action_buttons == buttons
+    assert any("synthetic-edited-model" in label.cget("text") for label in labels)
+    assert card.test_button.cget("state") == "disabled"
+    assert card.test_button.cget("text") == "测试中"
 
 
 def test_stale_result_does_not_replace_latest_widgets(view):

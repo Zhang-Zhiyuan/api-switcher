@@ -556,7 +556,7 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
             profiles, generation, on_complete=lambda: self._render_account_cards_batch(account_profiles, generation),
         )
 
-    def _create_profile_card(self, item):
+    def _profile_card_options(self, item):
         profile = item["profile"]
         is_active = bool(item["is_active"])
         auth_desc = f"API Key ({item.get('auth_identity') or 'no-auth'})"
@@ -564,8 +564,8 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
             f"认证: {auth_desc}  |  模型: {profile.model}  |  Provider: {profile.model_provider}",
             f"端点: {profile.custom_base_url or '(默认)'}  |  审批: {profile.approval_policy}  |  沙盒: {profile.sandbox_mode}",
         ]
-        card = ProfileCard(
-            self._cards_frame, profile.name, info, is_active=is_active,
+        return dict(
+            name=profile.name, info_lines=info, is_active=is_active,
             active_label="当前 API",
             switch_label="切换 API",
             on_switch=self._switch_profile,
@@ -575,10 +575,13 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
             on_delete=self._delete_profile,
             border_color=COLORS["primary"] if is_active else COLORS["border_soft"],
         )
-        self._register_profile_test_button(profile.name, card)
+
+    def _create_profile_card(self, item):
+        card = ProfileCard(self._cards_frame, **self._profile_card_options(item))
+        self._register_profile_test_button(item["profile"].name, card)
         return card
 
-    def _create_account_card(self, item):
+    def _account_card_options(self, item):
         account = item["profile"]
         is_active = bool(item["is_active"])
         snapshot_ok, snapshot_status = item["snapshot"]
@@ -587,8 +590,8 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
             f"状态: {snapshot_status}  |  凭据: 本机加密保存  |  保存时间: {account.created_at or '-'}",
         ]
 
-        card = ProfileCard(
-            self._account_cards_frame, account.name, info, is_active=is_active,
+        return dict(
+            name=account.name, info_lines=info, is_active=is_active,
             active_label="本地已写入",
             switch_label="切换账号",
             on_switch=self._switch_account if snapshot_ok else None,
@@ -596,7 +599,9 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
             on_delete=self._delete_account,
             border_color=COLORS["accent"] if is_active else (COLORS["danger"] if not snapshot_ok else COLORS["border_soft"]),
         )
-        return card
+
+    def _create_account_card(self, item):
+        return ProfileCard(self._account_cards_frame, **self._account_card_options(item))
 
     def _export_account_login(self, name=None):
         open_account_transfer(self, "codex", exporting=True, account_name=name)
@@ -635,6 +640,11 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
     def _register_profile_test_button(self, name: str, card) -> None:
         """Keep the rendered test button in sync with an in-flight request."""
 
+        button = getattr(card, "test_button", None)
+        if button is not None:
+            self._profile_test_buttons[name] = button
+            self._set_profile_test_busy(name, name in self._profile_tests_inflight)
+            return
         pending = [card]
         while pending:
             widget = pending.pop()
@@ -657,7 +667,7 @@ class CodexTab(ProfileTabRendering, ctk.CTkScrollableFrame):
         if button is None:
             return
         try:
-            button.configure(state="disabled" if busy else "normal", text="测试中" if busy else "测试")
+            configure_if_changed(button, state="disabled" if busy else "normal", text="测试中" if busy else "测试")
         except Exception:
             getattr(self, "_profile_test_buttons", {}).pop(name, None)
 

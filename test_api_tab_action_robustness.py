@@ -18,6 +18,9 @@ class _FakeButton:
         self.state = kwargs.get("state", self.state)
         self.text = kwargs.get("text", self.text)
 
+    def cget(self, name):
+        return getattr(self, name)
+
 
 class _DeferredThread:
     instances = []

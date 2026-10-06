@@ -83,8 +83,8 @@ def listing():
         created.append(data["profile"].name)
         return Card(frame, data["profile"].name)
 
-    def render(items):
-        renderer.render(items, create, lambda: Card(frame, "empty"))
+    def render(items, **options):
+        renderer.render(items, create, lambda: Card(frame, "empty"), **options)
 
     return renderer, render, owner, frame, created, errors
 
@@ -248,3 +248,115 @@ def test_completion_runs_once_for_noop_or_success_never_cancelled_plan(listing):
     owner.drain()
     assert done == ["A", "A"]
     assert [card.name for card in frame.order] == ["C"]
+
+
+def test_changed_rows_update_in_place_without_repacking(listing):
+    renderer, render, owner, frame, created, _ = listing
+    items = [item("A"), item("B")]
+    updates = []
+    render(items)
+    owner.drain()
+    before = frame.order[:]
+    items[0]["profile"].model = "synthetic-new-model"
+    items[1]["snapshot"] = (False, "synthetic invalid snapshot")
+    render(items, update_card=lambda card, data: updates.append((card, data)))
+    assert not updates
+    owner.step()
+    assert len(updates) == 1  # One bounded operation per event loop tick.
+    owner.drain()
+    assert [card for card, _ in updates] == before
+    assert frame.order == before and created == ["A", "B"]
+    assert all(not card.destroyed and card.pack_calls == 1 for card in before)
+    render(items, update_card=lambda *_: pytest.fail("unchanged row updated"))
+    assert not renderer.pending and len(updates) == 2
+
+
+def test_updates_and_reorders_keep_identity_with_insert_delete_and_rename(listing):
+    _, render, owner, frame, created, _ = listing
+    render([item(name) for name in "ABCDE"])
+    owner.drain()
+    before = {card.name: card for card in frame.order}
+    updates = []
+    for names in permutations("ABCD"):
+        render([item(name, auth_identity="".join(names)) for name in names] + [item("F")],
+               update_card=lambda card, data: updates.append(card.name))
+        owner.drain()
+        assert [card.name for card in frame.order] == [*names, "F"]
+        assert all(card is before[card.name] for card in frame.order[:-1])
+    assert before["E"].destroyed and created == [*"ABCDEF"]
+    assert len(updates) == 24 * 4
+    render([item("Renamed")], update_card=lambda *_: pytest.fail("renamed key reused"))
+    owner.drain()
+    assert all(card.destroyed for card in before.values())
+    assert created[-1] == "Renamed"
+
+
+def test_cancelled_in_place_updates_cannot_overwrite_newer_payload(listing):
+    renderer, render, owner, frame, _, _ = listing
+    render([item("A"), item("B")])
+    owner.drain()
+    updates = []
+
+    def update(card, data):
+        updates.append((card.name, data["auth_identity"]))
+
+    render([item("A", auth_identity="stale"), item("B", auth_identity="stale")], update_card=update)
+    owner.step()
+    stale_settle = next(iter(owner.callbacks.values()))
+    render([item("A", auth_identity="new"), item("B", auth_identity="new")], update_card=update)
+    stale_step = next(iter(owner.callbacks.values()))
+    renderer.should_pause = lambda: True
+    owner.step()
+    assert updates == [("A", "stale")]
+    renderer.should_pause = lambda: False
+    render([item("A", auth_identity="latest"), item("B", auth_identity="latest")], update_card=update)
+    token = renderer._after_id
+    stale_settle()
+    stale_step()
+    assert renderer._after_id == token
+    owner.drain()
+    assert updates == [("A", "stale"), ("A", "latest"), ("B", "latest")]
+    assert all(card.pack_calls == 1 for card in frame.order)
+
+
+@pytest.mark.parametrize("revert", [False, True])
+def test_failed_updater_is_not_cached_and_refresh_retries_same_card(listing, revert):
+    renderer, render, owner, frame, _, errors = listing
+    render([item("A")])
+    owner.drain()
+    original = frame.order[0]
+
+    def fail(_card, _data):
+        raise RuntimeError("synthetic update error")
+
+    done, updated = [], []
+    data = [item("A", is_active=True)]
+    render(data, update_card=fail, on_complete=lambda: done.append(True))
+    owner.drain()
+    assert errors == [True] and not done and not renderer.pending
+    assert renderer.rows["A"] == (None, original)
+    if revert:
+        data = [item("A")]  # Even the original payload must repair partial updates.
+    render(data, update_card=lambda card, _: updated.append(card), on_complete=lambda: done.append(True))
+    owner.drain()
+    assert done == [True] and updated == [original]
+    assert frame.order == [original] and original.pack_calls == 1
+
+
+def test_placeholder_rows_never_use_card_updater(listing):
+    renderer, render, owner, frame, _, _ = listing
+
+    def update(*_):
+        pytest.fail("placeholder sent to card updater")
+
+    render([], update_card=update)
+    owner.drain()
+    renderer.show_message("synthetic error", lambda: Card(frame, "error"))
+    owner.drain()
+    render([], update_card=update)
+    owner.drain()
+    render([item("A")], update_card=update)
+    owner.drain()
+    render([], update_card=update)
+    owner.drain()
+    assert [card.name for card in frame.children] == ["empty"]

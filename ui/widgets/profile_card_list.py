@@ -40,7 +40,7 @@ class ProfileCardList:
             self.owner.after_cancel(self._after_id)
             self._after_id = None
 
-    def render(self, items, create_card, create_empty, *, on_complete=None):
+    def render(self, items, create_card, create_empty, *, on_complete=None, update_card=None):
         self.cancel()
         self._on_complete = on_complete
         desired = []
@@ -53,17 +53,18 @@ class ProfileCardList:
             desired.append((item["profile"].name, signature, item, create_card))
         if not desired:
             desired = [(None, "empty", None, lambda _item: create_empty())]
-        self._reconcile(desired)
+        self._reconcile(desired, update_card=update_card)
 
     def show_message(self, message, create_label):
         self.cancel()
         self._reconcile([(None, message, None, lambda _item: create_label())])
 
-    def _reconcile(self, desired):
+    def _reconcile(self, desired, *, update_card=None):
         children = list(self.frame.pack_slaves())
         self.rows = {key: row for key, row in self.rows.items() if row[1] in children}
         signatures = {key: signature for key, signature, _item, _create in desired}
-        keep = {row[1] for key, row in self.rows.items() if signatures.get(key) == row[0]}
+        keep = {row[1] for key, row in self.rows.items()
+                if key in signatures and (signatures[key] == row[0] or (key is not None and update_card is not None))}
         # Remove bottom-up to avoid repeatedly shifting every following native
         # window. Include unpacked widgets left behind by a failed factory.
         packed = set(children)
@@ -75,7 +76,9 @@ class ProfileCardList:
         by_widget = {row[1]: key for key, row in self.rows.items()}
         planned = [by_widget[child] for child in order]
         for index, entry in enumerate(desired):
-            key, _signature, _item, _create = entry
+            key, signature, item, _create = entry
+            if key in self.rows and signature != self.rows[key][0]:
+                operations.append(("update", (key, signature, item, update_card)))
             if index < len(planned) and planned[index] == key:
                 continue
             operations.append(("place", (index, entry)))
@@ -116,6 +119,14 @@ class ProfileCardList:
             action, data = operations.popleft()
             if action == "remove":
                 data.destroy()
+            elif action == "update":
+                key, signature, item, update_card = data
+                card = self.rows[key][1]
+                # The updater can fail after changing some controls. Neither
+                # the old nor the new signature then describes the widget.
+                self.rows[key] = (None, card)
+                update_card(card, item)
+                self.rows[key] = (signature, card)
             else:
                 index, (key, signature, item, create) = data
                 row = self.rows.get(key)
@@ -193,7 +204,7 @@ class ProfileTabRendering:
         self._profile_card_lists[0].render(profiles, self._create_profile_card, lambda: EmptyState(
             self._cards_frame, f"暂无 {self._client_label} API 配置",
             "新建第三方 API 配置，或从当前设置中导入。", "新建 API 配置", self._create_profile,
-        ), on_complete=on_complete)
+        ), on_complete=on_complete, update_card=self._update_profile_card)
 
     def _render_account_cards_batch(self, accounts, generation):
         if generation != self._refresh_generation:
@@ -201,4 +212,11 @@ class ProfileTabRendering:
         self._profile_card_lists[1].render(accounts, self._create_account_card, lambda: EmptyState(
             self._account_cards_frame, f"暂无 {self._client_label} 官方账号",
             f"先在 {self._client_label} 登录，再导入当前账号快照。", "导入当前账号", self._import_current_account,
-        ))
+        ), update_card=self._update_account_card)
+
+    def _update_profile_card(self, card, item):
+        card.update_content(**self._profile_card_options(item))
+        self._register_profile_test_button(item["profile"].name, card)
+
+    def _update_account_card(self, card, item):
+        card.update_content(**self._account_card_options(item))

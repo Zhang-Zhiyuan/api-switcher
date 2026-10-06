@@ -1,6 +1,5 @@
 """Native paging tests use only synthetic subscriptions and never probe hosts."""
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import customtkinter as ctk
@@ -123,7 +122,7 @@ def test_busy_and_stale_subscription_navigation_cannot_act_on_new_scope(view):
 
 
 @pytest.mark.parametrize("scale", [1.0, 1.5, 2.5])
-def test_paging_controls_fit_above_list_at_supported_dpi_and_capture(view, scale):
+def test_paging_controls_fit_above_list_at_supported_dpi_and_capture(view, scale, tmp_path):
     from tools.ui_visual_audit import capture_window_image
     previous = ctk.ScalingTracker.widget_scaling
     try:
@@ -143,9 +142,10 @@ def test_paging_controls_fit_above_list_at_supported_dpi_and_capture(view, scale
             assert last_right <= right
         assert bar.winfo_rooty() + bar.winfo_height() <= picker._list_frame._parent_canvas.winfo_rooty()
         assert picker._page_label._label.winfo_reqheight() <= picker._page_label.winfo_height()
-        folder = Path(__file__).resolve().parent / "dist" / "proxy-simple-workflow-v2473"
-        folder.mkdir(parents=True, exist_ok=True)
-        capture_window_image(view.window, onscreen=True).save(folder / f"picker-pages-{int(scale * 100)}.png")
+        # Capture only this HWND; automated regression must not steal focus
+        # from the user or depend on Windows accepting foreground activation.
+        # Temporary output also avoids rewriting an older release's evidence.
+        capture_window_image(view.window).save(tmp_path / f"picker-pages-{int(scale * 100)}.png")
     finally:
         ctk.set_widget_scaling(previous)
         settle(view.root)
