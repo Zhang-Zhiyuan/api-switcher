@@ -1,0 +1,34 @@
+{
+  "view": "compact",
+  "captures": [
+    {
+      "file": "compact-Claude Code-top-dpi-200.png",
+      "tab": "Claude Code",
+      "size": [
+        1480,
+        1440
+      ],
+      "horizontal_overflow": [],
+      "layout_sizes": {},
+      "section_bounds": {}
+    },
+    {
+      "file": "compact-Claude Code-bottom-dpi-200.png",
+      "tab": "Claude Code",
+      "size": [
+        1480,
+        1440
+      ],
+      "horizontal_overflow": [],
+      "layout_sizes": {},
+      "section_bounds": {}
+    }
+  ],
+  "callback_errors": [],
+  "blocked_operations": [],
+  "simulated_monitor_dpi_percent": 200,
+  "requested_client_size": null,
+  "widget_scaling": 2.0,
+  "window_scaling": 2.0,
+  "capture_mode": "native-window"
+}

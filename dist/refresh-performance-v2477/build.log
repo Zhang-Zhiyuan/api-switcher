@@ -1,0 +1,171 @@
+================================================================================
+API Switcher build tool
+Bundle mode: onefile
+================================================================================
+PyInstaller is installed.
+Spec file written: API切换器.spec (onefile)
+
+Starting PyInstaller build...
+
+639 INFO: PyInstaller: 6.21.0, contrib hooks: 2026.6
+639 INFO: Python: 3.12.10
+676 INFO: Platform: Windows-11-10.0.26200-SP0
+676 INFO: Python environment: C:\Users\Zzy\AppData\Local\Programs\Python\Python312
+684 INFO: Removing temporary files and cleaning cache in C:\Users\Zzy\AppData\Local\pyinstaller
+712 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\Zzy\\Desktop\\Tools\\API切换器',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\python312.zip',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\DLLs',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312',
+ 'C:\\Users\\Zzy\\AppData\\Roaming\\Python\\Python312\\site-packages',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\win32',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\win32\\lib',
+ 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\Pythonwin',
+ 'C:\\Users\\Zzy\\Desktop\\Tools\\API切换器']
+1801 INFO: Appending 'datas' from .spec
+1802 INFO: checking Analysis
+1802 INFO: Building Analysis because Analysis-00.toc is non existent
+1802 INFO: Looking for Python shared library...
+1802 INFO: Using Python shared library: C:\Users\Zzy\AppData\Local\Programs\Python\Python312\python312.dll
+1802 INFO: Running Analysis Analysis-00.toc
+1802 INFO: Target bytecode optimization level: 0
+1802 INFO: Initializing module dependency graph...
+1803 INFO: Initializing module graph hook caches...
+1869 INFO: Analyzing modules for base_library.zip ...
+3076 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+3461 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+4701 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+5823 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+6491 INFO: Caching module dependency graph...
+6526 INFO: Analyzing C:\Users\Zzy\Desktop\Tools\API切换器\main.py
+6626 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+7398 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+7406 INFO: SetuptoolsInfo: initializing cached setuptools info...
+8468 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+8478 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+8497 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+8575 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+8582 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+8586 INFO: Setuptools: 'jaraco' appears to be a partial setuptools-vendored copy - extending search paths to ['C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\jaraco', 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\setuptools\\_vendor\\jaraco']!
+8587 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+8602 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+8792 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+9049 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+9195 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+9485 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+10045 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10280 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10282 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
+10295 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+10298 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10304 INFO: Processing standard module hook 'hook-importlib_resources.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+10350 INFO: Processing pre-safe-import-module hook 'hook-zipp.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10352 INFO: Setuptools: 'zipp' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.zipp'!
+10380 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10608 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10610 INFO: Setuptools: 'backports' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.backports'!
+10806 INFO: Processing pre-safe-import-module hook 'hook-importlib_metadata.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+10808 INFO: Setuptools: 'importlib_metadata' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.importlib_metadata'!
+10837 INFO: Processing standard module hook 'hook-setuptools._vendor.importlib_metadata.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+11835 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+11836 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+11948 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+11984 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+12351 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+12365 INFO: Processing standard module hook 'hook-customtkinter.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+12832 INFO: Processing standard module hook 'hook-PIL.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+12948 INFO: Processing standard module hook 'hook-PIL.Image.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+13364 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+13595 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+14220 INFO: Processing standard module hook 'hook-pystray.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+14545 INFO: Processing pre-safe-import-module hook 'hook-six.moves.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14606 INFO: Processing pre-safe-import-module hook 'hook-gi.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14942 INFO: Processing standard module hook 'hook-cryptography.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+16315 INFO: hook-cryptography: cryptography does not seem to be using dynamically linked OpenSSL.
+17232 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+17513 INFO: Processing standard module hook 'hook-bcrypt.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+17709 INFO: Processing standard module hook 'hook-nacl.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+19256 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+19328 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+19593 INFO: Analyzing hidden import 'PIL._tkinter_finder'
+19596 INFO: Analyzing hidden import 'keyring.backends.Windows'
+19598 INFO: Processing standard module hook 'hook-keyring.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+20142 INFO: Processing standard module hook 'hook-win32ctypes.core.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+21017 INFO: Processing standard module hook 'hook-pycparser.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+22149 INFO: Processing standard module hook 'hook-pywintypes.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+22219 INFO: Analyzing hidden import 'ui.tabs.claude_tab'
+22395 INFO: Analyzing hidden import 'ui.tabs.codex_tab'
+22419 INFO: Analyzing hidden import 'ui.tabs.env_tab'
+22455 INFO: Analyzing hidden import 'ui.tabs.browser_tab'
+22488 INFO: Analyzing hidden import 'ui.tabs.session_migration_tab'
+22526 INFO: Analyzing hidden import 'ui.tabs.ssh_tab'
+23079 INFO: Analyzing hidden import 'ui.tabs.local_proxy_tab'
+23257 INFO: Analyzing hidden import 'ui.tabs.common_tab'
+23276 INFO: Analyzing hidden import 'ui.tabs.usage_stats_tab'
+23299 INFO: Analyzing hidden import 'ui.tabs.backup_tab'
+23332 INFO: Analyzing hidden import 'ui.tabs.log_viewer_tab'
+23345 INFO: Analyzing hidden import 'core.api_config_parser'
+23377 INFO: Analyzing hidden import 'core.auto_continue.error_parser'
+23387 INFO: Analyzing hidden import 'core.local_config_bundle'
+23425 INFO: Analyzing hidden import 'core.network_diagnostics'
+23512 INFO: Analyzing hidden import 'core.remote_auto_continue'
+23579 INFO: Analyzing hidden import 'core.remote_git_login'
+23607 INFO: Analyzing hidden import 'core.session_migration'
+23678 INFO: Analyzing hidden import 'core.sync_manager'
+23736 INFO: Analyzing hidden import 'ui.dialogs.account_transfer_dialog'
+23747 INFO: Analyzing hidden import 'ui.dialogs.browser_profile_editor'
+23757 INFO: Analyzing hidden import 'ui.dialogs.bulk_operation_result_dialog'
+23760 INFO: Analyzing hidden import 'ui.dialogs.danger_confirm_dialog'
+23762 INFO: Analyzing hidden import 'ui.dialogs.password_dialog'
+23766 INFO: Analyzing hidden import 'ui.dialogs.portable_export_selection_dialog'
+23773 INFO: Analyzing hidden import 'ui.dialogs.profile_editor'
+23813 INFO: Analyzing hidden import 'ui.widgets.search_bar'
+23816 INFO: Processing module hooks (post-graph stage)...
+23817 WARNING: Hidden import "pycparser.lextab" not found!
+23817 WARNING: Hidden import "pycparser.yacctab" not found!
+23830 WARNING: Hidden import "importlib_resources.trees" not found!
+24197 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+24462 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks'
+24476 INFO: Performing binary vs. data reclassification (966 entries)
+24697 INFO: Looking for ctypes DLLs
+24710 WARNING: Ignoring AppKit.framework/AppKit imported from C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\site-packages\darkdetect\_mac_detect.py - only basenames are supported with ctypes imports!
+24801 INFO: Analyzing run-time hooks ...
+24807 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+24814 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+24818 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+24824 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+24828 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+24831 INFO: Including run-time hook 'pyi_rth_cryptography_openssl.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+24834 INFO: Including run-time hook 'pyi_rth_pywintypes.py' from 'C:\\Users\\Zzy\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+24866 INFO: Creating base_library.zip...
+24881 INFO: Looking for dynamic libraries
+25663 INFO: Extra DLL search directories (AddDllDirectory): []
+25663 INFO: Extra DLL search directories (PATH): []
+26307 INFO: Warnings written to C:\Users\Zzy\Desktop\Tools\API切换器\build\API切换器\warn-API切换器.txt
+26373 INFO: Graph cross-reference written to C:\Users\Zzy\Desktop\Tools\API切换器\build\API切换器\xref-API切换器.html
+26440 INFO: checking PYZ
+26440 INFO: Building PYZ because PYZ-00.toc is non existent
+26440 INFO: Building PYZ (ZlibArchive) C:\Users\Zzy\Desktop\Tools\API切换器\build\API切换器\PYZ-00.pyz
+27256 INFO: Building PYZ (ZlibArchive) C:\Users\Zzy\Desktop\Tools\API切换器\build\API切换器\PYZ-00.pyz completed successfully.
+27308 INFO: checking PKG
+27308 INFO: Building PKG because PKG-00.toc is non existent
+27308 INFO: Building PKG (CArchive) API切换器.pkg
+33390 INFO: Building PKG (CArchive) API切换器.pkg completed successfully.
+33409 INFO: Bootloader C:\Users\Zzy\AppData\Local\Programs\Python\Python312\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+33409 INFO: checking EXE
+33409 INFO: Building EXE because EXE-00.toc is non existent
+33409 INFO: Building EXE from EXE-00.toc
+33410 INFO: Copying bootloader EXE to C:\Users\Zzy\Desktop\Tools\API切换器\dist\API切换器.exe
+33808 INFO: Copying icon to EXE
+34017 INFO: Copying version information to EXE
+34275 INFO: Copying 0 resources to EXE
+34275 INFO: Embedding manifest in EXE
+34507 INFO: Appending PKG archive to EXE
+34528 INFO: Fixing EXE headers
+34693 INFO: Building EXE from EXE-00.toc completed successfully.
+34712 INFO: Build complete! The results are available in: C:\Users\Zzy\Desktop\Tools\API切换器\dist
+Smoke test passed: packaged app stayed running.
+
+Build complete: C:\Users\Zzy\Desktop\Tools\API切换器\dist\API切换器.exe

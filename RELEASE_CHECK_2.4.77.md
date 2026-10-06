@@ -35,6 +35,7 @@ python tools/ui_performance_probe.py --scenario nodes --count 200 --scroll --scr
 
 ## 验证范围
 
+- 普通全量回归：5080 项通过、22 项跳过，406.09 秒，自动排除 41 个原生 GUI 模块。[回归日志](dist/refresh-performance-v2477/regression.log)。首轮有一个延迟导入子进程以 `0xC000070A` 异常退出，无 Python 错误输出；相关检查单独复测和第二轮完整回归均通过，该退出尚未稳定复现。
 - 原生界面回归：8 个模块共 118 项通过，覆盖卡片局部更新、旧操作撤销、更新中断与恢复、渲染性能、滚动、DPI、主窗口、节点响应和分页。其余 33 个原生 GUI 模块不在本次回归范围内。
 - 版本与打包、发布检查和卡片列表契约：76 项通过；延迟导入相关检查 21 项通过；性能报告回归 8 项通过。
 - 全项目 Ruff、Python 语法、乱码检查、运行依赖和 32 项固定版本依赖检查通过。
@@ -43,3 +44,12 @@ python tools/ui_performance_probe.py --scenario nodes --count 200 --scroll --scr
 截图：[Codex 顶部](dist/refresh-performance-v2477/codex-top-100.png)、[Codex 账号区](dist/refresh-performance-v2477/codex-bottom-100.png)、[Claude 高 DPI 账号区](dist/refresh-performance-v2477/claude-bottom-200.png)。原始布局检查：[Codex](dist/refresh-performance-v2477/codex-100-report.json)、[Claude](dist/refresh-performance-v2477/claude-200-report.json)。
 
 测试使用隔离目录和合成账号、节点，没有切换实际代理、刷新真实令牌或部署远端服务。下载目录中正在运行的旧程序保持不变。
+
+## 发布产物
+
+- [Windows 单文件程序](dist/API切换器.exe)：FileVersion 和 ProductVersion 均为 2.4.77，31,328,429 字节。
+- SHA-256：`F6979626DE19B21E45D334CB0657B40AD35AED4333445D32CCE3D417CFD6D7ED`。
+- [构建日志](dist/refresh-performance-v2477/build.log)：单文件构建及 8 秒隔离启动检查通过。
+- [包内代码核对](dist/refresh-performance-v2477/package-payload.log)：142 个项目模块及 main.py 与最终源码一致，仅归一化代码对象中的文件名。
+
+需启动这份新 EXE 才能使用优化；下载目录中的旧进程不会自动更新。本次构建不替换或停止正在运行的程序与代理。
