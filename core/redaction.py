@@ -25,7 +25,7 @@ _SECRET_REDACTION_RULES = (
     (
         re.compile(
             r"(?i)((?:api[_ -]?key|(?:access|refresh|id|auth)[_ -]?token|"
-            r"(?:github|gh)[_ -]?token|authorization|client[_ -]?secret|"
+            r"(?:github|gh)[_ -]?token|token|authorization|client[_ -]?secret|"
             r"secret|password|passphrase)"
             r"\s*[\"']?\s*[:=]\s*[\"']?)[^\s\"',;；，。}\[\])>]+"
         ),

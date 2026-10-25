@@ -12,6 +12,13 @@ from ui.theme import COLORS, _screen_bounds, _window_scaling, font
 _MAX_VISIBLE_TOASTS = 3
 
 
+def _toast_preview(message: str, max_chars: int = 160, max_lines: int = 4) -> str:
+    """Keep notifications bounded; the complete text remains in the detail view."""
+    lines = message.splitlines()
+    preview = "\n".join(lines[:max_lines])[:max_chars].rstrip()
+    return preview + "…" if len(preview) < len(message) else message
+
+
 def _toast_wraplength(screen_width: int, scaling: float = 1.0) -> int:
     """Return a logical text width that leaves room for padding and screen edges."""
 
@@ -111,22 +118,38 @@ class Toast(ctk.CTkToplevel):
 
         label = ctk.CTkLabel(
             body,
-            text=self._message,
+            text=_toast_preview(self._message),
             text_color=COLORS["text"],
             font=font(13),
-            padx=18,
+            padx=0,
             pady=9,
             wraplength=wraplength,
             anchor="w",
             justify="left",
         )
-        label.pack(fill="x")
+        label.pack(fill="x", padx=18)
+        if _toast_preview(self._message) != self._message:
+            details_button = ctk.CTkButton(
+                body, text="查看详情", width=94, height=28,
+                font=font(12),
+                fg_color=COLORS["surface_hover"], text_color=COLORS["text"],
+                hover_color=COLORS["secondary"], command=self._show_details,
+            )
+            details_button.pack(anchor="e", padx=16, pady=(0, 12))
 
         self.update_idletasks()
         self._register_toast()
         self.bind("<Enter>", self._pause_dismiss, add="+")
         self.bind("<Leave>", self._resume_dismiss, add="+")
         self._schedule_dismiss()
+
+    def _show_details(self):
+        # Parent the detail window to the app so dismissing the toast cannot
+        # destroy a report the user is reading or copying.
+        from ui.dialogs.feedback_detail_dialog import FeedbackDetailDialog
+        dialog = FeedbackDetailDialog(self._toast_master, self._message, self._severity)
+        self._dismiss()
+        return dialog
 
     @staticmethod
     def _registered(master) -> list:

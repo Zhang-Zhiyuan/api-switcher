@@ -312,9 +312,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_switches = []
         self._remote_auto_refreshing = False
         self._remote_auto_continue_var = ctk.BooleanVar(value=False)
-        self._remote_git_snapshot_var = ctk.BooleanVar(value=True)
-        self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=True)
-        self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=True)
+        self._remote_git_snapshot_var = ctk.BooleanVar(value=False)
+        self._remote_git_snapshot_on_start_var = ctk.BooleanVar(value=False)
+        self._remote_git_snapshot_on_recovery_var = ctk.BooleanVar(value=False)
         self._remote_git_auto_push_var = ctk.BooleanVar(value=False)
         self._remote_training_auto_continue_var = ctk.BooleanVar(value=False)
         self._remote_error_recovery_var = ctk.BooleanVar(value=False)
@@ -1706,7 +1706,7 @@ class SSHTab(ctk.CTkScrollableFrame):
         self._remote_auto_header_title.pack(side="left")
         self._remote_auto_header_subtitle = ctk.CTkLabel(
             self._remote_auto_header,
-            text="同步本机 Hook 设置；Git 仓库会在远端项目首次触发时自动初始化",
+            text="按需开启；关闭全部自动化会移除本软件的触发器并保留设置",
             text_color=COLORS["muted"],
             font=font(12),
             anchor="w",
@@ -1771,9 +1771,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         install_button.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=(0, 4))
         pause_button = ctk.CTkButton(
             action_bar,
-            text="暂停 Stop 续跑",
-            width=118,
-            command=self._pause_remote_auto_continue,
+            text="关闭全部自动化",
+            width=124,
+            command=self._disable_remote_automation,
             **button_style("warning", compact=True),
         )
         pause_button.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=(0, 4))
@@ -5902,7 +5902,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             text=(
                 "安装/修复会把本机设置和训练 Prompt 模板同步到远端；"
                 "Git 快照首次触发时才会在项目目录 git init；"
-                "推送只使用项目已有 Git remote/upstream。暂停只关闭 Stop 续跑。"
+                "推送只使用项目已有 Git remote/upstream。“关闭全部自动化”会关闭续跑、恢复、Git 和权限自动确认。"
                 + (" | " if parts else "")
                 + " | ".join(parts)
             )
@@ -6416,7 +6416,9 @@ class SSHTab(ctk.CTkScrollableFrame):
         results = payload.get("results", [])
         self._remote_auto_last_payload = payload
         message = self._summarize_remote_auto_status(statuses, failures)
-        has_not_ready = expect_ready and any(not status.ready for status in statuses)
+        has_not_ready = expect_ready and any(
+            not status.ready and not getattr(status, "automation_disabled", False) for status in statuses
+        )
         severity = "error" if failures else "warning" if has_not_ready else "info"
         self._set_remote_auto_status(message, severity=severity)
         server_name = self._single_remote_auto_server_name()
@@ -6578,6 +6580,32 @@ class SSHTab(ctk.CTkScrollableFrame):
             f"正在一键修复 {server_name} 的远端自动续跑...",
             worker,
             lambda payload: self._show_remote_auto_result(payload, "远端自动续跑修复完成", expect_ready=True),
+        )
+
+    def _disable_remote_automation(self):
+        server_name = self._require_single_selected_server(self._set_remote_auto_status)
+        if not server_name:
+            return
+        targets = self._selected_remote_auto_targets()
+
+        def worker():
+            results, failures = [], []
+            for provider in targets:
+                try:
+                    results.append(remote_auto_continue.disable_remote_automation(server_name, provider))
+                except Exception as exc:
+                    failures.append(f"{provider}: {exc}")
+            statuses, status_failures = self._collect_remote_auto_statuses(server_name, targets)
+            failures.extend(status_failures)
+            for status in statuses:
+                if not status.automation_disabled:
+                    failures.append(f"{status.label}: 关闭后复查未确认全部关闭；{status.summary()}")
+            return {"statuses": statuses, "failures": failures, "results": results}
+
+        self._run_remote_auto_task(
+            f"正在关闭 {server_name} 的全部远端自动化...",
+            worker,
+            lambda payload: self._show_remote_auto_result(payload, "远端自动化已关闭，设置已保留"),
         )
 
     def _pause_remote_auto_continue(self):

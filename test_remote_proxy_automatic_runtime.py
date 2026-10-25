@@ -183,6 +183,19 @@ def test_candidate_rejection_is_typed_retained_without_runtime_changes(deploymen
     monkeypatch.setattr(remote_proxy, "probe_ai_proxy_candidate_isolated", lambda *_a, **_k: "AI 稳定性 0/13 可达")
     result = apply(deployment)
     assert result.outcome == "retained" and result.warning and result.retryable
+
+
+def test_independent_route_failure_stops_automatic_fallback_without_mutation(deployment, monkeypatch):
+    def reject(*_args, **_kwargs):
+        raise remote_proxy.RemoteProxyIndependentRouteError("独立分流不可用：OpenAI API")
+
+    monkeypatch.setattr(remote_proxy, "probe_ai_proxy_candidate_isolated", reject)
+    monkeypatch.setattr(remote_proxy, "measure_proxy_node_latencies_on_server", lambda *_a, **_k: pytest.fail("Unrelated node scan"))
+    result = apply(deployment)
+    assert result.outcome == "retained" and result.warning and not result.retryable
+    assert "独立分流不可用" in result
+    assert deployment.state["config"] == deployment.original
+    assert not deployment.state["writes"] and not deployment.state["selections"]
     assert not deployment.state["writes"] and not deployment.state["selections"]
 
 

@@ -33,6 +33,8 @@ import yaml
 from config.paths import STORAGE_DIR
 from core import proxy_routing
 from core.proxy_update_result import update_result, with_update_message
+from core.proxy_probe_diagnostics import CORE_DIAGNOSTIC_READER, candidate_failure_details
+from core.redaction import redact_sensitive_text
 from core.subscription_transport import SubscriptionRedirectHandler, subscription_error_message
 from core.lazy_imports import LazyAttribute, LazyModule
 from core.local_proxy_constants import LOCAL_PROXY_AI_SERVICES, LOCAL_PROXY_BUILTIN_SITES
@@ -494,6 +496,10 @@ class RemoteAIProxyStatus:
 
 class RemoteMihomoCoreMissingError(RuntimeError):
     """The remote candidate probe cannot start because no compatible core exists."""
+
+
+class RemoteProxyIndependentRouteError(RuntimeError):
+    """Changing the default candidate cannot repair a failing independent route."""
 
 
 @dataclass(frozen=True)
@@ -4621,6 +4627,11 @@ TMP=""
 CANDIDATE_PID=""
 cleanup_candidate() {{
   trap - EXIT HUP INT TERM
+  if [ -n "$TMP" ] && [ -f "$TMP/mihomo.log" ]; then
+    python3 - "$TMP/mihomo.log" <<'PY_DIAGNOSTICS' || true
+{CORE_DIAGNOSTIC_READER}
+PY_DIAGNOSTICS
+  fi
   if [ -n "$CANDIDATE_PID" ] && kill -0 "$CANDIDATE_PID" 2>/dev/null; then
     kill -TERM "$CANDIDATE_PID" 2>/dev/null || true
     wait_count=0
@@ -4839,7 +4850,7 @@ def _probe_ai_proxy_candidate_isolated(
     )
     if status != 0:
         detail = (stderr or stdout or "").strip().splitlines()
-        clean_detail = detail[-1][:240] if detail else str(status)
+        clean_detail = redact_sensitive_text(detail[-1])[:240] if detail else str(status)
         if status == 12:
             raise RemoteMihomoCoreMissingError(f"隔离候选验证失败: {clean_detail}")
         raise RuntimeError(f"隔离候选验证失败: {clean_detail}")
@@ -4866,9 +4877,24 @@ def _probe_ai_proxy_candidate_isolated(
         or compact_count != 1
         or sum(1 for item in results if item.ok) != expected
     ):
-        raise RuntimeError(
-            f"隔离候选稳定性未通过: {sum(1 for item in results if item.ok)}/{expected} 可达"
+        message = f"隔离候选稳定性未通过: {sum(1 for item in results if item.ok)}/{expected} 可达"
+        if len(results) != expected or not complete_rounds or compact_count != 1:
+            message += "（探测结果不完整）"
+        details = candidate_failure_details(
+            results, stdout,
+            (*REMOTE_AI_STABILITY_TARGETS, (REMOTE_CODEX_COMPACT_PROBE_LABEL, REMOTE_CODEX_COMPACT_PROBE_URL)),
         )
+        if details:
+            message += f"；{details}"
+        # Independent routes retain their own nodes during every default-node
+        # attempt. Do not spend minutes retrying those same broken routes.
+        independent = _failed_independent_probe_routes(config, results) if complete_rounds else ()
+        if independent:
+            raise RemoteProxyIndependentRouteError(
+                f"独立分流不可用（{'、'.join(independent)}）。更换默认节点不能修复；"
+                f"请在“目标分流”检查对应订阅、节点或直连设置。{message}"
+            )
+        raise RuntimeError(message)
     return results
 
 
@@ -5123,6 +5149,8 @@ def install_ai_proxy_verified(
     tried = []
     try:
         requested_probe = _probe_ai_proxy_candidate_with_core_bootstrap(ssh_name, proxy_text)
+    except RemoteProxyIndependentRouteError as exc:
+        return update_result(f"{ssh_name}: {exc}；未修改正式代理", "failed", warning=True)
     except Exception as exc:
         requested_probe = ""
         tried.append(f"{describe_proxy_node(requested_node)}: {exc}")
@@ -5138,7 +5166,8 @@ def install_ai_proxy_verified(
 
     candidates = automatic_proxy_subscription_nodes(candidate_nodes, quality_results)
     if not candidates:
-        return f"{ssh_name}: 候选未通过隔离稳定性验证，未修改正式代理"
+        detail = f"；{tried[0]}" if tried else ""
+        return f"{ssh_name}: 候选未通过隔离稳定性验证，未修改正式代理{detail}"
 
     try:
         latencies = measure_proxy_node_latencies_on_server(
@@ -5171,6 +5200,8 @@ def install_ai_proxy_verified(
                 ssh_name,
                 format_proxy_node(item.node),
             )
+        except RemoteProxyIndependentRouteError as exc:
+            return update_result(f"{ssh_name}: {exc}；未修改正式代理", "failed", warning=True)
         except Exception as exc:
             tried.append(f"{node_summary} {latency_label}: {exc}")
             continue
@@ -5367,8 +5398,8 @@ def _remote_automatic_subscription_origin_matches(profile_id, expected_current_k
     return True
 
 
-def _remote_automatic_probe_targets(config: str):
-    """Only gate targets whose actual rules use the changed default group."""
+def _remote_probe_routes(config: str):
+    """Resolve probe destinations against the exact generated routing rules."""
     from core.proxy_route_diagnostics import match_rules
 
     parsed = yaml.safe_load(config)
@@ -5381,12 +5412,40 @@ def _remote_automatic_probe_targets(config: str):
             rules.append({"type": fields[0], "payload": fields[1], "proxy": fields[2]})
         elif len(fields) == 2:
             rules.append({"type": fields[0], "proxy": fields[1]})
-    return tuple(
-        (label, url) for label, url in REMOTE_AI_STABILITY_TARGETS
+    return parsed, {
+        label: match.route
+        for label, url in (*REMOTE_AI_STABILITY_TARGETS,
+                           (REMOTE_CODEX_COMPACT_PROBE_LABEL, REMOTE_CODEX_COMPACT_PROBE_URL))
         if (match := match_rules(urlparse.urlsplit(url).hostname or "", rules,
                                mode=str(parsed.get("mode") or "rule"))).certain
-        and match.route == "AI-PROXY"
+    }
+
+
+def _failed_independent_probe_routes(config: str, results) -> tuple[str, ...]:
+    parsed, routes = _remote_probe_routes(config)
+    groups = {group["name"]: group.get("proxies", ()) for group in parsed.get("proxy-groups", ())}
+
+    def independent(route, seen):
+        if route in {"AI-PROXY", AI_PROXY_INTERNAL_NODE_NAME} or route in seen:
+            return False
+        if route in {"DIRECT", "REJECT", "REJECT-DROP"}:
+            return True
+        if route in groups:
+            return bool(groups[route]) and all(independent(child, seen | {route}) for child in groups[route])
+        return any(node.get("name") == route for node in parsed.get("proxies", ()))
+
+    return tuple(
+        label for label, route in routes.items()
+        if independent(route, set())
+        and (matching := [item for item in results if item.label == label])
+        and all(not item.ok for item in matching)
     )
+
+
+def _remote_automatic_probe_targets(config: str):
+    """Only gate targets whose actual rules use the changed default group."""
+    _parsed, routes = _remote_probe_routes(config)
+    return tuple((label, url) for label, url in REMOTE_AI_STABILITY_TARGETS if routes.get(label) == "AI-PROXY")
 
 
 def _probe_remote_automatic_update_runtime(ssh_name: str, mixed_port: int, config: str, *, client=None):
@@ -5482,8 +5541,10 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
     original_key = proxy_node_key(original_node)
     requested_key = proxy_node_key(requested_node)
     tried: list[str] = []
+    independent_failure = None
 
     def validate_candidate(node: dict, detail: str = "") -> str | None:
+        nonlocal independent_failure
         label = describe_proxy_node(node)
         try:
             summary = probe_ai_proxy_candidate_isolated(
@@ -5491,6 +5552,11 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
                 format_proxy_node(node),
                 **proxy_routing.ssh_probe_kwargs(ssh_name),
             )
+        except RemoteProxyIndependentRouteError as exc:
+            independent_failure = update_result(
+                f"{ssh_name}: {exc}；已保留当前运行节点", "retained", warning=True,
+            )
+            return None
         except Exception as exc:
             tried.append(f"{label}{detail}: {exc}")
             return None
@@ -5577,6 +5643,8 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
         return with_update_message(message, f"{message}；{label}: {_compact_probe_summary(probe_summary)}")
 
     requested_probe = validate_candidate(requested_node)
+    if independent_failure is not None:
+        return independent_failure
     if requested_probe is not None:
         return apply_validated(requested_node, requested_probe)
 
@@ -5622,6 +5690,8 @@ def _reload_ai_proxy_automatically_after_isolated_probe(
     for _latency, item, latency_result in ranked[:attempt_count]:
         latency_label = f"（远端 TCP {proxy_node_latency_label(latency_result)}）"
         candidate_probe = validate_candidate(item.node, latency_label)
+        if independent_failure is not None:
+            return independent_failure
         if candidate_probe is None:
             continue
         return apply_validated(item.node, candidate_probe, backup=True)

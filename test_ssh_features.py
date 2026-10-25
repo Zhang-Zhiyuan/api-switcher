@@ -3241,6 +3241,97 @@ def test_remote_pause_treats_string_false_feature_flags_as_disabled(monkeypatch)
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("fail_cleanup", [False, True])
+def test_disable_remote_automation_preserves_user_data_and_rolls_back(monkeypatch, provider, fail_cleanup):
+    from models.auto_continue import AutoContinueSettings
+
+    sftp = _FakeSFTP()
+    client = _FakeClient(sftp)
+    base = f"/home/test/.{provider}"
+    paths = remote_auto_continue.RemoteAutoContinuePaths(
+        provider_name=provider, config_dir=base, hooks_dir=f"{base}/hooks",
+        settings_path=f"{base}/auto_continue_settings.json",
+        script_path=f"{base}/hooks/auto_continue_stop.sh", state_dir=f"{base}/tmp",
+        guidance_path=f"{base}/{'CLAUDE.md' if provider == 'claude' else 'AGENTS.md'}",
+        provider_config_path=f"{base}/{'settings.json' if provider == 'claude' else 'config.toml'}",
+        permission_rules_path=f"{base}/auto_continue_permission_rules.json",
+        codex_hooks_path=f"{base}/hooks.json" if provider == "codex" else None,
+    )
+    flags = {
+        "enabled", "training_auto_continue_enabled", "git_auto_snapshot",
+        "git_snapshot_on_start", "git_snapshot_on_recovery", "git_auto_push",
+        "error_recovery_enabled", "auto_approve_permission_requests", "apply_to_subagents",
+    }
+    settings = AutoContinueSettings(**dict.fromkeys(flags, True))
+    settings.training_continue_prompt = "Keep my training instructions"
+    sftp.files[paths.settings_path] = json.dumps(settings.to_dict()).encode()
+    sftp.files[paths.script_path] = b"#!/bin/sh\n# retained script\n"
+    sftp.files[paths.guidance_path] = (
+        "# User instructions\n\n" + remote_auto_continue.AUTO_CONTINUE_GUIDANCE
+    ).encode()
+    hooks = {"Stop": [{"hooks": [
+        {"type": "command", "command": f"sh {paths.script_path}"},
+        {"type": "command", "command": "sh /home/test/user-hook.sh"},
+    ]}]}
+    if provider == "claude":
+        sftp.files[paths.provider_config_path] = json.dumps({
+            "hooks": hooks, "env": {"EXAMPLE_USER_OPTION": "preserve"},
+        }).encode()
+    else:
+        sftp.files[paths.provider_config_path] = b'model = "my-model"\n[features]\nhooks = true\n'
+        sftp.files[paths.codex_hooks_path] = json.dumps({"hooks": hooks}).encode()
+    protected = {
+        f"{base}/auth.json": b'{"test_login":"unchanged"}',
+        f"{base}/.credentials.json": b'{"test_login":"unchanged"}',
+        "/home/test/.config/mihomo/config.yaml": b"proxy: unchanged\n",
+    }
+    sftp.files.update(protected)
+    before = dict(sftp.files)
+    monkeypatch.setattr(remote_auto_continue, "_connect", lambda _: (SSHProfile(name="remote", host="host"), client))
+    monkeypatch.setattr(remote_auto_continue, "_paths", lambda *_: paths)
+    monkeypatch.setattr(remote_auto_continue, "_ensure_remote_runtime", lambda *a, **kw: pytest.fail("Disabling must not install anything"))
+
+    if fail_cleanup:
+        def fail(*_):
+            raise OSError("cleanup failed")
+        monkeypatch.setattr(remote_auto_continue, "_uninstall_guidance", fail)
+        with pytest.raises(OSError, match="cleanup failed"):
+            remote_auto_continue.disable_remote_automation("remote", provider)
+        assert sftp.files == before
+        return
+
+    result = remote_auto_continue.disable_remote_automation("remote", provider)
+    updated = json.loads(sftp.files[paths.settings_path])
+    assert all(updated[key] is False for key in flags)
+    assert updated["training_continue_prompt"] == settings.training_continue_prompt
+    assert "全部远端自动化已关闭" in result
+    hook_data = json.loads(sftp.files[paths.codex_hooks_path or paths.provider_config_path])
+    assert hook_data["hooks"]["Stop"][0]["hooks"] == [
+        {"type": "command", "command": "sh /home/test/user-hook.sh"},
+    ]
+    assert sftp.files[paths.guidance_path].decode().strip() == "# User instructions"
+    assert sftp.files[paths.script_path] == before[paths.script_path]
+    assert all(sftp.files[key] == value for key, value in protected.items())
+    if provider == "claude":
+        assert hook_data["env"] == {"EXAMPLE_USER_OPTION": "preserve"}
+    else:
+        assert b'model = "my-model"' in sftp.files[paths.provider_config_path]
+        assert remote_auto_continue._read_toml(client, paths.provider_config_path)["features"]["hooks"] is True
+    # Repeated clicks must be safe and must not restore any trigger.
+    after = dict(sftp.files)
+    remote_auto_continue.disable_remote_automation("remote", provider)
+    assert sftp.files == after
+
+
+def test_remote_automation_disabled_status_does_not_recommend_repair():
+    status = remote_auto_continue.RemoteAutoContinueStatus(provider_name="codex", settings_valid=True)
+    assert "全部自动化已关闭" in status.summary()
+    assert "需处理" not in status.summary()
+    status.hook_registered = True
+    assert "需处理" in status.summary()
+
+
 def test_remote_codex_hooks_feature_prefers_features_section():
     sftp = _FakeSFTP()
     client = _FakeClient(sftp)
@@ -3518,7 +3609,7 @@ def test_update_remote_codex_error_recovery_switch_registers_error_hook(monkeypa
     assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
 
 
-def test_update_remote_switch_without_remote_settings_keeps_git_snapshot_on_by_default(monkeypatch):
+def test_update_remote_switch_without_remote_settings_enables_only_requested_feature(monkeypatch):
     from models.auto_continue import AutoContinueSettings
 
     sftp = _FakeSFTP()
@@ -3562,13 +3653,14 @@ def test_update_remote_switch_without_remote_settings_keeps_git_snapshot_on_by_d
     hooks = json.loads(sftp.files[paths.codex_hooks_path].decode("utf-8"))
 
     assert settings["enabled"] is False
-    assert settings["git_auto_snapshot"] is True
-    assert settings["git_snapshot_on_start"] is True
+    assert settings["git_auto_snapshot"] is False
+    assert settings["git_snapshot_on_start"] is False
+    assert settings["git_auto_push"] is False
     assert settings["error_recovery_enabled"] is True
-    assert runtime_checks == [True]
-    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
-    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit"))
-    assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart"))
+    assert runtime_checks == [False]
+    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "Stop"))
+    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "UserPromptSubmit"))
+    assert not list(remote_auto_continue._iter_codex_hook_commands(hooks, "SessionStart"))
     assert list(remote_auto_continue._iter_codex_hook_commands(hooks, "Error"))
 
 

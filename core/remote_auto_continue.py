@@ -145,7 +145,23 @@ class RemoteAutoContinueStatus:
             and (not self.git_snapshot_enabled or self.git_available)
         )
 
+    @property
+    def automation_disabled(self) -> bool:
+        return (
+            self.settings_valid
+            and not self.issues
+            and not self.hook_registered
+            and not self.guidance_installed
+            and not any((
+                self.enabled, self.training_auto_continue_enabled,
+                self.git_snapshot_master_enabled, self.git_auto_push_enabled,
+                self.permission_auto_approve_enabled, self.error_recovery_enabled,
+            ))
+        )
+
     def summary(self) -> str:
+        if self.automation_disabled:
+            return f"{self.label}: 全部自动化已关闭（设置已保留）"
         state = "正常" if self.ready else "需处理"
         parts = [
             f"{self.label}: {state}",
@@ -652,13 +668,13 @@ def _remote_switch_baseline_settings(provider_name: str) -> AutoContinueSettings
     copied = AutoContinueSettings.from_dict(source.to_dict())
     copied.enabled = False
     copied.training_auto_continue_enabled = False
-    copied.git_auto_snapshot = True
-    copied.git_snapshot_on_start = True
-    copied.git_snapshot_on_recovery = True
+    copied.git_auto_snapshot = False
+    copied.git_snapshot_on_start = False
+    copied.git_snapshot_on_recovery = False
+    copied.git_auto_push = False
     copied.error_recovery_enabled = False
     copied.auto_approve_permission_requests = False
-    if provider == "codex":
-        copied.apply_to_subagents = False
+    copied.apply_to_subagents = False
     return copied
 
 
@@ -3933,6 +3949,27 @@ def update_remote_auto_continue_settings(
 
     logger.info(f"Updated remote auto-continue settings for {provider} on {ssh_profile.host}: {updates}")
     return f"\u5df2\u66f4\u65b0 {ssh_profile.host} \u7684 {_provider_label(provider)} \u8fdc\u7a0b\u81ea\u52a8\u7eed\u8dd1\u8bbe\u7f6e"
+
+
+def disable_remote_automation(ssh_name: str, provider_name: str) -> str:
+    """Disable every managed trigger and unregister only our hooks/guidance.
+
+    Reuse the transactional settings writer so a partial failure restores the
+    previous configuration. Prompts, scripts, history and third-party hooks stay.
+    """
+    provider = _normal_provider(provider_name)
+    update_remote_auto_continue_settings(ssh_name, provider, {
+        "enabled": False,
+        "training_auto_continue_enabled": False,
+        "git_auto_snapshot": False,
+        "git_snapshot_on_start": False,
+        "git_snapshot_on_recovery": False,
+        "git_auto_push": False,
+        "error_recovery_enabled": False,
+        "auto_approve_permission_requests": False,
+        "apply_to_subagents": False,
+    })
+    return f"{_provider_label(provider)} 全部远端自动化已关闭，设置已保留"
 
 
 def pause_remote_auto_continue(ssh_name: str, provider_name: str) -> str:

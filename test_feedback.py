@@ -14,7 +14,7 @@ from ui.tabs.env_tab import EnvTab
 from ui.tabs.ssh_tab import SSHTab
 from ui.widgets.persistent_env_control import PersistentEnvControl
 from ui.widgets.proxy_quality_panel import ProxyQualityPanel
-from ui.widgets.toast import Toast
+from ui.widgets.toast import Toast, _toast_preview
 
 
 class _CaptureLabel:
@@ -135,6 +135,13 @@ def test_toast_does_not_shadow_tkinter_callback_registration():
     # tkinter.Misc._register is called while CTkToplevel itself is being
     # constructed, so defining that name in Toast breaks every real popup.
     assert "_register" not in Toast.__dict__
+
+
+def test_long_toast_preview_is_bounded_and_short_messages_are_unchanged():
+    assert _toast_preview("设置已保存") == "设置已保存"
+    assert len(_toast_preview("节点连接失败；" * 200)) <= 161
+    assert _toast_preview("\n".join(str(i) for i in range(30))).count("\n") <= 3
+    assert _toast_preview("节点连接失败；" * 200).endswith("…")
 
 
 def test_api_result_recommendations_explain_stale_proxy_action():

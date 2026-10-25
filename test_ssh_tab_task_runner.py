@@ -112,3 +112,42 @@ def test_remote_auto_task_reports_done_callback_failure(monkeypatch):
     assert tab.busy_events == [(True, "checking"), (False, None)]
     assert tab.statuses[-1] == ("远端自动续跑结果处理失败: render broken", "error")
     assert tab.toasts[-1][1]["is_error"] is True
+
+
+def test_close_all_remote_automation_continues_after_one_provider_failure(monkeypatch):
+    tab = FakeRemoteAutoTab()
+    calls, completed = [], []
+    tab._require_single_selected_server = lambda _reporter: "synthetic-server"
+    tab._selected_remote_auto_targets = lambda: ["claude", "codex"]
+    tab._collect_remote_auto_statuses = lambda *_: ([], [])
+    tab._show_remote_auto_result = lambda payload, *_: completed.append(payload)
+    tab._run_remote_auto_task = lambda _message, worker, done: done(worker())
+
+    def disable(server, provider):
+        calls.append((server, provider))
+        if provider == "claude":
+            raise OSError("synthetic write failure")
+        return "Codex 全部远端自动化已关闭"
+
+    monkeypatch.setattr(ssh_tab.remote_auto_continue, "disable_remote_automation", disable)
+    ssh_tab.SSHTab._disable_remote_automation(tab)
+    assert calls == [("synthetic-server", "claude"), ("synthetic-server", "codex")]
+    assert completed[0]["results"] == ["Codex 全部远端自动化已关闭"]
+    assert completed[0]["failures"] == ["claude: synthetic write failure"]
+
+
+def test_close_all_remote_automation_reports_failed_readback(monkeypatch):
+    from core.remote_auto_continue import RemoteAutoContinueStatus
+
+    tab = FakeRemoteAutoTab()
+    completed = []
+    tab._require_single_selected_server = lambda _reporter: "synthetic-server"
+    tab._selected_remote_auto_targets = lambda: ["codex"]
+    tab._collect_remote_auto_statuses = lambda *_: (
+        [RemoteAutoContinueStatus(provider_name="codex", settings_valid=True, enabled=True)], [],
+    )
+    tab._show_remote_auto_result = lambda payload, *_: completed.append(payload)
+    tab._run_remote_auto_task = lambda _message, worker, done: done(worker())
+    monkeypatch.setattr(ssh_tab.remote_auto_continue, "disable_remote_automation", lambda *_: "写入完成")
+    ssh_tab.SSHTab._disable_remote_automation(tab)
+    assert "关闭后复查未确认全部关闭" in completed[0]["failures"][0]
