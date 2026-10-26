@@ -61,12 +61,51 @@ def test_advanced_controls_stay_folded_and_preserve_draft_across_layout(tk_root,
         actions = (tab._proxy_deploy_button, tab._proxy_inspect_button, tab._proxy_remote_cleanup_button)
     try:
         settle(tk_root)
+        disclosure = tab._subscription_disclosure
+        prefix = "" if kind == "win" else "proxy_"
+        setattr(tab, f"_{prefix}subscription_profile_edit_id", "synthetic")
+        name_entry = getattr(tab, f"_{prefix}subscription_name_entry")
+        url_entry = getattr(tab, f"_{prefix}subscription_entry")
+        auto_var = getattr(tab, f"_{prefix}auto_refresh_var")
+        periodic_var = getattr(tab, f"_{prefix}periodic_update_var")
+        interval = getattr(tab, f"_{prefix}periodic_update_entry")
+        advanced = getattr(tab, "_node_tools_toggle" if kind == "win" else "_proxy_node_tools_toggle")
+        all_test = getattr(tab, f"_{prefix}latency_all_button")
+        cancel = getattr(tab, f"_{prefix}quality_cancel_button")
+        name_entry.insert(0, "尚未保存的订阅名称")
+        url_entry.insert(0, "https://subscription.example.invalid/synthetic")
+        auto_var.set(True)
+        periodic_var.set(True)
+        interval.delete(0, "end")
+        interval.insert(0, "45")
+        disclosure.set_context("synthetic", dirty=True)
+        assert not name_entry.winfo_manager()
+        assert "未保存" in disclosure.toggle.cget("text")
+        calls = []
+        all_test.configure(state="normal", command=lambda: calls.append("all"))
+        cancel.configure(state="normal", command=lambda: calls.append("cancel"))
         editor.insert("1.0", "name: synthetic-draft\nserver: example.test")
         before = editor.get("1.0", "end")
         for width in (1040, 620):
             window.geometry(f"{width}x760")
             ctk.set_widget_scaling(scale)
             settle(tk_root)
+            assert not name_entry.winfo_viewable() and not url_entry.winfo_viewable()
+            assert not all_test.winfo_viewable()
+            assert cancel.winfo_viewable()
+            cancel.invoke()
+            advanced.invoke()
+            settle(tk_root)
+            assert all_test.winfo_viewable()
+            all_test.invoke()
+            advanced.invoke()
+            disclosure.toggle.invoke()
+            settle(tk_root)
+            assert name_entry.winfo_viewable() and url_entry.winfo_viewable()
+            assert name_entry.get() == "尚未保存的订阅名称"
+            assert url_entry.get() == "https://subscription.example.invalid/synthetic"
+            assert auto_var.get() and periodic_var.get() and interval.get() == "45"
+            disclosure.toggle.invoke()
             assert not editor.winfo_viewable()
             assert not maintenance.winfo_viewable()
             assert not import_button.winfo_viewable()
@@ -83,6 +122,11 @@ def test_advanced_controls_stay_folded_and_preserve_draft_across_layout(tk_root,
             maintenance_toggle.invoke()
             settle(tk_root)
         assert editor.get("1.0", "end") == before
+        assert calls == ["cancel", "all", "cancel", "all"]
+        disclosure.set_context("")
+        settle(tk_root)
+        assert name_entry.winfo_viewable()  # New subscriptions reveal their editor.
+        assert url_entry.get() == "https://subscription.example.invalid/synthetic"
         assert not errors
         destination = os.environ.get("API_SWITCHER_PROXY_PAGE_CAPTURE_DIR")
         if destination:

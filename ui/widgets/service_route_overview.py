@@ -271,8 +271,12 @@ class RuntimeRouteOverview(_RuntimeOverview, ctk.CTkFrame):
 class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
     """Compact overview; all edits live in the shared draft editor."""
 
-    def __init__(self, master, *, command, inspect_command=None, preset_command=None, **kwargs):
+    def __init__(self, master, *, command, inspect_command=None, preset_command=None, compact=False, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
+        self._compact = compact
+        self._table_expanded = not compact
+        self._has_warnings = False
+        self._inactive_count = 0
         self._command = command
         self._preset_command = preset_command
         self._enabled = True
@@ -338,6 +342,15 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
             font=font(11), text_color=COLORS["muted_soft"], anchor="w", justify="left")
         self._note.pack(fill="x", pady=(6, 0))
         bind_wraplength(self, self._note, padding=8)
+        self._table_toggle = None
+        if compact:
+            self._table_toggle = ctk.CTkButton(
+                self, text="查看逐网站线路 ▾", command=self._toggle_table,
+                **button_style("secondary", compact=True),
+            )
+            # Anchor to a permanently mapped widget: CTk replays pack options
+            # during DPI changes, including when the table itself is hidden.
+            self._table_toggle.pack(anchor="w", pady=(4, 0), before=self._note)
         self.bind("<Configure>", self._on_resize, add="+")
         self._layout(True)
 
@@ -405,6 +418,7 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
         enabled = sum(info["enabled"] for info, _ in descriptions if info["id"] != "custom")
         bound = sum(desc["bound"] for _, desc in descriptions)
         warnings = sum(desc["warning"] for _, desc in descriptions)
+        self._has_warnings = bool(warnings)
         _configure_changed(self._summary, text=f"已保存 · {enabled} 个目标启用 · {bound} 项独立线路"
                                 + (f" · {warnings} 项需检查" if warnings else ""),
                                 text_color=COLORS["warning"] if warnings else COLORS["muted"])
@@ -483,7 +497,7 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
                                       sticky="ew" if narrow else "e", pady=(6, 0) if narrow else 0)
             if narrow:
                 self._heading.pack_forget()
-            else:
+            elif self._body.winfo_manager():
                 self._heading.pack(fill="x", pady=(0, 4), before=self._body)
         for row in self._rows.values():
             self._sync_row_details(row)
@@ -508,6 +522,43 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
                 for col, name in enumerate(("target_box", "profile", "node_box", "edit")):
                     row[name].grid(row=0, column=col, sticky="ew", padx=10, pady=6)
             row["layout"] = (narrow, scale)
+        self._sync_table_visibility()
+
+    def _toggle_table(self):
+        self._table_expanded = not self._table_expanded
+        self._sync_table_visibility()
+
+    def _sync_table_visibility(self):
+        if not self._compact:
+            return
+        # Missing subscriptions/nodes must remain visible even in the compact view.
+        expanded = self._table_expanded or self._has_warnings
+        _configure_changed(
+            self._table_toggle,
+            text="线路需检查 · 已展开明细" if self._has_warnings else
+                 "收起逐网站线路 ▴" if expanded else "查看逐网站线路 ▾",
+            state="disabled" if self._has_warnings else "normal",
+        )
+        if expanded and not self._body.winfo_manager():
+            self._body.pack(fill="x", before=self._note, pady=(6, 0))
+        if not expanded and self._body.winfo_manager():
+            self._body.pack_forget()
+        for widget, visible, options in (
+            (self._heading, expanded and not self._narrow,
+             {"fill": "x", "pady": (6, 4), "before": self._body}),
+            (self._details_toggle, expanded, {"anchor": "w", "pady": (4, 0), "before": self._note}),
+            (self._more, expanded and bool(self._inactive_count),
+             {"anchor": "w", "pady": (4, 0), "before": self._note}),
+        ):
+            if visible and not widget.winfo_manager():
+                widget.pack(**options)
+            elif not visible and widget.winfo_manager():
+                widget.pack_forget()
+        if self._preset_note is not None:
+            if expanded and self._show_details and not self._preset_note.winfo_manager():
+                self._preset_note.pack(fill="x", pady=(4, 0), before=self._summary)
+            elif not expanded:
+                self._preset_note.pack_forget()
 
     def _sync_row_details(self, row):
         """Expose full saved intent on demand; warnings never depend on this fold."""
@@ -579,3 +630,5 @@ class ServiceRouteOverview(_RuntimeOverview, ctk.CTkFrame):
                 self._more.pack(anchor="w", pady=(4, 0), before=self._note)
         elif self._more.winfo_manager():
             self._more.pack_forget()
+        self._inactive_count = inactive
+        self._sync_table_visibility()

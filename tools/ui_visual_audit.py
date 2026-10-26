@@ -99,7 +99,16 @@ def capture_window_image(window, *, onscreen=False):
                 raise RuntimeError("refusing capture: preview is not the foreground window")
 
         topmost = window.attributes("-topmost")
+        attached = False
         try:
+            # Keep the temporary focus attachment through Tk's queued focus
+            # events and the capture, then always detach. Detaching before
+            # update() can hand focus back to the previous application.
+            thread_for_window = user32.GetWindowThreadProcessId
+            thread_for_window.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+            current = ctypes.windll.kernel32.GetCurrentThreadId()
+            other = thread_for_window(foreground(), None)
+            attached = bool(other and other != current and user32.AttachThreadInput(current, other, True))
             window.attributes("-topmost", True)
             window.lift()
             window.focus_force()
@@ -132,6 +141,8 @@ def capture_window_image(window, *, onscreen=False):
             require_foreground(hwnd)
             return result
         finally:
+            if attached:
+                user32.AttachThreadInput(current, other, False)
             window.attributes("-topmost", topmost)
     return ImageGrab.grab(window=prepare_native())
 

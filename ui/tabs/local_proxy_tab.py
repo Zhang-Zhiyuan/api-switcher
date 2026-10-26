@@ -25,6 +25,7 @@ from ui.ui_dispatch import dispatch_ui_callback
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.action_group import wrap_action_group
+from ui.widgets.subscription_disclosure import SubscriptionDisclosure
 from ui.widgets.service_route_overview import ServiceRouteOverview
 from ui.widgets.toast import show_toast
 
@@ -326,7 +327,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         routing_frame.pack(fill="x", padx=14, pady=(0, 12), before=policy_frame)
         self._route_overview = ServiceRouteOverview(
             routing_frame, command=self._open_service_routes, inspect_command=self._open_route_diagnostics,
-            preset_command=self._open_route_preset,
+            preset_command=self._open_route_preset, compact=True,
         )
         self._route_overview.pack(fill="x", padx=14, pady=14)
 
@@ -347,7 +348,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
 
         self._subscription_heading = ctk.CTkLabel(
             controls,
-            text="1 管理订阅",
+            text="1 选择订阅",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -515,6 +516,12 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._periodic_update_check,
             interval_group,
         ]
+        self._subscription_disclosure = SubscriptionDisclosure(
+            sub_actions,
+            fields=(self._subscription_name_label, self._subscription_name_entry,
+                    self._profile_actions, self._subscription_link_label, self._subscription_entry),
+            items=self._subscription_action_items, refresh=self._manual_hot_update_button,
+        )
         self._cache_label = ctk.CTkLabel(
             controls,
             text="本机缓存: 未加载",
@@ -669,7 +676,11 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             wraplength=126,
         )
         self._subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
-        wrap_action_group(node_actions, hint=self._subscription_action_hint_label)
+        self._node_tools_toggle = wrap_action_group(
+            node_actions, hint=self._subscription_action_hint_label,
+            advanced=(self._latency_all_button, self._stability_button, self._quality_button,
+                      self._quality_settings_button, self._subscription_action_hint_label),
+        )
         self._selected_label = ctk.CTkLabel(
             controls,
             text="待启动节点: 未选择",
@@ -883,7 +894,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
         if state == self._responsive_state:
             return
         self._responsive_state = state
-        stacked, startup_columns, _builtin_columns, subscription_action_columns, _custom_stacked = state
+        stacked, startup_columns, _builtin_columns, _subscription_action_columns, _custom_stacked = state
 
         policy = self._policy_grid
         self._reset_grid_columns(policy, 4)
@@ -915,17 +926,6 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             controls.grid_columnconfigure(2, weight=1)
 
         subscription_actions = self._subscription_actions
-        self._reset_grid_columns(subscription_actions, 4)
-        for column in range(subscription_action_columns):
-            subscription_actions.grid_columnconfigure(column, weight=1, uniform="proxy-sub-actions")
-        for index, widget in enumerate(self._subscription_action_items):
-            widget.grid(
-                row=index // subscription_action_columns,
-                column=index % subscription_action_columns,
-                sticky="ew",
-                padx=(0 if index % subscription_action_columns == 0 else 8, 0),
-                pady=(0 if index < subscription_action_columns else 6, 0),
-            )
 
         if stacked:
             self._subscription_profile_label_widget.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -971,6 +971,7 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
             self._node_text_host.grid(row=10, column=1, columnspan=2, sticky="new", padx=(8, 8), pady=(8, 0))
             self._proxy_actions.grid(row=10, column=3, columnspan=1, sticky="new", pady=(8, 0))
             self._status_label.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._subscription_disclosure.reflow()
 
     def _build_subscription_picker(self):
         self._subscription_picker_after_id = None
@@ -2055,6 +2056,9 @@ class LocalProxyTab(ctk.CTkScrollableFrame):
                 )
             except Exception:
                 pass
+        disclosure = getattr(self, "_subscription_disclosure", None)
+        if disclosure is not None:
+            disclosure.set_context(profile_id, dirty=dirty, busy=busy)
 
     def _on_subscription_profile_form_edited(self, _event=None):
         if not str(getattr(self, "_subscription_profile_edit_id", "") or ""):

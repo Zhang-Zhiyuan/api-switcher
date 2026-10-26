@@ -119,15 +119,17 @@ def read_codex_auth() -> dict:
         _JSON_FILE_CACHE.clear(CODEX_AUTH)
         raise
 
-    cached = _JSON_FILE_CACHE.get(CODEX_AUTH)
-    if cached is not CACHE_MISS:
-        return cached if isinstance(cached, dict) else {}
-
     try:
-        data = json.loads(CODEX_AUTH.read_text(encoding="utf-8-sig"))
+        # auth.json is small and externally refreshed. Metadata alone cannot
+        # identify same-size writes on Windows; cache parsing by actual content.
+        content = CODEX_AUTH.read_text(encoding="utf-8-sig")
+        cached = _JSON_FILE_CACHE.get(CODEX_AUTH, content=content)
+        if cached is not CACHE_MISS:
+            return cached if isinstance(cached, dict) else {}
+        data = json.loads(content)
         if not isinstance(data, dict):
             raise ValueError(f"{CODEX_AUTH} 的顶层 JSON 必须是对象")
-        _JSON_FILE_CACHE.set(CODEX_AUTH, data)
+        _JSON_FILE_CACHE.set(CODEX_AUTH, data, content=content)
         return data
     except FileNotFoundError:
         _JSON_FILE_CACHE.set(CODEX_AUTH, {})
@@ -141,7 +143,7 @@ def read_codex_auth() -> dict:
 def write_codex_auth(data: dict) -> None:
     content = json.dumps(data, indent=2, ensure_ascii=False)
     _atomic_write(CODEX_AUTH, content)
-    _JSON_FILE_CACHE.set(CODEX_AUTH, data)
+    _JSON_FILE_CACHE.set(CODEX_AUTH, data, content=content)
 
 
 def apply_codex_apikey(auth: dict, profile) -> dict:

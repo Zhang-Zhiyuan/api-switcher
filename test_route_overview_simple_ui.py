@@ -14,7 +14,7 @@ from ui.widgets.service_route_overview import ServiceRouteOverview
 
 
 @pytest.fixture
-def simple_overview(tk_root, monkeypatch):
+def simple_overview(tk_root, monkeypatch, request):
     def no_network(*_args, **_kwargs):
         pytest.fail("Overview presentation tests must not contact real services")
     monkeypatch.setattr(socket.socket, "connect", no_network)
@@ -29,6 +29,7 @@ def simple_overview(tk_root, monkeypatch):
         scroll, command=lambda service: events.append(("edit", service)),
         inspect_command=lambda: events.append(("inspect", "")),
         preset_command=lambda: events.append(("preset", "")),
+        compact=getattr(request, "param", False),
     )
     view.pack(fill="x")
     preferences = _preferences()
@@ -61,6 +62,42 @@ def test_normal_overview_is_compact_and_detail_toggle_is_read_only(tk_root, simp
     assert rows == {key: item["tile"] for key, item in view._rows.items()}
     assert preferences == before and view._signature == signature
     assert events == []
+
+
+@pytest.mark.parametrize("simple_overview", [True], indirect=True)
+def test_folded_table_preserves_routes_and_exposes_warnings_across_dpi(tk_root, simple_overview):
+    window, _, view, preferences, events = simple_overview
+    before = copy.deepcopy(preferences)
+    rows = {key: row["tile"] for key, row in view._rows.items()}
+    try:
+        for scale in (1, 2.5, 1):
+            ctk.set_widget_scaling(scale)
+            window.geometry("1000x800" if scale == 1 else "700x800")
+            settle(tk_root)
+            assert not view._body.winfo_viewable()
+            assert not view._heading.winfo_viewable()
+            assert not view._more.winfo_viewable()
+            assert all(button.winfo_viewable() for button in (view._preset, view._manage, view._inspect))
+            view._table_toggle.invoke()
+            settle(tk_root)
+            assert view._body.winfo_viewable()
+            assert view._rows["claude"]["node"].cget("text") == "美国 · 家宽 02"
+            view._table_toggle.invoke()
+            settle(tk_root)
+        assert rows == {key: row["tile"] for key, row in view._rows.items()}
+        assert preferences == before and not events
+        preferences["service_profile_bindings"]["github"] = "synthetic-missing"
+        view.set_routes(preferences, _catalog())
+        settle(tk_root)
+        assert view._body.winfo_viewable()
+        assert view._rows["github"]["hint"].winfo_viewable()
+        view._table_toggle.invoke()
+        assert view._body.winfo_manager()  # Warning rows cannot be concealed.
+        view.set_routes(before, _catalog())
+        settle(tk_root)
+        assert not view._body.winfo_viewable()
+    finally:
+        ctk.set_widget_scaling(1)
 
 
 def test_disabled_binding_is_not_presented_as_an_active_route(tk_root, simple_overview):

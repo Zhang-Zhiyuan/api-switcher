@@ -51,7 +51,8 @@ class Window:
 def capture(monkeypatch):
     events, grabs = [], []
     state = {"redraw": 1, "flush": 0, "foreground": 200, "roots": {100: 200, 200: 200},
-             "rect_ok": True, "rect_width": 400, "change_focus_on_grab": False}
+             "rect_ok": True, "rect_width": 400, "change_focus_on_grab": False,
+             "attachment_allowed": False, "attached": False, "activate_attached": False}
 
     def root(hwnd, flag):
         assert flag == 2  # No owner-based equivalence for another dialog.
@@ -84,11 +85,29 @@ def capture(monkeypatch):
         target._obj.x, target._obj.y = 10, 20
         return 1
 
+    def activate(hwnd):
+        state.setdefault("activation_requests", []).append(hwnd)
+        if state["attached"] and state["activate_attached"]:
+            state["foreground"] = hwnd
+        return int(state["roots"].get(state["foreground"], state["foreground"]) == hwnd)
+
+    def attach(current, other, enabled):
+        assert (current, other) == (1, 2)
+        state.setdefault("attachments", []).append(enabled)
+        if not enabled:
+            state["attached"] = False
+            return 1
+        state["attached"] = state["attachment_allowed"]
+        return int(state["attached"])
+
     dlls = SimpleNamespace(
         user32=SimpleNamespace(GetAncestor=Function(root), RedrawWindow=Function(redraw),
                                GetForegroundWindow=Function(lambda: state["foreground"]),
-                               SetForegroundWindow=Function(lambda hwnd: state.setdefault("activation_requests", []).append(hwnd)),
+                               SetForegroundWindow=Function(activate),
+                               GetWindowThreadProcessId=Function(lambda _hwnd, _pid: 2),
+                               AttachThreadInput=Function(attach),
                                GetClientRect=Function(client_rect), ClientToScreen=Function(client_origin)),
+        kernel32=SimpleNamespace(GetCurrentThreadId=Function(lambda: 1)),
         dwmapi=SimpleNamespace(DwmFlush=Function(flush)),
     )
     monkeypatch.setattr(ui_visual_audit, "os", SimpleNamespace(name="nt"))
@@ -160,6 +179,22 @@ def test_foreign_foreground_refuses_capture_and_restores_topmost(capture):
         ui_visual_audit.capture_window_image(window, onscreen=True)
     assert window.topmost is False
     assert "redraw" not in events and not grabs
+
+
+@pytest.mark.parametrize("activation_succeeds", [True, False])
+def test_temporary_focus_attachment_is_released_and_keeps_capture_guard(capture, activation_succeeds):
+    window, _events, grabs, state = capture
+    state.update(foreground=900, attachment_allowed=True, activate_attached=activation_succeeds)
+    if activation_succeeds:
+        assert ui_visual_audit.capture_window_image(window, onscreen=True) == "synthetic-image"
+        assert grabs == [{"bbox": (10, 20, 410, 320), "all_screens": True}]
+    else:
+        with pytest.raises(RuntimeError, match="foreground"):
+            ui_visual_audit.capture_window_image(window, onscreen=True)
+        assert not grabs
+    assert state["activation_requests"] == [200]
+    assert state["attachments"] == [True, False]
+    assert state["attached"] is False and window.topmost is False
 
 
 @pytest.mark.parametrize("fault", ["missing", "empty"])

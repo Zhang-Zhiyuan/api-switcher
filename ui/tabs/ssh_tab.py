@@ -21,6 +21,7 @@ from ui.ui_dispatch import dispatch_ui_callback
 from ui.theme import COLORS, bind_wraplength, button_style, card_frame_kwargs, combo_style, font, input_style, recent_user_scroll, textbox_style
 from ui.widgets.proxy_node_picker import ProxyNodePicker
 from ui.widgets.action_group import wrap_action_group
+from ui.widgets.subscription_disclosure import SubscriptionDisclosure
 from ui.widgets.service_route_overview import RuntimeRouteOverview
 
 
@@ -964,6 +965,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 proxy_controls.grid_columnconfigure(1, weight=1, minsize=260)
                 proxy_controls.grid_columnconfigure(2, weight=1, minsize=220)
                 proxy_controls.grid_columnconfigure(3, weight=0, minsize=190)
+            disclosure = getattr(self, "_subscription_disclosure", None)
+            if disclosure is not None:
+                disclosure.reflow()
 
         proxy_header = getattr(self, "_proxy_header", None)
         if proxy_header is not None:
@@ -1099,28 +1103,29 @@ class SSHTab(ctk.CTkScrollableFrame):
         ctk.CTkLabel(routes_card, text="目标分流 · 每台服务器独立保存", font=font(13, "bold"),
                      text_color=COLORS["text"]).pack(anchor="w", padx=14, pady=(10, 2))
         route_hint = ctk.CTkLabel(
-            routes_card, text="智能方案：AI 优先家宽，视频、搜索等网站优先非家宽；先预览，再保存并应用。"
-                              "也可为 Claude、GPT、YouTube 和自定义域名分别选择订阅与节点。"
-                              "在编辑窗口按服务器查看和筛选，修改后统一保存并应用；部署和热更新沿用各自的设置。",
+            routes_card, text="为已勾选的服务器设置网站线路。可套用智能方案，也可逐网站调整；先预览，再保存并应用。",
             font=font(12), text_color=COLORS["muted"], anchor="w", justify="left",
         )
         route_hint.pack(fill="x", padx=14)
         bind_wraplength(routes_card, route_hint, padding=32)
+        route_actions = ctk.CTkFrame(routes_card, fg_color="transparent")
+        route_actions.pack(fill="x", padx=14, pady=(8, 6))
         self._proxy_route_preset_button = ctk.CTkButton(
-            routes_card, text="一键套用智能分流方案", width=196, command=self._open_proxy_route_preset,
+            route_actions, text="一键套用智能分流方案", width=196, command=self._open_proxy_route_preset,
             **button_style("primary", compact=True),
         )
-        self._proxy_route_preset_button.pack(anchor="w", padx=14, pady=(8, 6))
+        self._proxy_route_preset_button.pack(anchor="w")
         self._proxy_service_routes_button = ctk.CTkButton(
-            routes_card, text="管理已选服务器分流", command=self._open_proxy_service_routes,
+            route_actions, text="设置网站线路", command=self._open_proxy_service_routes,
             **button_style("secondary", compact=True),
         )
-        self._proxy_service_routes_button.pack(anchor="w", padx=14, pady=(0, 6))
+        self._proxy_service_routes_button.pack(anchor="w")
         self._proxy_route_diagnostics_button = ctk.CTkButton(
-            routes_card, text="检查已选服务器的分流 / 网址去向", command=self._open_route_diagnostics,
+            route_actions, text="检查网址去向", command=self._open_route_diagnostics,
             **button_style("secondary", compact=True),
         )
-        self._proxy_route_diagnostics_button.pack(anchor="w", padx=14, pady=(0, 12))
+        self._proxy_route_diagnostics_button.pack(anchor="w")
+        wrap_action_group(route_actions)
         self._proxy_runtime_overview = RuntimeRouteOverview(routes_card)
         self._proxy_runtime_overview.pack(fill="x", padx=14, pady=(0, 12))
 
@@ -1135,7 +1140,7 @@ class SSHTab(ctk.CTkScrollableFrame):
 
         ctk.CTkLabel(
             proxy_controls,
-            text="1 管理订阅",
+            text="1 选择订阅",
             text_color=COLORS["text"],
             font=font(13, "bold"),
             anchor="w",
@@ -1204,13 +1209,14 @@ class SSHTab(ctk.CTkScrollableFrame):
             **button_style("secondary", compact=True),
         )
         self._proxy_subscription_profile_delete_button.pack(side="left")
-        ctk.CTkLabel(
+        self._proxy_subscription_link_label = ctk.CTkLabel(
             proxy_controls,
             text="订阅链接",
             text_color=COLORS["muted"],
             width=82,
             anchor="w",
-        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        )
+        self._proxy_subscription_link_label.grid(row=3, column=0, sticky="w", pady=(8, 0))
         self._proxy_subscription_entry = ctk.CTkEntry(
             proxy_controls,
             placeholder_text="粘贴 Clash/mihomo 订阅链接；只保存在本机缓存，不写入远端",
@@ -1266,23 +1272,33 @@ class SSHTab(ctk.CTkScrollableFrame):
             font=font(12),
         )
         self._proxy_periodic_update_check.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        proxy_interval_group = ctk.CTkFrame(proxy_sub_action_frame, fg_color="transparent")
+        proxy_interval_group.grid_columnconfigure(0, weight=1)
         self._proxy_periodic_update_entry = ctk.CTkEntry(
-            proxy_sub_action_frame,
+            proxy_interval_group,
             width=48,
             placeholder_text="60",
             **input_style(),
         )
-        self._proxy_periodic_update_entry.grid(row=1, column=2, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self._proxy_periodic_update_entry.grid(row=0, column=0, sticky="ew")
         if getattr(self, "_subscription_timer_restored", False):
             self._proxy_periodic_update_entry.insert(0, str(self._proxy_periodic_update_interval_saved))
         self._proxy_periodic_update_entry.bind("<Return>", self._on_proxy_periodic_interval_edited, add="+")
         self._proxy_periodic_update_entry.bind("<FocusOut>", self._on_proxy_periodic_interval_edited, add="+")
         ctk.CTkLabel(
-            proxy_sub_action_frame,
+            proxy_interval_group,
             text="分钟",
             text_color=COLORS["muted"],
             font=font(12),
-        ).grid(row=1, column=3, sticky="w", padx=(4, 0), pady=(6, 0))
+        ).grid(row=0, column=1, sticky="w", padx=(4, 0))
+        self._subscription_disclosure = SubscriptionDisclosure(
+            proxy_sub_action_frame,
+            fields=(self._proxy_subscription_name_label, self._proxy_subscription_name_entry,
+                    proxy_profile_actions, self._proxy_subscription_link_label, self._proxy_subscription_entry),
+            items=(self._proxy_fetch_button, self._proxy_manual_hot_update_button,
+                   self._proxy_auto_refresh_check, self._proxy_periodic_update_check, proxy_interval_group),
+            refresh=self._proxy_manual_hot_update_button,
+        )
         self._proxy_cache_label = ctk.CTkLabel(
             proxy_controls,
             text="本机缓存: 未加载",
@@ -1322,7 +1338,7 @@ class SSHTab(ctk.CTkScrollableFrame):
             self._build_proxy_subscription_picker,
         )
         proxy_node_actions = ctk.CTkFrame(proxy_controls, fg_color="transparent")
-        proxy_node_actions.grid(row=6, column=3, sticky="e", pady=(8, 0))
+        proxy_node_actions.grid(row=6, column=3, sticky="new", pady=(8, 0))
         ctk.CTkLabel(
             proxy_node_actions,
             text="检测",
@@ -1422,7 +1438,11 @@ class SSHTab(ctk.CTkScrollableFrame):
             wraplength=120,
         )
         self._proxy_subscription_action_hint_label.pack(anchor="e", pady=(8, 0))
-        wrap_action_group(proxy_node_actions, hint=self._proxy_subscription_action_hint_label)
+        self._proxy_node_tools_toggle = wrap_action_group(
+            proxy_node_actions, hint=self._proxy_subscription_action_hint_label,
+            advanced=(self._proxy_latency_all_button, self._proxy_quality_button,
+                      self._proxy_quality_settings_button, self._proxy_subscription_action_hint_label),
+        )
         self._proxy_selected_label = ctk.CTkLabel(
             proxy_controls,
             text="待部署节点: 未选择",
@@ -1591,6 +1611,12 @@ class SSHTab(ctk.CTkScrollableFrame):
         )
         self._proxy_status_label.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         bind_wraplength(proxy_controls, self._proxy_status_label, padding=20)
+        # Keep subscription actions on a full row so they do not widen the node sidebar.
+        for widget in proxy_controls.grid_slaves():
+            row = int(widget.grid_info()["row"])
+            if row >= 4:
+                widget.grid_configure(row=row + 1)
+        proxy_sub_action_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
         self._proxy_grid_layout = self._capture_grid_layout(proxy_controls)
         self._apply_deployment_responsive_layout(_ssh_proxy_form_stacked(self._logical_layout_width()))
         self._update_proxy_target_label()
@@ -3047,6 +3073,9 @@ class SSHTab(ctk.CTkScrollableFrame):
                 )
             except Exception:
                 pass
+        disclosure = getattr(self, "_subscription_disclosure", None)
+        if disclosure is not None:
+            disclosure.set_context(profile_id, dirty=dirty, busy=busy)
 
     def _on_proxy_subscription_profile_form_edited(self, _event=None):
         if not str(
